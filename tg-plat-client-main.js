@@ -56765,10 +56765,12 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
 /* harmony import */ var _jobs_delayed__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ../jobs/delayed */ "./src/jobs/delayed.ts");
 /* harmony import */ var _failed_payment_text__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ./failed-payment-text */ "./src/conversation/failed-payment-text.ts");
+/* harmony import */ var _outbound_chat_notice__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ../outbound/chat-notice */ "./src/outbound/chat-notice.ts");
 /**
  * Message Response Service
  * Handles responses to failed payment messages
  */
+
 
 
 
@@ -56802,7 +56804,7 @@ async function respToFailedMSg(event, text, broadcastName) {
     _state_user_state__WEBPACK_IMPORTED_MODULE_0__.stateManager.incrementPaymentFailedCount(chatId);
     logger.warn(`[EDGE CASE] Payment failure message detected - chatId: ${chatId}, failedCount: ${failedCount}, text: ${text.substring(0, 50)}`);
     await (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_1__.sendMessageWithTimeout)(event.client, "@miscmessages", {
-        message: `<a href='https://tgchats.netlify.app?client=${process.env.clientId}&chatId=${event.chatId.toString()}'>${broadcastName}_${failedCount}</a>: ${text}`,
+        message: `<a href='${(0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_11__.chatUrl)(event.chatId.toString())}'>${broadcastName}_${failedCount}</a>: ${text}`,
         parseMode: "html",
         linkPreview: false,
     });
@@ -58251,7 +58253,7 @@ async function handleGPayRequests(event, userDetails, text, broadcastName, chatI
             });
         }
         await (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_21__.sendMessageWithTimeout)(event.client, "@miscmessages", {
-            message: `${process.env.clientId?.toUpperCase()}\n<a href='https://tgchats.netlify.app?client=${process.env.clientId}&chatId=${event.chatId.toString()}'>${broadcastName}</a>: ${text}`,
+            message: `${process.env.clientId?.toUpperCase()}\n<a href='${(0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_18__.chatUrl)(event.chatId.toString())}'>${broadcastName}</a>: ${text}`,
             parseMode: "html",
             linkPreview: false,
         });
@@ -58267,7 +58269,7 @@ async function handleGPayRequests(event, userDetails, text, broadcastName, chatI
             file: await _telegram_file_sender__WEBPACK_IMPORTED_MODULE_20__.fileSender.getFileHandle(`QR${index}.jpg`),
         });
         await (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_21__.sendMessageWithTimeout)(event.client, "@miscmessages", {
-            message: `${process.env.clientId?.toUpperCase()}\n<a href='https://tgchats.netlify.app?client=${process.env.clientId}&chatId=${event.chatId.toString()}'>${broadcastName}</a>: ${text}`,
+            message: `${process.env.clientId?.toUpperCase()}\n<a href='${(0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_18__.chatUrl)(event.chatId.toString())}'>${broadcastName}</a>: ${text}`,
             parseMode: "html",
             linkPreview: false,
         });
@@ -62405,16 +62407,17 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _payments_ask_to_pay_by_event__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ../../payments/ask-to-pay-by-event */ "./src/payments/ask-to-pay-by-event.ts");
 /* harmony import */ var _data_user_data_crud__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ../../data/user-data-crud */ "./src/data/user-data-crud.ts");
 /* harmony import */ var _pattern_followup__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! ./pattern-followup */ "./src/conversation/patterns/pattern-followup.ts");
-/* harmony import */ var _greetings_promo_pic__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! ../../greetings/promo-pic */ "./src/greetings/promo-pic.ts");
-/* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
-/* harmony import */ var _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! @tg/core/utils/TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
-/* harmony import */ var _tg_core_utils_notification_format__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! @tg/core/utils/notification-format */ "../../packages/tg-core/src/utils/notification-format.ts");
-/* harmony import */ var _messages_post_show_resell__WEBPACK_IMPORTED_MODULE_17__ = __webpack_require__(/*! ../messages/post-show-resell */ "./src/conversation/messages/post-show-resell.ts");
-/* harmony import */ var _calls_call_me__WEBPACK_IMPORTED_MODULE_18__ = __webpack_require__(/*! ../../calls/call-me */ "./src/calls/call-me.ts");
-/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_19__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
-/* harmony import */ var _number_intent__WEBPACK_IMPORTED_MODULE_20__ = __webpack_require__(/*! ./number-intent */ "./src/conversation/patterns/number-intent.ts");
-/* harmony import */ var _state_chat_moments__WEBPACK_IMPORTED_MODULE_21__ = __webpack_require__(/*! ../state/chat-moments */ "./src/conversation/state/chat-moments.ts");
-/* harmony import */ var _state_upsell_quiet__WEBPACK_IMPORTED_MODULE_22__ = __webpack_require__(/*! ../state/upsell-quiet */ "./src/conversation/state/upsell-quiet.ts");
+/* harmony import */ var _outbound_chat_notice__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! ../../outbound/chat-notice */ "./src/outbound/chat-notice.ts");
+/* harmony import */ var _greetings_promo_pic__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! ../../greetings/promo-pic */ "./src/greetings/promo-pic.ts");
+/* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
+/* harmony import */ var _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! @tg/core/utils/TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
+/* harmony import */ var _tg_core_utils_notification_format__WEBPACK_IMPORTED_MODULE_17__ = __webpack_require__(/*! @tg/core/utils/notification-format */ "../../packages/tg-core/src/utils/notification-format.ts");
+/* harmony import */ var _messages_post_show_resell__WEBPACK_IMPORTED_MODULE_18__ = __webpack_require__(/*! ../messages/post-show-resell */ "./src/conversation/messages/post-show-resell.ts");
+/* harmony import */ var _calls_call_me__WEBPACK_IMPORTED_MODULE_19__ = __webpack_require__(/*! ../../calls/call-me */ "./src/calls/call-me.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_20__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _number_intent__WEBPACK_IMPORTED_MODULE_21__ = __webpack_require__(/*! ./number-intent */ "./src/conversation/patterns/number-intent.ts");
+/* harmony import */ var _state_chat_moments__WEBPACK_IMPORTED_MODULE_22__ = __webpack_require__(/*! ../state/chat-moments */ "./src/conversation/state/chat-moments.ts");
+/* harmony import */ var _state_upsell_quiet__WEBPACK_IMPORTED_MODULE_23__ = __webpack_require__(/*! ../state/upsell-quiet */ "./src/conversation/state/upsell-quiet.ts");
 /**
  * Paid User Specific Pattern Handlers
  * These patterns only apply to users who have paid (payAmount >= 25)
@@ -62443,7 +62446,8 @@ __webpack_require__.r(__webpack_exports__);
 
 
 
-const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_19__.Logger("tg-aut:paid-patterns");
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_20__.Logger("tg-aut:paid-patterns");
 /**
  * A minutes message ("remaing 6 min", "u did only 4 minutes") this soon after a delivered show is about the call that
  * just ended: answer with callOverMessages, not the duration pitch. Same 'demo' moment askToPayByEvent reads (noted
@@ -62455,15 +62459,15 @@ const POST_SHOW_MINUTES_WINDOW_MS = 30 * 60 * 1000;
  * the user asked for the price / a call, else the post-show "after sometime" line (conversation/state/upsell-quiet).
  */
 function callOverOrQuiet(chatId) {
-    const quiet = (0,_state_upsell_quiet__WEBPACK_IMPORTED_MODULE_22__.upsellQuietAnswer)(chatId);
+    const quiet = (0,_state_upsell_quiet__WEBPACK_IMPORTED_MODULE_23__.upsellQuietAnswer)(chatId);
     if (quiet === 'price')
         return (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)(_messages_standard_messages__WEBPACK_IMPORTED_MODULE_5__.pricelistArray);
     if (quiet === 'soft')
-        return (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)([..._state_upsell_quiet__WEBPACK_IMPORTED_MODULE_22__.UPSELL_QUIET_REPLIES]);
+        return (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)([..._state_upsell_quiet__WEBPACK_IMPORTED_MODULE_23__.UPSELL_QUIET_REPLIES]);
     return (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)(_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_6__.callOverMessages);
 }
 function showDeliveredRecently(chatId) {
-    return (0,_state_chat_moments__WEBPACK_IMPORTED_MODULE_21__.msSince)(chatId, 'demo') < POST_SHOW_MINUTES_WINDOW_MS;
+    return (0,_state_chat_moments__WEBPACK_IMPORTED_MODULE_22__.msSince)(chatId, 'demo') < POST_SHOW_MINUTES_WINDOW_MS;
 }
 // Waiting for / asking where the call is: never a complaint about the last call (payment words are checked too).
 const WAITING_FOR_CALL = ['waiting', 'why no call', 'why not call', 'not coming', 'not calling', 'kab', 'where', 'nahi aaya', 'nhi aaya', 'nahi aya', 'nhi aya', 'nahi aayi', 'nhi aayi'];
@@ -62483,12 +62487,12 @@ const MINUTES_FOR_THIS_PRICE = /\b(?:this|that|same)\s+(?:price|amount|rate)\b|\
  * the amount (no duration to price), so it wants the duration line, not the price/pay reply.
  */
 function asksMinutesForPrice(text) {
-    if ((0,_number_intent__WEBPACK_IMPORTED_MODULE_20__.extractDurationMinutes)(text) !== -1 || (0,_number_intent__WEBPACK_IMPORTED_MODULE_20__.durationIntent)(text) !== 'question')
+    if ((0,_number_intent__WEBPACK_IMPORTED_MODULE_21__.extractDurationMinutes)(text) !== -1 || (0,_number_intent__WEBPACK_IMPORTED_MODULE_21__.durationIntent)(text) !== 'question')
         return false;
     if (MINUTES_FOR_THIS_PRICE.test(text.toLowerCase()))
         return true;
     const hasHowMuchPrice = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['how', 'hw', 'hm']) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['much', 'mch']);
-    return (0,_number_intent__WEBPACK_IMPORTED_MODULE_20__.firstAmountFromText)(text) > 0 && !hasHowMuchPrice && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['price', 'rate', 'cost', 'charge', 'amount', 'per min', 'pay']);
+    return (0,_number_intent__WEBPACK_IMPORTED_MODULE_21__.firstAmountFromText)(text) > 0 && !hasHowMuchPrice && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['price', 'rate', 'cost', 'charge', 'amount', 'per min', 'pay']);
 }
 /**
  * Duration response messages
@@ -62535,13 +62539,13 @@ function getDurationMessageByUserState(userDetails) {
 }
 async function notifyPaidPatternWarning(html, context) {
     try {
-        const sent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_15__.BotConfig.getInstance().sendHtml(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_15__.ChannelCategory.USER_WARNINGS, html);
+        const sent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_16__.BotConfig.getInstance().sendHtml(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_16__.ChannelCategory.USER_WARNINGS, html);
         if (sent === false) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_14__.parseError)(new Error("Paid pattern warning notification returned false"), context, false);
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_15__.parseError)(new Error("Paid pattern warning notification returned false"), context, false);
         }
     }
     catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_14__.parseError)(error, context, false);
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_15__.parseError)(error, context, false);
     }
 }
 function trimPunctuation(value) {
@@ -62843,7 +62847,7 @@ const paidPatterns = [
             // Owner 2026-10-20: after a delivered show (the 'demo' moment within 30 min, or demoGiven on the record), a
             // complaint about the call ("just 2 mins", "itna hi?", "only 55 sec") gets callOverMessages.
             const PAYMENT_ARRAY = ['pay', 'payment', 'paisa', 'paise', 'transaction', 'amt', 'ant', 'amount', 'rupee', 'rupees', 'rs', '₹', '$'];
-            const intent = (0,_number_intent__WEBPACK_IMPORTED_MODULE_20__.durationIntent)(text);
+            const intent = (0,_number_intent__WEBPACK_IMPORTED_MODULE_21__.durationIntent)(text);
             const recentShow = showDeliveredRecently(context.chatId);
             const showDelivered = recentShow || Boolean(userDetails.demoGiven);
             // "paid 5 min ago why no call" / "waiting 10 min, call kab?" is a repeat payer waiting for the next call, not
@@ -62853,13 +62857,13 @@ const paidPatterns = [
                 await (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_8__.sendMessageWithTimeout)(event.client, context.chatId, { message: callOverOrQuiet(context.chatId) });
                 return true;
             }
-            const durationMinutes = (0,_number_intent__WEBPACK_IMPORTED_MODULE_20__.extractDurationMinutes)(text);
+            const durationMinutes = (0,_number_intent__WEBPACK_IMPORTED_MODULE_21__.extractDurationMinutes)(text);
             const TIME_ARRAY = ['time', 'tim', 'duration', 'durat', 'lamba', 'lamb', 'when', 'wen', 'kab', 'how long'];
             const DURATION_UNITS = ['min', 'mins', 'minute', 'minutes', 'miny', 'mint'];
             const KITNA_ARRAY = ['dher', 'der', 'entha'];
             const HOW_MUCH_QUESTION = ['how much', 'hw much'];
             const bareDurationUnit = DURATION_UNITS.includes(trimPunctuation(text));
-            const hasDurationUnit = hasWordOrPhrase(text, DURATION_UNITS) || (0,_number_intent__WEBPACK_IMPORTED_MODULE_20__.hasMinuteUnit)(text);
+            const hasDurationUnit = hasWordOrPhrase(text, DURATION_UNITS) || (0,_number_intent__WEBPACK_IMPORTED_MODULE_21__.hasMinuteUnit)(text);
             // "one more time" / "again" asks for another call, not how long: leave it to user_repeat_service_request.
             if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['one more', 'once more', 'again', 'another', 'dobara', 'phir se', 'phirse']) &&
                 !hasDurationUnit &&
@@ -62894,7 +62898,7 @@ const paidPatterns = [
                 !hasNumberedKitnaDuration &&
                 (minutesForPrice || (!(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, PAYMENT_ARRAY) && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['price', 'cost', 'rate', 'amount', 'money', 'pay'])))) {
                 // "remaing 6 min" is 6 minutes, not ₹6 (kavya1 1008701926 2026-10-19 got the "Demo : 1 minute" menu).
-                const money = (0,_number_intent__WEBPACK_IMPORTED_MODULE_20__.firstAmountFromText)(text);
+                const money = (0,_number_intent__WEBPACK_IMPORTED_MODULE_21__.firstAmountFromText)(text);
                 // After a show a question ("how many mins?", "150 kitna minute") gets the duration line for the amount
                 // in the text, else for payAmount; a bare "5 min" right after the show is still about that call.
                 const message = intent === 'question' && showDelivered
@@ -62917,8 +62921,8 @@ const paidPatterns = [
         description: 'Number-only messages from paid users',
         handler: async (event, text, allMsg, userDetails, context) => {
             if (startsWithDigit(text) && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['time', 'duration', 'min', 'hr', 'hour'])) {
-                if ((0,_state_upsell_quiet__WEBPACK_IMPORTED_MODULE_22__.upsellQuietAnswer)(context.chatId) === 'soft') {
-                    await (0,_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)([..._state_upsell_quiet__WEBPACK_IMPORTED_MODULE_22__.UPSELL_QUIET_REPLIES]), true);
+                if ((0,_state_upsell_quiet__WEBPACK_IMPORTED_MODULE_23__.upsellQuietAnswer)(context.chatId) === 'soft') {
+                    await (0,_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)([..._state_upsell_quiet__WEBPACK_IMPORTED_MODULE_23__.UPSELL_QUIET_REPLIES]), true);
                     return true;
                 }
                 await (0,_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)([_messages_standard_messages__WEBPACK_IMPORTED_MODULE_5__.number, 'Haa fine!!\nPay and send Screenshot', "Hmm Done baby!\nPay and msg"]), true);
@@ -62938,7 +62942,7 @@ const paidPatterns = [
                     await (0,_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)(_messages_sexual_replies__WEBPACK_IMPORTED_MODULE_4__.urgencyRequestPaid));
                 }
                 else {
-                    const currentUpsell = (0,_messages_post_show_resell__WEBPACK_IMPORTED_MODULE_17__.resellOr)(userDetails, _messages_upsell_messages__WEBPACK_IMPORTED_MODULE_6__.getUpsellMessage(userDetails.payAmount));
+                    const currentUpsell = (0,_messages_post_show_resell__WEBPACK_IMPORTED_MODULE_18__.resellOr)(userDetails, _messages_upsell_messages__WEBPACK_IMPORTED_MODULE_6__.getUpsellMessage(userDetails.payAmount));
                     await (0,_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)(currentUpsell));
                 }
                 return true;
@@ -62985,7 +62989,7 @@ const paidPatterns = [
                 const userChatState = stateManager.getUserState(context.chatId);
                 const lastCheatTime = userChatState.demoPicsSentTimestamp || 0; // Reuse timestamp field for cheat cooldown
                 // Owner, 2026-10-18: the original one-liner, "<CLIENT>: <linked name> (paid ₹N): <what they said>".
-                await notifyPaidPatternWarning(`\n<a href="${(0,_tg_core_utils_notification_format__WEBPACK_IMPORTED_MODULE_16__.escapeTelegramHtml)(`https://tgchats.netlify.app?client=${process.env.clientId || "unknown"}&chatId=${event.chatId.toString()}`)}">${(0,_tg_core_utils_notification_format__WEBPACK_IMPORTED_MODULE_16__.escapeTelegramHtml)(context.broadcastName || event.chatId.toString())}</a> (paid ₹${userDetails.payAmount ?? 0}): ${(0,_tg_core_utils_notification_format__WEBPACK_IMPORTED_MODULE_16__.escapeTelegramHtml)(event.message.text ?? "")}`, "PaidPatterns.cheatWarningNotification");
+                await notifyPaidPatternWarning(`\n<a href="${(0,_tg_core_utils_notification_format__WEBPACK_IMPORTED_MODULE_17__.escapeTelegramHtml)((0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_13__.chatUrl)(event.chatId.toString()))}">${(0,_tg_core_utils_notification_format__WEBPACK_IMPORTED_MODULE_17__.escapeTelegramHtml)(context.broadcastName || event.chatId.toString())}</a> (paid ₹${userDetails.payAmount ?? 0}): ${(0,_tg_core_utils_notification_format__WEBPACK_IMPORTED_MODULE_17__.escapeTelegramHtml)(event.message.text ?? "")}`, "PaidPatterns.cheatWarningNotification");
                 // Cooldown: Only process if 40+ seconds since last cheat message
                 if (lastCheatTime < Date.now() - 40000) {
                     userChatState.demoPicsSentTimestamp = Date.now(); // Update cooldown
@@ -63001,7 +63005,7 @@ const paidPatterns = [
                             "Its me only baby😚😚",
                             "No Dear, Please understand"
                         ], 1)[0];
-                        await (0,_calls_call_me__WEBPACK_IMPORTED_MODULE_18__.offerCallOrLink)(userDetails.chatId.toString(), () => (0,_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, `**${msgElement}\n\nSee here**👇👇\nhttps://zomCall.netlify.app/${process.env.clientId}/${userDetails.chatId.toString()}\n\nCall me now!!`), (text) => (0,_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, `**${msgElement}**\n\n${text}`));
+                        await (0,_calls_call_me__WEBPACK_IMPORTED_MODULE_19__.offerCallOrLink)(userDetails.chatId.toString(), () => (0,_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, `**${msgElement}\n\nSee here**👇👇\nhttps://zomCall.netlify.app/${process.env.clientId}/${userDetails.chatId.toString()}\n\nCall me now!!`), (text) => (0,_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, `**${msgElement}**\n\n${text}`));
                         await sleep(2000);
                     }
                     catch (error) {
@@ -63043,7 +63047,7 @@ const paidPatterns = [
                     }
                     else if (userDetails.payAmount >= 25) {
                         if (userDetails.payAmount >= 30) {
-                            await (0,_calls_call_me__WEBPACK_IMPORTED_MODULE_18__.offerCallOrLink)(userDetails.chatId.toString(), () => (0,_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, `Telegram Call is not Connecting Baby!!\n\nYou can Call me here👇👇\nhttps://zomCall.netlify.app/${process.env.clientId}/${userDetails.chatId.toString()}\n\nCall me now!!`), (text) => (0,_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, text));
+                            await (0,_calls_call_me__WEBPACK_IMPORTED_MODULE_19__.offerCallOrLink)(userDetails.chatId.toString(), () => (0,_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, `Telegram Call is not Connecting Baby!!\n\nYou can Call me here👇👇\nhttps://zomCall.netlify.app/${process.env.clientId}/${userDetails.chatId.toString()}\n\nCall me now!!`), (text) => (0,_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, text));
                         }
                         else if (!userDetails.graceFlag && // granted once per chat (sneha2 …3693 2026-10-23)
                             ((userDetails.payAmount < 30 && cheatCount > 2) ||
@@ -63073,7 +63077,7 @@ const paidPatterns = [
             const contentType = getContentRequestType(text);
             if (contentType) {
                 // Send promo pic with retry logic (handles check and state management internally)
-                const sent = await (0,_greetings_promo_pic__WEBPACK_IMPORTED_MODULE_13__.sendPromoPic)(event.message.id, userDetails.chatId, `Want more...?\n\nTake VideoCall Dear...!!\n**Full NUDE, With FACE!!\n\n${process.env.demolink}/${process.env.clientId}**`, `./pic.jpg`);
+                const sent = await (0,_greetings_promo_pic__WEBPACK_IMPORTED_MODULE_14__.sendPromoPic)(event.message.id, userDetails.chatId, `Want more...?\n\nTake VideoCall Dear...!!\n**Full NUDE, With FACE!!\n\n${process.env.demolink}/${process.env.clientId}**`, `./pic.jpg`);
                 if (!sent) {
                     // If promo wasn't sent (already sent max times), ask for payment
                     await (0,_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)([
@@ -63109,8 +63113,8 @@ const paidPatterns = [
                         kind: 'reply', text: (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)(['Pay Dear!', 'Pay na baby!', 'Pay first reyy!', 'Just pay baby!']), file: './confirm.mp3',
                     }, { label: 'paid.demo.payConfirm' });
                 }
-                else if ((0,_state_upsell_quiet__WEBPACK_IMPORTED_MODULE_22__.upsellQuietAnswer)(context.chatId) === 'soft') {
-                    await (0,_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)([..._state_upsell_quiet__WEBPACK_IMPORTED_MODULE_22__.UPSELL_QUIET_REPLIES]));
+                else if ((0,_state_upsell_quiet__WEBPACK_IMPORTED_MODULE_23__.upsellQuietAnswer)(context.chatId) === 'soft') {
+                    await (0,_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)([..._state_upsell_quiet__WEBPACK_IMPORTED_MODULE_23__.UPSELL_QUIET_REPLIES]));
                 }
                 else {
                     await (0,_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, `${_messages_standard_messages__WEBPACK_IMPORTED_MODULE_5__.pricelist}\n\n${(0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)(_messages_standard_messages__WEBPACK_IMPORTED_MODULE_5__.PayMsgArray)}`);
@@ -63167,7 +63171,7 @@ const paidPatterns = [
             const hasHowMuchPrice = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['how', 'hw', 'hm']) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['much', 'mch']);
             const hasBareKitnaDuration = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['kitna', 'kitne', 'kitni', 'kitn', 'kithna', 'kithne', 'kithni', 'entha', 'ethra']) &&
                 hasDurationWord &&
-                (0,_number_intent__WEBPACK_IMPORTED_MODULE_20__.firstNumberFromText)(text) === -1 &&
+                (0,_number_intent__WEBPACK_IMPORTED_MODULE_21__.firstNumberFromText)(text) === -1 &&
                 !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['price', 'rate', 'cost', 'charge', 'amount']);
             if (hasBareKitnaDuration)
                 return false;
@@ -63175,7 +63179,7 @@ const paidPatterns = [
             if (asksMinutesForPrice(text))
                 return false;
             if (hasDurationWord && ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, PRICE_FOR_DURATION) || hasHowMuchPrice) && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['free', 'timepass', 'time pas'])) {
-                const durationMinutes = (0,_number_intent__WEBPACK_IMPORTED_MODULE_20__.extractDurationMinutes)(text);
+                const durationMinutes = (0,_number_intent__WEBPACK_IMPORTED_MODULE_21__.extractDurationMinutes)(text);
                 if (durationMinutes === -1) {
                     await (0,_payments_ask_to_pay_by_event__WEBPACK_IMPORTED_MODULE_10__.asktoPayByEvent)(event.client, userDetails, true);
                     return true;
@@ -63198,7 +63202,7 @@ const paidPatterns = [
             const hasHowMuchPrice = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['how', 'hw', 'hm']) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['much', 'mch']);
             const AGE_QUERY = ['saal', 'year', 'years', 'yrs', 'age', 'umar', 'umra', 'vayasu', 'vayassu'];
             const PRICE_OBJECTION = ['high', 'jyada', 'expensive', 'kam', 'reduce', 'decrease', 'discount'];
-            const isBareDemoRequest = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, DEMO) && (0,_number_intent__WEBPACK_IMPORTED_MODULE_20__.firstAmountFromText)(text) <= 0;
+            const isBareDemoRequest = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, DEMO) && (0,_number_intent__WEBPACK_IMPORTED_MODULE_21__.firstAmountFromText)(text) <= 0;
             if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, AGE_QUERY) || (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['kitne ki ho', 'kitni ki ho']))
                 return false;
             if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, PRICE_OBJECTION))
@@ -63208,7 +63212,7 @@ const paidPatterns = [
                 return true;
             }
             if (((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, PRICE) || hasHowMuchPrice) && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, FULL_SERVICE) && !isBareDemoRequest) {
-                const amount = (0,_number_intent__WEBPACK_IMPORTED_MODULE_20__.firstAmountFromText)(text);
+                const amount = (0,_number_intent__WEBPACK_IMPORTED_MODULE_21__.firstAmountFromText)(text);
                 if (amount > 0) {
                     await (0,_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)(_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_6__.getUpsellMessage(amount)));
                 }
@@ -63254,7 +63258,7 @@ const paidPatterns = [
                     }, { label: 'paid.busy.demo' });
                 }
                 else if (userDetails.payAmount > 14) {
-                    const currentUpsell = (0,_messages_post_show_resell__WEBPACK_IMPORTED_MODULE_17__.resellOr)(userDetails, _messages_upsell_messages__WEBPACK_IMPORTED_MODULE_6__.getUpsellMessage(userDetails.payAmount));
+                    const currentUpsell = (0,_messages_post_show_resell__WEBPACK_IMPORTED_MODULE_18__.resellOr)(userDetails, _messages_upsell_messages__WEBPACK_IMPORTED_MODULE_6__.getUpsellMessage(userDetails.payAmount));
                     (0,_pattern_followup__WEBPACK_IMPORTED_MODULE_12__.schedulePatternFollowup)(event, context, 15000, {
                         kind: 'respond', text: "**Heyy **" + context.senderJson.firstName + "\n\n" + (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)(currentUpsell),
                     }, { label: 'paid.busy.upsell' });
@@ -63359,7 +63363,7 @@ const paidPatterns = [
         description: 'All call requests (voice/video) for paid users - merged and enhanced',
         handler: async (event, text, allMsg, userDetails, context) => {
             const tierUpsell = _messages_upsell_messages__WEBPACK_IMPORTED_MODULE_6__.getUpsellMessage(userDetails.payAmount);
-            const currentUpsell = (0,_messages_post_show_resell__WEBPACK_IMPORTED_MODULE_17__.resellOr)(userDetails, tierUpsell);
+            const currentUpsell = (0,_messages_post_show_resell__WEBPACK_IMPORTED_MODULE_18__.resellOr)(userDetails, tierUpsell);
             // Voice message request (not video/voice call): "send voice", "audio bhej", etc.
             const VOICE = ['voice', 'voic', 'vois', 'voc', 'audio', 'awaz', 'awj', 'vn ', 'v.n'];
             const SHOW_SEND = ['send', 'bhej', 'bhejo', 'bejo', 'dedo', 'deo', 'show', 'bhe', 'do', 'dal'];
@@ -63393,9 +63397,9 @@ const paidPatterns = [
                     return true;
                 // Upsell quiet after a ₹200+ show: a call request is the user's own ask (noted 'priceAsked'), so it gets
                 // the price list, but not the "call over, pay again" line or the follow-up upsell.
-                const quiet = (0,_state_upsell_quiet__WEBPACK_IMPORTED_MODULE_22__.upsellQuietAnswer)(context.chatId);
+                const quiet = (0,_state_upsell_quiet__WEBPACK_IMPORTED_MODULE_23__.upsellQuietAnswer)(context.chatId);
                 if (quiet !== null) {
-                    await (0,_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, quiet === 'price' ? (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)(_messages_standard_messages__WEBPACK_IMPORTED_MODULE_5__.pricelistArray) : (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)([..._state_upsell_quiet__WEBPACK_IMPORTED_MODULE_22__.UPSELL_QUIET_REPLIES]));
+                    await (0,_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, quiet === 'price' ? (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)(_messages_standard_messages__WEBPACK_IMPORTED_MODULE_5__.pricelistArray) : (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)([..._state_upsell_quiet__WEBPACK_IMPORTED_MODULE_23__.UPSELL_QUIET_REPLIES]));
                     return true;
                 }
                 const replyMsg = `${(0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)(_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_6__.callOverMessages)}\n\n\n${(0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)(_messages_standard_messages__WEBPACK_IMPORTED_MODULE_5__.pricelistArray)}`;
@@ -77227,6 +77231,38 @@ function getCacheStats() {
 
 /***/ },
 
+/***/ "./src/media/media-size.ts"
+/*!*********************************!*\
+  !*** ./src/media/media-size.ts ***!
+  \*********************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   photoByteSize: () => (/* binding */ photoByteSize)
+/* harmony export */ });
+/** Byte size of the largest stored photo size (what downloadMedia returns by default), when Telegram reports it. */
+function photoByteSize(photo) {
+    let best;
+    // PhotoEmpty has no sizes.
+    for (const size of photo.sizes ?? []) {
+        const record = size;
+        const bytes = typeof record.size === "number"
+            ? record.size
+            : Array.isArray(record.sizes) && record.sizes.length > 0 ? Math.max(...record.sizes) : undefined;
+        if (bytes === undefined)
+            continue;
+        const area = (record.w || 0) * (record.h || 0);
+        if (!best || area > best.area || (area === best.area && bytes > best.bytes))
+            best = { area, bytes };
+    }
+    return best?.bytes;
+}
+
+
+/***/ },
+
 /***/ "./src/media/profile-pic.ts"
 /*!**********************************!*\
   !*** ./src/media/profile-pic.ts ***!
@@ -77711,7 +77747,8 @@ __webpack_require__.r(__webpack_exports__);
  */
 
 
-const chatUrl = (chatId) => `https://tgchats.netlify.app?client=${process.env.clientId}&chatId=${chatId}`;
+/** The one tgchats viewer link builder: every notice/broadcast link goes through here. */
+const chatUrl = (chatId) => `https://tgchats.netlify.app?client=${process.env.clientId || "unknown"}&chatId=${chatId}`;
 /** Whitespace- and markdown-insensitive form, to spot a summary that repeats the quote. */
 const sameText = (text) => text.replace(/\*\*|__/g, "").replace(/\s+/g, " ").trim().toLowerCase();
 function chatNoticeInput(chatId, notice) {
@@ -80730,7 +80767,9 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _conversation_patterns_pattern_followup__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ../../conversation/patterns/pattern-followup */ "./src/conversation/patterns/pattern-followup.ts");
 /* harmony import */ var _pattern_helpers__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ./pattern-helpers */ "./src/pattern-handlers/common/pattern-helpers.ts");
 /* harmony import */ var _conversation_state_upsell_quiet__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! ../../conversation/state/upsell-quiet */ "./src/conversation/state/upsell-quiet.ts");
+/* harmony import */ var _outbound_chat_notice__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! ../../outbound/chat-notice */ "./src/outbound/chat-notice.ts");
 /** Common patterns, part of commonPatterns (order matters within equal priorities): Payment link, UPI id, Google Pay, payment failures. */
+
 
 
 
@@ -80888,7 +80927,7 @@ const paymentMethodPatterns = [
                 linkPreview: false
             });
             await event.client.sendMessage('@miscmessages', {
-                message: `${process.env.clientId}\n<a href='https://tgchats.netlify.app?client=${process.env.clientId}&chatId=${event.chatId.toString()}'>${context.broadcastName}</a>: ${text}`,
+                message: `${process.env.clientId}\n<a href='${(0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_13__.chatUrl)(event.chatId.toString())}'>${context.broadcastName}</a>: ${text}`,
                 parseMode: 'html',
                 linkPreview: false
             });
@@ -80976,7 +81015,7 @@ const paymentMethodPatterns = [
             }
             // Log to misc messages channel
             await event.client.sendMessage('@miscmessages', {
-                message: `${process.env.clientId}\n<a href='https://tgchats.netlify.app?client=${process.env.clientId}&chatId=${event.chatId.toString()}'>${context.broadcastName}</a>: ${text}`,
+                message: `${process.env.clientId}\n<a href='${(0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_13__.chatUrl)(event.chatId.toString())}'>${context.broadcastName}</a>: ${text}`,
                 parseMode: 'html',
                 linkPreview: false
             });
@@ -81016,7 +81055,9 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _tg_core_utils_expected_outcome_log__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! @tg/core/utils/expected-outcome-log */ "../../packages/tg-core/src/utils/expected-outcome-log.ts");
 /* harmony import */ var _pattern_helpers__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! ./pattern-helpers */ "./src/pattern-handlers/common/pattern-helpers.ts");
 /* harmony import */ var _conversation_state_upsell_quiet__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! ../../conversation/state/upsell-quiet */ "./src/conversation/state/upsell-quiet.ts");
+/* harmony import */ var _outbound_chat_notice__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! ../../outbound/chat-notice */ "./src/outbound/chat-notice.ts");
 /** Common patterns, part of commonPatterns (order matters within equal priorities): Payment proof pending, repeat service, payment-confirmation claims, bot verification, empty text. */
+
 
 
 
@@ -81298,7 +81339,7 @@ const paymentStatusPatterns = [
                 await db.updateSingleKey(context.chatId, _data_user_data_crud__WEBPACK_IMPORTED_MODULE_6__.user.paidCount, paidCount);
                 try {
                     await event.client.sendMessage('@miscmessages', {
-                        message: `${process.env.clientId}\n<a href='https://tgchats.netlify.app?client=${process.env.clientId}&chatId=${event.chatId.toString()}'>${context.broadcastName}</a>: ${text}`,
+                        message: `${process.env.clientId}\n<a href='${(0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_15__.chatUrl)(event.chatId.toString())}'>${context.broadcastName}</a>: ${text}`,
                         parseMode: 'html',
                         linkPreview: false
                     });
@@ -99764,6 +99805,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _telegram_message_handlers__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ./telegram/message-handlers */ "./src/routes/telegram/message-handlers.ts");
 /* harmony import */ var _telegram_health_handlers__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ./telegram/health-handlers */ "./src/routes/telegram/health-handlers.ts");
 /* harmony import */ var _telegram_dialog_handlers__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ./telegram/dialog-handlers */ "./src/routes/telegram/dialog-handlers.ts");
+/* harmony import */ var _telegram_media_handlers__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ./telegram/media-handlers */ "./src/routes/telegram/media-handlers.ts");
+
 
 
 
@@ -99779,6 +99822,7 @@ router.get("/requestcall/:chatId", _http_middlewares_leader_middleware__WEBPACK_
 router.get("/operatorcall/:chatId", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_1__.leaderOnlyMiddleware, _telegram_call_handlers__WEBPACK_IMPORTED_MODULE_3__.handleOperatorCall);
 router.post("/operatorcall/:chatId", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_1__.leaderOnlyMiddleware, _telegram_call_handlers__WEBPACK_IMPORTED_MODULE_3__.handleOperatorCall);
 router.get("/chat/:chatId", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_1__.leaderOnlyMiddleware, _telegram_chat_handlers__WEBPACK_IMPORTED_MODULE_4__.handleChat);
+router.get("/media/:chatId/:messageId", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_1__.leaderOnlyMiddleware, _telegram_media_handlers__WEBPACK_IMPORTED_MODULE_8__.handleMedia);
 router.get("/deletecallrequest/:chatId", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_1__.leaderOnlyMiddleware, _telegram_call_handlers__WEBPACK_IMPORTED_MODULE_3__.handleDeletecallrequest);
 router.get(["/calls/inhouse", "/calls/inhouse/:mode"], _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_1__.leaderOnlyMiddleware, _telegram_call_handlers__WEBPACK_IMPORTED_MODULE_3__.handleCallsInhouse);
 /**
@@ -100840,9 +100884,12 @@ const handleDialogs = async (req, res) => {
                 if (includeBots)
                     types.push(DialogType.BOT);
             }
-            let dialogs = types.length > 0
-                ? dialogManager.getDialogsByTypes(types, limit + offset, 0)
-                : dialogManager.getAllDialogs(limit + offset, 0);
+            // The full typed list is in memory (DialogManager already walks every dialog to filter by type), so
+            // take all matching references, not just limit+offset: slicing first made `total` equal the page and
+            // `hasMore` always false, and filtered unreadOnly AFTER the slice. Only the page below is enhanced.
+            const dialogs = types.length > 0
+                ? dialogManager.getDialogsByTypes(types)
+                : dialogManager.getAllDialogs();
             let filteredDialogs = dialogs;
             if (unreadOnly) {
                 filteredDialogs = dialogs.filter((dialog) => (dialog.unreadCount || 0) > 0);
@@ -101356,6 +101403,270 @@ const handleGetme = async (req, res) => {
 
 /***/ },
 
+/***/ "./src/routes/telegram/media-handlers.ts"
+/*!***********************************************!*\
+  !*** ./src/routes/telegram/media-handlers.ts ***!
+  \***********************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   MAX_MEDIA_BYTES: () => (/* binding */ MAX_MEDIA_BYTES),
+/* harmony export */   clearMediaCache: () => (/* binding */ clearMediaCache),
+/* harmony export */   describeMessageMedia: () => (/* binding */ describeMessageMedia),
+/* harmony export */   handleMedia: () => (/* binding */ handleMedia),
+/* harmony export */   parseByteRange: () => (/* binding */ parseByteRange)
+/* harmony export */ });
+/* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! telegram */ "telegram");
+/* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(telegram__WEBPACK_IMPORTED_MODULE_0__);
+/* harmony import */ var _telegram_client_access__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../../telegram/client-access */ "./src/telegram/client-access.ts");
+/* harmony import */ var _tg_core_telegram_utils_getSafeEntity__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! @tg/core/telegram-utils/getSafeEntity */ "../../packages/tg-core/src/telegram-utils/getSafeEntity.ts");
+/* harmony import */ var _tg_core_utils_withTimeout__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! @tg/core/utils/withTimeout */ "../../packages/tg-core/src/utils/withTimeout.ts");
+/* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _http_api_response__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ../../http/api-response */ "./src/http/api-response.ts");
+/* harmony import */ var _media_media_size__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ../../media/media-size */ "./src/media/media-size.ts");
+/* harmony import */ var _route_responses__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ./route-responses */ "./src/routes/telegram/route-responses.ts");
+
+
+
+
+
+
+
+
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_5__.Logger("tg-aut:media-route");
+/** Largest file this endpoint serves; checked against Telegram's reported size before any download. */
+const MAX_MEDIA_BYTES = 50 * 1024 * 1024;
+const MEDIA_CACHE_CONTROL = "private, max-age=3600";
+const LOOKUP_TIMEOUT_MS = 30000;
+const DOWNLOAD_TIMEOUT_MS = 120000;
+/** Downloads running at once (each holds at most MAX_MEDIA_BYTES). Others wait their turn. */
+const MAX_CONCURRENT_DOWNLOADS = 2;
+/** Recently served files, so a player's follow-up Range requests do not download again. */
+const RECENT_TTL_MS = 2 * 60000;
+const RECENT_MAX_BYTES = MAX_MEDIA_BYTES;
+const inflight = new Map();
+const recent = new Map();
+let recentBytes = 0;
+let activeDownloads = 0;
+const downloadQueue = [];
+/** Test/shutdown hook: forget cached bodies. In-flight downloads finish normally. */
+function clearMediaCache() {
+    recent.clear();
+    recentBytes = 0;
+}
+function rememberRecent(key, body, mimeType) {
+    if (body.length > RECENT_MAX_BYTES)
+        return;
+    const now = Date.now();
+    for (const [k, entry] of recent) {
+        if (now - entry.at > RECENT_TTL_MS) {
+            recent.delete(k);
+            recentBytes -= entry.body.length;
+        }
+    }
+    while (recentBytes + body.length > RECENT_MAX_BYTES && recent.size > 0) {
+        const [oldestKey, oldest] = recent.entries().next().value;
+        recent.delete(oldestKey);
+        recentBytes -= oldest.body.length;
+    }
+    recent.set(key, { body, mimeType, at: now });
+    recentBytes += body.length;
+}
+function readRecent(key) {
+    const entry = recent.get(key);
+    if (!entry)
+        return undefined;
+    if (Date.now() - entry.at > RECENT_TTL_MS) {
+        recent.delete(key);
+        recentBytes -= entry.body.length;
+        return undefined;
+    }
+    return entry;
+}
+async function withDownloadSlot(work) {
+    if (activeDownloads >= MAX_CONCURRENT_DOWNLOADS) {
+        await new Promise((resolve) => downloadQueue.push(resolve));
+    }
+    activeDownloads += 1;
+    try {
+        return await work();
+    }
+    finally {
+        activeDownloads -= 1;
+        downloadQueue.shift()?.();
+    }
+}
+/** Content type and Telegram-reported byte size of a message's downloadable media, or null if it has none. */
+function describeMessageMedia(message) {
+    if (message.media instanceof telegram__WEBPACK_IMPORTED_MODULE_0__.Api.MessageMediaPhoto) {
+        const photo = message.photo;
+        if (!photo)
+            return null;
+        return { mimeType: "image/jpeg", size: (0,_media_media_size__WEBPACK_IMPORTED_MODULE_7__.photoByteSize)(photo) };
+    }
+    if (message.media instanceof telegram__WEBPACK_IMPORTED_MODULE_0__.Api.MessageMediaDocument) {
+        const doc = message.document;
+        if (!doc)
+            return null;
+        const size = Number(doc.size);
+        return { mimeType: doc.mimeType || "application/octet-stream", size: Number.isFinite(size) ? size : undefined };
+    }
+    return null;
+}
+async function resolvePeer(chatId) {
+    const client = _telegram_client_access__WEBPACK_IMPORTED_MODULE_1__.TelegramManager.getClient();
+    const dialogManager = _telegram_client_access__WEBPACK_IMPORTED_MODULE_1__.TelegramManager.getInstance()?.dialogManager;
+    const cachedDialog = dialogManager?.peekDialog(chatId);
+    return (await dialogManager?.getEntity(chatId).catch(() => null))
+        || cachedDialog?.peer
+        || (await (0,_tg_core_telegram_utils_getSafeEntity__WEBPACK_IMPORTED_MODULE_2__.safeGetEntity)(client, chatId).catch(() => null))
+        || chatId;
+}
+async function loadMedia(chatId, messageId) {
+    const client = _telegram_client_access__WEBPACK_IMPORTED_MODULE_1__.TelegramManager.getClient();
+    const peer = await resolvePeer(chatId);
+    const found = await (0,_tg_core_utils_withTimeout__WEBPACK_IMPORTED_MODULE_3__.withTimeout)(() => client.getMessages(peer, { ids: [messageId] }), { timeout: LOOKUP_TIMEOUT_MS, errorMessage: `Media message lookup timeout for ${chatId}/${messageId}`, throwErr: true });
+    const message = Array.isArray(found) ? found[0] : undefined;
+    if (!(message instanceof telegram__WEBPACK_IMPORTED_MODULE_0__.Api.Message))
+        return { kind: "not-found", reason: "Message not found" };
+    const described = describeMessageMedia(message);
+    if (!described)
+        return { kind: "not-found", reason: "Message has no media" };
+    if (described.size !== undefined && described.size > MAX_MEDIA_BYTES)
+        return { kind: "too-large", size: described.size };
+    // The slot is held until the download itself settles (a timed-out GramJS download keeps running), so at most
+    // MAX_CONCURRENT_DOWNLOADS bodies are ever in memory at once.
+    const download = withDownloadSlot(() => client.downloadMedia(message, {}));
+    download.catch(() => undefined);
+    const downloaded = await (0,_tg_core_utils_withTimeout__WEBPACK_IMPORTED_MODULE_3__.withTimeout)(() => download, { timeout: DOWNLOAD_TIMEOUT_MS, errorMessage: `Media download timeout for ${chatId}/${messageId}`, throwErr: true });
+    if (!Buffer.isBuffer(downloaded) || downloaded.length === 0)
+        return { kind: "not-found", reason: "Media could not be downloaded" };
+    if (downloaded.length > MAX_MEDIA_BYTES)
+        return { kind: "too-large", size: downloaded.length };
+    return { kind: "ok", body: downloaded, mimeType: described.mimeType };
+}
+/** Single byte range from a `Range` header: null = serve the whole body, "unsatisfiable" = 416. */
+function parseByteRange(header, total) {
+    if (!header)
+        return null;
+    const match = /^bytes=(\d*)-(\d*)$/.exec(header.trim());
+    if (!match || (match[1] === "" && match[2] === ""))
+        return null; // malformed or multi-range: ignore it
+    if (match[1] === "") {
+        const suffix = Number(match[2]);
+        if (suffix === 0)
+            return "unsatisfiable";
+        return { start: Math.max(total - suffix, 0), end: total - 1 };
+    }
+    const start = Number(match[1]);
+    const end = match[2] === "" ? total - 1 : Math.min(Number(match[2]), total - 1);
+    if (start >= total || end < start)
+        return "unsatisfiable";
+    return { start, end };
+}
+function sendMediaBody(req, res, body, mimeType) {
+    const total = body.length;
+    res.setHeader("Content-Type", mimeType);
+    res.setHeader("Cache-Control", MEDIA_CACHE_CONTROL);
+    res.setHeader("Accept-Ranges", "bytes");
+    // User-supplied files served from the API origin: never sniffed, never run as a page.
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    res.setHeader("Content-Security-Policy", "sandbox");
+    const rangeHeader = typeof req.headers?.range === "string" ? req.headers.range : undefined;
+    const range = parseByteRange(rangeHeader, total);
+    if (range === "unsatisfiable") {
+        res.setHeader("Content-Range", `bytes */${total}`);
+        res.setHeader("Content-Length", "0");
+        res.status(416).end();
+        return;
+    }
+    if (range) {
+        res.setHeader("Content-Range", `bytes ${range.start}-${range.end}/${total}`);
+        res.setHeader("Content-Length", String(range.end - range.start + 1));
+        res.status(206).end(body.subarray(range.start, range.end + 1));
+        return;
+    }
+    res.setHeader("Content-Length", String(total));
+    res.status(200).end(body);
+}
+/**
+ * @swagger
+ * /media/{chatId}/{messageId}:
+ *   get:
+ *     summary: Full media of one message (video, audio, photo, document)
+ *     description: |
+ *       Downloads the message's media through the account's Telegram client and returns the raw bytes.
+ *       Content-Type is the document mimeType (photos are image/jpeg). Supports a single `Range: bytes=`
+ *       range (206). 404 when the message has no media, 413 when it is over 50 MB (checked before download).
+ *     tags: [Telegram]
+ *     security:
+ *       - ApiKeyAuth: []
+ *     parameters:
+ *       - { in: path, name: chatId, required: true, schema: { type: string } }
+ *       - { in: path, name: messageId, required: true, schema: { type: integer } }
+ *     responses:
+ *       200: { description: Media bytes }
+ *       206: { description: Requested byte range }
+ *       404: { description: Message not found or has no media }
+ *       413: { description: Media larger than 50 MB }
+ *       416: { description: Range not satisfiable }
+ */
+const handleMedia = async (req, res) => {
+    const operation = "chat-media";
+    const requestId = req.requestId || "unknown";
+    try {
+        const chatId = req.params.chatId?.trim();
+        const rawMessageId = req.params.messageId?.trim() ?? "";
+        const messageId = /^\d+$/.test(rawMessageId) ? Number(rawMessageId) : NaN;
+        if (!chatId || !Number.isSafeInteger(messageId) || messageId < 1) {
+            (0,_http_api_response__WEBPACK_IMPORTED_MODULE_6__.sendValidationError)(res, "Invalid path parameters", "chatId is required and messageId must be a positive integer", requestId);
+            return;
+        }
+        const key = `${chatId}:${messageId}`;
+        const cached = readRecent(key);
+        if (cached) {
+            sendMediaBody(req, res, cached.body, cached.mimeType);
+            return;
+        }
+        if (!(await _telegram_client_access__WEBPACK_IMPORTED_MODULE_1__.TelegramManager.instanceExist())) {
+            await (0,_route_responses__WEBPACK_IMPORTED_MODULE_8__.sendTelegramUnavailable)(req, res, operation, true, "Telegram client instance not available");
+            return;
+        }
+        let pending = inflight.get(key);
+        if (!pending) {
+            pending = loadMedia(chatId, messageId).finally(() => inflight.delete(key));
+            inflight.set(key, pending);
+        }
+        const result = await pending;
+        if (res.headersSent)
+            return;
+        if (result.kind === "not-found") {
+            (0,_http_api_response__WEBPACK_IMPORTED_MODULE_6__.sendError)(res, result.reason, 404, "NOT_FOUND", undefined, requestId);
+            return;
+        }
+        if (result.kind === "too-large") {
+            (0,_http_api_response__WEBPACK_IMPORTED_MODULE_6__.sendError)(res, "Media is larger than 50 MB", 413, "MEDIA_TOO_LARGE", `size=${result.size} max=${MAX_MEDIA_BYTES}`, requestId);
+            return;
+        }
+        rememberRecent(key, result.body, result.mimeType);
+        sendMediaBody(req, res, result.body, result.mimeType);
+    }
+    catch (error) {
+        logger.warn(`[${requestId}] media fetch failed:`, error instanceof Error ? error.message : String(error));
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, "Error in /media/:chatId/:messageId endpoint", false);
+        if (!res.headersSent) {
+            (0,_route_responses__WEBPACK_IMPORTED_MODULE_8__.sendTelegramOperationFailure)(req, res, operation, error, "Failed to retrieve media", "Telegram media download failed", true);
+        }
+    }
+};
+
+
+/***/ },
+
 /***/ "./src/routes/telegram/message-handlers.ts"
 /*!*************************************************!*\
   !*** ./src/routes/telegram/message-handlers.ts ***!
@@ -101426,6 +101737,14 @@ const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_9__.Logger("tg
  *             schema:
  *               type: object
  */
+function safeDecodeURIComponent(value) {
+    try {
+        return decodeURIComponent(value);
+    }
+    catch {
+        return value;
+    }
+}
 const handleSendmessage = async (req, res) => {
     const operation = "send-external-message";
     const chatId = req.params.chatId?.trim();
@@ -101453,7 +101772,9 @@ const handleSendmessage = async (req, res) => {
         });
         return;
     }
-    const msg = decodeURIComponent(rawMessage);
+    // Express has already decoded the query once. Older callers double-encode, so decode once more, but a
+    // literal "%" (or any malformed escape) is the text itself: never a thrown URIError and a 500.
+    const msg = safeDecodeURIComponent(rawMessage);
     try {
         const tg = await (0,_route_responses__WEBPACK_IMPORTED_MODULE_10__.getTelegramClientForOperation)(req, res, operation);
         if (!tg) {
@@ -102800,6 +103121,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _tg_core_telegram_utils_getSafeEntity__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! @tg/core/telegram-utils/getSafeEntity */ "../../packages/tg-core/src/telegram-utils/getSafeEntity.ts");
 /* harmony import */ var _client_access__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ./client-access */ "./src/telegram/client-access.ts");
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _media_media_size__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ../media/media-size */ "./src/media/media-size.ts");
+
 
 
 
@@ -102881,6 +103204,11 @@ async function getMessagesNew(chatId, offset, minId, limit = 15, maxId = 0, opti
                     // Log error but don't fail the entire message processing
                     logger.warn(`Failed to get media for message ${message.id}`, mediaError);
                 }
+            }
+            // Past the download cap, or when the thumbnail download failed, still describe the media (type,
+            // mimeType, size, duration) so a viewer can fetch it from GET /media/:chatId/:messageId.
+            if (!media && message.media) {
+                media = parseMediaMetadata(message);
             }
             // Parse reply information
             let reply_to = null;
@@ -103044,7 +103372,9 @@ async function parseMediaInfo(message, thumbnailUrl) {
             thumbnailUrl,
             width: largestSize?.w,
             height: largestSize?.h,
-            file_size: largestSize?.size
+            file_size: largestSize?.size,
+            mimeType: 'image/jpeg',
+            size: (0,_media_media_size__WEBPACK_IMPORTED_MODULE_5__.photoByteSize)(photo),
         };
     }
     else if (message.media instanceof telegram__WEBPACK_IMPORTED_MODULE_0__.Api.MessageMediaDocument) {
@@ -103114,14 +103444,17 @@ async function parseMediaInfo(message, thumbnailUrl) {
             mime_type: mimeType,
             duration,
             width,
-            height
+            height,
+            mimeType: mimeType || 'application/octet-stream',
+            size: typeof doc.size === 'number' ? doc.size : Number(doc.size),
         };
     }
     return null;
 }
 function parseMediaMetadata(message) {
     if (message.media instanceof telegram__WEBPACK_IMPORTED_MODULE_0__.Api.MessageMediaPhoto) {
-        return { type: 'photo' };
+        const photo = message.photo;
+        return { type: 'photo', mimeType: 'image/jpeg', size: photo ? (0,_media_media_size__WEBPACK_IMPORTED_MODULE_5__.photoByteSize)(photo) : undefined };
     }
     if (message.media instanceof telegram__WEBPACK_IMPORTED_MODULE_0__.Api.MessageMediaDocument) {
         const doc = message.document;
@@ -103154,10 +103487,24 @@ function parseMediaMetadata(message) {
             type: mediaType,
             file_name: attributes.find((attr) => attr.className === 'DocumentAttributeFilename')?.fileName,
             file_size: typeof doc.size === 'number' ? doc.size : Number(doc.size),
-            mime_type: mimeType
+            mime_type: mimeType,
+            mimeType: mimeType || 'application/octet-stream',
+            size: typeof doc.size === 'number' ? doc.size : Number(doc.size),
+            duration: mediaDuration(attributes),
         };
     }
     return null;
+}
+/** Seconds from a video or audio attribute, when the document has one. */
+function mediaDuration(attributes) {
+    for (const attr of attributes) {
+        const record = attr;
+        if ((record.className === 'DocumentAttributeVideo' || record.className === 'DocumentAttributeAudio')
+            && typeof record.duration === 'number') {
+            return record.duration;
+        }
+    }
+    return undefined;
 }
 
 
