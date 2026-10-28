@@ -36188,7 +36188,7 @@ function promotePoolPipeline(clientId) {
 exports.TTFP_BUCKETS = ['<10m', '10-30m', '30m-2h', '2-24h', '1-3d', '3d+'];
 function timeToFirstPayPipeline(clientId, start, end) {
     return [
-        { $match: { clientId, firstPaidAt: { $gte: start, $lt: end } } },
+        { $match: { ...(clientId ? { clientId } : {}), firstPaidAt: { $gte: start, $lt: end } } },
         { $project: { _id: 0, mins: { $divide: [{ $subtract: ['$firstPaidAt', { $toLong: { $toDate: '$_id' } }] }, 60000] } } },
         {
             $bucket: {
@@ -36327,83 +36327,120 @@ GROUP BY GROUPING SETS ((client_id), ())`,
         params: [iso(cur.start), iso(cur.end), iso(prev.start), iso(prev.end)],
     };
 }
+function scoped(clientId, base) {
+    const params = [];
+    const add = (v) => {
+        params.push(v);
+        return `$${params.length}`;
+    };
+    const where = clientId === null ? '' : `client_id = ${add(clientId)} AND `;
+    return { params, add, where, name: `${clientId === null ? 'fleet' : 'client'}.${base}` };
+}
 function clientPaymentsSql(clientId, start) {
+    const q = scoped(clientId, 'payments');
     return {
-        name: 'client.payments',
+        name: q.name,
         sql: `SELECT ts, chat_id, amount, owner_amount, cheat_flagged
 FROM payment_event_owner
-WHERE client_id = $1 AND ts >= $2::timestamptz AND amount > 0`,
-        params: [clientId, iso(start)],
+WHERE ${q.where}ts >= ${q.add(iso(start))}::timestamptz AND amount > 0`,
+        params: q.params,
     };
 }
 function clientDailyClientSql(clientId, from) {
+    const q = scoped(clientId, 'daily_client');
     return {
-        name: 'client.daily_client',
+        name: q.name,
         sql: `SELECT day::text AS d,
   coalesce(sum(sent), 0) AS sent, coalesce(sum(delivered), 0) AS delivered, coalesce(sum(banned), 0) AS banned,
   coalesce(sum(new_users) FILTER (WHERE namespace = 'tg-aut'), 0) AS new_users
 FROM daily_client
-WHERE client_id = $1 AND day >= $2::date
+WHERE ${q.where}day >= ${q.add(from)}::date
 GROUP BY day`,
-        params: [clientId, from],
+        params: q.params,
     };
 }
 function clientDmsDailySql(clientId, start) {
+    const q = scoped(clientId, 'dms_daily');
     return {
-        name: 'client.dms_daily',
+        name: q.name,
         sql: `SELECT ${IST}::date::text AS d, count(DISTINCT conversion_id) AS dms
 FROM conversion_event
-WHERE kind = 'dm' AND client_id = $1 AND ts >= $2::timestamptz
+WHERE kind = 'dm' AND ${q.where}ts >= ${q.add(iso(start))}::timestamptz
 GROUP BY 1`,
-        params: [clientId, iso(start)],
+        params: q.params,
     };
 }
 function clientSendsHourlySql(clientId, start) {
+    const q = scoped(clientId, 'promotion_send_hourly');
     return {
-        name: 'client.promotion_send_hourly',
+        name: q.name,
         sql: `SELECT ${IST}::date::text AS d, extract(hour FROM ${IST})::int AS h,
   count(*) FILTER (WHERE outcome <> 'deleted') AS sent
 FROM promotion_send
-WHERE client_id = $1 AND ts >= $2::timestamptz
+WHERE ${q.where}ts >= ${q.add(iso(start))}::timestamptz
 GROUP BY 1, 2`,
-        params: [clientId, iso(start)],
+        params: q.params,
     };
 }
 function clientMobilesSql(clientId, from) {
+    const q = scoped(clientId, 'daily_mobile');
+    const fleet = clientId === null;
     return {
-        name: 'client.daily_mobile',
-        sql: `SELECT mobile,
+        name: q.name,
+        sql: `SELECT mobile,${fleet ? `\n  (array_agg(client_id ORDER BY day DESC))[1] AS client_id,` : ''}
   coalesce(sum(new_users) FILTER (WHERE namespace = 'tg-aut'), 0) AS new_users,
   coalesce(sum(new_users) FILTER (WHERE namespace = 'promote-clients'), 0) AS dms,
   coalesce(sum(sent), 0) AS sent, coalesce(sum(delivered), 0) AS delivered, coalesce(sum(banned), 0) AS banned,
   min(day)::text AS first_day, max(day)::text AS last_day
 FROM daily_mobile
-WHERE client_id = $1 AND day >= $2::date
+WHERE ${q.where}day >= ${q.add(from)}::date
 GROUP BY mobile
-ORDER BY sent DESC`,
-        params: [clientId, from],
+${fleet ? 'ORDER BY new_users DESC, sent DESC, mobile\nLIMIT 20' : 'ORDER BY sent DESC'}`,
+        params: q.params,
     };
 }
 function clientTopDmChannelsSql(clientId, start) {
+    const q = scoped(clientId, 'channels_top_dms');
     return {
-        name: 'client.channels_top_dms',
+        name: q.name,
         sql: `SELECT channel_id, count(DISTINCT conversion_id) AS dms
 FROM conversion_event
-WHERE kind = 'dm' AND client_id = $1 AND ts >= $2::timestamptz AND channel_id IS NOT NULL
+WHERE kind = 'dm' AND ${q.where}ts >= ${q.add(iso(start))}::timestamptz AND channel_id IS NOT NULL
 GROUP BY 1
 ORDER BY 2 DESC, 1
 LIMIT 20`,
-        params: [clientId, iso(start)],
+        params: q.params,
     };
 }
-function clientChannelSendsSql(clientId, start, channelIds) {
+function clientChannelSendsSql(clientId, start, channelIds, fleetDays) {
+    const q = scoped(clientId, 'channels_sends');
+    if (clientId === null) {
+        if (!fleetDays)
+            throw new Error('fleet channel sends need the IST day range');
+        const ids = q.add(channelIds);
+        return {
+            name: q.name,
+            sql: `SELECT channel_id, sum(sent)::bigint AS sent, (SELECT max(day) FROM daily_channel)::text AS rolled_to
+FROM (
+  SELECT channel_id, sent FROM daily_channel
+  WHERE channel_id = ANY(${ids}::text[]) AND day >= ${q.add(fleetDays.from)}::date AND day < ${q.add(fleetDays.today)}::date
+  UNION ALL
+  SELECT channel_id, count(*) FILTER (WHERE outcome <> 'deleted') FROM promotion_send
+  WHERE channel_id = ANY(${ids}::text[]) AND ts >= ${q.add(iso(fleetDays.todayStart))}::timestamptz
+  GROUP BY 1
+) x
+GROUP BY 1`,
+            params: q.params,
+        };
+    }
+    const ts = q.add(iso(start));
     return {
-        name: 'client.channels_sends',
+        name: q.name,
         sql: `SELECT channel_id, count(*) FILTER (WHERE outcome <> 'deleted') AS sent
 FROM promotion_send
-WHERE channel_id = ANY($3::text[]) AND client_id = $1 AND ts >= $2::timestamptz
+WHERE channel_id = ANY(${q.add(channelIds)}::text[]) AND ${q.where}ts >= ${ts}::timestamptz
 GROUP BY 1`,
-        params: [clientId, iso(start), channelIds],
+        params: q.params,
     };
 }
 
@@ -36645,6 +36682,9 @@ let MonitorController = class MonitorController {
     async live(svc) {
         return this.service.live(parseSvc(svc));
     }
+    fleetDetail(days) {
+        return this.service.fleetDetail(parseDays(days));
+    }
     async client(clientId, days) {
         if (!CLIENT_ID_RE.test(clientId ?? ''))
             throw new common_1.BadRequestException('invalid clientId');
@@ -36668,6 +36708,14 @@ __decorate([
     __metadata("design:paramtypes", [String]),
     __metadata("design:returntype", Promise)
 ], MonitorController.prototype, "live", null);
+__decorate([
+    (0, common_1.Get)('fleet/detail'),
+    (0, swagger_1.ApiQuery)({ name: 'days', required: false, enum: ['7', '30'] }),
+    __param(0, (0, common_1.Query)('days')),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [String]),
+    __metadata("design:returntype", void 0)
+], MonitorController.prototype, "fleetDetail", null);
 __decorate([
     (0, common_1.Get)('client/:clientId'),
     (0, swagger_1.ApiParam)({ name: 'clientId' }),
@@ -36751,7 +36799,8 @@ var __param = (this && this.__param) || function (paramIndex, decorator) {
 };
 var MonitorService_1;
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.MonitorService = exports.LIVE_SVCS = exports.HEARTBEAT_INDEX_KEY = exports.LIVE_TTL_MS = exports.CLIENT_TTL_MS = exports.FLEET_TTL_MS = exports.LIVE_REDIS_DEADLINE_MS = exports.MONGO_TIMEOUT_MS = exports.PG_TIMEOUT_MS = exports.MONITOR_REDIS = void 0;
+exports.MonitorService = exports.FLEET_DETAIL_ID = exports.LIVE_SVCS = exports.HEARTBEAT_INDEX_KEY = exports.LIVE_TTL_MS = exports.CLIENT_TTL_MS = exports.FLEET_TTL_MS = exports.LIVE_REDIS_DEADLINE_MS = exports.MONGO_TIMEOUT_MS = exports.PG_TIMEOUT_MS = exports.MONITOR_REDIS = void 0;
+exports.fleetSummaryRow = fleetSummaryRow;
 exports.classifyHeartbeat = classifyHeartbeat;
 const common_1 = __webpack_require__(/*! @nestjs/common */ "@nestjs/common");
 const mongoose_1 = __webpack_require__(/*! @nestjs/mongoose */ "@nestjs/mongoose");
@@ -36771,6 +36820,41 @@ exports.CLIENT_TTL_MS = 60_000;
 exports.LIVE_TTL_MS = 5_000;
 exports.HEARTBEAT_INDEX_KEY = 'heartbeat::index';
 exports.LIVE_SVCS = ['tg-aut', 'promote'];
+exports.FLEET_DETAIL_ID = 'all';
+const FLEET_DETAIL_KEY = '*fleet*';
+function fleetSummaryRow(f) {
+    const pools = f.clients.map((c) => c.pool);
+    const sparks = f.clients.map((c) => c.spark);
+    const pool = pools.length && pools.every((p) => p)
+        ? pools.reduce((a, p) => ({
+            buffersEligible: a.buffersEligible + p.buffersEligible,
+            buffersTotal: a.buffersTotal + p.buffersTotal,
+            promoteActive: a.promoteActive + p.promoteActive,
+        }), { buffersEligible: 0, buffersTotal: 0, promoteActive: 0 })
+        : null;
+    const spark = sparks.length && sparks.every((x) => x)
+        ? sparks[0].map((_, i) => sparks.reduce((s, x) => s + (x[i] ?? 0), 0))
+        : null;
+    const m = f.fleet;
+    return {
+        clientId: exports.FLEET_DETAIL_ID,
+        name: 'All clients',
+        revenue: m.revenue,
+        grossRevenue: m.grossRevenue,
+        flaggedRevenue: m.flaggedRevenue,
+        payers: m.payers,
+        newUsers: m.newUsers,
+        conversion: m.conversion,
+        avgTicket: m.avgTicket,
+        sends: m.sends,
+        sendSuccess: m.sendSuccess,
+        banned: m.banned,
+        dms: m.dms,
+        pool,
+        spark,
+        previous: { revenue: f.previous.revenue, payers: f.previous.payers, newUsers: f.previous.newUsers, conversion: f.previous.conversion },
+    };
+}
 function classifyHeartbeat(payload, now) {
     if (!payload)
         return { state: 'no-heartbeat', ageSec: null, clockSkew: false };
@@ -37046,32 +37130,51 @@ let MonitorService = MonitorService_1 = class MonitorService {
     async client(clientId, days) {
         return (await this.clientCache.get(`${clientId}:${days}`, () => this.buildClient(clientId, days, Date.now()))).value;
     }
+    async fleetDetail(days) {
+        return (await this.clientCache.get(`${FLEET_DETAIL_KEY}:${days}`, () => this.buildFleetDetail(days, Date.now()))).value;
+    }
     async buildClient(clientId, days, now) {
+        return this.buildDetail(clientId, days, now);
+    }
+    async buildFleetDetail(days, now) {
+        return this.buildDetail(null, days, now);
+    }
+    async buildDetail(scope, days, now) {
         const ctx = { notes: [], timings: {} };
+        const fleetScope = scope === null;
+        const clientId = scope ?? exports.FLEET_DETAIL_ID;
+        const mongoClient = scope ?? undefined;
         const r = (0, monitor_time_1.clientDaysRange)(days, now);
         const today = r.to;
         const yday = (0, monitor_time_1.addDays)(today, -1);
         const yday0 = (0, monitor_time_1.istDayStart)(yday);
         const payStart = Math.min(r.start, yday0);
+        const tag = fleetScope ? 'fleet' : 'client';
         const [meta, fleet, payRows, dcRows, dmsRows, psHourly, mobileRows, channelRows, cohortDaily, cohortHourly, ttfpRows, pool] = await Promise.all([
             this.section('clients', ctx, () => this.clientMeta(ctx)),
             this.section('summary', ctx, () => this.fleet(days === 7 ? '7d' : '30d')),
-            this.section('payments', ctx, () => this.pgRows((0, monitor_sql_1.clientPaymentsSql)(clientId, payStart), ctx)),
-            this.section('daily_client', ctx, () => this.pgRows((0, monitor_sql_1.clientDailyClientSql)(clientId, r.from), ctx)),
-            this.section('dms', ctx, () => this.pgRows((0, monitor_sql_1.clientDmsDailySql)(clientId, r.start), ctx)),
-            this.section('hourly_sends', ctx, () => this.pgRows((0, monitor_sql_1.clientSendsHourlySql)(clientId, yday0), ctx)),
-            this.section('mobiles', ctx, () => this.pgRows((0, monitor_sql_1.clientMobilesSql)(clientId, r.from), ctx)),
-            this.section('channels', ctx, () => this.topChannels(clientId, r.start, ctx)),
-            this.section('conversion', ctx, async () => (0, monitor_mongo_1.flattenCohort)(await this.mongoAgg('userData', (0, monitor_mongo_1.userCohortPipeline)({ start: r.start, end: now, clientId }), 'mongo.userData_cohorts_client', ctx))),
-            this.section('hourly_new_users', ctx, async () => (0, monitor_mongo_1.flattenCohort)(await this.mongoAgg('userData', (0, monitor_mongo_1.userCohortPipeline)({ start: yday0, end: now, clientId, byHour: true }), 'mongo.userData_hourly_client', ctx))),
-            this.section('time_to_first_pay', ctx, () => this.mongoAgg('userData', (0, monitor_mongo_1.timeToFirstPayPipeline)(clientId, r.start, now), 'mongo.userData_ttfp_client', ctx)),
-            this.section('pool', ctx, () => this.poolByClient(now, today, clientId, ctx)),
+            this.section('payments', ctx, () => this.pgRows((0, monitor_sql_1.clientPaymentsSql)(scope, payStart), ctx)),
+            this.section('daily_client', ctx, () => this.pgRows((0, monitor_sql_1.clientDailyClientSql)(scope, r.from), ctx)),
+            this.section('dms', ctx, () => this.pgRows((0, monitor_sql_1.clientDmsDailySql)(scope, r.start), ctx)),
+            this.section('hourly_sends', ctx, () => this.pgRows((0, monitor_sql_1.clientSendsHourlySql)(scope, yday0), ctx)),
+            this.section('mobiles', ctx, () => this.pgRows((0, monitor_sql_1.clientMobilesSql)(scope, r.from), ctx)),
+            this.section('channels', ctx, () => this.topChannels(scope, r.start, { from: r.from, today, todayStart: (0, monitor_time_1.istDayStart)(today) }, ctx)),
+            this.section('conversion', ctx, async () => (0, monitor_mongo_1.flattenCohort)(await this.mongoAgg('userData', (0, monitor_mongo_1.userCohortPipeline)({ start: r.start, end: now, clientId: mongoClient }), `mongo.userData_cohorts_${tag}`, ctx))),
+            this.section('hourly_new_users', ctx, async () => (0, monitor_mongo_1.flattenCohort)(await this.mongoAgg('userData', (0, monitor_mongo_1.userCohortPipeline)({ start: yday0, end: now, clientId: mongoClient, byHour: true }), `mongo.userData_hourly_${tag}`, ctx))),
+            this.section('time_to_first_pay', ctx, () => this.mongoAgg('userData', (0, monitor_mongo_1.timeToFirstPayPipeline)(mongoClient, r.start, now), `mongo.userData_ttfp_${tag}`, ctx)),
+            this.section('pool', ctx, () => this.poolByClient(now, today, mongoClient, ctx)),
         ]);
         const credits = (payRows ?? []).map(credit);
         const inRange = credits.filter((c) => c.ms >= r.start && c.ms < now);
         const dcBy = new Map((dcRows ?? []).map((x) => [x.d, x]));
         const dmsBy = new Map((dmsRows ?? []).map((x) => [x.d, (0, monitor_util_1.num)(x.dms)]));
-        const cohortBy = new Map((cohortDaily ?? []).map((x) => [x.d, x]));
+        const cohortBy = new Map();
+        for (const x of cohortDaily ?? []) {
+            const e = cohortBy.get(x.d) ?? { n: 0, same: 0 };
+            e.n += x.n;
+            e.same += x.same;
+            cohortBy.set(x.d, e);
+        }
         const daily = (0, monitor_time_1.datesBetween)(r.from, r.to).map((date) => {
             const dayCredits = inRange.filter((c) => (0, monitor_time_1.istDate)(c.ms) === date);
             const revenue = payRows ? dayCredits.reduce((s, c) => s + c.revenue, 0) : null;
@@ -37151,6 +37254,7 @@ let MonitorService = MonitorService_1 = class MonitorService {
         const mobiles = mobileRows
             ? mobileRows.map((m) => ({
                 mobile: (0, monitor_util_1.maskMobile)(m.mobile),
+                ...(fleetScope ? { clientId: m.client_id ?? null } : {}),
                 newUsers: (0, monitor_util_1.num)(m.new_users),
                 sends: (0, monitor_util_1.num)(m.sent),
                 sendSuccess: (0, monitor_util_1.num)(m.delivered),
@@ -37173,18 +37277,35 @@ let MonitorService = MonitorService_1 = class MonitorService {
                 };
             });
         }
-        const p = pool?.get(clientId);
-        const metaRow = meta?.find((m) => m.clientId === clientId);
-        const summary = fleet?.clients.find((c) => c.clientId === clientId) ?? null;
+        const poolAll = { eligible: 0, total: 0, harsh: 0, promoteActive: 0 };
+        for (const v of pool?.values() ?? []) {
+            poolAll.eligible += v.eligible;
+            poolAll.total += v.total;
+            poolAll.harsh += v.harsh;
+            poolAll.promoteActive += v.promoteActive;
+        }
+        const p = fleetScope ? poolAll : pool?.get(clientId);
+        const metaRow = fleetScope ? undefined : meta?.find((m) => m.clientId === clientId);
+        const summary = fleetScope
+            ? fleet
+                ? fleetSummaryRow(fleet)
+                : null
+            : (fleet?.clients.find((c) => c.clientId === clientId) ?? null);
         const notes = [...(0, monitor_util_1.historyNotes)([r, ...(fleet ? [fleet.previousRange] : [])], { mobiles: true }), ...ctx.notes];
-        if (meta && !metaRow)
+        if (!fleetScope && meta && !metaRow)
             notes.push(`clientId ${clientId} is not in the clients collection.`);
-        notes.push(`daily covers ${r.from}..${r.to} IST; the last row (today) is partial. summary = ${days} complete IST days ending yesterday (same row as /monitor/fleet?period=${days}d).`);
-        notes.push('channels = top 20 by attributed DMs (conversion_event); channels with sends but no DMs are not listed.');
+        notes.push(`daily covers ${r.from}..${r.to} IST; the last row (today) is partial. summary = ${days} complete IST days ending yesterday (same row as /monitor/fleet?period=${days}d${fleetScope ? ', fleet totals' : ''}).`);
+        if (fleetScope) {
+            notes.push('channels = top 20 fleet-wide by attributed DMs (conversion_event, incl. DMs without a client before 2026-10-26); channels with sends but no DMs are not listed.');
+            notes.push('mobiles = top 20 accounts fleet-wide by tg-aut new users; clientId = the client that owned the mobile on its last day in range.');
+        }
+        else {
+            notes.push('channels = top 20 by attributed DMs (conversion_event); channels with sends but no DMs are not listed.');
+        }
         notes.push('mobiles[].dms = first DMs to that account as a promote account (daily_mobile promote-clients new_users), not attributed conversion_event DMs.');
         return {
             clientId,
-            name: metaRow?.name ?? null,
+            name: fleetScope ? 'All clients' : (metaRow?.name ?? null),
             generatedAt: new Date(now).toISOString(),
             days,
             range: { from: r.from, to: r.to },
@@ -37199,12 +37320,17 @@ let MonitorService = MonitorService_1 = class MonitorService {
             timingsMs: ctx.timings,
         };
     }
-    async topChannels(clientId, start, ctx) {
+    async topChannels(clientId, start, days, ctx) {
         const top = await this.pgRows((0, monitor_sql_1.clientTopDmChannelsSql)(clientId, start), ctx);
         if (!top.length)
             return [];
         const ids = top.map((t) => String(t.channel_id));
-        const sends = await this.pgRows((0, monitor_sql_1.clientChannelSendsSql)(clientId, start, ids), ctx);
+        const sends = await this.pgRows((0, monitor_sql_1.clientChannelSendsSql)(clientId, start, ids, clientId === null ? days : undefined), ctx);
+        const rolledTo = sends.find((x) => x.rolled_to)?.rolled_to;
+        const yday = (0, monitor_time_1.addDays)(days.today, -1);
+        if (clientId === null && rolledTo && rolledTo < yday) {
+            ctx.notes.push(`channels[].sends: daily_channel is rolled up only to ${rolledTo}; sends for ${(0, monitor_time_1.addDays)(rolledTo, 1)}..${yday} are missing.`);
+        }
         const sentBy = new Map(sends.map((x) => [String(x.channel_id), (0, monitor_util_1.num)(x.sent)]));
         return top.map((t) => ({ channel_id: String(t.channel_id), dms: (0, monitor_util_1.num)(t.dms), sent: sentBy.get(String(t.channel_id)) ?? 0 }));
     }
