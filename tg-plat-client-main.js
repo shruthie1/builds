@@ -34177,6 +34177,66 @@ class PromoteRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_1__.Ba
 
 /***/ },
 
+/***/ "../../packages/tg-db/src/collections/reply-failures.repository.ts"
+/*!*************************************************************************!*\
+  !*** ../../packages/tg-db/src/collections/reply-failures.repository.ts ***!
+  \*************************************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   REPLY_FAILURES_CLIENT_INDEX: () => (/* binding */ REPLY_FAILURES_CLIENT_INDEX),
+/* harmony export */   REPLY_FAILURES_TTL_INDEX: () => (/* binding */ REPLY_FAILURES_TTL_INDEX),
+/* harmony export */   REPLY_FAILURES_TTL_SECONDS: () => (/* binding */ REPLY_FAILURES_TTL_SECONDS),
+/* harmony export */   REPLY_FAILURE_TEXT_MAX: () => (/* binding */ REPLY_FAILURE_TEXT_MAX),
+/* harmony export */   ReplyFailuresRepository: () => (/* binding */ ReplyFailuresRepository)
+/* harmony export */ });
+/* harmony import */ var _base_repository__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../base-repository */ "../../packages/tg-db/src/base-repository.ts");
+
+/**
+ * `replyFailures`: one small row per user-facing send that did not go out (Telegram refused it, the queue dropped
+ * it, or it failed and will be retried), written fire-and-forget by tg-aut for debug review. LOG ONLY: no send path
+ * reads it except the debug route GET /diagnostics/reply-failures and mongosh (added 2026-10-28 for the PEER_FLOOD review).
+ *
+ * Indexes: TTL on `ts` (14 days) and `{ clientId: 1, ts: -1 }` for "this account's failures, newest first".
+ * Never stored: message text beyond 300 characters, user names, session data.
+ */
+const REPLY_FAILURES_TTL_SECONDS = 14 * 24 * 60 * 60;
+const REPLY_FAILURES_TTL_INDEX = 'ts_ttl';
+const REPLY_FAILURES_CLIENT_INDEX = 'clientId_ts';
+/** Longest stored text (characters). */
+const REPLY_FAILURE_TEXT_MAX = 300;
+class ReplyFailuresRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_0__.BaseRepository {
+    constructor() {
+        super(...arguments);
+        this.collectionName = 'replyFailures';
+    }
+    /** Never throws; false when the write failed (already logged by guardWrite). */
+    async insert(doc) {
+        return this.guardWrite(`insert(${String(doc.chatId)})`, () => this.collection.insertOne({ ...doc }));
+    }
+    /** This account's rows, newest first (served by clientId_ts). Debug reads only; [] on error. */
+    async recent(clientId, limit, filter = {}) {
+        const query = { clientId };
+        if (filter.errorClass)
+            query.errorClass = filter.errorClass;
+        if (filter.outcome)
+            query.outcome = filter.outcome;
+        if (filter.chatId)
+            query.chatId = filter.chatId;
+        const capped = Math.max(1, Math.min(500, Math.floor(limit) || 50));
+        return this.guard(`recent(${clientId})`, [], () => this.collection.find(query, { projection: { _id: 0 } }).sort({ ts: -1 }).limit(capped).toArray());
+    }
+    async ensureIndexes() {
+        await this.guardWrite('ensureIndexes(ts ttl)', () => this.collection.createIndex({ ts: 1 }, { name: REPLY_FAILURES_TTL_INDEX, expireAfterSeconds: REPLY_FAILURES_TTL_SECONDS }));
+        await this.guardWrite('ensureIndexes(clientId ts)', () => this.collection.createIndex({ clientId: 1, ts: -1 }, { name: REPLY_FAILURES_CLIENT_INDEX }));
+    }
+}
+
+
+/***/ },
+
 /***/ "../../packages/tg-db/src/collections/stats.repository.ts"
 /*!****************************************************************!*\
   !*** ../../packages/tg-db/src/collections/stats.repository.ts ***!
@@ -35183,11 +35243,16 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   DISPLAY_NAME_HISTORY: () => (/* reexport safe */ _collections_user_identity_repository__WEBPACK_IMPORTED_MODULE_4__.DISPLAY_NAME_HISTORY),
 /* harmony export */   DailyStatsRepository: () => (/* reexport safe */ _collections_daily_stats_repository__WEBPACK_IMPORTED_MODULE_5__.DailyStatsRepository),
 /* harmony export */   DbConnection: () => (/* reexport safe */ _connection__WEBPACK_IMPORTED_MODULE_0__.DbConnection),
-/* harmony export */   ERROR_ALERT_WINDOW_MS: () => (/* reexport safe */ _repositories__WEBPACK_IMPORTED_MODULE_11__.ERROR_ALERT_WINDOW_MS),
+/* harmony export */   ERROR_ALERT_WINDOW_MS: () => (/* reexport safe */ _repositories__WEBPACK_IMPORTED_MODULE_12__.ERROR_ALERT_WINDOW_MS),
 /* harmony export */   PERSONA_ASSIGNMENT_PROJECTION: () => (/* reexport safe */ _collections_promote_repository__WEBPACK_IMPORTED_MODULE_7__.PERSONA_ASSIGNMENT_PROJECTION),
 /* harmony export */   PROMOTE_RUNTIME_MIN_AGE_DAYS: () => (/* reexport safe */ _collections_promote_repository__WEBPACK_IMPORTED_MODULE_7__.PROMOTE_RUNTIME_MIN_AGE_DAYS),
 /* harmony export */   PromoteRepository: () => (/* reexport safe */ _collections_promote_repository__WEBPACK_IMPORTED_MODULE_7__.PromoteRepository),
-/* harmony export */   RepositoryContainer: () => (/* reexport safe */ _repositories__WEBPACK_IMPORTED_MODULE_11__.RepositoryContainer),
+/* harmony export */   REPLY_FAILURES_CLIENT_INDEX: () => (/* reexport safe */ _collections_reply_failures_repository__WEBPACK_IMPORTED_MODULE_10__.REPLY_FAILURES_CLIENT_INDEX),
+/* harmony export */   REPLY_FAILURES_TTL_INDEX: () => (/* reexport safe */ _collections_reply_failures_repository__WEBPACK_IMPORTED_MODULE_10__.REPLY_FAILURES_TTL_INDEX),
+/* harmony export */   REPLY_FAILURES_TTL_SECONDS: () => (/* reexport safe */ _collections_reply_failures_repository__WEBPACK_IMPORTED_MODULE_10__.REPLY_FAILURES_TTL_SECONDS),
+/* harmony export */   REPLY_FAILURE_TEXT_MAX: () => (/* reexport safe */ _collections_reply_failures_repository__WEBPACK_IMPORTED_MODULE_10__.REPLY_FAILURE_TEXT_MAX),
+/* harmony export */   ReplyFailuresRepository: () => (/* reexport safe */ _collections_reply_failures_repository__WEBPACK_IMPORTED_MODULE_10__.ReplyFailuresRepository),
+/* harmony export */   RepositoryContainer: () => (/* reexport safe */ _repositories__WEBPACK_IMPORTED_MODULE_12__.RepositoryContainer),
 /* harmony export */   StatsRepository: () => (/* reexport safe */ _collections_stats_repository__WEBPACK_IMPORTED_MODULE_9__.StatsRepository),
 /* harmony export */   USER_DATA_DEFAULTS: () => (/* reexport safe */ _collections_user_data_repository__WEBPACK_IMPORTED_MODULE_3__.USER_DATA_DEFAULTS),
 /* harmony export */   UserDataRepository: () => (/* reexport safe */ _collections_user_data_repository__WEBPACK_IMPORTED_MODULE_3__.UserDataRepository),
@@ -35197,20 +35262,20 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   availableMsgsUpdateExpression: () => (/* reexport safe */ _collections_channels_repository__WEBPACK_IMPORTED_MODULE_6__.availableMsgsUpdateExpression),
 /* harmony export */   buildLiveChannelUpsert: () => (/* reexport safe */ _collections_channels_repository__WEBPACK_IMPORTED_MODULE_6__.buildLiveChannelUpsert),
 /* harmony export */   createChannelsStore: () => (/* reexport safe */ _collections_channels_repository__WEBPACK_IMPORTED_MODULE_6__.createChannelsStore),
-/* harmony export */   createRepositories: () => (/* reexport safe */ _repositories__WEBPACK_IMPORTED_MODULE_11__.createRepositories),
+/* harmony export */   createRepositories: () => (/* reexport safe */ _repositories__WEBPACK_IMPORTED_MODULE_12__.createRepositories),
 /* harmony export */   describeError: () => (/* reexport safe */ _connection__WEBPACK_IMPORTED_MODULE_0__.describeError),
 /* harmony export */   emptyPromoteAvailability: () => (/* reexport safe */ _collections_promote_repository__WEBPACK_IMPORTED_MODULE_7__.emptyPromoteAvailability),
-/* harmony export */   ensureAllIndexes: () => (/* reexport safe */ _repositories__WEBPACK_IMPORTED_MODULE_11__.ensureAllIndexes),
+/* harmony export */   ensureAllIndexes: () => (/* reexport safe */ _repositories__WEBPACK_IMPORTED_MODULE_12__.ensureAllIndexes),
 /* harmony export */   getPromoteRuntimeEligibilityFilter: () => (/* reexport safe */ _collections_promote_repository__WEBPACK_IMPORTED_MODULE_7__.getPromoteRuntimeEligibilityFilter),
 /* harmony export */   neverPaidFilter: () => (/* reexport safe */ _collections_user_data_repository__WEBPACK_IMPORTED_MODULE_3__.neverPaidFilter),
 /* harmony export */   normalizeActiveChannelWrite: () => (/* reexport safe */ _collections_channels_repository__WEBPACK_IMPORTED_MODULE_6__.normalizeActiveChannelWrite),
 /* harmony export */   normalizeChannelKey: () => (/* reexport safe */ _collections_channels_repository__WEBPACK_IMPORTED_MODULE_6__.normalizeChannelKey),
 /* harmony export */   personaAssignmentFilter: () => (/* reexport safe */ _collections_promote_repository__WEBPACK_IMPORTED_MODULE_7__.personaAssignmentFilter),
-/* harmony export */   readDatabaseSize: () => (/* reexport safe */ _database_info__WEBPACK_IMPORTED_MODULE_10__.readDatabaseSize),
+/* harmony export */   readDatabaseSize: () => (/* reexport safe */ _database_info__WEBPACK_IMPORTED_MODULE_11__.readDatabaseSize),
 /* harmony export */   recordDailyAnalytics: () => (/* reexport safe */ _collections_daily_stats_repository__WEBPACK_IMPORTED_MODULE_5__.recordDailyAnalytics),
 /* harmony export */   sanitizeAvailableMsgs: () => (/* reexport safe */ _collections_channels_repository__WEBPACK_IMPORTED_MODULE_6__.sanitizeAvailableMsgs),
 /* harmony export */   usableChannelId: () => (/* reexport safe */ _collections_channels_repository__WEBPACK_IMPORTED_MODULE_6__.usableChannelId),
-/* harmony export */   withErrorReporter: () => (/* reexport safe */ _repositories__WEBPACK_IMPORTED_MODULE_11__.withErrorReporter)
+/* harmony export */   withErrorReporter: () => (/* reexport safe */ _repositories__WEBPACK_IMPORTED_MODULE_12__.withErrorReporter)
 /* harmony export */ });
 /* harmony import */ var _connection__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./connection */ "../../packages/tg-db/src/connection.ts");
 /* harmony import */ var _adopt_connection__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./adopt-connection */ "../../packages/tg-db/src/adopt-connection.ts");
@@ -35222,8 +35287,9 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _collections_promote_repository__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ./collections/promote.repository */ "../../packages/tg-db/src/collections/promote.repository.ts");
 /* harmony import */ var _collections_clients_repository__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ./collections/clients.repository */ "../../packages/tg-db/src/collections/clients.repository.ts");
 /* harmony import */ var _collections_stats_repository__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ./collections/stats.repository */ "../../packages/tg-db/src/collections/stats.repository.ts");
-/* harmony import */ var _database_info__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ./database-info */ "../../packages/tg-db/src/database-info.ts");
-/* harmony import */ var _repositories__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ./repositories */ "../../packages/tg-db/src/repositories.ts");
+/* harmony import */ var _collections_reply_failures_repository__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ./collections/reply-failures.repository */ "../../packages/tg-db/src/collections/reply-failures.repository.ts");
+/* harmony import */ var _database_info__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ./database-info */ "../../packages/tg-db/src/database-info.ts");
+/* harmony import */ var _repositories__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! ./repositories */ "../../packages/tg-db/src/repositories.ts");
 /**
  * @tg/db — the shared MongoDB layer.
  *
@@ -35250,6 +35316,7 @@ __webpack_require__.r(__webpack_exports__);
  *   events                                            -> OWNED BY @tg/events (EventStore),
  *                                                        deliberately NOT here — see repositories.ts
  */
+
 
 
 
@@ -35291,6 +35358,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _collections_stats_repository__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ./collections/stats.repository */ "../../packages/tg-db/src/collections/stats.repository.ts");
 /* harmony import */ var _collections_payment_proofs_repository__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ./collections/payment-proofs.repository */ "../../packages/tg-db/src/collections/payment-proofs.repository.ts");
 /* harmony import */ var _collections_vision_shadow_repository__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ./collections/vision-shadow.repository */ "../../packages/tg-db/src/collections/vision-shadow.repository.ts");
+/* harmony import */ var _collections_reply_failures_repository__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ./collections/reply-failures.repository */ "../../packages/tg-db/src/collections/reply-failures.repository.ts");
+
 
 
 
@@ -35326,6 +35395,7 @@ function createRepositories(connection, logger) {
         stats: new _collections_stats_repository__WEBPACK_IMPORTED_MODULE_7__.StatsRepository(connection, logger),
         paymentProofs: new _collections_payment_proofs_repository__WEBPACK_IMPORTED_MODULE_8__.PaymentProofsRepository(connection, logger),
         visionShadow: new _collections_vision_shadow_repository__WEBPACK_IMPORTED_MODULE_9__.VisionShadowRepository(connection, logger),
+        replyFailures: new _collections_reply_failures_repository__WEBPACK_IMPORTED_MODULE_10__.ReplyFailuresRepository(connection, logger),
     };
 }
 /**
@@ -35355,6 +35425,7 @@ async function ensureAllIndexes(repositories, logger) {
         ['stats', repositories.stats],
         ['paymentProofs', repositories.paymentProofs],
         ['visionShadow', repositories.visionShadow],
+        ['replyFailures', repositories.replyFailures],
     ];
     for (const [name, repository] of all) {
         try {
@@ -49398,8 +49469,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "a95a4ede97dc60954c967163e7d90d85f4435b91" : 0;
-    const builtAt =  true ? "2026-10-28T10:25:50.258Z" : 0;
+    const sha =  true ? "a428c7151bf21f7104ceb126ffbd3496a681a954" : 0;
+    const builtAt =  true ? "2026-10-28T11:31:54.778Z" : 0;
     return { sha, builtAt };
 }
 
@@ -67819,6 +67890,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _tg_db__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/db */ "../../packages/tg-db/src/index.ts");
 /* harmony import */ var _user_data_crud__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./user-data-crud */ "./src/data/user-data-crud.ts");
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _outbound_reply_failures__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../outbound/reply-failures */ "./src/outbound/reply-failures.ts");
+
 
 
 
@@ -67834,6 +67907,11 @@ function getRepositories() {
 }
 /** Channel access for injected shared code (promotion engine, reactions); resolved per call. */
 const channelsStore = (0,_tg_db__WEBPACK_IMPORTED_MODULE_0__.createChannelsStore)(getRepositories, new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_2__.Logger('channels-store'));
+// Debug rows for failed / dropped user sends (outbound/reply-failures.ts). Resolved per write, like everything above.
+(0,_outbound_reply_failures__WEBPACK_IMPORTED_MODULE_3__.registerReplyFailureBackend)({
+    getStore: () => getRepositories()?.replyFailures ?? null,
+    readUser: (chatId) => _user_data_crud__WEBPACK_IMPORTED_MODULE_1__.UserDataDtoCrud.getInstance().read(chatId),
+});
 
 
 /***/ },
@@ -79514,6 +79592,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _conversation_state_upsell_quiet__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ../conversation/state/upsell-quiet */ "./src/conversation/state/upsell-quiet.ts");
 /* harmony import */ var _tg_core_state_durable_queue__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! @tg/core/state/durable-queue */ "../../packages/tg-core/src/state/durable-queue.ts");
 /* harmony import */ var _jobs_delayed__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ../jobs/delayed */ "./src/jobs/delayed.ts");
+/* harmony import */ var _reply_failures__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ./reply-failures */ "./src/outbound/reply-failures.ts");
+
 
 
 
@@ -79582,6 +79662,29 @@ function outboundBackup() {
         ttlMs: OUTBOUND_BACKUP_TTL_MS,
     });
 }
+/** Debug row for a send that did not go out (outbound/reply-failures.ts): fire-and-forget, never throws. */
+function noteFailure(subject, outcome, error, override = {}) {
+    const chatId = subject.chatId == null ? '' : String(subject.chatId);
+    if (!chatId)
+        return;
+    const payload = subject.record?.payload ?? {};
+    const text = subject.text ?? (typeof payload.message === 'string' ? payload.message : typeof payload.caption === 'string' ? payload.caption : undefined);
+    const kind = subject.kind ?? 'general';
+    (0,_reply_failures__WEBPACK_IMPORTED_MODULE_9__.recordReplyFailure)({
+        path: 'outbound',
+        chatId,
+        outcome,
+        error,
+        attempt: subject.floodWaitRetries ?? 0,
+        replyKind: `${subject.label ?? kind}:${kind}`,
+        text,
+        file: subject.file ?? payload.file,
+        followup: kind === 'reminder',
+        ...(subject.enqueuedAt !== undefined ? { queuedAt: subject.enqueuedAt } : {}),
+        ...override,
+    });
+}
+const GATED = { errorCode: 'PEER_FLOOD_GATED', errorClass: 'peer_flood_gate' };
 const nativeSetTimeout = globalThis.setTimeout.bind(globalThis);
 const nativeClearTimeout = globalThis.clearTimeout.bind(globalThis);
 function gapRange() {
@@ -79601,17 +79704,21 @@ function outboundQueueEnabled() {
 function sendUnqueued(spec, gate) {
     const chat = spec.chatId == null ? '' : String(spec.chatId);
     const label = spec.label ?? spec.kind ?? 'general';
-    if (chat && gate.isRefused(chat))
+    if (chat && gate.isRefused(chat)) {
+        noteFailure({ ...spec, chatId: chat, label }, 'dropped', null, GATED);
         return Promise.reject(refusedDropped(label, chat));
+    }
     if (spec.upsell && chat && (0,_conversation_state_upsell_quiet__WEBPACK_IMPORTED_MODULE_6__.holdUpsell)(chat))
         return Promise.reject(quietDropped(label, chat));
     if (spec.pitch && chat && !(0,_chat_voice__WEBPACK_IMPORTED_MODULE_5__.claimPitchSlot)(chat, Date.now(), spec.solicitedPayAsk === true))
         return Promise.reject(pitchDropped(label, chat));
     return spec.send().catch((error) => {
-        if ((0,_flood_error__WEBPACK_IMPORTED_MODULE_4__.classifyFlood)(error)?.kind === 'peer') {
+        const peer = (0,_flood_error__WEBPACK_IMPORTED_MODULE_4__.classifyFlood)(error)?.kind === 'peer';
+        if (peer) {
             gate.notePeerFlood(undefined, chat || null);
             logger.warn(`[${label}] ${chat || 'chat'}: PEER_FLOOD, Telegram refused this chat; not retried until the user writes again: ${(0,_flood_error__WEBPACK_IMPORTED_MODULE_4__.floodErrorText)(error)}`);
         }
+        noteFailure({ ...spec, chatId: chat, label }, peer ? 'refused' : 'dropped', error);
         throw error;
     });
 }
@@ -79685,13 +79792,16 @@ class OutboundQueue {
         }
         if (spec.chatId != null && this.gate.isRefused(spec.chatId)) {
             this.stats.dropped += 1;
+            noteFailure({ ...spec, kind, label: spec.label ?? kind }, 'dropped', null, GATED);
             return Promise.reject(refusedDropped(spec.label ?? kind, spec.chatId));
         }
         const priority = spec.priority ?? cfg.priority;
         if (!this.makeRoom(priority, kind)) {
             this.stats.dropped += 1;
             logger.warn(`[${spec.label ?? kind}] ${spec.chatId ?? ''}: dropped (queue full, ${OUTBOUND.maxSize} items)`);
-            return Promise.reject(new OutboundDroppedError('full', 'outbound queue full'));
+            const full = new OutboundDroppedError('full', 'outbound queue full');
+            noteFailure({ ...spec, kind, label: spec.label ?? kind }, 'dropped', full);
+            return Promise.reject(full);
         }
         const seq = ++this.seq;
         const chatId = spec.chatId == null ? '' : String(spec.chatId);
@@ -79726,6 +79836,9 @@ class OutboundQueue {
             promise,
             floodWaitRetries: 0,
             backup,
+            text: spec.text,
+            file: spec.file,
+            ...(spec.record ? { record: spec.record } : {}),
         });
         this.kick();
         return promise;
@@ -79740,7 +79853,9 @@ class OutboundQueue {
         this.items = this.items.filter((i) => i !== worst);
         this.stats.dropped += 1;
         logger.warn(`[${worst.label}] ${worst.chatId}: dropped (queue full, evicted for a higher-priority ${kind} item)`);
-        worst.reject(new OutboundDroppedError('evicted', 'outbound queue full: evicted'));
+        const evicted = new OutboundDroppedError('evicted', 'outbound queue full: evicted');
+        noteFailure(worst, 'dropped', evicted);
+        worst.reject(evicted);
         return true;
     }
     backup(spec, at) {
@@ -79814,7 +79929,9 @@ class OutboundQueue {
             if (item.expiresAt <= now) {
                 this.stats.dropped += 1;
                 logger.warn(`[${item.label}] ${item.chatId || 'chat'}: dropped, ${item.kind} message older than ${Math.round((item.expiresAt - item.enqueuedAt) / 1000)}s`);
-                item.reject(new OutboundDroppedError('expired', `${item.kind} message expired before it could be sent`));
+                const expired = new OutboundDroppedError('expired', `${item.kind} message expired before it could be sent`);
+                noteFailure(item, 'dropped', expired);
+                item.reject(expired);
             }
             else
                 live.push(item);
@@ -79938,7 +80055,9 @@ class OutboundQueue {
             const victim = worst.priority > item.priority || (worst.priority === item.priority && worst.seq > item.seq) ? worst : item;
             this.stats.dropped += 1;
             logger.warn(`[${victim.label}] ${victim.chatId}: dropped (queue full on re-queue)`);
-            victim.reject(new OutboundDroppedError('evicted', 'outbound queue full: evicted'));
+            const evicted = new OutboundDroppedError('evicted', 'outbound queue full: evicted');
+            noteFailure(victim, 'dropped', evicted);
+            victim.reject(evicted);
             if (victim === item)
                 return;
             this.items = this.items.filter((i) => i !== worst);
@@ -79957,6 +80076,7 @@ class OutboundQueue {
         const fail = (why) => {
             this.stats.failed += 1;
             logger.warn(`${where}: ${why}: ${(0,_flood_error__WEBPACK_IMPORTED_MODULE_4__.floodErrorText)(error)}`);
+            noteFailure(item, flood?.kind === 'peer' ? 'refused' : 'dropped', error);
             item.reject(error);
         };
         if (flood?.kind === 'peer') {
@@ -79969,8 +80089,10 @@ class OutboundQueue {
                     this.items = this.items.filter((i) => i.chatKey !== item.chatKey);
                     this.stats.dropped += rest.length;
                     logger.warn(`${where}: dropped ${rest.length} more queued message(s) for this refused chat`);
-                    for (const i of rest)
+                    for (const i of rest) {
+                        noteFailure(i, 'dropped', null, GATED);
                         i.reject(new OutboundDroppedError('refused', 'chat refused by Telegram (PEER_FLOOD) until the user writes again'));
+                    }
                 }
             }
             return;
@@ -79986,6 +80108,7 @@ class OutboundQueue {
             item.notBefore = now + waitMs;
             this.stats.floodRequeues += 1;
             logger.warn(`${where}: FLOOD_WAIT_${flood.seconds}; account paused, retry in ${Math.round(waitMs / 1000)}s`);
+            noteFailure(item, 'will-retry', error);
             this.requeue(item);
             return;
         }
@@ -79993,10 +80116,229 @@ class OutboundQueue {
         // even when the caller ignores the rejection (sendMessageWithTimeout returns undefined).
         this.stats.failed += 1;
         logger.warn(`${where}: send failed`, error);
+        noteFailure(item, 'dropped', error);
         item.reject(error);
     }
 }
 const outboundQueue = new OutboundQueue({}, outboundBackup());
+
+
+/***/ },
+
+/***/ "./src/outbound/reply-failures.ts"
+/*!****************************************!*\
+  !*** ./src/outbound/reply-failures.ts ***!
+  \****************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   INBOUND_WINDOW_MS: () => (/* binding */ INBOUND_WINDOW_MS),
+/* harmony export */   REPLY_FAILURE_MAX_PENDING: () => (/* binding */ REPLY_FAILURE_MAX_PENDING),
+/* harmony export */   REPLY_FAILURE_TEXT_LIMIT: () => (/* binding */ REPLY_FAILURE_TEXT_LIMIT),
+/* harmony export */   awaitReplyFailuresIdle: () => (/* binding */ awaitReplyFailuresIdle),
+/* harmony export */   classifyReplyFailure: () => (/* binding */ classifyReplyFailure),
+/* harmony export */   getReplyFailureStats: () => (/* binding */ getReplyFailureStats),
+/* harmony export */   mediaTypeOf: () => (/* binding */ mediaTypeOf),
+/* harmony export */   recordReplyFailure: () => (/* binding */ recordReplyFailure),
+/* harmony export */   registerReplyFailureBackend: () => (/* binding */ registerReplyFailureBackend),
+/* harmony export */   setReplyFailureTestHooks: () => (/* binding */ setReplyFailureTestHooks),
+/* harmony export */   userStageOf: () => (/* binding */ userStageOf)
+/* harmony export */ });
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _conversation_state_chat_moments__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../conversation/state/chat-moments */ "./src/conversation/state/chat-moments.ts");
+/* harmony import */ var _flood_error__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./flood-error */ "./src/outbound/flood-error.ts");
+// Debug record of every user-facing send that did not go out: one `replyFailures` row (Mongo, 14-day TTL) per failure
+// on the two send funnels, the reply queue (replier/reply-processor.ts) and the OutboundQueue (outbound-queue.ts).
+//
+// Tracking only: recordReplyFailure() never throws, never awaits on the caller's path, and never changes what the
+// caller does next. Writes are fire-and-forget and bounded (MAX_PENDING in flight; beyond that rows are dropped and
+// counted). The store and the user lookup are registered by data/db.ts (registerReplyFailureBackend), so this module
+// stays import-light (no Mongo or user-data imports) and the send path never depends on them.
+//
+// Review: db.replyFailures.find({ clientId: 'kavya1' }).sort({ ts: -1 }).limit(50)
+
+
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_0__.Logger('tg-aut:reply-failures');
+const REPLY_FAILURE_TEXT_LIMIT = 300;
+/** Writes in flight beyond this are dropped (a hung Mongo must not grow memory). */
+const REPLY_FAILURE_MAX_PENDING = 100;
+/** A reply this soon after the user's last message answers them (otherwise it is our follow-up). */
+const INBOUND_WINDOW_MS = 20 * 60 * 1000;
+const DROP_LOG_EVERY_MS = 60000;
+let backend = null;
+let nowFn = () => Date.now();
+let pending = 0;
+let dropped = 0;
+let lastDropLogAt = 0;
+const inFlight = new Set();
+const processStartedAt = new Date(Date.now() - Math.round(process.uptime() * 1000));
+/** Wired once at startup by data/db.ts. */
+function registerReplyFailureBackend(next) {
+    backend = next;
+}
+/** Test hook: replace the backend / clock; no argument restores the defaults and clears the counters. */
+function setReplyFailureTestHooks(over = {}) {
+    if ('backend' in over)
+        backend = over.backend ?? null;
+    nowFn = over.now ?? (() => Date.now());
+    pending = 0;
+    dropped = 0;
+    lastDropLogAt = 0;
+    inFlight.clear();
+}
+function getReplyFailureStats() {
+    return { pending, dropped };
+}
+/** Test hook: resolves when every scheduled write has settled. */
+async function awaitReplyFailuresIdle() {
+    while (inFlight.size)
+        await Promise.allSettled([...inFlight]);
+}
+function errorFields(error) {
+    const e = (error ?? {});
+    return {
+        name: typeof e.name === 'string' ? e.name : '',
+        message: typeof e.message === 'string' ? e.message : (typeof error === 'string' ? error : ''),
+        errorMessage: typeof e.errorMessage === 'string' ? e.errorMessage : '',
+        reason: typeof e.reason === 'string' ? e.reason : '',
+        seconds: typeof e.seconds === 'number' ? e.seconds : undefined,
+    };
+}
+/** The error's code and class: what Telegram (or our queue) said, in a form that groups well. */
+function classifyReplyFailure(error) {
+    const f = errorFields(error);
+    const text = `${f.errorMessage} ${f.message}`.toUpperCase();
+    if (f.name === 'ReplySendOutcomeUnknownError')
+        return { errorCode: 'SEND_TIMEOUT', errorClass: 'outcome_unknown' };
+    if (text.includes('PEER_FLOOD')) {
+        if (f.name === 'OutboundDroppedError')
+            return { errorCode: 'PEER_FLOOD_GATED', errorClass: 'peer_flood_gate' };
+        return { errorCode: 'PEER_FLOOD', errorClass: 'peer_flood' };
+    }
+    if (f.name === 'OutboundDroppedError') {
+        if (f.reason === 'timeout')
+            return { errorCode: 'QUEUE_SEND_TIMEOUT', errorClass: 'outcome_unknown' };
+        return { errorCode: f.reason ? `queue_${f.reason}` : 'queue_dropped', errorClass: 'queue' };
+    }
+    const flood = (0,_flood_error__WEBPACK_IMPORTED_MODULE_2__.classifyFlood)(error);
+    if (flood?.kind === 'wait')
+        return { errorCode: `FLOOD_WAIT_${flood.seconds}`, errorClass: 'flood_wait' };
+    if (/FLOOD_?WAIT/.test(text) || f.name === 'FloodWaitError')
+        return { errorCode: 'FLOOD_WAIT', errorClass: 'flood_wait' };
+    if (text.includes('VOICE_MESSAGES_FORBIDDEN'))
+        return { errorCode: 'VOICE_MESSAGES_FORBIDDEN', errorClass: 'voice_forbidden' };
+    if (text.includes('PRIVACY'))
+        return { errorCode: f.errorMessage || 'USER_PRIVACY_RESTRICTED', errorClass: 'privacy' };
+    for (const code of ['INPUT_USER_DEACTIVATED', 'USER_IS_BLOCKED', 'USER_ID_INVALID', 'PEER_ID_INVALID', 'CHAT_WRITE_FORBIDDEN']) {
+        if (text.includes(code))
+            return { errorCode: code, errorClass: 'recipient_permanent' };
+    }
+    if (text.includes('TIMEOUT'))
+        return { errorCode: 'TIMEOUT', errorClass: 'timeout' };
+    if (/NETWORK|CONNECTION|DISCONNECT|ECONNRESET|ETIMEDOUT|NOT CONNECTED/.test(text))
+        return { errorCode: 'TRANSPORT', errorClass: 'transport' };
+    const code = f.errorMessage || f.message.split(/[\s:(]/)[0] || f.name || 'UNKNOWN';
+    return { errorCode: code.slice(0, 60), errorClass: 'other' };
+}
+function fileName(file) {
+    if (typeof file === 'string')
+        return file.split('/').pop() ?? file;
+    if (Array.isArray(file))
+        return file.map(fileName).filter(Boolean).join(',');
+    const name = file?.name;
+    return typeof name === 'string' ? name : (file ? 'upload' : '');
+}
+function mediaTypeOf(file) {
+    const name = fileName(file).toLowerCase();
+    if (!name)
+        return undefined;
+    if (/\.(mp3|ogg|oga|opus|m4a)\b/.test(name))
+        return 'voice';
+    if (/\.(jpe?g|png|webp)\b/.test(name))
+        return 'photo';
+    if (/\.(mp4|mov|webm)\b/.test(name))
+        return 'video';
+    return 'file';
+}
+/** unpaid / demo (paid up to 50) / paid (more than 50); unknown without a user row. */
+function userStageOf(user) {
+    if (!user)
+        return { userStage: 'unknown' };
+    const payAmount = Number(user.payAmount ?? 0) || 0;
+    const lifetimePaid = Number(user.lifetimePaid ?? 0) || 0;
+    const peak = Math.max(payAmount, lifetimePaid, Number(user.highestPayAmount ?? 0) || 0);
+    return { userStage: peak <= 0 ? 'unpaid' : peak <= 50 ? 'demo' : 'paid', payAmount, lifetimePaid };
+}
+function composeRow(input, user, at) {
+    const classified = classifyReplyFailure(input.error);
+    const userAt = (0,_conversation_state_chat_moments__WEBPACK_IMPORTED_MODULE_1__.momentAt)(input.chatId, 'user');
+    const sinceUserMs = userAt === undefined ? -1 : Math.max(0, at - userAt);
+    const inbound = !input.followup && sinceUserMs >= 0 && sinceUserMs <= INBOUND_WINDOW_MS;
+    const file = fileName(input.file);
+    const mediaType = mediaTypeOf(input.file);
+    return {
+        ts: new Date(at),
+        clientId: process.env.clientId ?? '',
+        mobile: process.env.mobile ?? '',
+        chatId: input.chatId,
+        profile: process.env.dbcoll ?? '',
+        path: input.path,
+        errorCode: input.errorCode ?? classified.errorCode,
+        errorClass: input.errorClass ?? classified.errorClass,
+        attempt: input.attempt ?? 0,
+        outcome: input.outcome,
+        replyKind: input.replyKind,
+        text: String(input.text ?? '').slice(0, REPLY_FAILURE_TEXT_LIMIT),
+        ...(mediaType ? { mediaType } : {}),
+        ...(file ? { file: file.slice(0, 120) } : {}),
+        ...userStageOf(user),
+        initiated: inbound ? 'inbound' : 'followup',
+        sinceUserMs,
+        queueAgeMs: input.queuedAt !== undefined ? Math.max(0, at - input.queuedAt) : -1,
+        processStartedAt,
+    };
+}
+function noteDrop() {
+    dropped += 1;
+    const at = nowFn();
+    if (at - lastDropLogAt >= DROP_LOG_EVERY_MS) {
+        lastDropLogAt = at;
+        logger.warn(`[reply-failures] row dropped: ${pending} writes in flight (dropped total ${dropped})`);
+    }
+}
+/**
+ * Record one failed / dropped send. Never throws, never blocks: the row is composed now (timestamp, chat moments) and
+ * written in the background. No backend registered (tests, before Mongo is up) = nothing written.
+ */
+function recordReplyFailure(input) {
+    try {
+        const current = backend;
+        if (!current || !input?.chatId)
+            return;
+        if (pending >= REPLY_FAILURE_MAX_PENDING)
+            return noteDrop();
+        const at = nowFn();
+        pending += 1;
+        const work = (async () => {
+            const user = input.user !== undefined ? input.user : await current.readUser?.(input.chatId).catch(() => null);
+            const row = composeRow(input, user, at);
+            const store = current.getStore();
+            if (store)
+                await store.insert(row);
+        })();
+        const run = work
+            .catch((error) => { logger.warn(`[reply-failures] write failed: ${error instanceof Error ? error.message : String(error)}`); })
+            .finally(() => { pending -= 1; });
+        inFlight.add(run);
+        void run.finally(() => inFlight.delete(run));
+    }
+    catch (error) {
+        logger.warn(`[reply-failures] record failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+}
 
 
 /***/ },
@@ -93618,10 +93960,12 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _outbound_flood_gate__WEBPACK_IMPORTED_MODULE_19__ = __webpack_require__(/*! ../outbound/flood-gate */ "./src/outbound/flood-gate.ts");
 /* harmony import */ var _outbound_send_executor__WEBPACK_IMPORTED_MODULE_20__ = __webpack_require__(/*! ../outbound/send-executor */ "./src/outbound/send-executor.ts");
 /* harmony import */ var _policies_send_policy__WEBPACK_IMPORTED_MODULE_21__ = __webpack_require__(/*! ../policies/send-policy */ "./src/policies/send-policy.ts");
+/* harmony import */ var _outbound_reply_failures__WEBPACK_IMPORTED_MODULE_22__ = __webpack_require__(/*! ../outbound/reply-failures */ "./src/outbound/reply-failures.ts");
 /**
  * Reply Processor
  * Handles processing and sending of individual replies
  */
+
 
 
 
@@ -93766,6 +94110,23 @@ function holdForPaymentCheck(replyObj, onRequeue, where) {
     logger.log(`[replier] ${replyObj.chatId} pay ask held${where}: ${_outbound_chat_voice__WEBPACK_IMPORTED_MODULE_18__.PAYMENT_CHECK_REASON} kind=${classifyReply(replyObj)}`);
     (0,_outbound_chat_voice__WEBPACK_IMPORTED_MODULE_18__.holdPayAsk)(replyObj.chatId, () => onRequeue({ ...replyObj, notBefore: undefined }));
 }
+/** Debug row for a reply that did not go out (outbound/reply-failures.ts): fire-and-forget, never throws. */
+function noteReplyFailure(replyObj, outcome, extra) {
+    const { user, ...rest } = extra;
+    (0,_outbound_reply_failures__WEBPACK_IMPORTED_MODULE_22__.recordReplyFailure)({
+        path: 'replier',
+        chatId: replyObj.chatId,
+        outcome,
+        attempt: (replyObj.retryCount ?? 0) + (replyObj.transportRetryCount ?? 0),
+        replyKind: `replier:${replyObj.kind ?? 'answer'}:${classifyReply(replyObj)}`,
+        text: replyObj.msg,
+        file: replyObj.file,
+        followup: replyObj.kind === 'nudge',
+        queuedAt: replyObj.pushedAt,
+        ...(user ? { user } : {}),
+        ...rest,
+    });
+}
 function maxAgeFor(item) {
     return (item.retryCount ?? 0) > 0 ? RETRY_MAX_AGE_MS : RECENT_MAX_AGE_MS;
 }
@@ -93773,6 +94134,7 @@ function maxAgeFor(item) {
  * Process a single reply
  */
 async function processSingleReply(client, replyObj, isMsgLimitReached, sleepTime, onProcessed, onRequeue, onFloodError, onSuccess) {
+    let loadedUser;
     try {
         const db = _data_user_data_crud__WEBPACK_IMPORTED_MODULE_3__.UserDataDtoCrud.getInstance();
         onProcessed(); // Update lastProcessed timestamp
@@ -93780,6 +94142,7 @@ async function processSingleReply(client, replyObj, isMsgLimitReached, sleepTime
         if (_outbound_flood_gate__WEBPACK_IMPORTED_MODULE_19__.floodGate.isRefused(replyObj.chatId)) {
             logger.warn(`[replier] reply dropped: Telegram refused chatId=${replyObj.chatId} (PEER_FLOOD) until the user writes again kind=${classifyReply(replyObj)}`);
             (0,_outbound_send_executor__WEBPACK_IMPORTED_MODULE_20__.logReplierOutcome)(replyObj.chatId, replyObj.kind, 'skipped');
+            noteReplyFailure(replyObj, 'dropped', { errorCode: 'PEER_FLOOD_GATED', errorClass: 'peer_flood_gate' });
             return;
         }
         // Never message a user mid-call: park the item (not a flood retry, not dropped) and look again shortly.
@@ -93830,10 +94193,12 @@ async function processSingleReply(client, replyObj, isMsgLimitReached, sleepTime
                     maxAgeMs,
                     error: errorMessage,
                 });
+                noteReplyFailure(replyObj, 'dropped', { error: userRead.error, errorCode: 'USER_LOOKUP_FAILED', errorClass: 'precheck' });
             }
             return;
         }
         const userDetail = userRead.user;
+        loadedUser = userDetail;
         let msgs = null;
         try {
             const rawMsgs = await (0,_tg_core_utils_withTimeout__WEBPACK_IMPORTED_MODULE_6__.withTimeout)(() => client.getMessages(entity, { limit: 4 }), { timeout: 10000, errorMessage: "GetMessages Timeout" });
@@ -93846,6 +94211,7 @@ async function processSingleReply(client, replyObj, isMsgLimitReached, sleepTime
             const isRecent = ageMs < maxAgeFor(replyObj);
             if (!isRecent && isRetry) {
                 logger.warn(`Dropping stale retried reply: chatId=${replyObj.chatId} kind=${classifyReply(replyObj)} ageMs=${ageMs} retryCount=${replyObj.retryCount}`);
+                noteReplyFailure(replyObj, 'dropped', { errorCode: 'STALE_RETRY', errorClass: 'precheck', user: userDetail });
             }
             const totalMsgs = msgs?.total ?? (Array.isArray(msgs) ? msgs.length : 0);
             if (isRecent) {
@@ -93866,12 +94232,14 @@ async function processSingleReply(client, replyObj, isMsgLimitReached, sleepTime
                             : !Array.isArray(msgs) || msgs.length === 0 ? 'no readable chat history'
                                 : 'awaiting the user (last messages are ours)';
                         logger.warn(`Dropping reply for ${replyObj.chatId} after ${MAX_RETRIES} retries: ${why} kind=${classifyReply(replyObj)}`);
+                        noteReplyFailure(replyObj, 'dropped', { errorCode: `PRECHECK_${why.replace(/\W+/g, '_').toUpperCase()}`, errorClass: 'precheck', user: userDetail });
                     }
                 }
             }
             else {
                 if (!isRetry) {
                     logger.warn(`Dropping stale reply (not sent): chatId=${replyObj.chatId} kind=${classifyReply(replyObj)} ageMs=${ageMs} retryCount=0`);
+                    noteReplyFailure(replyObj, 'dropped', { errorCode: 'STALE', errorClass: 'precheck', user: userDetail });
                 }
                 await updateUserDetail(replyObj, entity, msgs);
             }
@@ -93888,6 +94256,7 @@ async function processSingleReply(client, replyObj, isMsgLimitReached, sleepTime
         if (error instanceof ReplySendOutcomeUnknownError) {
             // Not retried: the timed-out send may still land, and a second copy would reach the user twice.
             logger.warn(`[replier] ${replyObj.chatId} reply not retried: the send timed out and may still be delivered (${error.message}) kind=${classifyReply(replyObj)}`);
+            noteReplyFailure(replyObj, 'dropped', { error, user: loadedUser });
             return;
         }
         if ((0,_tg_core_utils_telegram_error_parser__WEBPACK_IMPORTED_MODULE_13__.parseTelegramError)(error).type === 'PEER_FLOOD') {
@@ -93896,6 +94265,7 @@ async function processSingleReply(client, replyObj, isMsgLimitReached, sleepTime
             _outbound_flood_gate__WEBPACK_IMPORTED_MODULE_19__.floodGate.notePeerFlood(Date.now(), replyObj.chatId);
             logger.warn(`[replier] PEER_FLOOD: Telegram refused chatId=${replyObj.chatId}; reply dropped, not retried until the user writes again kind=${classifyReply(replyObj)}`);
             (0,_outbound_send_executor__WEBPACK_IMPORTED_MODULE_20__.logReplierOutcome)(replyObj.chatId, replyObj.kind, 'refused');
+            noteReplyFailure(replyObj, 'refused', { error, user: loadedUser });
             return;
         }
         if ((0,_recipient_errors__WEBPACK_IMPORTED_MODULE_16__.isVoiceForbiddenError)(error) && replyObj.file) {
@@ -93903,9 +94273,11 @@ async function processSingleReply(client, replyObj, isMsgLimitReached, sleepTime
             if (replyObj.msg) {
                 logger.warn(`[replier] ${replyObj.chatId} refuses voice messages: sending the reply as text only kind=${classifyReply(replyObj)}`);
                 onRequeue({ ...replyObj, file: undefined });
+                noteReplyFailure(replyObj, 'will-retry', { error, user: loadedUser });
             }
             else {
                 logger.warn(`[replier] ${replyObj.chatId} refuses voice messages: voice-only reply dropped`);
+                noteReplyFailure(replyObj, 'dropped', { error, user: loadedUser });
             }
             return;
         }
@@ -93913,6 +94285,7 @@ async function processSingleReply(client, replyObj, isMsgLimitReached, sleepTime
             // Deleted account, blocked us, invalid peer: no retry can deliver it (sneha2 2026-10-15 retried
             // INPUT_USER_DEACTIVATED 5 times).
             logger.warn(`[replier] ${replyObj.chatId} reply dropped: recipient permanently unreachable (${error instanceof Error ? error.message : String(error)}) kind=${classifyReply(replyObj)}`);
+            noteReplyFailure(replyObj, 'dropped', { error, user: loadedUser });
             return;
         }
         if ((0,_tg_core_telegram_utils_isTelegramRuntimeFailure__WEBPACK_IMPORTED_MODULE_14__.isTelegramTransportUnavailable)(error)) {
@@ -93925,6 +94298,7 @@ async function processSingleReply(client, replyObj, isMsgLimitReached, sleepTime
             if (next) {
                 logger.warn(`[replier] ${replyObj.chatId} reply deferred ${Math.round((next.notBefore - Date.now()) / 1000)}s: Telegram unreachable (${message}) ageMs=${ageMs} try=${next.transportRetryCount}/${_retry_policy__WEBPACK_IMPORTED_MODULE_15__.REPLY_TRANSPORT_MAX_RETRIES}`);
                 onRequeue(next);
+                noteReplyFailure(replyObj, 'will-retry', { error, user: loadedUser });
             }
             else if (ageMs < maxAgeFor(replyObj)) {
                 logger.warn(`[replier] ${replyObj.chatId} reply dropped: Telegram unreachable after ${_retry_policy__WEBPACK_IMPORTED_MODULE_15__.REPLY_TRANSPORT_MAX_RETRIES} tries (${message}) ageMs=${ageMs} kind=${classifyReply(replyObj)}`);
@@ -93932,6 +94306,8 @@ async function processSingleReply(client, replyObj, isMsgLimitReached, sleepTime
             else {
                 logger.warn(`[replier] ${replyObj.chatId} reply dropped: Telegram unreachable past the age bound (${message}) ageMs=${ageMs} kind=${classifyReply(replyObj)}`);
             }
+            if (!next)
+                noteReplyFailure(replyObj, 'dropped', { error, user: loadedUser });
             return;
         }
         logger.warn(`Error processing single reply (requeue handled):`, error);
@@ -93942,6 +94318,7 @@ async function processSingleReply(client, replyObj, isMsgLimitReached, sleepTime
         else {
             logger.warn(`Dropping reply for ${replyObj.chatId} after max retries`);
         }
+        noteReplyFailure(replyObj, next ? 'will-retry' : 'dropped', { error, user: loadedUser });
     }
 }
 /**
@@ -98032,6 +98409,44 @@ router.get("/diagnostics/runtime/replies", _http_middlewares_leader_middleware__
             owner: "replier",
             summary: "Reply diagnostics failed",
             message: "Failed to retrieve reply diagnostics",
+            error,
+            action: "manual",
+        });
+    }
+});
+/**
+ * @swagger
+ * /diagnostics/reply-failures:
+ *   get:
+ *     summary: This account's failed / dropped user sends (Mongo replyFailures, 14 days), newest first
+ *     tags: [Diagnostics]
+ *     parameters:
+ *       - { in: query, name: limit, schema: { type: integer, default: 50, maximum: 500 } }
+ *       - { in: query, name: errorClass, schema: { type: string }, description: "peer_flood, peer_flood_gate, flood_wait, privacy, outcome_unknown, queue, precheck..." }
+ *       - { in: query, name: outcome, schema: { type: string, enum: [refused, dropped, will-retry] } }
+ *       - { in: query, name: chatId, schema: { type: string } }
+ *     responses:
+ *       200:
+ *         description: Reply failure rows (read-only)
+ */
+router.get("/diagnostics/reply-failures", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_5__.leaderOnlyMiddleware, async (req, res) => {
+    try {
+        const limit = parseLimit(req.query.limit, 50, 500);
+        const pick = (v) => (typeof v === "string" && v.length > 0 && v.length <= 40 ? v : undefined);
+        const store = (0,_data_db__WEBPACK_IMPORTED_MODULE_10__.getRepositories)()?.replyFailures;
+        const rows = store
+            ? await store.recent(process.env.clientId ?? "", limit, { errorClass: pick(req.query.errorClass), outcome: pick(req.query.outcome), chatId: pick(req.query.chatId) })
+            : [];
+        res.json(formatResponse(true, { clientId: process.env.clientId ?? "", count: rows.length, rows }, "Reply failures retrieved successfully", req.requestId));
+    }
+    catch (error) {
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, "diagnostics.reply-failures");
+        sendDiagnosticsFailure(req, res, {
+            operation: "diagnostics-reply-failures",
+            component: "telegram.replier",
+            owner: "replier",
+            summary: "Reply failures read failed",
+            message: "Failed to retrieve reply failures",
             error,
             action: "manual",
         });
@@ -105983,7 +106398,7 @@ function floodSafe(op, ctx = {}) {
     const { text, file, voice, record, ...queueCtx } = ctx;
     const pitch = (0,_outbound_chat_voice__WEBPACK_IMPORTED_MODULE_0__.needsPitchSlot)(voice, text, file);
     const upsell = (0,_outbound_chat_voice__WEBPACK_IMPORTED_MODULE_0__.carriesPitch)(text, file);
-    return _outbound_outbound_queue__WEBPACK_IMPORTED_MODULE_3__.outboundQueue.enqueue({ send: op, ...queueCtx, pitch, upsell, record: record ?? undefined });
+    return _outbound_outbound_queue__WEBPACK_IMPORTED_MODULE_3__.outboundQueue.enqueue({ send: op, ...queueCtx, pitch, upsell, record: record ?? undefined, text, file });
 }
 /** Best-effort chat id of a send target; '' when it cannot be told. */
 function chatIdOf(entity) {
