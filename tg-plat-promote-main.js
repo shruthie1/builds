@@ -2291,6 +2291,1091 @@ function createAlertNotifier(send, options = {}) {
 
 /***/ },
 
+/***/ "../../packages/tg-calls/src/CallEngine.ts"
+/*!*************************************************!*\
+  !*** ../../packages/tg-calls/src/CallEngine.ts ***!
+  \*************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   CallEngine: () => (/* binding */ CallEngine)
+/* harmony export */ });
+/* harmony import */ var events__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! events */ "events");
+/* harmony import */ var events__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(events__WEBPACK_IMPORTED_MODULE_0__);
+/* harmony import */ var crypto__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! crypto */ "crypto");
+/* harmony import */ var crypto__WEBPACK_IMPORTED_MODULE_1___default = /*#__PURE__*/__webpack_require__.n(crypto__WEBPACK_IMPORTED_MODULE_1__);
+/* harmony import */ var big_integer__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! big-integer */ "big-integer");
+/* harmony import */ var big_integer__WEBPACK_IMPORTED_MODULE_2___default = /*#__PURE__*/__webpack_require__.n(big_integer__WEBPACK_IMPORTED_MODULE_2__);
+/* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! telegram */ "telegram");
+/* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_3___default = /*#__PURE__*/__webpack_require__.n(telegram__WEBPACK_IMPORTED_MODULE_3__);
+/* harmony import */ var telegram_events__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! telegram/events */ "telegram/events");
+/* harmony import */ var telegram_events__WEBPACK_IMPORTED_MODULE_4___default = /*#__PURE__*/__webpack_require__.n(telegram_events__WEBPACK_IMPORTED_MODULE_4__);
+/* harmony import */ var _convert__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ./convert */ "../../packages/tg-calls/src/convert.ts");
+/* harmony import */ var _media__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ./media */ "../../packages/tg-calls/src/media.ts");
+/* harmony import */ var _audio_feeder__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ./audio-feeder */ "../../packages/tg-calls/src/audio-feeder.ts");
+
+
+
+
+
+
+
+
+let ntgModule = null;
+/**
+ * Loaded lazily so importing @tg/calls never crashes a process on a host without the native
+ * ntgcalls binary (or ffmpeg): only constructing a CallEngine does.
+ */
+function loadNtgCalls() {
+    if (!ntgModule) {
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        ntgModule = __webpack_require__(/*! ntgcalls */ "ntgcalls");
+    }
+    return ntgModule;
+}
+const DEFAULTS = {
+    answerTimeoutMs: 45000,
+    connectTimeoutMs: 90000,
+    maxDurationMs: 5 * 60 * 1000,
+    hangupOnMediaEnd: true,
+    hangupGraceMs: 2000,
+};
+/**
+ * Private 1:1 voice/video calls on a GramJS client. GramJS carries the MTProto signaling;
+ * ntgcalls (WebRTC) carries the media, fed by ffmpeg from any audio/video file.
+ *
+ * One call at a time per engine (Telegram allows one active private call per account);
+ * incoming calls while busy are declined with Busy.
+ *
+ *   const engine = new CallEngine(client, { incomingPolicy, logger });
+ *   engine.start();
+ *   const record = await engine.call('username', { file: '/path/show.mp4' });
+ */
+class CallEngine extends events__WEBPACK_IMPORTED_MODULE_0__.EventEmitter {
+    constructor(client, options = {}) {
+        super();
+        this.callerFilter = null;
+        /** Live calls by peer user id. ntgcalls keys every call and callback by that id. */
+        this.calls = new Map();
+        this.started = false;
+        this.rawBuilder = new telegram_events__WEBPACK_IMPORTED_MODULE_4__.Raw({});
+        this.onUpdate = (update) => { void this.handleUpdate(update); };
+        this.lastAccessHash = new Map();
+        this.client = client;
+        this.ntgLib = options.ntgModule ?? loadNtgCalls();
+        this.maxConcurrent = Math.max(1, Math.floor(options.maxConcurrentCalls ?? 1));
+        this.ntg = new this.ntgLib.NTgCalls();
+        this.logger = options.logger ?? console;
+        this.audio = { ..._media__WEBPACK_IMPORTED_MODULE_6__.DEFAULT_AUDIO, ...options.audio };
+        this.video = { ..._media__WEBPACK_IMPORTED_MODULE_6__.DEFAULT_VIDEO, ...options.video };
+        this.ffmpeg = options.ffmpegPath ?? 'ffmpeg';
+        this.echo = options.echo && options.echo.gain > 0 ? { gain: options.echo.gain, delayMs: Math.max(0, options.echo.delayMs) } : null;
+        this.incomingPolicy = options.incomingPolicy ?? null;
+        this.setCallerFilter(options.callerFilter ?? null);
+        this.defaults = {
+            answerTimeoutMs: options.answerTimeoutMs ?? DEFAULTS.answerTimeoutMs,
+            connectTimeoutMs: options.connectTimeoutMs ?? DEFAULTS.connectTimeoutMs,
+            maxDurationMs: options.maxDurationMs ?? DEFAULTS.maxDurationMs,
+            hangupOnMediaEnd: options.hangupOnMediaEnd ?? DEFAULTS.hangupOnMediaEnd,
+            hangupGraceMs: options.hangupGraceMs ?? DEFAULTS.hangupGraceMs,
+        };
+        this.wireNtgCallbacks();
+    }
+    /** True when the native ntgcalls binary loads on this host. */
+    static isSupported() {
+        try {
+            loadNtgCalls().NTgCalls.ping();
+            return true;
+        }
+        catch (error) {
+            console.warn('[tg-calls] ntgcalls failed to load; in-house calls unavailable', error?.message ?? error);
+            return false;
+        }
+    }
+    /** Subscribe to call updates. Idempotent. */
+    start() {
+        if (this.started)
+            return;
+        this.client.addEventHandler(this.onUpdate, this.rawBuilder);
+        this.started = true;
+    }
+    /** Hang up every active call and unsubscribe. */
+    async stop() {
+        await this.hangup();
+        if (this.started)
+            this.client.removeEventHandler(this.onUpdate, this.rawBuilder);
+        this.started = false;
+    }
+    setIncomingPolicy(policy) {
+        this.incomingPolicy = policy;
+    }
+    /** Restrict incoming handling to a fixed id set or a live lookup; null = all callers. */
+    setCallerFilter(filter) {
+        if (!filter) {
+            this.callerFilter = null;
+        }
+        else if (typeof filter === 'function') {
+            this.callerFilter = filter;
+        }
+        else {
+            const ids = new Set(Array.from(filter, (id) => id.toString()));
+            this.callerFilter = (id) => ids.has(id);
+        }
+    }
+    /** A filter that throws counts as "not allowed" so a DB outage never auto-answers strangers. */
+    async isAllowedCaller(tgUserId) {
+        if (!this.callerFilter)
+            return true;
+        try {
+            return await this.callerFilter(tgUserId.toString());
+        }
+        catch (error) {
+            this.logger.warn('[tg-calls] callerFilter failed; ignoring call', error?.message ?? error);
+            return false;
+        }
+    }
+    /** True when no further call can start (maxConcurrentCalls reached). */
+    isBusy() {
+        return this.calls.size >= this.maxConcurrent;
+    }
+    activeCallCount() {
+        return this.calls.size;
+    }
+    isInCallWith(userId) {
+        return this.calls.has(userId.toString());
+    }
+    getActiveCall() {
+        const first = this.calls.values().next().value;
+        return first ? { ...first.record } : null;
+    }
+    getActiveCalls() {
+        return Array.from(this.calls.values(), (call) => ({ ...call.record }));
+    }
+    /**
+     * Ring `user` and stream `media` once answered. Resolves with the call record when the call
+     * ends for any reason (never rejects for call outcomes; check record.endReason / record.error).
+     */
+    async call(user, media, options = {}) {
+        this.start();
+        if (this.isBusy())
+            throw new Error('CallEngine is busy with another call');
+        const entity = await this.client.getEntity(user);
+        if (!(entity instanceof telegram__WEBPACK_IMPORTED_MODULE_3__.Api.User))
+            throw new Error('Can only call users');
+        if (this.calls.has(entity.id.toString()))
+            throw new Error('CallEngine is already in a call with this user');
+        if (this.isBusy())
+            throw new Error('CallEngine is busy with another call');
+        const call = this.createActive('outgoing', (0,_convert__WEBPACK_IMPORTED_MODULE_5__.toBigInt)(entity.id), entity.username ?? null, media, options);
+        const done = new Promise((resolve) => { call.resolve = resolve; });
+        try {
+            const accepted = new Promise((resolve) => { call.onAccepted = resolve; });
+            const gAHash = await this.prepareMedia(call, media, null);
+            // Hung up while preparing: nothing has rung yet; release the media instance created meanwhile.
+            if (call.finished) {
+                try {
+                    await this.ntg.stop(call.userId);
+                }
+                catch { /* not created / already stopped */ }
+                return done;
+            }
+            const req = await this.client.invoke(new telegram__WEBPACK_IMPORTED_MODULE_3__.Api.phone.RequestCall({
+                userId: await this.client.getInputEntity(entity),
+                randomId: (0,crypto__WEBPACK_IMPORTED_MODULE_1__.randomInt)(1, 2 ** 31 - 1),
+                gAHash: Buffer.from(gAHash),
+                protocol: this.protocol(),
+                video: call.record.video,
+            }));
+            if (req.phoneCall instanceof telegram__WEBPACK_IMPORTED_MODULE_3__.Api.PhoneCallEmpty || req.phoneCall instanceof telegram__WEBPACK_IMPORTED_MODULE_3__.Api.PhoneCallDiscarded) {
+                throw new Error(`requestCall returned ${req.phoneCall.className}`);
+            }
+            call.inputCall = new telegram__WEBPACK_IMPORTED_MODULE_3__.Api.InputPhoneCall({ id: req.phoneCall.id, accessHash: req.phoneCall.accessHash });
+            call.record.callId = req.phoneCall.id.toString();
+            if (call.finished) {
+                // Hung up while RequestCall was in flight: the phone is ringing now, so discard it.
+                await this.discard(call.inputCall, new telegram__WEBPACK_IMPORTED_MODULE_3__.Api.PhoneCallDiscardReasonHangup(), 0);
+                return done;
+            }
+            this.emit('ringing', { ...call.record });
+            call.answerTimer = setTimeout(() => { void this.localHangup(call, 'no_answer', true); }, call.options.answerTimeoutMs);
+            call.timers.push(call.answerTimer);
+            // Ends either way: answered, or finished first (no answer, declined, missed, hung up).
+            const pc = await Promise.race([accepted, done.then(() => null)]);
+            if (!pc || call.finished)
+                return done;
+            this.markAnswered(call);
+            const auth = await this.ntg.exchangeKeys(call.userId, (0,_convert__WEBPACK_IMPORTED_MODULE_5__.toByteArray)(pc.gB), 0n);
+            const confirmed = await this.client.invoke(new telegram__WEBPACK_IMPORTED_MODULE_3__.Api.phone.ConfirmCall({
+                peer: call.inputCall,
+                gA: Buffer.from(auth.gAOrB),
+                keyFingerprint: big_integer__WEBPACK_IMPORTED_MODULE_2___default()(auth.keyFingerprint.toString()),
+                protocol: this.protocol(),
+            }));
+            if (confirmed.phoneCall instanceof telegram__WEBPACK_IMPORTED_MODULE_3__.Api.PhoneCall)
+                await this.connectMedia(call, confirmed.phoneCall);
+        }
+        catch (error) {
+            await this.failCall(call, error);
+        }
+        // A media failure can end the call while RequestCall is still in flight (nidhi1 2026-10-11: the
+        // audio source died, then RequestCall threw PEER_FLOOD): the record resolved before failCall set
+        // the error, so the caller saw a plain media_failed and rang the refused user again. Carry it over.
+        return done.then((rec) => (rec.error || !call.record.error ? rec : { ...rec, error: call.record.error }));
+    }
+    /** Hang up the call with `userId`, or every active call when omitted. */
+    async hangup(userId) {
+        const targets = userId === undefined ? Array.from(this.calls.values()) : [this.calls.get(userId.toString())];
+        await Promise.all(targets.map((call) => (call ? this.localHangup(call, 'local_hangup', false) : undefined)));
+    }
+    /** Submit a star rating for a finished call (Telegram asks when record.needRating). */
+    async rateCall(record, rating, comment = '') {
+        if (!record.callId)
+            throw new Error('Call has no id');
+        const accessHash = this.lastAccessHash.get(record.callId);
+        if (!accessHash)
+            throw new Error('Unknown call (rating is only possible for calls made by this engine instance)');
+        await this.client.invoke(new telegram__WEBPACK_IMPORTED_MODULE_3__.Api.phone.SetCallRating({
+            peer: new telegram__WEBPACK_IMPORTED_MODULE_3__.Api.InputPhoneCall({ id: big_integer__WEBPACK_IMPORTED_MODULE_2___default()(record.callId), accessHash }),
+            rating,
+            comment,
+        }));
+    }
+    // ---------- incoming ----------
+    async handleIncoming(pc) {
+        // Not on the list → not ours: don't decline, don't emit, let the phone ring.
+        if (!(await this.isAllowedCaller(pc.adminId.toString())))
+            return;
+        const inputCall = new telegram__WEBPACK_IMPORTED_MODULE_3__.Api.InputPhoneCall({ id: pc.id, accessHash: pc.accessHash });
+        if (this.isBusy() || this.calls.has(pc.adminId.toString())) {
+            this.logger.log('[tg-calls] busy; declining incoming call', pc.id.toString());
+            await this.discard(inputCall, new telegram__WEBPACK_IMPORTED_MODULE_3__.Api.PhoneCallDiscardReasonBusy(), 0);
+            this.emit('busy-declined', { callId: pc.id.toString(), peerUserId: pc.adminId.toString(), peerUsername: null, video: !!pc.video });
+            return;
+        }
+        if (!this.incomingPolicy)
+            return;
+        const caller = await this.client.getEntity(pc.adminId).catch(() => null);
+        const info = {
+            callId: pc.id.toString(),
+            peerUserId: pc.adminId.toString(),
+            peerUsername: caller instanceof telegram__WEBPACK_IMPORTED_MODULE_3__.Api.User ? caller.username ?? null : null,
+            video: !!pc.video,
+        };
+        this.emit('incoming', info);
+        const decision = await this.incomingPolicy(info);
+        if (decision.action === 'ignore')
+            return;
+        if (decision.action === 'decline') {
+            await this.discard(inputCall, new telegram__WEBPACK_IMPORTED_MODULE_3__.Api.PhoneCallDiscardReasonBusy(), 0);
+            return;
+        }
+        if (this.isBusy() || this.calls.has(pc.adminId.toString())) {
+            // Another call won the race while the policy ran: decline busy and report it, so a
+            // policy that already reserved state for this caller can release it.
+            await this.discard(inputCall, new telegram__WEBPACK_IMPORTED_MODULE_3__.Api.PhoneCallDiscardReasonBusy(), 0);
+            this.emit('busy-declined', info);
+            return;
+        }
+        // A voice call gets audio only even if the policy hands over a video file, unless the policy asks to
+        // turn our camera on (videoOnVoiceCall: a paid show the caller is owed).
+        const sendVideo = (info.video || decision.media.videoOnVoiceCall === true) && (0,_media__WEBPACK_IMPORTED_MODULE_6__.wantsVideo)(decision.media);
+        const media = { ...decision.media, video: sendVideo };
+        this.logger.log(`[tg-calls] incoming ${info.video ? 'video' : 'voice'} call from ${info.peerUserId}: answering with ${sendVideo ? 'video' : 'audio only'}${sendVideo && !info.video ? ' (camera turned on)' : ''}`);
+        const call = this.createActive('incoming', (0,_convert__WEBPACK_IMPORTED_MODULE_5__.toBigInt)(pc.adminId), info.peerUsername, media, decision.options ?? {});
+        call.inputCall = inputCall;
+        call.record.callId = info.callId;
+        call.record.video = info.video;
+        try {
+            await this.client.invoke(new telegram__WEBPACK_IMPORTED_MODULE_3__.Api.phone.ReceivedCall({ peer: inputCall })).catch((error) => { this.logger.warn('[tg-calls] ReceivedCall failed', error?.message ?? error); });
+            this.emit('ringing', { ...call.record });
+            await new Promise((r) => setTimeout(r, decision.delayMs ?? 2000));
+            if (call.finished)
+                return;
+            const gB = await this.prepareMedia(call, media, pc.gAHash);
+            await this.client.invoke(new telegram__WEBPACK_IMPORTED_MODULE_3__.Api.phone.AcceptCall({ peer: inputCall, gB: Buffer.from(gB), protocol: this.protocol() }));
+            this.markAnswered(call);
+            // The caller's confirmCall arrives as UpdatePhoneCall(PhoneCall) → onIncomingConfirmed.
+        }
+        catch (error) {
+            await this.failCall(call, error);
+        }
+    }
+    async onIncomingConfirmed(call, pc) {
+        try {
+            // Verifies the caller's g_a against the g_a_hash it committed to when ringing.
+            await this.ntg.exchangeKeys(call.userId, (0,_convert__WEBPACK_IMPORTED_MODULE_5__.toByteArray)(pc.gAOrB), (0,_convert__WEBPACK_IMPORTED_MODULE_5__.toBigInt)(pc.keyFingerprint));
+            await this.connectMedia(call, pc);
+        }
+        catch (error) {
+            await this.failCall(call, error);
+        }
+    }
+    // ---------- shared ----------
+    createActive(direction, userId, username, media, options) {
+        const video = (0,_media__WEBPACK_IMPORTED_MODULE_6__.wantsVideo)(media);
+        const call = {
+            userId,
+            inputCall: null,
+            options: { ...this.defaults, ...stripUndefined(options) },
+            // A video with no audio stream is over when its video is; its silent audio track never ends.
+            pendingTracks: new Set(video ? (media.audio === false ? ['video'] : ['audio', 'video']) : ['audio']),
+            timers: [],
+            resolve: () => undefined,
+            finished: false,
+            record: {
+                callId: null, direction, peerUserId: userId.toString(), peerUsername: username,
+                video: video || (direction === 'outgoing' && !!media.ringAsVideo),
+                mediaFile: media.file, mediaStartSec: Math.max(0, Number(media.startSec) || 0), requestedAt: Date.now(), answeredAt: null, connectedAt: null, endedAt: null,
+                ringToAnswerMs: null, connectMs: null, talkMs: null, mediaCompleted: false,
+                endReason: null, endedBy: null, telegramDurationSec: null, needRating: false,
+                emojis: null, p2pAllowed: null, relayCount: null, libraryVersions: [], remoteSources: [], error: null,
+            },
+        };
+        this.calls.set(userId.toString(), call);
+        return call;
+    }
+    /** Creates the ntgcalls p2p instance, attaches the ffmpeg sources, runs the first DH step. */
+    async prepareMedia(call, media, gAHash) {
+        const dhc = await this.client.invoke(new telegram__WEBPACK_IMPORTED_MODULE_3__.Api.messages.GetDhConfig({ version: 0, randomLength: 256 }));
+        if (!(dhc instanceof telegram__WEBPACK_IMPORTED_MODULE_3__.Api.messages.DhConfig))
+            throw new Error('Unexpected DH config response');
+        await this.ntg.createP2pCall(call.userId);
+        const { MediaSource, StreamMode } = this.ntgLib;
+        const audioCommand = media.audio === false && (0,_media__WEBPACK_IMPORTED_MODULE_6__.wantsVideo)(media)
+            ? (0,_media__WEBPACK_IMPORTED_MODULE_6__.silenceShellCommand)(this.audio, this.ffmpeg)
+            : (0,_media__WEBPACK_IMPORTED_MODULE_6__.audioShellCommand)(media.file, this.audio, this.ffmpeg, media.startSec);
+        const shellMicrophone = {
+            mediaSource: MediaSource.SHELL, input: audioCommand,
+            sampleRate: this.audio.sampleRate, channelCount: this.audio.channels, keepOpen: false,
+        };
+        const description = {
+            microphone: this.echo
+                ? { mediaSource: MediaSource.EXTERNAL, input: '', sampleRate: this.audio.sampleRate, channelCount: this.audio.channels, keepOpen: true }
+                : shellMicrophone,
+        };
+        // record.video is the ring type; a ringAsVideo call has no camera track to send. An incoming voice call
+        // gets the camera only when the policy turned it on (videoOnVoiceCall).
+        if ((0,_media__WEBPACK_IMPORTED_MODULE_6__.wantsVideo)(media) && (call.record.video || media.videoOnVoiceCall === true)) {
+            const video = media.size ? { ...this.video, width: media.size.width, height: media.size.height } : this.video;
+            description.camera = {
+                mediaSource: MediaSource.SHELL, input: (0,_media__WEBPACK_IMPORTED_MODULE_6__.videoShellCommand)(media.file, video, this.ffmpeg, media.startSec),
+                width: video.width, height: video.height, fps: video.fps, keepOpen: false,
+            };
+        }
+        if (this.echo) {
+            try {
+                await this.ntg.setStreamSources(call.userId, StreamMode.CAPTURE, description);
+                // The caller's audio comes back to us as frames (onFrames), for the echo. In PLAYBACK
+                // mode ntgcalls files the remote party's audio under `microphone` (py-tgcalls records
+                // the same way); `speaker` alone was accepted but delivered 0 frames live (2026-10-10).
+                const remoteAudio = { mediaSource: MediaSource.EXTERNAL, input: '', sampleRate: this.audio.sampleRate, channelCount: this.audio.channels, keepOpen: true };
+                await this.ntg.setStreamSources(call.userId, StreamMode.PLAYBACK, { microphone: remoteAudio, speaker: remoteAudio });
+                call.feeder = this.createFeeder(call, audioCommand);
+            }
+            catch (error) {
+                // Echo plumbing unavailable: play the show the plain way.
+                this.logger.warn('[tg-calls] echo audio setup failed; using plain audio', error?.message ?? error);
+                call.feeder?.stop();
+                call.feeder = undefined;
+                description.microphone = shellMicrophone;
+                await this.ntg.setStreamSources(call.userId, StreamMode.CAPTURE, description);
+            }
+        }
+        else {
+            await this.ntg.setStreamSources(call.userId, StreamMode.CAPTURE, description);
+        }
+        // Outgoing: null → returns g_a_hash. Incoming: caller's g_a_hash → returns g_b.
+        return this.ntg.initExchange(call.userId, { g: dhc.g, p: (0,_convert__WEBPACK_IMPORTED_MODULE_5__.toByteArray)(dhc.p), random: (0,_convert__WEBPACK_IMPORTED_MODULE_5__.toByteArray)(dhc.random) }, (gAHash ? (0,_convert__WEBPACK_IMPORTED_MODULE_5__.toByteArray)(gAHash) : null));
+    }
+    async connectMedia(call, pc) {
+        if (call.finished)
+            return;
+        const versions = pc.protocol.libraryVersions;
+        call.record.p2pAllowed = !!pc.p2pAllowed;
+        call.record.relayCount = pc.connections.length;
+        call.record.libraryVersions = versions;
+        call.record.emojis = await this.ntg.getEmojisFingerprint(call.userId).catch(() => null);
+        this.lastAccessHash.set(pc.id.toString(), pc.accessHash);
+        if (this.lastAccessHash.size > 1000)
+            this.lastAccessHash.delete(this.lastAccessHash.keys().next().value);
+        await this.ntg.connectP2p(call.userId, (0,_convert__WEBPACK_IMPORTED_MODULE_5__.toRtcServers)(pc.connections), versions, !!pc.p2pAllowed, 
+        // ntgcalls parses this as JSON; an empty string throws "incomplete JSON".
+        pc.customParameters?.data || '{}');
+        if (call.finished)
+            return;
+        call.timers.push(setTimeout(() => { void this.localHangup(call, 'max_duration', false); }, call.options.maxDurationMs));
+    }
+    createFeeder(call, command) {
+        const { StreamDevice } = this.ntgLib;
+        let feedErrors = 0;
+        return new _audio_feeder__WEBPACK_IMPORTED_MODULE_7__.AudioFeeder({
+            command,
+            sampleRate: this.audio.sampleRate,
+            channels: this.audio.channels,
+            echo: this.echo,
+            // Byte fields go to the binding as number[] (toByteArray): a Buffer here fails every frame
+            // with "An array was expected" (seen live on VM1, 2026-10-10) and the show is silent.
+            send: (frame) => this.ntg.sendExternalFrame(call.userId, StreamDevice.MICROPHONE, (0,_convert__WEBPACK_IMPORTED_MODULE_5__.toByteArray)(frame), {
+                absoluteCaptureTimestampMs: BigInt(Date.now()), rotation: 0, width: 0, height: 0,
+            }),
+            onEnd: () => this.trackEnded(call, 'audio'),
+            onError: (error) => {
+                // A send error repeats every 10 ms frame: log the first and then every 500th.
+                feedErrors += 1;
+                if (error instanceof _audio_feeder__WEBPACK_IMPORTED_MODULE_7__.AudioSourceError || feedErrors % 500 === 1) {
+                    this.logger.warn(`[tg-calls] echo audio feed error (x${feedErrors})`, error?.message ?? error);
+                }
+                // The audio source died: end the call as a media failure instead of idling until the cap.
+                if (error instanceof _audio_feeder__WEBPACK_IMPORTED_MODULE_7__.AudioSourceError)
+                    void this.localHangup(call, 'media_failed', false);
+            },
+        });
+    }
+    /** One media track finished; when all have, the show is complete (and hung up after a grace). */
+    trackEnded(call, track) {
+        if (call.finished || !call.pendingTracks.has(track))
+            return;
+        call.pendingTracks.delete(track);
+        this.emit('media-end', { ...call.record }, track);
+        if (call.pendingTracks.size === 0) {
+            call.record.mediaCompleted = true;
+            if (call.options.hangupOnMediaEnd) {
+                call.timers.push(setTimeout(() => { void this.localHangup(call, 'local_hangup', false); }, call.options.hangupGraceMs));
+            }
+        }
+    }
+    markAnswered(call) {
+        if (call.answerTimer)
+            clearTimeout(call.answerTimer);
+        call.answerTimer = undefined;
+        call.record.answeredAt = Date.now();
+        call.record.ringToAnswerMs = call.record.answeredAt - call.record.requestedAt;
+        // Nothing else bounds a call stuck "connecting" (max duration is armed only after connect): it would
+        // hold its slot until restart.
+        if (!call.finished && !call.record.connectedAt && !call.connectTimer) {
+            call.connectTimer = setTimeout(() => { void this.localHangup(call, 'media_failed', false); }, call.options.connectTimeoutMs);
+            call.timers.push(call.connectTimer);
+        }
+        this.emit('answered', { ...call.record });
+    }
+    wireNtgCallbacks() {
+        const { ConnectionState, StreamDevice, StreamStatus, StreamMode } = this.ntgLib;
+        this.ntg.onSignalingData((chatId, data) => {
+            const call = this.calls.get(chatId.toString());
+            if (!call?.inputCall)
+                return;
+            this.client.invoke(new telegram__WEBPACK_IMPORTED_MODULE_3__.Api.phone.SendSignalingData({ peer: call.inputCall, data: Buffer.from(data) }))
+                .catch((e) => this.logger.warn('[tg-calls] signaling send failed', e?.message ?? e));
+        });
+        this.ntg.onConnectionChange((chatId, info) => {
+            const call = this.calls.get(chatId.toString());
+            if (!call)
+                return;
+            if (info.state === ConnectionState.CONNECTED && !call.record.connectedAt) {
+                call.record.connectedAt = Date.now();
+                if (call.connectTimer)
+                    clearTimeout(call.connectTimer);
+                call.connectTimer = undefined;
+                call.record.connectMs = call.record.answeredAt ? call.record.connectedAt - call.record.answeredAt : null;
+                call.feeder?.start();
+                this.emit('connected', { ...call.record });
+            }
+            else if (info.state === ConnectionState.FAILED || info.state === ConnectionState.TIMEOUT) {
+                void this.localHangup(call, 'media_failed', false);
+            }
+        });
+        this.ntg.onStreamEnd((chatId, _type, device) => {
+            const call = this.calls.get(chatId.toString());
+            if (!call)
+                return;
+            this.trackEnded(call, device === StreamDevice.CAMERA ? 'video' : 'audio');
+        });
+        // The caller's audio (PLAYBACK side), mixed back to them by the feeder as the echo.
+        this.ntg.onFrames?.((chatId, mode, device, frames) => {
+            if (mode !== StreamMode.PLAYBACK || device === StreamDevice.CAMERA || device === StreamDevice.SCREEN)
+                return;
+            const feeder = this.calls.get(chatId.toString())?.feeder;
+            if (!feeder)
+                return;
+            for (const frame of frames)
+                feeder.pushRemote(Buffer.from(frame.data));
+        });
+        this.ntg.onRemoteSourceChange((chatId, source) => {
+            const call = this.calls.get(chatId.toString());
+            if (!call)
+                return;
+            const event = {
+                at: Date.now(),
+                device: ((0,_convert__WEBPACK_IMPORTED_MODULE_5__.enumName)(StreamDevice, source.device)?.toLowerCase() ?? 'unknown'),
+                state: ((0,_convert__WEBPACK_IMPORTED_MODULE_5__.enumName)(StreamStatus, source.state)?.toLowerCase() ?? 'unknown'),
+            };
+            call.record.remoteSources.push(event);
+            this.emit('remote-source', { ...call.record }, event);
+        });
+    }
+    async handleUpdate(update) {
+        try {
+            if (update instanceof telegram__WEBPACK_IMPORTED_MODULE_3__.Api.UpdatePhoneCallSignalingData) {
+                const call = this.byPhoneCallId(update.phoneCallId);
+                if (call) {
+                    await this.ntg.sendSignalingData(call.userId, (0,_convert__WEBPACK_IMPORTED_MODULE_5__.toByteArray)(update.data));
+                }
+                return;
+            }
+            if (!(update instanceof telegram__WEBPACK_IMPORTED_MODULE_3__.Api.UpdatePhoneCall))
+                return;
+            const pc = update.phoneCall;
+            if (pc instanceof telegram__WEBPACK_IMPORTED_MODULE_3__.Api.PhoneCallRequested) {
+                await this.handleIncoming(pc);
+                return;
+            }
+            const call = this.byPhoneCallId(pc.id);
+            if (!call)
+                return;
+            if (pc instanceof telegram__WEBPACK_IMPORTED_MODULE_3__.Api.PhoneCallAccepted) {
+                call.onAccepted?.(pc);
+            }
+            else if (pc instanceof telegram__WEBPACK_IMPORTED_MODULE_3__.Api.PhoneCall && call.record.direction === 'incoming' && !call.record.connectedAt) {
+                await this.onIncomingConfirmed(call, pc);
+            }
+            else if (pc instanceof telegram__WEBPACK_IMPORTED_MODULE_3__.Api.PhoneCallDiscarded) {
+                call.record.telegramDurationSec = pc.duration ?? null;
+                call.record.needRating = !!pc.needRating;
+                await this.finish(call, (0,_convert__WEBPACK_IMPORTED_MODULE_5__.discardReason)(pc.reason?.className), 'remote');
+            }
+        }
+        catch (error) {
+            this.logger.error('[tg-calls] update handling failed', error?.message ?? error);
+        }
+    }
+    async localHangup(call, reason, missed) {
+        if (call.finished || call.hangingUp)
+            return;
+        call.hangingUp = true;
+        if (call.inputCall) {
+            const duration = call.record.connectedAt ? Math.round((Date.now() - call.record.connectedAt) / 1000) : 0;
+            await this.discard(call.inputCall, missed ? new telegram__WEBPACK_IMPORTED_MODULE_3__.Api.PhoneCallDiscardReasonMissed() : new telegram__WEBPACK_IMPORTED_MODULE_3__.Api.PhoneCallDiscardReasonHangup(), duration);
+        }
+        await this.finish(call, reason, 'local');
+    }
+    async failCall(call, error) {
+        const message = error?.errorMessage
+            ?? error?.message ?? String(error);
+        call.record.error = message;
+        this.logger.warn('[tg-calls] call failed', call.record.peerUserId, message);
+        if (message === 'USER_PRIVACY_RESTRICTED') {
+            await this.finish(call, 'privacy_restricted', 'local');
+        }
+        else {
+            await this.localHangup(call, 'error', false);
+        }
+    }
+    async finish(call, reason, by) {
+        if (call.finished)
+            return;
+        call.finished = true;
+        call.timers.forEach(clearTimeout);
+        if (call.feeder) {
+            const s = call.feeder.stats;
+            this.logger.log(`[tg-calls] audio feed ${call.record.peerUserId}: sent=${s.framesSent} underruns=${s.underruns} remoteFrames=${s.remoteFrames} remoteBytes=${s.remoteBytes} echoMixed=${s.echoMixedFrames}`);
+            call.feeder.stop();
+        }
+        try {
+            await this.ntg.stop(call.userId);
+        }
+        catch { /* no media instance yet / already stopped */ }
+        const r = call.record;
+        r.endedAt = Date.now();
+        r.endReason = reason;
+        r.endedBy = by;
+        r.talkMs = r.connectedAt ? r.endedAt - r.connectedAt : null;
+        const key = call.userId.toString();
+        if (this.calls.get(key) === call)
+            this.calls.delete(key);
+        call.onAccepted = undefined;
+        this.emit('ended', { ...r });
+        call.resolve({ ...r });
+    }
+    async discard(peer, reason, duration) {
+        try {
+            await this.client.invoke(new telegram__WEBPACK_IMPORTED_MODULE_3__.Api.phone.DiscardCall({ peer, duration, reason, connectionId: big_integer__WEBPACK_IMPORTED_MODULE_2___default()(0) }));
+        }
+        catch (error) {
+            this.logger.warn('[tg-calls] discardCall failed', error?.message ?? error);
+        }
+    }
+    byPhoneCallId(id) {
+        for (const call of this.calls.values()) {
+            if (call.inputCall && id.equals(call.inputCall.id))
+                return call;
+        }
+        return undefined;
+    }
+    protocol() {
+        // Advertise exactly what the bundled ntgcalls speaks (layer 92, tgcalls 8.0.0+).
+        return new telegram__WEBPACK_IMPORTED_MODULE_3__.Api.PhoneCallProtocol({ ...this.ntgLib.NTgCalls.getProtocol() });
+    }
+}
+function stripUndefined(obj) {
+    return Object.fromEntries(Object.entries(obj).filter(([, v]) => v !== undefined));
+}
+
+
+/***/ },
+
+/***/ "../../packages/tg-calls/src/audio-feeder.ts"
+/*!***************************************************!*\
+  !*** ../../packages/tg-calls/src/audio-feeder.ts ***!
+  \***************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   AudioFeeder: () => (/* binding */ AudioFeeder),
+/* harmony export */   AudioSourceError: () => (/* binding */ AudioSourceError),
+/* harmony export */   SOURCE_EXIT_WAIT_MS: () => (/* binding */ SOURCE_EXIT_WAIT_MS)
+/* harmony export */ });
+/* harmony import */ var child_process__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! child_process */ "child_process");
+/* harmony import */ var child_process__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(child_process__WEBPACK_IMPORTED_MODULE_0__);
+
+const FRAME_MS = 10;
+const TICK_MS = 10;
+/** Read ahead at most this much show audio before pausing ffmpeg. */
+const MAX_BUFFER_MS = 3000;
+const RESUME_BUFFER_MS = 1000;
+/** Behind by more than this (event-loop stall): skip ahead instead of bursting. */
+const MAX_CATCH_UP_MS = 200;
+/** Remote audio beyond delay + this is dropped, so the echo never drifts later. */
+const MAX_REMOTE_SLACK_MS = 1000;
+/** After ffmpeg's stdout closes, how long to wait for its exit status before deciding without it. */
+const SOURCE_EXIT_WAIT_MS = 1000;
+/**
+ * Feeds a call's microphone track itself (ntgcalls MediaSource.EXTERNAL) instead of letting
+ * ntgcalls read ffmpeg: the show's PCM is paced out in 10 ms frames, and the caller's own voice
+ * (ntgcalls onFrames, PLAYBACK) is mixed back in at `echo.gain`, `echo.delayMs` late.
+ * Pacing starts at start() (call connected); until then ffmpeg reads ahead up to MAX_BUFFER_MS.
+ */
+/** The ffmpeg source died or never produced audio: the show did NOT complete. */
+class AudioSourceError extends Error {
+    constructor(message) {
+        super(message);
+        this.name = 'AudioSourceError';
+    }
+}
+class AudioFeeder {
+    constructor(options) {
+        this.stats = { framesSent: 0, remoteFrames: 0, remoteBytes: 0, underruns: 0, echoMixedFrames: 0 };
+        this.proc = null;
+        this.show = [];
+        this.showBytes = 0;
+        this.sourceDone = false;
+        this.paused = false;
+        this.remote = [];
+        this.remoteBytesQueued = 0;
+        this.remotePrimed = false;
+        this.timer = null;
+        this.startedAt = 0;
+        this.framesDue = 0;
+        this.ended = false;
+        this.stopped = false;
+        this.sending = false;
+        this.totalBytes = 0;
+        this.failed = false;
+        this.exitWait = null;
+        this.o = options;
+        this.bytesPerMs = (options.sampleRate * options.channels * 2) / 1000;
+        this.frameBytes = this.bytesPerMs * FRAME_MS;
+        this.now = options.now ?? Date.now;
+        this.spawnSource();
+    }
+    /** Begin real-time pacing (the call just connected). Idempotent. */
+    start() {
+        if (this.timer || this.stopped)
+            return;
+        this.startedAt = this.now();
+        this.framesDue = 0;
+        const set = this.o.setInterval ?? ((fn, ms) => setInterval(fn, ms));
+        this.timer = set(() => { void this.tick(); }, TICK_MS);
+        this.timer?.unref?.();
+    }
+    /** Raw PCM from the caller (same format as the show audio). */
+    pushRemote(pcm) {
+        if (!this.o.echo || this.stopped || pcm.length === 0)
+            return;
+        this.stats.remoteFrames += 1;
+        this.stats.remoteBytes += pcm.length;
+        this.remote.push(pcm);
+        this.remoteBytesQueued += pcm.length;
+        const cap = this.delayBytes() + Math.round(MAX_REMOTE_SLACK_MS * this.bytesPerMs);
+        if (this.remoteBytesQueued > cap)
+            this.dropRemote(this.remoteBytesQueued - this.delayBytes());
+    }
+    stop() {
+        if (this.stopped)
+            return;
+        this.stopped = true;
+        if (this.timer)
+            (this.o.clearInterval ?? ((h) => clearInterval(h)))(this.timer);
+        this.timer = null;
+        this.clearExitWait();
+        try {
+            this.proc?.kill('SIGKILL');
+        }
+        catch { /* already gone */ }
+        this.proc = null;
+        this.show = [];
+        this.remote = [];
+    }
+    spawnSource() {
+        const spawn = this.o.spawn ?? ((command) => (0,child_process__WEBPACK_IMPORTED_MODULE_0__.spawn)('/bin/sh', ['-c', command], { stdio: ['ignore', 'pipe', 'ignore'] }));
+        const proc = spawn(this.o.command);
+        this.proc = proc;
+        proc.stdout?.on('data', (chunk) => {
+            if (this.stopped)
+                return;
+            this.totalBytes += chunk.length;
+            this.show.push(chunk);
+            this.showBytes += chunk.length;
+            if (!this.paused && this.showBytes > MAX_BUFFER_MS * this.bytesPerMs) {
+                this.paused = true;
+                proc.stdout?.pause();
+            }
+        });
+        // ntgcalls replaces libuv's SIGCHLD handler during in-house calls; after that Node never reports a
+        // child's exit, so 'close' never comes, the show never ends (underruns until the duration cap).
+        // stdout closing means ffmpeg wrote everything: wait briefly for the exit status, then decide
+        // without it (some audio = the show ended; none = a media failure, never a fake "delivered").
+        proc.stdout?.on('end', () => {
+            if (this.sourceDone || this.stopped)
+                return;
+            const set = this.o.setTimeout ?? ((fn, ms) => setTimeout(fn, ms));
+            this.exitWait = set(() => {
+                this.exitWait = null;
+                if (this.sourceDone || this.stopped)
+                    return;
+                this.sourceDone = true;
+                if (this.totalBytes > 0)
+                    return;
+                this.failed = true;
+                this.o.onError?.(new AudioSourceError('audio source closed its output with no audio and its exit was never reported'));
+            }, SOURCE_EXIT_WAIT_MS);
+            this.exitWait?.unref?.();
+        });
+        proc.on('close', (code, signal) => {
+            this.clearExitWait();
+            if (this.sourceDone)
+                return;
+            this.sourceDone = true;
+            if (this.stopped)
+                return;
+            // A failed launch or a crash is a media failure, not "the show finished".
+            // A clean exit with zero bytes is NOT a failure. (A video without an audio stream, e.g. video_1013, makes
+            // ffmpeg 7 exit 234, not 0: the engine feeds such files a silent lavfi source instead, see media.audio.)
+            const bad = (typeof code === 'number' && code !== 0) || !!signal;
+            if (!bad)
+                return;
+            this.failed = true;
+            this.o.onError?.(new AudioSourceError(`audio source exited${code != null ? ` with code ${code}` : ''}${signal ? ` (signal ${signal})` : ''} after ${this.totalBytes} bytes`));
+        });
+        proc.on('error', (error) => {
+            this.clearExitWait();
+            this.sourceDone = true;
+            this.failed = true;
+            this.o.onError?.(new AudioSourceError(`audio source failed: ${error?.message ?? error}`));
+        });
+    }
+    async tick() {
+        if (this.stopped || this.sending)
+            return;
+        const target = Math.floor((this.now() - this.startedAt) / FRAME_MS);
+        if (target - this.framesDue > MAX_CATCH_UP_MS / FRAME_MS)
+            this.framesDue = target - 1; // stalled: don't burst
+        this.sending = true;
+        try {
+            while (this.framesDue < target && !this.stopped) {
+                const frame = this.nextFrame();
+                if (!frame)
+                    break;
+                this.framesDue += 1;
+                await this.o.send(frame);
+                this.stats.framesSent += 1;
+            }
+        }
+        catch (error) {
+            this.o.onError?.(error);
+        }
+        finally {
+            this.sending = false;
+        }
+        if (this.paused && this.showBytes < RESUME_BUFFER_MS * this.bytesPerMs) {
+            this.paused = false;
+            this.proc?.stdout?.resume();
+        }
+    }
+    /** Next 10 ms frame, or null when waiting for ffmpeg / finished. */
+    nextFrame() {
+        if (this.showBytes < this.frameBytes) {
+            if (!this.sourceDone) {
+                this.stats.underruns += 1;
+                return null;
+            }
+            if (this.showBytes === 0) {
+                if (!this.failed)
+                    this.finishOnce();
+                return null;
+            }
+        }
+        const frame = this.take(this.frameBytes);
+        if (this.o.echo)
+            this.mixRemote(frame);
+        return frame;
+    }
+    take(bytes) {
+        const out = Buffer.alloc(bytes);
+        let filled = 0;
+        while (filled < bytes && this.show.length) {
+            const head = this.show[0];
+            const n = Math.min(head.length, bytes - filled);
+            head.copy(out, filled, 0, n);
+            filled += n;
+            if (n === head.length)
+                this.show.shift();
+            else
+                this.show[0] = head.subarray(n);
+        }
+        this.showBytes -= filled;
+        return out; // a short last frame is zero-padded
+    }
+    mixRemote(frame) {
+        const delay = this.delayBytes();
+        if (!this.remotePrimed) {
+            if (this.remoteBytesQueued < delay + this.frameBytes)
+                return;
+            this.remotePrimed = true;
+        }
+        if (this.remoteBytesQueued < this.frameBytes) {
+            // Caller muted / silent: re-prime so the delay holds when they speak again.
+            this.remotePrimed = false;
+            return;
+        }
+        const voice = Buffer.alloc(this.frameBytes);
+        let filled = 0;
+        while (filled < this.frameBytes && this.remote.length) {
+            const head = this.remote[0];
+            const n = Math.min(head.length, this.frameBytes - filled);
+            head.copy(voice, filled, 0, n);
+            filled += n;
+            if (n === head.length)
+                this.remote.shift();
+            else
+                this.remote[0] = head.subarray(n);
+        }
+        this.remoteBytesQueued -= filled;
+        const gain = this.o.echo?.gain ?? 0;
+        for (let i = 0; i + 1 < frame.length; i += 2) {
+            const mixed = frame.readInt16LE(i) + Math.round(voice.readInt16LE(i) * gain);
+            frame.writeInt16LE(mixed > 32767 ? 32767 : mixed < -32768 ? -32768 : mixed, i);
+        }
+        this.stats.echoMixedFrames += 1;
+    }
+    dropRemote(bytes) {
+        let left = bytes;
+        while (left > 0 && this.remote.length) {
+            const head = this.remote[0];
+            if (head.length <= left) {
+                left -= head.length;
+                this.remoteBytesQueued -= head.length;
+                this.remote.shift();
+            }
+            else {
+                this.remote[0] = head.subarray(left);
+                this.remoteBytesQueued -= left;
+                left = 0;
+            }
+        }
+    }
+    delayBytes() {
+        const ms = Math.max(0, this.o.echo?.delayMs ?? 0);
+        const bytes = Math.round(ms * this.bytesPerMs);
+        return bytes - (bytes % 2);
+    }
+    clearExitWait() {
+        if (this.exitWait == null)
+            return;
+        (this.o.clearTimeout ?? ((h) => clearTimeout(h)))(this.exitWait);
+        this.exitWait = null;
+    }
+    finishOnce() {
+        if (this.ended)
+            return;
+        this.ended = true;
+        this.o.onEnd();
+    }
+}
+
+
+/***/ },
+
+/***/ "../../packages/tg-calls/src/convert.ts"
+/*!**********************************************!*\
+  !*** ../../packages/tg-calls/src/convert.ts ***!
+  \**********************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   discardReason: () => (/* binding */ discardReason),
+/* harmony export */   enumName: () => (/* binding */ enumName),
+/* harmony export */   toBigInt: () => (/* binding */ toBigInt),
+/* harmony export */   toByteArray: () => (/* binding */ toByteArray),
+/* harmony export */   toRtcServers: () => (/* binding */ toRtcServers)
+/* harmony export */ });
+// Shape conversions between GramJS TL objects and the ntgcalls native binding.
+/**
+ * The ntgcalls N-API binding rejects Buffers for byte fields ("An array was expected") even
+ * though its index.d.ts declares Buffer. Plain number[] is what it actually accepts.
+ */
+function toByteArray(data) {
+    return Array.from(data);
+}
+function toBigInt(value) {
+    return BigInt(value.toString());
+}
+/** PhoneCall.connections → ntgcalls RTCServer[] (WebRTC TURN/STUN vs Telegram reflector). */
+function toRtcServers(connections) {
+    return connections.map((c) => c.className === 'PhoneConnectionWebrtc'
+        ? {
+            id: toBigInt(c.id), ipv4: c.ip, ipv6: c.ipv6, port: c.port,
+            username: c.username, password: c.password,
+            turn: !!c.turn, stun: !!c.stun, tcp: false,
+        }
+        : {
+            id: toBigInt(c.id), ipv4: c.ip, ipv6: c.ipv6, port: c.port,
+            turn: true, stun: false, tcp: !!c.tcp,
+            peerTag: c.peerTag ? toByteArray(c.peerTag) : undefined,
+        });
+}
+/** ntgcalls enums are plain objects without a reverse map; look a name up by value. */
+function enumName(enumObj, value) {
+    return Object.keys(enumObj).find((k) => enumObj[k] === value);
+}
+const DISCARD_REASONS = {
+    PhoneCallDiscardReasonHangup: 'hangup',
+    PhoneCallDiscardReasonBusy: 'busy',
+    PhoneCallDiscardReasonMissed: 'missed',
+    PhoneCallDiscardReasonDisconnect: 'disconnect',
+};
+function discardReason(className) {
+    return (className && DISCARD_REASONS[className]) || 'hangup';
+}
+
+
+/***/ },
+
+/***/ "../../packages/tg-calls/src/index.ts"
+/*!********************************************!*\
+  !*** ../../packages/tg-calls/src/index.ts ***!
+  \********************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   CallEngine: () => (/* reexport safe */ _CallEngine__WEBPACK_IMPORTED_MODULE_0__.CallEngine),
+/* harmony export */   DEFAULT_AUDIO: () => (/* reexport safe */ _media__WEBPACK_IMPORTED_MODULE_1__.DEFAULT_AUDIO),
+/* harmony export */   DEFAULT_VIDEO: () => (/* reexport safe */ _media__WEBPACK_IMPORTED_MODULE_1__.DEFAULT_VIDEO),
+/* harmony export */   audioShellCommand: () => (/* reexport safe */ _media__WEBPACK_IMPORTED_MODULE_1__.audioShellCommand),
+/* harmony export */   discardReason: () => (/* reexport safe */ _convert__WEBPACK_IMPORTED_MODULE_2__.discardReason),
+/* harmony export */   enumName: () => (/* reexport safe */ _convert__WEBPACK_IMPORTED_MODULE_2__.enumName),
+/* harmony export */   isVideoFile: () => (/* reexport safe */ _media__WEBPACK_IMPORTED_MODULE_1__.isVideoFile),
+/* harmony export */   shellQuote: () => (/* reexport safe */ _media__WEBPACK_IMPORTED_MODULE_1__.shellQuote),
+/* harmony export */   silenceShellCommand: () => (/* reexport safe */ _media__WEBPACK_IMPORTED_MODULE_1__.silenceShellCommand),
+/* harmony export */   toBigInt: () => (/* reexport safe */ _convert__WEBPACK_IMPORTED_MODULE_2__.toBigInt),
+/* harmony export */   toByteArray: () => (/* reexport safe */ _convert__WEBPACK_IMPORTED_MODULE_2__.toByteArray),
+/* harmony export */   toRtcServers: () => (/* reexport safe */ _convert__WEBPACK_IMPORTED_MODULE_2__.toRtcServers),
+/* harmony export */   videoShellCommand: () => (/* reexport safe */ _media__WEBPACK_IMPORTED_MODULE_1__.videoShellCommand),
+/* harmony export */   wantsVideo: () => (/* reexport safe */ _media__WEBPACK_IMPORTED_MODULE_1__.wantsVideo)
+/* harmony export */ });
+/* harmony import */ var _CallEngine__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./CallEngine */ "../../packages/tg-calls/src/CallEngine.ts");
+/* harmony import */ var _media__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./media */ "../../packages/tg-calls/src/media.ts");
+/* harmony import */ var _convert__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./convert */ "../../packages/tg-calls/src/convert.ts");
+/**
+ * Calls Module
+ *
+ * Private 1:1 Telegram voice/video calls that play audio/video files:
+ * - outgoing: engine.call(user, { file })
+ * - incoming: an app-supplied policy decides answer / decline / ignore per caller
+ * - per-call metadata record (timings, end reason, emojis, relays, remote camera/mic changes)
+ *
+ * Requires the native `ntgcalls` binary (darwin-arm64, linux-x64/arm64) and ffmpeg on PATH.
+ */
+
+
+
+
+
+/***/ },
+
+/***/ "../../packages/tg-calls/src/media.ts"
+/*!********************************************!*\
+  !*** ../../packages/tg-calls/src/media.ts ***!
+  \********************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   DEFAULT_AUDIO: () => (/* binding */ DEFAULT_AUDIO),
+/* harmony export */   DEFAULT_VIDEO: () => (/* binding */ DEFAULT_VIDEO),
+/* harmony export */   audioShellCommand: () => (/* binding */ audioShellCommand),
+/* harmony export */   isVideoFile: () => (/* binding */ isVideoFile),
+/* harmony export */   shellQuote: () => (/* binding */ shellQuote),
+/* harmony export */   silenceShellCommand: () => (/* binding */ silenceShellCommand),
+/* harmony export */   videoShellCommand: () => (/* binding */ videoShellCommand),
+/* harmony export */   wantsVideo: () => (/* binding */ wantsVideo)
+/* harmony export */ });
+const DEFAULT_AUDIO = { sampleRate: 48000, channels: 1 };
+// Portrait 9:16 — what phones show full-screen in a 1:1 video call.
+const DEFAULT_VIDEO = { width: 720, height: 1280, fps: 24 };
+const VIDEO_EXT = /\.(mp4|mov|mkv|webm)$/i;
+function isVideoFile(file) {
+    return VIDEO_EXT.test(file);
+}
+function wantsVideo(media) {
+    return media.video ?? isVideoFile(media.file);
+}
+/** POSIX single-quote escaping; ntgcalls runs SHELL sources through /bin/sh. */
+function shellQuote(value) {
+    return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+/**
+ * Video is cropped to fill the portrait frame (no stretching, no black bars): sources differ
+ * slightly in aspect (0.52–0.61), and a plain scale distorted them by up to ~9%.
+ */
+/** Input-side seek (`-ss` before `-i`): fast, and identical for audio and video so they stay in sync. */
+function seekArg(startSec) {
+    const sec = Number(startSec);
+    return Number.isFinite(sec) && sec > 0 ? `-ss ${sec.toFixed(3)} ` : '';
+}
+/** A CDN source survives a network blip (reconnects and resumes) instead of stalling the stream. */
+function reconnectArgs(file) {
+    return /^https?:\/\//i.test(file) ? '-reconnect 1 -reconnect_streamed 1 -reconnect_on_network_error 1 -reconnect_delay_max 5 ' : '';
+}
+// Each pipe decodes only its own stream: without -vn the audio process also decoded the whole
+// video (~13% of a core per call on the 2-vCPU VMs, measured 2026-10-10).
+function audioShellCommand(file, audio, ffmpeg = 'ffmpeg', startSec) {
+    return `${ffmpeg} ${seekArg(startSec)}${reconnectArgs(file)}-i ${shellQuote(file)} -vn -v quiet -f s16le -ac ${audio.channels} -ar ${audio.sampleRate} pipe:1`;
+}
+/** Endless silence in the show's audio format, for a video with no audio stream (CallMedia.audio === false). */
+function silenceShellCommand(audio, ffmpeg = 'ffmpeg') {
+    return `${ffmpeg} -v quiet -f lavfi -i anullsrc=r=${audio.sampleRate}:cl=${audio.channels === 1 ? 'mono' : 'stereo'} -f s16le -ac ${audio.channels} -ar ${audio.sampleRate} pipe:1`;
+}
+function videoShellCommand(file, video, ffmpeg = 'ffmpeg', startSec) {
+    return `${ffmpeg} ${seekArg(startSec)}${reconnectArgs(file)}-i ${shellQuote(file)} -an -v quiet -f rawvideo -r ${video.fps} -pix_fmt yuv420p -vf scale=${video.width}:${video.height}:force_original_aspect_ratio=increase,crop=${video.width}:${video.height},setsar=1 pipe:1`;
+}
+
+
+/***/ },
+
 /***/ "../../packages/tg-channel-state/src/channel-message-promotions/attribution/conversion-attribution.ts"
 /*!************************************************************************************************************!*\
   !*** ../../packages/tg-channel-state/src/channel-message-promotions/attribution/conversion-attribution.ts ***!
@@ -16107,151 +17192,6 @@ function isTelegramRuntimeFailure(error) {
  */
 function isSendOutcomeUnknown(error) {
     return /timeout/i.test(errorText(error));
-}
-
-
-/***/ },
-
-/***/ "../../packages/tg-core/src/telegram-utils/phonestate.ts"
-/*!***************************************************************!*\
-  !*** ../../packages/tg-core/src/telegram-utils/phonestate.ts ***!
-  \***************************************************************/
-(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
-
-__webpack_require__.r(__webpack_exports__);
-/* harmony export */ __webpack_require__.d(__webpack_exports__, {
-/* harmony export */   acceptPhoneCall: () => (/* binding */ acceptPhoneCall),
-/* harmony export */   confirmPhoneCall: () => (/* binding */ confirmPhoneCall),
-/* harmony export */   createPhoneCallState: () => (/* binding */ createPhoneCallState),
-/* harmony export */   decodePhoneCallData: () => (/* binding */ decodePhoneCallData),
-/* harmony export */   destroyPhoneCallState: () => (/* binding */ destroyPhoneCallState),
-/* harmony export */   encodePhoneCallData: () => (/* binding */ encodePhoneCallData),
-/* harmony export */   generateEmojiFingerprint: () => (/* binding */ generateEmojiFingerprint),
-/* harmony export */   requestPhoneCall: () => (/* binding */ requestPhoneCall)
-/* harmony export */ });
-/* harmony import */ var big_integer__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! big-integer */ "big-integer");
-/* harmony import */ var big_integer__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(big_integer__WEBPACK_IMPORTED_MODULE_0__);
-/* harmony import */ var telegram_network_MTProtoState__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! telegram/network/MTProtoState */ "telegram/network/MTProtoState");
-/* harmony import */ var telegram_network_MTProtoState__WEBPACK_IMPORTED_MODULE_1___default = /*#__PURE__*/__webpack_require__.n(telegram_network_MTProtoState__WEBPACK_IMPORTED_MODULE_1__);
-/* harmony import */ var telegram_extensions_Logger__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! telegram/extensions/Logger */ "telegram/extensions/Logger");
-/* harmony import */ var telegram_extensions_Logger__WEBPACK_IMPORTED_MODULE_2___default = /*#__PURE__*/__webpack_require__.n(telegram_extensions_Logger__WEBPACK_IMPORTED_MODULE_2__);
-/* harmony import */ var telegram_Helpers__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! telegram/Helpers */ "telegram/Helpers");
-/* harmony import */ var telegram_Helpers__WEBPACK_IMPORTED_MODULE_3___default = /*#__PURE__*/__webpack_require__.n(telegram_Helpers__WEBPACK_IMPORTED_MODULE_3__);
-/* harmony import */ var telegram_crypto_AuthKey__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! telegram/crypto/AuthKey */ "telegram/crypto/AuthKey");
-/* harmony import */ var telegram_crypto_AuthKey__WEBPACK_IMPORTED_MODULE_4___default = /*#__PURE__*/__webpack_require__.n(telegram_crypto_AuthKey__WEBPACK_IMPORTED_MODULE_4__);
-/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
-// @ts-nocheck
-
-
-
-
-
-
-const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_5__.Logger("PhoneCallState");
-let currentPhoneCallState;
-class PhoneCallState {
-    constructor() {
-        this.seq = 0;
-        this.waitForState = new Promise((resolve) => {
-            this.resolveState = resolve;
-        });
-    }
-    async requestCall({ p, g, random }) {
-        const pBN = telegram_Helpers__WEBPACK_IMPORTED_MODULE_3__.readBigIntFromBuffer(Buffer.from(p), false);
-        const randomBN = telegram_Helpers__WEBPACK_IMPORTED_MODULE_3__.readBigIntFromBuffer(Buffer.from(random), false);
-        const gA = telegram_Helpers__WEBPACK_IMPORTED_MODULE_3__.modExp(big_integer__WEBPACK_IMPORTED_MODULE_0___default()(g), randomBN, pBN);
-        this.gA = gA;
-        this.p = pBN;
-        this.random = randomBN;
-        const gAHash = await telegram_Helpers__WEBPACK_IMPORTED_MODULE_3__.sha256(telegram_Helpers__WEBPACK_IMPORTED_MODULE_3__.getByteArray(gA));
-        return Array.from(gAHash);
-    }
-    acceptCall({ p, g, random }) {
-        const pLast = telegram_Helpers__WEBPACK_IMPORTED_MODULE_3__.readBigIntFromBuffer(p, false);
-        const randomLast = telegram_Helpers__WEBPACK_IMPORTED_MODULE_3__.readBigIntFromBuffer(random, false);
-        const gB = telegram_Helpers__WEBPACK_IMPORTED_MODULE_3__.modExp(big_integer__WEBPACK_IMPORTED_MODULE_0___default()(g), randomLast, pLast);
-        this.gB = gB;
-        this.p = pLast;
-        this.random = randomLast;
-        return Array.from(telegram_Helpers__WEBPACK_IMPORTED_MODULE_3__.getByteArray(gB));
-    }
-    async confirmCall(gB) {
-        if (!this.gA || !this.random || !this.p) {
-            throw new Error("Phone call state has not been initialized; requestPhoneCall must run before confirmPhoneCall");
-        }
-        this.gB = telegram_Helpers__WEBPACK_IMPORTED_MODULE_3__.readBigIntFromBuffer(Buffer.from(gB), false);
-        const authKey = telegram_Helpers__WEBPACK_IMPORTED_MODULE_3__.modExp(this.gB, this.random, this.p);
-        const fingerprint = await telegram_Helpers__WEBPACK_IMPORTED_MODULE_3__.sha1(telegram_Helpers__WEBPACK_IMPORTED_MODULE_3__.getByteArray(authKey));
-        const keyFingerprint = telegram_Helpers__WEBPACK_IMPORTED_MODULE_3__.readBigIntFromBuffer(fingerprint.slice(-8).reverse(), false);
-        const key = new telegram_crypto_AuthKey__WEBPACK_IMPORTED_MODULE_4__.AuthKey();
-        await key.setKey(telegram_Helpers__WEBPACK_IMPORTED_MODULE_3__.getByteArray(authKey));
-        this.state = new telegram_network_MTProtoState__WEBPACK_IMPORTED_MODULE_1__.MTProtoState(key, new telegram_extensions_Logger__WEBPACK_IMPORTED_MODULE_2__.Logger(), true);
-        this.resolveState();
-        return { gA: Array.from(telegram_Helpers__WEBPACK_IMPORTED_MODULE_3__.getByteArray(this.gA)), keyFingerprint: keyFingerprint.toString() };
-    }
-    async encode(data) {
-        if (!this.state)
-            return undefined;
-        const seqBuffer = Buffer.alloc(4);
-        seqBuffer.writeUInt32LE(this.seq++, 0);
-        const encodedData = await this.state.encryptMessageData(Buffer.concat([telegram_Helpers__WEBPACK_IMPORTED_MODULE_3__.convertToLittle(seqBuffer), Buffer.from(data)]));
-        return Array.from(encodedData);
-    }
-    async decode(data) {
-        if (!this.state) {
-            return this.waitForState.then(() => {
-                return this.decode(data);
-            });
-        }
-        const message = await this.state.decryptMessageData(Buffer.from(data));
-        return JSON.parse(message.toString());
-    }
-}
-function computeEmojiIndex(bytes) {
-    return ((big_integer__WEBPACK_IMPORTED_MODULE_0___default()(bytes[0]).and(0x7F)).shiftLeft(56))
-        .or((big_integer__WEBPACK_IMPORTED_MODULE_0___default()(bytes[1]).shiftLeft(48)))
-        .or((big_integer__WEBPACK_IMPORTED_MODULE_0___default()(bytes[2]).shiftLeft(40)))
-        .or((big_integer__WEBPACK_IMPORTED_MODULE_0___default()(bytes[3]).shiftLeft(32)))
-        .or((big_integer__WEBPACK_IMPORTED_MODULE_0___default()(bytes[4]).shiftLeft(24)))
-        .or((big_integer__WEBPACK_IMPORTED_MODULE_0___default()(bytes[5]).shiftLeft(16)))
-        .or((big_integer__WEBPACK_IMPORTED_MODULE_0___default()(bytes[6]).shiftLeft(8)))
-        .or((big_integer__WEBPACK_IMPORTED_MODULE_0___default()(bytes[7])));
-}
-async function generateEmojiFingerprint(authKey, gA, emojiData, emojiOffsets) {
-    const hash = await telegram_Helpers__WEBPACK_IMPORTED_MODULE_3__.sha256(Buffer.concat([new Uint8Array(authKey), new Uint8Array(gA)]));
-    const result = [];
-    const emojiCount = emojiOffsets.length - 1;
-    const kPartSize = 8;
-    for (let partOffset = 0; partOffset !== hash.byteLength; partOffset += kPartSize) {
-        const value = computeEmojiIndex(hash.subarray(partOffset, partOffset + kPartSize));
-        const index = value.modPow(1, emojiCount).toJSNumber();
-        const offset = emojiOffsets[index];
-        const size = emojiOffsets[index + 1] - offset;
-        result.push(String.fromCharCode(...emojiData.subarray(offset, offset + size)));
-    }
-    return result.join('');
-}
-function createPhoneCallState() {
-    currentPhoneCallState = new PhoneCallState();
-}
-function destroyPhoneCallState() {
-    logger.info("Delete Call State!!");
-    currentPhoneCallState = undefined;
-}
-function encodePhoneCallData(params) {
-    return currentPhoneCallState?.encode(params);
-}
-function decodePhoneCallData(params) {
-    return currentPhoneCallState?.decode(params);
-}
-function confirmPhoneCall(params) {
-    return currentPhoneCallState?.confirmCall(params);
-}
-function acceptPhoneCall(params) {
-    return currentPhoneCallState?.acceptCall(params);
-}
-function requestPhoneCall(params) {
-    return currentPhoneCallState?.requestCall(params);
 }
 
 
@@ -38333,330 +39273,354 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "56f5c2cbae5d8204fb87a975453144671f198b61" : 0;
-    const builtAt =  true ? "2026-10-28T17:52:04.169Z" : 0;
+    const sha =  true ? "85ea3c8b9982f16fac4857978ec88780e0b1732e" : 0;
+    const builtAt =  true ? "2026-10-28T18:46:05.450Z" : 0;
     return { sha, builtAt };
 }
 
 
 /***/ },
 
-/***/ "./src/calls/call-manager.ts"
-/*!***********************************!*\
-  !*** ./src/calls/call-manager.ts ***!
-  \***********************************/
+/***/ "./src/calls/route-call.ts"
+/*!*********************************!*\
+  !*** ./src/calls/route-call.ts ***!
+  \*********************************/
 (__unused_webpack_module, __webpack_exports__, __webpack_require__) {
 
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
-/* harmony export */   CallManager: () => (/* binding */ CallManager)
+/* harmony export */   ROUTE_CALL_ANSWER_TIMEOUT_MS: () => (/* binding */ ROUTE_CALL_ANSWER_TIMEOUT_MS),
+/* harmony export */   ROUTE_CALL_CONNECT_TIMEOUT_MS: () => (/* binding */ ROUTE_CALL_CONNECT_TIMEOUT_MS),
+/* harmony export */   ROUTE_CALL_COUNT_WINDOW_MS: () => (/* binding */ ROUTE_CALL_COUNT_WINDOW_MS),
+/* harmony export */   ROUTE_CALL_DEFAULT_MIN_GAP_MS: () => (/* binding */ ROUTE_CALL_DEFAULT_MIN_GAP_MS),
+/* harmony export */   ROUTE_CALL_DEFAULT_USER_GAP_MS: () => (/* binding */ ROUTE_CALL_DEFAULT_USER_GAP_MS),
+/* harmony export */   ROUTE_CALL_DEFAULT_USER_MAX_PER_DAY: () => (/* binding */ ROUTE_CALL_DEFAULT_USER_MAX_PER_DAY),
+/* harmony export */   ROUTE_CALL_FLOOD_MIN_MS: () => (/* binding */ ROUTE_CALL_FLOOD_MIN_MS),
+/* harmony export */   ROUTE_CALL_MAX_DURATION_MS: () => (/* binding */ ROUTE_CALL_MAX_DURATION_MS),
+/* harmony export */   ROUTE_CALL_PEER_FLOOD_MS: () => (/* binding */ ROUTE_CALL_PEER_FLOOD_MS),
+/* harmony export */   ROUTE_CALL_PRIVACY_TTL_MS: () => (/* binding */ ROUTE_CALL_PRIVACY_TTL_MS),
+/* harmony export */   ROUTE_CALL_RING_DELAY_MS: () => (/* binding */ ROUTE_CALL_RING_DELAY_MS),
+/* harmony export */   RouteCallService: () => (/* binding */ RouteCallService),
+/* harmony export */   classifyRouteCallFlood: () => (/* binding */ classifyRouteCallFlood),
+/* harmony export */   listRouteCallClips: () => (/* binding */ listRouteCallClips),
+/* harmony export */   pickRouteCallClip: () => (/* binding */ pickRouteCallClip),
+/* harmony export */   resetRouteCallLogOnceForTests: () => (/* binding */ resetRouteCallLogOnceForTests),
+/* harmony export */   routeCallAudioDir: () => (/* binding */ routeCallAudioDir),
+/* harmony export */   routeCallResult: () => (/* binding */ routeCallResult)
 /* harmony export */ });
-/* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! telegram */ "telegram");
-/* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(telegram__WEBPACK_IMPORTED_MODULE_0__);
-/* harmony import */ var telegram_Helpers__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! telegram/Helpers */ "telegram/Helpers");
-/* harmony import */ var telegram_Helpers__WEBPACK_IMPORTED_MODULE_1___default = /*#__PURE__*/__webpack_require__.n(telegram_Helpers__WEBPACK_IMPORTED_MODULE_1__);
-/* harmony import */ var big_integer__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! big-integer */ "big-integer");
-/* harmony import */ var big_integer__WEBPACK_IMPORTED_MODULE_2___default = /*#__PURE__*/__webpack_require__.n(big_integer__WEBPACK_IMPORTED_MODULE_2__);
-/* harmony import */ var _tg_core_telegram_utils_phonestate__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! @tg/core/telegram-utils/phonestate */ "../../packages/tg-core/src/telegram-utils/phonestate.ts");
-/* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
-/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
-/* harmony import */ var _tg_core_utils_expected_outcome_log__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! @tg/core/utils/expected-outcome-log */ "../../packages/tg-core/src/utils/expected-outcome-log.ts");
-/* harmony import */ var _data_user_data_crud__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ../data/user-data-crud */ "./src/data/user-data-crud.ts");
+/* harmony import */ var fs__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! fs */ "fs");
+/* harmony import */ var fs__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(fs__WEBPACK_IMPORTED_MODULE_0__);
+/* harmony import */ var path__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! path */ "path");
+/* harmony import */ var path__WEBPACK_IMPORTED_MODULE_1___default = /*#__PURE__*/__webpack_require__.n(path__WEBPACK_IMPORTED_MODULE_1__);
+/* harmony import */ var _tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! @tg/core/state/state-redis */ "../../packages/tg-core/src/state/state-redis.ts");
+/* harmony import */ var _tg_calls__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! @tg/calls */ "../../packages/tg-calls/src/index.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/**
+ * Route call: a promote account rings a user who DMed it (route stage 2) with ONE short pre-recorded clip
+ * ("message me on my main account"), then hangs up. It rings as a VIDEO call (phones put video calls on the
+ * loudspeaker) but sends no camera track: media `{ file, video: false, ringAsVideo: true }` on the shared
+ * @tg/calls engine. Replaces the old silent RequestCall that was never hung up.
+ *
+ * Owner bounds (2026-10-29). Per user (chatId), GLOBAL across every promote account and client: at most one call
+ * every 6 h and at most 4 calls in any rolling 24 h. Every gate is in Redis, so it survives the 15-min route reset
+ * (a returning user can reach stage 2 again) and restarts, and is shared across mobiles and clients:
+ *
+ *   promote::routecall::user::{chatId}     STRING  ROUTE_CALL_USER_GAP_MS (6 h)     one call per user per 6 h
+ *   promote::routecall::count::{chatId}    ZSET    24 h  (member per call, score=ms) ROUTE_CALL_USER_MAX_PER_DAY (4) per rolling 24 h
+ *   promote::routecall::gap::{mobile}      STRING  ROUTE_CALL_MIN_GAP_MS (180 s)    spacing between calls on one mobile
+ *   promote::routecall::privacy::{chatId}  STRING  30 d                             chat answered USER_PRIVACY_RESTRICTED
+ *   promote::routecall::flood::{mobile}    STRING  FLOOD_WAIT: max(wait, 1 h); PEER_FLOOD: 6 h
+ *
+ * The user and mobile gap keys are claimed in ONE MULTI (MSETNX = both or neither) BEFORE RequestCall, with the
+ * call added to the 24 h count in the same MULTI; the call is placed only when MSETNX returns 1. Any Redis failure
+ * = no call (fail closed). A claimed call is never retried, whatever its outcome (declined, missed, media_failed
+ * and error all count).
+ */
 
 
 
 
 
-
-
-
-const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_5__.Logger("CallManager");
-// Default timeouts and call config
-const TIMEOUTS = {
-    PHONE_CALL_TIMEOUT: 60000,
-    PHONE_CALL_DESTROY_TIMEOUT: 30000,
-    SLEEP_MEDIUM: 1000
-};
-class CallManager {
-    constructor(client, options = {}) {
-        this.currentCall = null;
-        this.callQueue = [];
-        this.processing = false;
-        this.callTimeout = null;
-        this.MAX_CALL_QUEUE = 50;
-        this.client = client;
-        CallManager.instanceCounter++;
-        this.instanceId = options.instanceId || `cm-${CallManager.instanceCounter}-${Date.now()}`;
-        this.instanceName = options.instanceName || `CallManager-${this.instanceId}`;
-        CallManager.activeInstances.set(this.instanceId, this);
+const ROUTE_CALL_DEFAULT_USER_GAP_MS = 6 * 60 * 60000;
+const ROUTE_CALL_DEFAULT_USER_MAX_PER_DAY = 4;
+const ROUTE_CALL_COUNT_WINDOW_MS = 24 * 60 * 60000;
+const ROUTE_CALL_PRIVACY_TTL_MS = 30 * 24 * 60 * 60000;
+const ROUTE_CALL_FLOOD_MIN_MS = 60 * 60000;
+const ROUTE_CALL_PEER_FLOOD_MS = 6 * 60 * 60000;
+const ROUTE_CALL_DEFAULT_MIN_GAP_MS = 180000;
+/** Delay between the stage-2 text and the ring (as the old call did). */
+const ROUTE_CALL_RING_DELAY_MS = 2500;
+const ROUTE_CALL_ANSWER_TIMEOUT_MS = 25000;
+/** Answered but media never connected: give up quickly (engine default is 90 s). */
+const ROUTE_CALL_CONNECT_TIMEOUT_MS = 20000;
+/**
+ * No duration probe exists in @tg/calls, so a fixed cap: the 14 clips are 11.5-16.4 s (ffprobe 2026-10-29), so
+ * 30 s >= clip + 10 s for all of them and stays under the 45 s ceiling. hangupOnMediaEnd ends the call at the clip end.
+ */
+const ROUTE_CALL_MAX_DURATION_MS = 30000;
+/** `ROUTE_CALL_AUDIO_DIR`, else `<cwd>/assets/route-call-audio` (cwd is /root/promotions on the VMs). */
+function routeCallAudioDir(env = process.env) {
+    const configured = env.ROUTE_CALL_AUDIO_DIR?.trim();
+    return configured ? configured : path__WEBPACK_IMPORTED_MODULE_1___default().join(process.cwd(), "assets/route-call-audio");
+}
+/** Every *.mp3 file directly in `dir`, sorted; [] when the dir is missing. */
+function listRouteCallClips(dir) {
+    try {
+        return fs__WEBPACK_IMPORTED_MODULE_0___default().readdirSync(dir, { withFileTypes: true })
+            .filter((entry) => entry.isFile() && /\.mp3$/i.test(entry.name))
+            .map((entry) => path__WEBPACK_IMPORTED_MODULE_1___default().join(dir, entry.name))
+            .sort();
     }
-    // Static methods for debugging and tracking
-    static getInstanceCount() {
-        return CallManager.activeInstances.size;
-    }
-    static getInstances() {
-        return Array.from(CallManager.activeInstances.values());
-    }
-    static getInstanceById(id) {
-        return CallManager.activeInstances.get(id);
-    }
-    /**
-     * Factory method - returns existing instance or creates new one.
-     * Prevents orphaned instances in activeInstances map on creation failure.
-     */
-    static getOrCreate(client, options = {}) {
-        const instanceId = options.instanceId || `cm-${CallManager.instanceCounter + 1}-${Date.now()}`;
-        const existing = CallManager.activeInstances.get(instanceId);
-        if (existing) {
-            existing.dispose();
-        }
-        return new CallManager(client, { ...options, instanceId });
-    }
-    getInstanceId() {
-        return this.instanceId;
-    }
-    getInstanceName() {
-        return this.instanceName;
-    }
-    getCurrentCall() {
-        return this.currentCall;
-    }
-    isCallActive() {
-        return this.currentCall !== null;
-    }
-    addToQueue(chatId) {
-        this.callQueue.push(chatId);
-        // Limit callQueue array size
-        if (this.callQueue.length > this.MAX_CALL_QUEUE) {
-            this.callQueue = this.callQueue.slice(-this.MAX_CALL_QUEUE);
-            logger.warn(`[${this.instanceName}] Call queue trimmed to ${this.MAX_CALL_QUEUE}`);
-        }
-        logger.info(`[${this.instanceName}] Added to call queue: ${chatId}, Queue length: ${this.callQueue.length}`);
-        this.processQueue();
-    }
-    removeFromQueue(chatId) {
-        const index = this.callQueue.indexOf(chatId);
-        if (index > -1) {
-            this.callQueue.splice(index, 1);
-            return true;
-        }
-        return false;
-    }
-    getQueueLength() {
-        return this.callQueue.length;
-    }
-    async processQueue() {
-        if (this.processing)
-            return;
-        this.processing = true;
-        while (this.callQueue.length > 0) {
-            if (!this.isCallActive()) {
-                const chatId = this.callQueue.shift();
-                if (chatId) {
-                    await this.requestCall(chatId, true);
-                }
-            }
-            // Wait for call to end before processing next
-            while (this.isCallActive()) {
-                await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_1__.sleep)(500);
-            }
-        }
-        this.processing = false;
-    }
-    async requestCall(chatId, force = false) {
-        if (!this.client) {
-            logger.info(`[${this.instanceName}] No client available for call request`);
-            return false;
-        }
-        if (await this.isBlocked(chatId))
-            return false;
-        try {
-            logger.info(`[${this.instanceName}] Requesting call to:`, chatId);
-            if (!this.isCallActive() || force) {
-                (0,_tg_core_telegram_utils_phonestate__WEBPACK_IMPORTED_MODULE_3__.createPhoneCallState)();
-                // Resolve chatId to InputUser
-                const inputUser = await this.resolveInputUser(chatId);
-                if (!inputUser) {
-                    logger.info(`[${this.instanceName}] Failed to resolve user for call`);
-                    (0,_tg_core_telegram_utils_phonestate__WEBPACK_IMPORTED_MODULE_3__.destroyPhoneCallState)();
-                    return false;
-                }
-                const dhConfig = await this.client.invoke(new telegram__WEBPACK_IMPORTED_MODULE_0__.Api.messages.GetDhConfig({}));
-                const gAHash = await (0,_tg_core_telegram_utils_phonestate__WEBPACK_IMPORTED_MODULE_3__.requestPhoneCall)(dhConfig);
-                try {
-                    const result = await this.client.invoke(new telegram__WEBPACK_IMPORTED_MODULE_0__.Api.phone.RequestCall({
-                        video: true,
-                        userId: chatId,
-                        randomId: this.generateRandomInt(),
-                        gAHash: Buffer.from(gAHash),
-                        protocol: new telegram__WEBPACK_IMPORTED_MODULE_0__.Api.PhoneCallProtocol({
-                            udpP2p: true,
-                            udpReflector: true,
-                            minLayer: 65,
-                            maxLayer: 105,
-                            libraryVersions: ["2.4.4", "4.0.0"],
-                        }),
-                    }));
-                    this.currentCall = result.phoneCall;
-                    // Auto-cleanup after timeout
-                    if (this.callTimeout) {
-                        clearTimeout(this.callTimeout);
-                    }
-                    this.callTimeout = setTimeout(() => {
-                        this.callTimeout = null;
-                        if (this.currentCall && this.currentCall.id === result.phoneCall.id) {
-                            logger.info(`[${this.instanceName}] Call request timed out, ending call`);
-                            this.endCall();
-                        }
-                    }, TIMEOUTS.PHONE_CALL_DESTROY_TIMEOUT);
-                    return true;
-                }
-                catch (error) {
-                    if ((0,_tg_core_utils_expected_outcome_log__WEBPACK_IMPORTED_MODULE_6__.isExpectedTelegramLogOutcome)(error)) {
-                        logger.warn(`[${this.instanceName}] Call request error:`, error);
-                    }
-                    else {
-                        logger.error(`[${this.instanceName}] Call request error:`, error);
-                    }
-                    this.endCall();
-                    (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, 'Failed to Request Call', false);
-                    return false;
-                }
-            }
-            else {
-                logger.info(`[${this.instanceName}] Call already active, skipping request`);
-                return false;
-            }
-        }
-        catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, `[${this.instanceName}] Call request error`, false);
-            this.endCall();
-            return false;
-        }
-    }
-    /**
-     * Owner rule (2026-10-21): a chat blocked (canReply 0) on ANY persona row is never rung, by any
-     * caller of requestCall. Text is unaffected. A failed read rings (fail open), as in tg-aut.
-     */
-    async isBlocked(chatId) {
-        try {
-            if (!(await _data_user_data_crud__WEBPACK_IMPORTED_MODULE_7__.UserDataDtoCrud.getInstance().hasBlockedRow(chatId)))
-                return false;
-            logger.info(`[${this.instanceName}] Call to ${chatId} skipped: chat is blocked (canReply 0) on a persona row`);
-            return true;
-        }
-        catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, `[${this.instanceName}] block check failed for ${chatId}; ringing`, false);
-            return false;
-        }
-    }
-    async handlePhoneCallEvent(event) {
-        if (event?.className == "UpdatePhoneCall") {
-            if (!this.currentCall || !event.phoneCall || this.currentCall.id !== event.phoneCall.id || this.currentCall.participantId?.toString() !== event.phoneCall.participantId?.toString()) {
-                return;
-            }
-            try {
-                if (event.phoneCall.className === 'PhoneCallAccepted') {
-                    logger.info(`[${this.instanceName}] Call accepted`);
-                    // await this.handleCallAccepted(event);
-                    await this.endCall();
-                }
-                else if (event.phoneCall.className === 'PhoneCallDiscarded') {
-                    logger.info(`[${this.instanceName}] Call discarded`);
-                    this.endCall();
-                }
-            }
-            catch (error) {
-                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, "Phone call event handling error");
-            }
-        }
-    }
-    async handleCallAccepted(event) {
-        const resultObj = await (0,_tg_core_telegram_utils_phonestate__WEBPACK_IMPORTED_MODULE_3__.confirmPhoneCall)(event.phoneCall.gB);
-        if (!resultObj)
-            return;
-        const { gA, keyFingerprint } = resultObj;
-        await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_1__.sleep)(TIMEOUTS.SLEEP_MEDIUM);
-        const result = await event.client.invoke(new telegram__WEBPACK_IMPORTED_MODULE_0__.Api.phone.ConfirmCall({
-            peer: new telegram__WEBPACK_IMPORTED_MODULE_0__.Api.InputPhoneCall({
-                id: this.currentCall.id,
-                accessHash: this.currentCall.accessHash
-            }),
-            gA: Buffer.from(gA ?? []),
-            keyFingerprint: big_integer__WEBPACK_IMPORTED_MODULE_2___default()(keyFingerprint ?? "0"),
-            protocol: new telegram__WEBPACK_IMPORTED_MODULE_0__.Api.PhoneCallProtocol({
-                udpP2p: true,
-                udpReflector: true,
-                minLayer: 65,
-                maxLayer: 105,
-                libraryVersions: ["2.4.4", "4.0.0", "4.0.1"],
-            }),
-        }));
-        this.currentCall = {
-            ...this.currentCall,
-            ...result.phoneCall
-        };
-    }
-    endCall() {
-        if (this.callTimeout) {
-            clearTimeout(this.callTimeout);
-            this.callTimeout = null;
-        }
-        this.currentCall = null;
-        logger.info(`[${this.instanceName}] Ending call`);
-        (0,_tg_core_telegram_utils_phonestate__WEBPACK_IMPORTED_MODULE_3__.destroyPhoneCallState)();
-    }
-    /**
-     * Dispose this CallManager instance, clearing all timers, queues, and static references.
-     */
-    dispose() {
-        // Clear call timeout
-        if (this.callTimeout) {
-            clearTimeout(this.callTimeout);
-            this.callTimeout = null;
-        }
-        // End any active call
-        if (this.currentCall) {
-            this.endCall();
-        }
-        // Clear call queue
-        this.callQueue = [];
-        this.processing = false;
-        // Remove from static instances map
-        CallManager.activeInstances.delete(this.instanceId);
-        // Clear client reference
-        this.client = null;
-        logger.info(`[${this.instanceName}] CallManager disposed`);
-    }
-    generateRandomInt() {
-        return (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_1__.readBigIntFromBuffer)((0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_1__.generateRandomBytes)(4), true, true).toJSNumber();
-    }
-    getCallQueueStatus() {
-        return {
-            active: this.isCallActive(),
-            queueLength: this.getQueueLength(),
-            currentCall: this.getCurrentCall()
-        };
-    }
-    // Helper to resolve chatId to InputUser
-    async resolveInputUser(chatId) {
-        try {
-            const user = await this.client.getEntity(chatId);
-            if (user && user instanceof telegram__WEBPACK_IMPORTED_MODULE_0__.Api.User && user.accessHash) {
-                return new telegram__WEBPACK_IMPORTED_MODULE_0__.Api.InputUser({
-                    userId: user.id,
-                    accessHash: user.accessHash
-                });
-            }
-        }
-        catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, "User resolution error");
-        }
-        return null;
+    catch {
+        return [];
     }
 }
-CallManager.instanceCounter = 0;
-CallManager.activeInstances = new Map();
+/** Uniform pick: each of the n clips owns an equal 1/n slice of [0, 1). */
+function pickRouteCallClip(clips, random = Math.random) {
+    if (clips.length === 0)
+        return null;
+    const index = Math.min(clips.length - 1, Math.max(0, Math.floor(random() * clips.length)));
+    return clips[index];
+}
+function positiveInt(raw, fallback) {
+    if (raw === undefined || raw.trim() === "")
+        return fallback;
+    const value = Number(raw);
+    return Number.isFinite(value) && value >= 0 ? Math.floor(value) : fallback;
+}
+/** FLOOD_WAIT_n / "A wait of n seconds" / bare FLOOD = timed account limit; PEER_FLOOD / too many requests = spam limit. */
+function classifyRouteCallFlood(error) {
+    if (!error)
+        return null;
+    const e = error;
+    const text = [e.errorMessage, e.message, typeof error === "string" ? error : ""].filter(Boolean).map(String).join(" ");
+    if (/PEER_FLOOD|too many requests/i.test(text))
+        return { kind: "peer" };
+    const wait = /FLOOD_(?:PREMIUM_)?WAIT_(\d+)/i.exec(text) ?? /wait of (\d+) seconds/i.exec(text);
+    if (wait)
+        return { kind: "wait", seconds: Number(wait[1]) };
+    if (/FLOOD/i.test(text))
+        return { kind: "wait", seconds: Number(e.seconds) || 0 };
+    return null;
+}
+function routeCallResult(record) {
+    if (record.endReason === "privacy_restricted")
+        return "privacy";
+    if (record.error && classifyRouteCallFlood(record.error))
+        return "flood";
+    switch (record.endReason) {
+        case "media_failed": return "media_failed";
+        case "error": return "error";
+        case "missed":
+        case "no_answer":
+        case "disconnect": return record.connectedAt ? "played" : "missed";
+        case "busy": return record.connectedAt ? "played" : "declined";
+        case "hangup": return record.connectedAt ? "played" : "declined";
+        case "local_hangup":
+        case "max_duration": return record.connectedAt ? "played" : "missed";
+        default: return "error";
+    }
+}
+let missingClipLogged = false;
+/** Tests only. */
+function resetRouteCallLogOnceForTests() { missingClipLogged = false; }
+class RouteCallService {
+    constructor(deps) {
+        this.engine = null;
+        this.supported = null;
+        /** Set synchronously while a call is being set up or is live, so two inbound DMs cannot both pass the busy check. */
+        this.pending = false;
+        this.disposed = false;
+        this.inFlight = null;
+        this.deps = deps;
+        this.logger = deps.logger ?? new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_4__.Logger("RouteCall");
+    }
+    get now() { return (this.deps.now ?? Date.now)(); }
+    get env() { return this.deps.env ?? process.env; }
+    /** Resolves when the latest maybeCall() has finished (tests, dispose). */
+    async settled() { await this.inFlight?.catch(() => undefined); }
+    /** Never throws. Places at most one call; see the file header for every gate. */
+    maybeCall(chatId) {
+        const run = this.run(chatId).catch((error) => {
+            this.logger.warn(`[ROUTE-CALL] mobile=${this.deps.mobile} chat=${chatId} unexpected failure: ${error?.message ?? error}`);
+            return { called: false, skip: "engine" };
+        });
+        this.inFlight = run;
+        return run;
+    }
+    skip(chatId, skip) {
+        this.logger.info(`[ROUTE-CALL] mobile=${this.deps.mobile} chat=${chatId} result=skipped reason=${skip}`);
+        return { called: false, skip };
+    }
+    async run(chatId) {
+        const { mobile } = this.deps;
+        if (this.disposed)
+            return this.skip(chatId, "engine");
+        if (this.pending || this.engine?.isBusy())
+            return this.skip(chatId, "busy");
+        const clips = (this.deps.listClips ?? listRouteCallClips)(routeCallAudioDir(this.env));
+        const clip = pickRouteCallClip(clips, this.deps.random);
+        if (!clip) {
+            if (!missingClipLogged) {
+                missingClipLogged = true;
+                this.logger.warn(`[ROUTE-CALL] no *.mp3 in ${routeCallAudioDir(this.env)}: route calls are off until clips are installed`);
+            }
+            return { called: false, skip: "no_clip" };
+        }
+        if (this.supported === null)
+            this.supported = (this.deps.isSupported ?? (() => _tg_calls__WEBPACK_IMPORTED_MODULE_3__.CallEngine.isSupported()))();
+        if (!this.supported)
+            return this.skip(chatId, "unsupported");
+        if (this.deps.isSpamLimited())
+            return this.skip(chatId, "spam_limited");
+        this.pending = true;
+        try {
+            return await this.claimAndCall(chatId, clip, mobile);
+        }
+        finally {
+            this.pending = false;
+        }
+    }
+    async claimAndCall(chatId, clip, mobile) {
+        const now = this.now;
+        const userKey = (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_2__.stateKey)("promote::routecall::user", chatId);
+        const countKey = (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_2__.stateKey)("promote::routecall::count", chatId);
+        const gapKey = (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_2__.stateKey)("promote::routecall::gap", mobile);
+        const privacyKey = (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_2__.stateKey)("promote::routecall::privacy", chatId);
+        const floodKey = (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_2__.stateKey)("promote::routecall::flood", mobile);
+        if (!userKey || !countKey || !gapKey || !privacyKey || !floodKey)
+            return this.skip(chatId, "redis");
+        const windowStart = now - ROUTE_CALL_COUNT_WINDOW_MS;
+        const gate = await (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_2__.readState)("promote.routecall", (r) => Promise.all([
+            r.mget(floodKey, privacyKey, userKey, gapKey),
+            r.zrangebyscore(countKey, windowStart, "+inf"),
+        ]));
+        if (!gate)
+            return this.skip(chatId, "redis");
+        const [[flood, privacy, user, gap], recentCalls] = gate;
+        if (flood !== null)
+            return this.skip(chatId, "flood_cooldown");
+        if (privacy !== null)
+            return this.skip(chatId, "privacy");
+        const maxPerDay = positiveInt(this.env.ROUTE_CALL_USER_MAX_PER_DAY, ROUTE_CALL_DEFAULT_USER_MAX_PER_DAY);
+        if (recentCalls.length >= maxPerDay)
+            return this.skip(chatId, "user_daily_max");
+        if (user !== null)
+            return this.skip(chatId, "user_gap");
+        if (gap !== null)
+            return this.skip(chatId, "mobile_gap");
+        // Blocked check after the cheap Redis gates (it reads Mongo).
+        let blocked = false;
+        try {
+            blocked = await this.deps.isBlocked(chatId);
+        }
+        catch (error) {
+            this.logger.warn(`[ROUTE-CALL] mobile=${mobile} chat=${chatId} block check failed; ringing: ${error?.message ?? error}`);
+        }
+        if (blocked)
+            return this.skip(chatId, "blocked");
+        let peer = null;
+        try {
+            peer = this.deps.resolvePeer ? await this.deps.resolvePeer(chatId) : chatId;
+        }
+        catch (error) {
+            this.logger.warn(`[ROUTE-CALL] mobile=${mobile} chat=${chatId} peer resolve failed: ${error?.message ?? error}`);
+        }
+        if (!peer)
+            return this.skip(chatId, "unresolved");
+        let engine;
+        try {
+            engine = this.engine ?? (this.engine = (this.deps.createEngine ?? (() => this.defaultEngine()))());
+        }
+        catch (error) {
+            this.supported = false;
+            this.logger.warn(`[ROUTE-CALL] mobile=${mobile} engine unavailable: ${error?.message ?? error}`);
+            return this.skip(chatId, "unsupported");
+        }
+        if (engine.isBusy())
+            return this.skip(chatId, "busy");
+        // The claim, one MULTI: user + mobile gap keys both-or-neither (MSETNX), each given its TTL, and this call added
+        // to the user's 24 h count. The PEXPIREs/ZADD only matter for keys this MSETNX created, except in a lost race
+        // (another process claimed between the read and here), where they can only extend an existing block.
+        const userGap = Math.max(1, positiveInt(this.env.ROUTE_CALL_USER_GAP_MS, ROUTE_CALL_DEFAULT_USER_GAP_MS));
+        const minGap = Math.max(1, positiveInt(this.env.ROUTE_CALL_MIN_GAP_MS, ROUTE_CALL_DEFAULT_MIN_GAP_MS));
+        const stamp = `${now}:${mobile}`;
+        const claim = await (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_2__.readState)("promote.routecall.claim", (r) => {
+            const m = r.multi();
+            m.msetnx(userKey, stamp, gapKey, stamp);
+            m.pexpire(userKey, userGap);
+            m.pexpire(gapKey, minGap);
+            m.zadd(countKey, now, stamp);
+            m.zremrangebyscore(countKey, "-inf", `(${windowStart}`);
+            m.pexpire(countKey, ROUTE_CALL_COUNT_WINDOW_MS);
+            return m.exec();
+        });
+        if (!claim || claim.some(([err]) => err))
+            return this.skip(chatId, "redis");
+        if (Number(claim[0][1]) !== 1)
+            return this.skip(chatId, "claim_lost");
+        if (this.disposed)
+            return this.skip(chatId, "engine");
+        await (this.deps.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms))))(ROUTE_CALL_RING_DELAY_MS);
+        if (this.disposed)
+            return this.skip(chatId, "engine");
+        let record = null;
+        let thrown = null;
+        try {
+            record = await engine.call(peer, { file: clip, video: false, ringAsVideo: true }, {
+                answerTimeoutMs: ROUTE_CALL_ANSWER_TIMEOUT_MS,
+                connectTimeoutMs: ROUTE_CALL_CONNECT_TIMEOUT_MS,
+                maxDurationMs: ROUTE_CALL_MAX_DURATION_MS,
+                hangupOnMediaEnd: true,
+            });
+        }
+        catch (error) {
+            thrown = error;
+        }
+        const floodInfo = classifyRouteCallFlood(thrown ?? record?.error ?? null);
+        const result = record && !thrown ? routeCallResult(record) : floodInfo ? "flood" : "error";
+        if (result === "privacy") {
+            await (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_2__.writeOnce)("promote.routecall.privacy", (m) => { m.set(privacyKey, String(now), "PX", ROUTE_CALL_PRIVACY_TTL_MS); });
+        }
+        if (floodInfo) {
+            const pauseMs = floodInfo.kind === "peer"
+                ? ROUTE_CALL_PEER_FLOOD_MS
+                : Math.max(floodInfo.seconds * 1000, ROUTE_CALL_FLOOD_MIN_MS);
+            await (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_2__.writeOnce)("promote.routecall.flood", (m) => { m.set(floodKey, `${floodInfo.kind}:${now}`, "PX", pauseMs); });
+        }
+        const error = thrown?.message ?? record?.error;
+        this.logger.info(`[ROUTE-CALL] mobile=${mobile} chat=${chatId} clip=${path__WEBPACK_IMPORTED_MODULE_1___default().basename(clip)} result=${result} talkMs=${record?.talkMs ?? 0} mediaCompleted=${record?.mediaCompleted ?? false}${error ? ` error=${error}` : ""}`);
+        return { called: true, result, clip };
+    }
+    defaultEngine() {
+        if (!this.deps.client)
+            throw new Error("no Telegram client");
+        const text = (args) => args.map((a) => (a instanceof Error ? a.message : String(a))).join(" ");
+        const engineLogger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_4__.Logger("RouteCallEngine");
+        return new _tg_calls__WEBPACK_IMPORTED_MODULE_3__.CallEngine(this.deps.client, {
+            maxConcurrentCalls: 1,
+            logger: {
+                log: (...args) => engineLogger.log(text(args)),
+                warn: (...args) => engineLogger.warn(text(args)),
+                error: (...args) => engineLogger.error(text(args)),
+            },
+        });
+    }
+    /** Hang up any live call and release the engine. Idempotent; never throws. */
+    async dispose() {
+        this.disposed = true;
+        const engine = this.engine;
+        this.engine = null;
+        if (!engine)
+            return;
+        try {
+            await engine.stop();
+        }
+        catch (error) {
+            this.logger.warn(`[ROUTE-CALL] mobile=${this.deps.mobile} engine stop failed: ${error?.message ?? error}`);
+        }
+    }
+}
 
 
 /***/ },
@@ -45071,7 +46035,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _tg_dialogs__WEBPACK_IMPORTED_MODULE_27__ = __webpack_require__(/*! @tg/dialogs */ "../../packages/tg-dialogs/src/index.ts");
 /* harmony import */ var _tg_persona_persona_verifier__WEBPACK_IMPORTED_MODULE_28__ = __webpack_require__(/*! @tg/persona/persona-verifier */ "../../packages/tg-persona/src/persona-verifier.ts");
 /* harmony import */ var _tg_persona_persona_timestamps__WEBPACK_IMPORTED_MODULE_29__ = __webpack_require__(/*! @tg/persona/persona-timestamps */ "../../packages/tg-persona/src/persona-timestamps.ts");
-/* harmony import */ var _calls_call_manager__WEBPACK_IMPORTED_MODULE_30__ = __webpack_require__(/*! ../calls/call-manager */ "./src/calls/call-manager.ts");
+/* harmony import */ var _calls_route_call__WEBPACK_IMPORTED_MODULE_30__ = __webpack_require__(/*! ../calls/route-call */ "./src/calls/route-call.ts");
 /* harmony import */ var _setup_new_mobile__WEBPACK_IMPORTED_MODULE_31__ = __webpack_require__(/*! ./setup-new-mobile */ "./src/telegram/setup-new-mobile.ts");
 /* harmony import */ var _promotion_send_message_queue__WEBPACK_IMPORTED_MODULE_32__ = __webpack_require__(/*! ../promotion/send-message-queue */ "./src/promotion/send-message-queue.ts");
 /* harmony import */ var _accounts_route_state_store__WEBPACK_IMPORTED_MODULE_33__ = __webpack_require__(/*! ../accounts/route-state-store */ "./src/accounts/route-state-store.ts");
@@ -45414,6 +46378,8 @@ class TelegramManager {
         this.checkingAuths = false;
         this.lastResetTime = 0;
         this.liveMap = new Map();
+        /** Stage-2 route call (one clip, then hang up). Created per client in createClient, stopped in cleanupClient. */
+        this.routeCalls = null;
         this.updateChannelsInterval = null;
         this.connectionCheckInterval = null;
         this.isReconnecting = false;
@@ -45670,19 +46636,25 @@ class TelegramManager {
                     onPermanentFailure: (error) => (0,_permanent_failure__WEBPACK_IMPORTED_MODULE_14__.handlePermanentTelegramFailure)(error, this.clientDetails.mobile, false, 'DialogManager'),
                 },
             });
-            this.callManager = _calls_call_manager__WEBPACK_IMPORTED_MODULE_30__.CallManager.getOrCreate(this.client, { instanceName: this.clientDetails.clientId, instanceId: this.clientDetails.mobile });
+            void this.routeCalls?.dispose();
+            this.routeCalls = new _calls_route_call__WEBPACK_IMPORTED_MODULE_30__.RouteCallService({
+                mobile: this.clientDetails.mobile,
+                client: this.client,
+                isSpamLimited: () => (0,_tg_core_utils_spam_limit__WEBPACK_IMPORTED_MODULE_8__.isSpamLimited)(this.promoterInstance?.daysLeft ?? -1),
+                isBlocked: (chatId) => _data_user_data_crud__WEBPACK_IMPORTED_MODULE_17__.UserDataDtoCrud.getInstance().hasBlockedRow(chatId),
+                // The user just DMed this account, so the session has its access hash; a bare id string would be parsed as a phone.
+                resolvePeer: (chatId) => _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_20__.EntityCacheManager.getInstance().getEntity(chatId, this.client),
+                sleep: telegram_Helpers__WEBPACK_IMPORTED_MODULE_23__.sleep,
+            });
             await this.dialogManager.initialize();
             logger.info("Adding event Handler");
             if (handler && this.client) {
                 const newMessageHandler = (event) => this.handleEvents(event);
-                const otherEventsHandler = this.callManager.handlePhoneCallEvent.bind(this.callManager);
                 this.eventHandlers.push([this.newMessageFilter, newMessageHandler]);
                 this.client.addEventHandler(newMessageHandler, this.newMessageFilter);
                 // This mobile's delayed records (e.g. a password-reset decline scheduled before a restart) can run now.
                 const mobile = this.clientDetails.mobile;
                 void (0,_jobs_promote_delayed__WEBPACK_IMPORTED_MODULE_36__.startPromoteDelayed)(mobile, promoteRecordRunner(mobile));
-                this.eventHandlers.push([null, otherEventsHandler]);
-                this.client.addEventHandler(otherEventsHandler);
                 // Limit eventHandlers array size
                 if (this.eventHandlers.length >= this.MAX_EVENT_HANDLERS) {
                     const [oldestBuilder, oldestHandler] = this.eventHandlers.shift();
@@ -45995,14 +46967,10 @@ class TelegramManager {
             // Clear tracked routing state
             this.routeStateMap.clear();
             // Cleanup service instances (but keep DialogManager for reuse)
-            try {
-                if (this.callManager) {
-                    this.callManager.dispose();
-                    this.callManager = null;
-                }
-            }
-            catch (error) {
-                logger.warn(`Failed to cleanup CallManager:`, error);
+            if (this.routeCalls) {
+                const routeCalls = this.routeCalls;
+                this.routeCalls = null;
+                await routeCalls.dispose();
             }
             try {
                 if (this.messageQueue) {
@@ -46618,31 +47586,23 @@ class TelegramManager {
         }
         if (existingState.stage === 1) {
             await this.sendPromoteRouteStageMessage(chatId, 2, !existingState.firstStageUseUrl);
-            let callAttempts = existingState.callAttempts;
-            if (callAttempts < 1) {
-                await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_23__.sleep)(2500);
-                await this.callManager.requestCall(chatId);
-                callAttempts += 1;
-            }
+            // Stage 2 is the only ring. Whether this user may be rung (6 h gap, 4 per 24 h, any account) is decided
+            // in Redis by RouteCallService, not by this 15-min route state. Not awaited: the call runs up to ~1 min.
+            if (this.routeCalls)
+                void this.routeCalls.maybeCall(chatId);
             this.setRouteState(chatId, {
                 stage: 2,
                 lastSentAt: Date.now(),
-                callAttempts,
+                callAttempts: existingState.callAttempts + 1,
                 firstStageUseUrl: existingState.firstStageUseUrl,
             });
             return;
         }
         await this.sendPromoteRouteStageMessage(chatId, 3, existingState.firstStageUseUrl);
-        let callAttempts = existingState.callAttempts;
-        if (callAttempts < 2) {
-            await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_23__.sleep)(2500);
-            await this.callManager.requestCall(chatId);
-            callAttempts += 1;
-        }
         this.setRouteState(chatId, {
             stage: 3,
             lastSentAt: Date.now(),
-            callAttempts,
+            callAttempts: existingState.callAttempts,
             firstStageUseUrl: existingState.firstStageUseUrl,
         });
     }
@@ -47587,6 +48547,16 @@ module.exports = require("dotenv");
 
 /***/ },
 
+/***/ "events"
+/*!*************************!*\
+  !*** external "events" ***!
+  \*************************/
+(module) {
+
+module.exports = require("events");
+
+/***/ },
+
 /***/ "express"
 /*!**************************!*\
   !*** external "express" ***!
@@ -47647,6 +48617,16 @@ module.exports = require("node-schedule-tz");
 
 /***/ },
 
+/***/ "ntgcalls"
+/*!***************************!*\
+  !*** external "ntgcalls" ***!
+  \***************************/
+(module) {
+
+module.exports = require("ntgcalls");
+
+/***/ },
+
 /***/ "path"
 /*!***********************!*\
   !*** external "path" ***!
@@ -47687,16 +48667,6 @@ module.exports = require("telegram/Helpers");
 
 /***/ },
 
-/***/ "telegram/crypto/AuthKey"
-/*!******************************************!*\
-  !*** external "telegram/crypto/AuthKey" ***!
-  \******************************************/
-(module) {
-
-module.exports = require("telegram/crypto/AuthKey");
-
-/***/ },
-
 /***/ "telegram/events"
 /*!**********************************!*\
   !*** external "telegram/events" ***!
@@ -47714,16 +48684,6 @@ module.exports = require("telegram/events");
 (module) {
 
 module.exports = require("telegram/extensions/Logger");
-
-/***/ },
-
-/***/ "telegram/network/MTProtoState"
-/*!************************************************!*\
-  !*** external "telegram/network/MTProtoState" ***!
-  \************************************************/
-(module) {
-
-module.exports = require("telegram/network/MTProtoState");
 
 /***/ },
 
