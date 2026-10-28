@@ -49637,8 +49637,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "8d889500b8db676d62465422e7766f91c3dd0c59" : 0;
-    const builtAt =  true ? "2026-10-28T20:32:59.583Z" : 0;
+    const sha =  true ? "6b4df58d36ea6ec34caa9eb94839aed6a2502bd9" : 0;
+    const builtAt =  true ? "2026-10-28T21:06:52.848Z" : 0;
     return { sha, builtAt };
 }
 
@@ -52026,6 +52026,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   deferEventsForChat: () => (/* binding */ deferEventsForChat),
 /* harmony export */   executeEvent: () => (/* binding */ executeEvent),
 /* harmony export */   hasPendingEventsForChat: () => (/* binding */ hasPendingEventsForChat),
+/* harmony export */   hasPendingEventsForClient: () => (/* binding */ hasPendingEventsForClient),
 /* harmony export */   holdCallsUntil: () => (/* binding */ holdCallsUntil),
 /* harmony export */   scheduleInHouseFollowUp: () => (/* binding */ scheduleInHouseFollowUp),
 /* harmony export */   scheduleInHousePrivacyProbes: () => (/* binding */ scheduleInHousePrivacyProbes),
@@ -52211,6 +52212,14 @@ async function deferEventsForChat(chatId, ms) {
 }
 async function hasPendingEventsForChat(chatId) {
     return store().existsForChat(chatId, process.env.clientId);
+}
+/**
+ * True when ANY chat on this client has a pending call-ladder event (every event in the collection is a paid show's
+ * ring / follow-up / probe): a show is owed, so proof calls (calls/proof-moment.ts) stay off the line.
+ */
+async function hasPendingEventsForClient() {
+    const collection = _data_user_data_crud__WEBPACK_IMPORTED_MODULE_5__.UserDataDtoCrud.getInstance().getEventsCollection();
+    return (await collection.countDocuments({ clientId: process.env.clientId }, { limit: 1 })) > 0;
 }
 
 
@@ -53052,6 +53061,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   STOP_SETTLE_WAIT_MS: () => (/* binding */ STOP_SETTLE_WAIT_MS),
 /* harmony export */   UNANSWERED_RETRY_MS: () => (/* binding */ UNANSWERED_RETRY_MS),
 /* harmony export */   USER_ENDED_RECALL_MS: () => (/* binding */ USER_ENDED_RECALL_MS),
+/* harmony export */   VOICE_PROOF_RING_MS: () => (/* binding */ VOICE_PROOF_RING_MS),
 /* harmony export */   WAIT_NOTICE_COOLDOWN_MS: () => (/* binding */ WAIT_NOTICE_COOLDOWN_MS),
 /* harmony export */   WARN_DEDUPE_MS: () => (/* binding */ WARN_DEDUPE_MS),
 /* harmony export */   callFloodLimitedMessages: () => (/* binding */ callFloodLimitedMessages)
@@ -53155,8 +53165,12 @@ const PAID_THRESHOLD = 15;
 const PITCH_LIMITS = [{ window: 5, max: 3 }, { window: 3, max: 2 }];
 const PITCH_HISTORY = 5;
 const PITCH_MAX_MS = 60 * 1000;
-/** Voice-proof calls: ring briefly, cap at clip length + slack (never more than VOICE_PROOF_MAX_MS). */
-const VOICE_PROOF_RING_MS = 30 * 1000;
+/** Voice-proof calls: ring briefly (20 s), cap at clip length + slack (never more than VOICE_PROOF_MAX_MS). */
+const VOICE_PROOF_RING_MS = 20 * 1000;
+/** A show waits at most this long for a preempted proof call's hang-up before ringing. */
+const PREEMPT_HANGUP_MAX_MS = 5 * 1000;
+/** The "calling you" text before a voice-proof ring never holds the ring longer than this. */
+const VOICE_PROOF_ANNOUNCE_MAX_MS = 15 * 1000;
 const VOICE_PROOF_DEFAULT_CLIP_SEC = 60;
 const VOICE_PROOF_CAP_SLACK_MS = 15 * 1000;
 const VOICE_PROOF_MAX_MS = 3 * 60 * 1000;
@@ -53181,8 +53195,16 @@ class InHouseCallService {
         this.pitchCalls = new Map();
         /** Voice-proof calls in progress (audio only, a clip to a non-show chat); they hold a slot. */
         this.voiceProofCalls = new Set();
+        /** Proof calls a paid show took the line from (hung up, or stopped before ringing). */
+        this.voiceProofPreempted = new Set();
+        /** chatId -> the peer key its proof call rings (to hang it up on preemption). */
+        this.voiceProofPeers = new Map();
+        /** A preemption hang-up in flight: the show's engine.call waits for it (bounded), never for the clip to end. */
+        this.preemption = null;
         this.voiceProofByChat = new Map();
         this.voiceProofPrivacy = new Map();
+        /** Clip path -> its length (one ffprobe per clip per process; null = unreadable, the default cap is used). */
+        this.clipDurations = new Map();
         this.voiceProofLog = [];
         this.voiceProofLoaded = false;
         /** Pay amount each running show was planned under, by chat (a mid-show payment is judged against it). */
@@ -53246,6 +53268,8 @@ class InHouseCallService {
                 if (this.isBusy())
                     return { action: 'decline' };
                 if (plan) {
+                    // Paid shows always win: a proof call on the line is hung up for this show.
+                    this.preemptVoiceProofs(`incoming show from ${chatId}`);
                     this.incomingPlans.set(chatId, plan);
                     this.showPaid.set(chatId, Number(user.payAmount) || 0);
                     this.showEnds.set(chatId, this.now() + this.remainingMs(plan));
@@ -53254,6 +53278,9 @@ class InHouseCallService {
                 }
                 if ((Number(user.highestPayAmount) || 0) < PAID_THRESHOLD)
                     return { action: 'ignore' };
+                // A pitch is not a show: it never preempts a proof call (the line is taken).
+                if (this.voiceProofCalls.size > 0)
+                    return { action: 'decline' };
                 const clip = this.nextPitch(chatId);
                 if (clip) {
                     // Voice-only pitch; the text menu follows when the call ends (see the 'ended' listener).
@@ -53301,9 +53328,17 @@ class InHouseCallService {
         return this.supported;
     }
     /** No free slot: outgoing plays (incl. ones still planning), incoming shows and pitches, or the engine itself. */
+    /**
+     * True when no show can start now. Proof calls never hold a show's slot: a show that needs the line hangs them up
+     * (preemptVoiceProofs), so an engine full only because of a proof call is not busy for shows.
+     */
     isBusy() {
-        const held = this.outgoing.size + this.incomingPlans.size + this.pitchCalls.size + this.voiceProofCalls.size;
-        return held >= this.maxCalls || (this.engine?.isBusy() ?? false);
+        const held = this.outgoing.size + this.incomingPlans.size + this.pitchCalls.size;
+        if (held >= this.maxCalls)
+            return true;
+        if (this.voiceProofCalls.size > 0)
+            return false;
+        return this.engine?.isBusy() ?? false;
     }
     /** True while chatId is on (or being set up for) a call with this account. */
     /** When a call with chatId last connected (show or pitch, either direction); undefined if none since start. */
@@ -53426,6 +53461,8 @@ class InHouseCallService {
             this.noticeQueued(chatId);
             return { status: 'busy_engine' };
         }
+        // Paid shows always win: a proof call on the line is hung up now; the show does not wait for its clip.
+        this.preemptVoiceProofs(`show for ${chatId}`);
         this.outgoing.add(chatId);
         const run = this.playReserved(chatId);
         this.plays.add(run);
@@ -53457,6 +53494,15 @@ class InHouseCallService {
         if (this.stopped || !this.isEnabled())
             return { ok: false, reason: 'disabled' };
         this.loadVoiceProofState();
+        // A hot account (SpamBot-limited / recent PEER_FLOOD) must not add a call request on top.
+        if (this.deps.accountHot?.())
+            return { ok: false, reason: 'hot' };
+        // Same checks as show calls (play()): the account is call-limited (FLOOD_WAIT) or Telegram refused this chat (PEER_FLOOD).
+        if (this.cooldown.isActive() || this.cooldown.isRefused(chatId))
+            return { ok: false, reason: 'flood' };
+        // A previous process died setting up a call to this chat (ntgcalls segfault): no ntgcalls for it for now.
+        if (this.deps.crashGuard?.isBarred(chatId))
+            return { ok: false, reason: 'crash_quarantine' };
         if (this.isInCall(chatId))
             return { ok: false, reason: 'in_call' };
         if (this.hasActiveCalls() || this.isBusy() || this.deps.isLineBusy?.())
@@ -53468,11 +53514,10 @@ class InHouseCallService {
             return { ok: false, reason: 'privacy_blocked' };
         }
         const now = this.now();
-        if (this.withinWindow(this.voiceProofByChat, chatId, limits.perUserMs))
-            return { ok: false, reason: 'user_cooldown' };
-        this.voiceProofLog = this.voiceProofLog.filter((at) => now - at < limits.perUserMs);
-        if (this.voiceProofLog.length >= limits.perDay)
-            return { ok: false, reason: 'daily_cap' };
+        if (this.proofCallsFor(chatId, now, limits.perUserMs).length >= limits.perUserMax)
+            return { ok: false, reason: 'capped' };
+        // No account daily cap (owner 2026-10-29); the log only keeps the spacing between calls.
+        this.voiceProofLog = this.voiceProofLog.filter((at) => now - at < VOICE_PROOF_STATE_MAX_AGE_MS);
         const lastAt = this.voiceProofLog[this.voiceProofLog.length - 1];
         if (lastAt !== undefined && now - lastAt < limits.spacingMs)
             return { ok: false, reason: 'spacing' };
@@ -53492,11 +53537,14 @@ class InHouseCallService {
         // Reserve before any await (like play()), so two requests never overshoot a limit.
         const now = this.now();
         this.voiceProofCalls.add(chatId);
-        this.voiceProofByChat.set(chatId, now);
+        this.voiceProofPreempted.delete(chatId);
+        this.voiceProofByChat.set(chatId, [...this.proofCallsFor(chatId, now, VOICE_PROOF_STATE_MAX_AGE_MS), now]);
         if (this.voiceProofByChat.size > 5000)
             this.voiceProofByChat.delete(this.voiceProofByChat.keys().next().value);
         this.voiceProofLog.push(now);
         this.saveVoiceProofState();
+        // Only a flood from the call request itself is a call flood (resolving the peer is a different limit).
+        let requesting = false;
         try {
             const [user, others] = await Promise.all([this.deps.readUser(chatId), this.deps.readOtherProfiles(chatId)]);
             if ((0,_video_policy__WEBPACK_IMPORTED_MODULE_1__.callBlock)(chatId, user, await this.blockedElsewhere(chatId, others))) {
@@ -53505,24 +53553,59 @@ class InHouseCallService {
             }
             if (!(await this.isAvailable()))
                 return { status: 'unsupported' };
+            await this.recoverFromCrash();
+            if (this.deps.crashGuard?.isBarred(chatId)) {
+                this.releaseVoiceProofSlot(chatId, now);
+                return { status: 'skipped', reason: 'crash_quarantine' };
+            }
             const stepMs = this.deps.planTimeoutMs ?? PLAN_TIMEOUT_MS;
-            const durationSec = await withStepTimeout(this.deps.probeDurationSec(clipPath), stepMs, 'probing the clip');
+            const durationSec = await this.clipDurationSec(clipPath, stepMs);
+            // The short "calling you" line lands just before the ring (call-status text: urgent, past the reply cool-down).
+            // Sent while the slot is held, so no reply waits behind the ring; never holds the ring longer than the cap.
+            if (opts.announce)
+                await this.announceVoiceProof(chatId, opts.announce);
             const engine = this.getEngine();
             const peer = await withStepTimeout(this.deps.resolvePeer(chatId), stepMs, 'resolving the peer');
             if (this.stopped)
                 return { status: 'error' };
+            // A paid show took the line while we prepared (or one is waiting for it): do not ring.
+            if (this.voiceProofPreempted.has(chatId) || this.outgoing.size + this.incomingPlans.size > 0 || this.deps.hasQueuedCalls?.()) {
+                return { status: 'preempted' };
+            }
+            this.voiceProofPeers.set(chatId, String(peer?.id ?? chatId));
+            requesting = true;
+            await this.deps.crashGuard?.settingUp(chatId, this);
+            if (this.stopped)
+                return { status: 'error' };
+            if (this.voiceProofPreempted.has(chatId))
+                return { status: 'preempted' };
             const record = await engine.call(peer, { file: clipPath, video: false, ringAsVideo: true }, {
                 answerTimeoutMs: VOICE_PROOF_RING_MS,
                 maxDurationMs: Math.min((durationSec ?? VOICE_PROOF_DEFAULT_CLIP_SEC) * 1000 + VOICE_PROOF_CAP_SLACK_MS, VOICE_PROOF_MAX_MS),
                 hangupOnMediaEnd: true,
             });
+            // Hung up by us for a paid show: whatever the record says, the user did not hear the clip through.
+            if (this.voiceProofPreempted.has(chatId))
+                return { status: 'preempted' };
             if (record.endReason === 'privacy_restricted') {
                 this.voiceProofPrivacy.set(chatId, this.now());
                 this.saveVoiceProofState();
                 return { status: 'privacy_restricted' };
             }
-            if (record.connectedAt === null)
-                return { status: 'unanswered' };
+            if (record.connectedAt === null) {
+                // PEER_FLOOD / FLOOD_WAIT recorded on the call (RequestCall failed without throwing): same as a show call.
+                const flood = record.error ? (0,_call_flood_cooldown__WEBPACK_IMPORTED_MODULE_4__.classifyCallFlood)({ message: record.error }) : null;
+                if (flood) {
+                    this.noteCallFlood(flood, chatId);
+                    return { status: 'flood', reason: record.endReason ?? undefined };
+                }
+                // Hung up while ringing = declined (pauses ladder rings like a declined show call).
+                if (!record.answeredAt && record.endReason === 'hangup') {
+                    (0,_call_pause__WEBPACK_IMPORTED_MODULE_8__.noteCallDeclined)(chatId);
+                    return { status: 'declined' };
+                }
+                return { status: 'unanswered', ...(record.endReason ? { reason: record.endReason } : {}) };
+            }
             // Connected but the clip never played (audio source died): the user heard nothing, send the voice note.
             if (record.endReason === 'media_failed' || record.endReason === 'error')
                 return { status: 'error' };
@@ -53535,19 +53618,108 @@ class InHouseCallService {
                 this.logger.warn(`[in-house-calls] voice-proof ${chatId}: ${error.message}; giving up (voice note instead)`);
                 return { status: 'error' };
             }
+            if (this.voiceProofPreempted.has(chatId))
+                return { status: 'preempted' };
             if (/busy/i.test(error?.message ?? ''))
                 return { status: 'busy' };
+            const flood = requesting ? (0,_call_flood_cooldown__WEBPACK_IMPORTED_MODULE_4__.classifyCallFlood)(error) : null;
+            if (flood) {
+                this.noteCallFlood(flood, chatId);
+                return { status: 'flood' };
+            }
             this.logger.error(`[in-house-calls] voice-proof call to ${chatId} failed`, error);
             return { status: 'error' };
         }
         finally {
+            if (requesting)
+                this.deps.crashGuard?.setupEnded(chatId, this);
             this.voiceProofCalls.delete(chatId);
+            this.voiceProofPeers.delete(chatId);
+            this.voiceProofPreempted.delete(chatId);
             this.notifyCallEnded(chatId);
         }
     }
+    /** This chat's proof-call times within windowMs (oldest first). */
+    proofCallsFor(chatId, now, windowMs) {
+        return (this.voiceProofByChat.get(chatId) ?? []).filter((at) => now - at < windowMs);
+    }
+    /**
+     * A paid show needs the line: hang up every proof call now (DiscardCall) and stop any still being set up. Each
+     * one resolves 'preempted' (its caller sends the voice note). Synchronous start, so play() keeps reserving its slot
+     * before any await; the show's engine.call waits for the hang-ups via afterPreemption().
+     */
+    preemptVoiceProofs(why) {
+        if (this.voiceProofCalls.size === 0)
+            return;
+        const hangups = [];
+        for (const proofChat of this.voiceProofCalls) {
+            if (this.voiceProofPreempted.has(proofChat))
+                continue;
+            this.voiceProofPreempted.add(proofChat);
+            this.logger.log(`[in-house-calls] voice-proof call to ${proofChat} preempted (${why})`);
+            const peer = this.voiceProofPeers.get(proofChat);
+            if (peer && this.engine?.hangup) {
+                hangups.push(this.engine.hangup(peer).catch((error) => {
+                    this.logger.warn(`[in-house-calls] hanging up the proof call to ${proofChat} failed`, error?.message ?? error);
+                }));
+            }
+        }
+        if (hangups.length)
+            this.preemption = Promise.all([this.preemption, ...hangups]);
+    }
+    async afterPreemption() {
+        const pending = this.preemption;
+        if (!pending)
+            return;
+        let timer;
+        const cap = new Promise((resolve) => { timer = setTimeout(resolve, PREEMPT_HANGUP_MAX_MS); timer.unref?.(); });
+        try {
+            await Promise.race([pending, cap]);
+        }
+        finally {
+            if (timer)
+                clearTimeout(timer);
+            if (this.preemption === pending)
+                this.preemption = null;
+        }
+    }
+    async announceVoiceProof(chatId, text) {
+        let timer;
+        const cap = new Promise((resolve) => { timer = setTimeout(resolve, VOICE_PROOF_ANNOUNCE_MAX_MS); timer.unref?.(); });
+        try {
+            await Promise.race([this.safeSend(chatId, text, true), cap]);
+        }
+        finally {
+            if (timer)
+                clearTimeout(timer);
+        }
+    }
+    /**
+     * The clip's length, probed once per clip per process (the clips are static files): never an ffprobe per call.
+     * A probe that fails or times out is remembered as unknown (null), so the default cap is used from then on.
+     */
+    clipDurationSec(clipPath, stepMs) {
+        let known = this.clipDurations.get(clipPath);
+        if (!known) {
+            known = Promise.resolve()
+                .then(() => this.deps.probeDurationSec(clipPath))
+                .then((value) => (value && value > 0 ? value : null), () => null);
+            this.clipDurations.set(clipPath, known);
+            if (this.clipDurations.size > 200)
+                this.clipDurations.delete(this.clipDurations.keys().next().value);
+        }
+        return withStepTimeout(known, stepMs, 'probing the clip').catch((error) => {
+            if (error instanceof StepTimeout)
+                this.clipDurations.set(clipPath, Promise.resolve(null));
+            throw error;
+        });
+    }
     /** Undo playVoiceProof's reservation for a call that was never placed (no cooldown, cap or spacing used). */
     releaseVoiceProofSlot(chatId, reservedAt) {
-        if (this.voiceProofByChat.get(chatId) === reservedAt)
+        const times = (this.voiceProofByChat.get(chatId) ?? []).filter((at) => at !== reservedAt);
+        if (times.length)
+            this.voiceProofByChat.set(chatId, times);
+        else
             this.voiceProofByChat.delete(chatId);
         const at = this.voiceProofLog.lastIndexOf(reservedAt);
         if (at >= 0)
@@ -53565,9 +53737,11 @@ class InHouseCallService {
                 return;
             const now = this.now();
             const fresh = (at) => typeof at === 'number' && Number.isFinite(at) && now - at < VOICE_PROOF_STATE_MAX_AGE_MS;
-            for (const [chat, at] of Object.entries(saved.byChat ?? {}))
-                if (fresh(at))
-                    this.voiceProofByChat.set(chat, at);
+            for (const [chat, at] of Object.entries(saved.byChat ?? {})) {
+                const times = (Array.isArray(at) ? at : [at]).filter(fresh);
+                if (times.length)
+                    this.voiceProofByChat.set(chat, times);
+            }
             for (const [chat, at] of Object.entries(saved.privacy ?? {}))
                 if (fresh(at))
                     this.voiceProofPrivacy.set(chat, at);
@@ -53582,9 +53756,15 @@ class InHouseCallService {
             return;
         const now = this.now();
         const recent = (map) => Object.fromEntries([...map].filter(([, at]) => now - at < VOICE_PROOF_STATE_MAX_AGE_MS));
+        const byChat = {};
+        for (const [chat, times] of this.voiceProofByChat) {
+            const kept = times.filter((at) => now - at < VOICE_PROOF_STATE_MAX_AGE_MS);
+            if (kept.length)
+                byChat[chat] = kept;
+        }
         this.voiceProofLog = this.voiceProofLog.filter((at) => now - at < VOICE_PROOF_STATE_MAX_AGE_MS);
         try {
-            this.deps.saveVoiceProofState({ byChat: recent(this.voiceProofByChat), log: this.voiceProofLog, privacy: recent(this.voiceProofPrivacy) });
+            this.deps.saveVoiceProofState({ byChat, log: this.voiceProofLog, privacy: recent(this.voiceProofPrivacy) });
         }
         catch (error) {
             this.logger.warn('[in-house-calls] voice-proof state not saved', error?.message ?? error);
@@ -53806,6 +53986,8 @@ class InHouseCallService {
             // clears the marker (setupEnded), so an aborted setup never bars the chat (review 2026-10-24).
             if (this.cancelled.has(chatId) || this.stopped)
                 return { status: 'cancelled' };
+            // A proof call this show preempted: its hang-up (DiscardCall) is quick; wait for it, bounded, so the engine has the slot.
+            await this.afterPreemption();
             record = await engine.call(peer, { file: plan.url, video: true, startSec: plan.startSec, size: plan.size, ...(plan.audio === false ? { audio: false } : {}) }, this.callOptions(plan));
         }
         catch (error) {
@@ -53914,8 +54096,12 @@ class InHouseCallService {
                 this.connectedAt.set(connectedChat, this.now());
                 if (this.connectedAt.size > 500)
                     this.connectedAt.delete(this.connectedAt.keys().next().value);
-                if (!plan)
-                    return; // pitch, not a show
+                if (!plan) {
+                    // A voice-proof call: media is up, its setup is over (crash guard marker).
+                    if (record.direction === 'outgoing' && this.voiceProofCalls.has(connectedChat))
+                        this.deps.crashGuard?.setupEnded(connectedChat, this);
+                    return; // pitch / voice proof, not a show
+                }
                 if (record.direction === 'outgoing')
                     this.deps.crashGuard?.setupEnded(plan.chatId, this); // media is up: setup is over
                 this.connectedChats.add(plan.chatId);
@@ -53928,6 +54114,9 @@ class InHouseCallService {
                     return;
                 const plan = this.outgoingPlans.get(record.peerUserId);
                 if (plan && (this.cancelled.has(plan.chatId) || this.stopped))
+                    void engine.hangup?.(record.peerUserId);
+                // A proof call preempted before the engine knew it: hang up as soon as it rings.
+                if (!plan && this.voiceProofPreempted.has(record.peerUserId))
                     void engine.hangup?.(record.peerUserId);
             });
             engine.on('busy-declined', (info) => {
@@ -54424,14 +54613,14 @@ class InHouseCallService {
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   CallAllowList: () => (/* reexport safe */ _call_allow_list__WEBPACK_IMPORTED_MODULE_6__.CallAllowList),
-/* harmony export */   InHouseCallService: () => (/* reexport safe */ _in_house_call_service__WEBPACK_IMPORTED_MODULE_17__.InHouseCallService),
+/* harmony export */   InHouseCallService: () => (/* reexport safe */ _in_house_call_service__WEBPACK_IMPORTED_MODULE_18__.InHouseCallService),
 /* harmony export */   createInHouseCallService: () => (/* binding */ createInHouseCallService),
-/* harmony export */   inHouseCallsSwitchState: () => (/* reexport safe */ _switch__WEBPACK_IMPORTED_MODULE_19__.inHouseCallsSwitchState),
-/* harmony export */   isInHouseCallsEnabled: () => (/* reexport safe */ _switch__WEBPACK_IMPORTED_MODULE_19__.isInHouseCallsEnabled),
+/* harmony export */   inHouseCallsSwitchState: () => (/* reexport safe */ _switch__WEBPACK_IMPORTED_MODULE_20__.inHouseCallsSwitchState),
+/* harmony export */   isInHouseCallsEnabled: () => (/* reexport safe */ _switch__WEBPACK_IMPORTED_MODULE_20__.isInHouseCallsEnabled),
 /* harmony export */   maxInHouseCalls: () => (/* binding */ maxInHouseCalls),
-/* harmony export */   restoreCallPrivacyIfLeftOpen: () => (/* reexport safe */ _privacy_restore__WEBPACK_IMPORTED_MODULE_25__.restoreCallPrivacyIfLeftOpen),
+/* harmony export */   restoreCallPrivacyIfLeftOpen: () => (/* reexport safe */ _privacy_restore__WEBPACK_IMPORTED_MODULE_26__.restoreCallPrivacyIfLeftOpen),
 /* harmony export */   sendInHouseText: () => (/* binding */ sendInHouseText),
-/* harmony export */   setInHouseCallsOverride: () => (/* reexport safe */ _switch__WEBPACK_IMPORTED_MODULE_19__.setInHouseCallsOverride)
+/* harmony export */   setInHouseCallsOverride: () => (/* reexport safe */ _switch__WEBPACK_IMPORTED_MODULE_20__.setInHouseCallsOverride)
 /* harmony export */ });
 /* harmony import */ var child_process__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! child_process */ "child_process");
 /* harmony import */ var child_process__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(child_process__WEBPACK_IMPORTED_MODULE_0__);
@@ -54453,16 +54642,18 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
 /* harmony import */ var _data_user_data_crud__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! ../../data/user-data-crud */ "./src/data/user-data-crud.ts");
 /* harmony import */ var _outbound_flood_gate__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! ../../outbound/flood-gate */ "./src/outbound/flood-gate.ts");
-/* harmony import */ var _call_flood_cooldown__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! ../call-flood-cooldown */ "./src/calls/call-flood-cooldown.ts");
-/* harmony import */ var _in_house_call_service__WEBPACK_IMPORTED_MODULE_17__ = __webpack_require__(/*! ./in-house-call-service */ "./src/calls/inhouse/in-house-call-service.ts");
-/* harmony import */ var _call_notes__WEBPACK_IMPORTED_MODULE_18__ = __webpack_require__(/*! ./call-notes */ "./src/calls/inhouse/call-notes.ts");
-/* harmony import */ var _switch__WEBPACK_IMPORTED_MODULE_19__ = __webpack_require__(/*! ./switch */ "./src/calls/inhouse/switch.ts");
-/* harmony import */ var _video_policy__WEBPACK_IMPORTED_MODULE_20__ = __webpack_require__(/*! ./video-policy */ "./src/calls/inhouse/video-policy.ts");
-/* harmony import */ var _chat_proofs__WEBPACK_IMPORTED_MODULE_21__ = __webpack_require__(/*! ../chat-proofs */ "./src/calls/chat-proofs.ts");
-/* harmony import */ var _tg_core_telegram_utils_resolveEntity__WEBPACK_IMPORTED_MODULE_22__ = __webpack_require__(/*! @tg/core/telegram-utils/resolveEntity */ "../../packages/tg-core/src/telegram-utils/resolveEntity.ts");
-/* harmony import */ var _crash_quarantine__WEBPACK_IMPORTED_MODULE_23__ = __webpack_require__(/*! ./crash-quarantine */ "./src/calls/inhouse/crash-quarantine.ts");
-/* harmony import */ var _media_voices__WEBPACK_IMPORTED_MODULE_24__ = __webpack_require__(/*! ../../media/voices */ "./src/media/voices.ts");
-/* harmony import */ var _privacy_restore__WEBPACK_IMPORTED_MODULE_25__ = __webpack_require__(/*! ./privacy-restore */ "./src/calls/inhouse/privacy-restore.ts");
+/* harmony import */ var _outbound_hot_account__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! ../../outbound/hot-account */ "./src/outbound/hot-account.ts");
+/* harmony import */ var _call_flood_cooldown__WEBPACK_IMPORTED_MODULE_17__ = __webpack_require__(/*! ../call-flood-cooldown */ "./src/calls/call-flood-cooldown.ts");
+/* harmony import */ var _in_house_call_service__WEBPACK_IMPORTED_MODULE_18__ = __webpack_require__(/*! ./in-house-call-service */ "./src/calls/inhouse/in-house-call-service.ts");
+/* harmony import */ var _call_notes__WEBPACK_IMPORTED_MODULE_19__ = __webpack_require__(/*! ./call-notes */ "./src/calls/inhouse/call-notes.ts");
+/* harmony import */ var _switch__WEBPACK_IMPORTED_MODULE_20__ = __webpack_require__(/*! ./switch */ "./src/calls/inhouse/switch.ts");
+/* harmony import */ var _video_policy__WEBPACK_IMPORTED_MODULE_21__ = __webpack_require__(/*! ./video-policy */ "./src/calls/inhouse/video-policy.ts");
+/* harmony import */ var _chat_proofs__WEBPACK_IMPORTED_MODULE_22__ = __webpack_require__(/*! ../chat-proofs */ "./src/calls/chat-proofs.ts");
+/* harmony import */ var _tg_core_telegram_utils_resolveEntity__WEBPACK_IMPORTED_MODULE_23__ = __webpack_require__(/*! @tg/core/telegram-utils/resolveEntity */ "../../packages/tg-core/src/telegram-utils/resolveEntity.ts");
+/* harmony import */ var _crash_quarantine__WEBPACK_IMPORTED_MODULE_24__ = __webpack_require__(/*! ./crash-quarantine */ "./src/calls/inhouse/crash-quarantine.ts");
+/* harmony import */ var _media_voices__WEBPACK_IMPORTED_MODULE_25__ = __webpack_require__(/*! ../../media/voices */ "./src/media/voices.ts");
+/* harmony import */ var _privacy_restore__WEBPACK_IMPORTED_MODULE_26__ = __webpack_require__(/*! ./privacy-restore */ "./src/calls/inhouse/privacy-restore.ts");
+
 
 
 
@@ -54528,7 +54719,7 @@ function probeVideoSize(url) {
     return (0,_ffprobe__WEBPACK_IMPORTED_MODULE_1__.runFfprobe)(['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=width,height', '-of', 'csv=p=0:s=x', url])
         .then((stdout) => {
         const m = /^(\d+)x(\d+)/.exec(String(stdout ?? '').trim());
-        return m ? (0,_video_policy__WEBPACK_IMPORTED_MODULE_20__.pickCallVideoSize)(Number(m[1]), Number(m[2])) : null;
+        return m ? (0,_video_policy__WEBPACK_IMPORTED_MODULE_21__.pickCallVideoSize)(Number(m[1]), Number(m[2])) : null;
     });
 }
 /** Whether the video has an audio stream (video_1013 has none), via ffprobe; null when the probe failed. */
@@ -54576,10 +54767,10 @@ async function readCallPrivacy(client) {
 }
 function createCallAllowList(client) {
     const db = _data_user_data_crud__WEBPACK_IMPORTED_MODULE_14__.UserDataDtoCrud.getInstance();
-    const stateFile = (0,_privacy_restore__WEBPACK_IMPORTED_MODULE_25__.allowListStateFile)();
+    const stateFile = (0,_privacy_restore__WEBPACK_IMPORTED_MODULE_26__.allowListStateFile)();
     const setRules = (rules) => client.invoke(new telegram__WEBPACK_IMPORTED_MODULE_4__.Api.account.SetPrivacy({ key: new telegram__WEBPACK_IMPORTED_MODULE_4__.Api.InputPrivacyKeyPhoneCall(), rules }));
     return new _call_allow_list__WEBPACK_IMPORTED_MODULE_6__.CallAllowList({
-        isEnabled: () => (0,_switch__WEBPACK_IMPORTED_MODULE_19__.isInHouseCallsEnabled)(),
+        isEnabled: () => (0,_switch__WEBPACK_IMPORTED_MODULE_20__.isInHouseCallsEnabled)(),
         listPaidChatIds: (limit) => db.listPaidChatIds(limit),
         resolvable: (chatIds) => chatIds.filter((id) => cachedInputUser(client, id) !== null),
         readPrivacy: () => readCallPrivacy(client),
@@ -54628,7 +54819,7 @@ async function sendInHouseText(client, chatId, text, urgent) {
 function createInHouseCallService(client, hooks) {
     const db = _data_user_data_crud__WEBPACK_IMPORTED_MODULE_14__.UserDataDtoCrud.getInstance();
     const maxCalls = maxInHouseCalls();
-    const proofStateFile = (0,_privacy_restore__WEBPACK_IMPORTED_MODULE_25__.voiceProofStateFile)();
+    const proofStateFile = (0,_privacy_restore__WEBPACK_IMPORTED_MODULE_26__.voiceProofStateFile)();
     // Same formalities as the replier: gate, read, pause, typing scaled to the text, then send.
     const sendLikeHuman = (0,_human_send__WEBPACK_IMPORTED_MODULE_7__.createHumanSender)({
         readGate: async (chatId) => (await db.read(chatId)),
@@ -54641,26 +54832,26 @@ function createInHouseCallService(client, hooks) {
         send: (chatId, text, sendOpts) => sendInHouseText(client, chatId, text, sendOpts?.urgent),
         sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
     });
-    return new _in_house_call_service__WEBPACK_IMPORTED_MODULE_17__.InHouseCallService({
+    return new _in_house_call_service__WEBPACK_IMPORTED_MODULE_18__.InHouseCallService({
         allowList: createCallAllowList(client),
         // The same pay-prompt voice notes the chat flow sends: a variant from voices/<clientId> + voices/common, else the working directory.
-        pitchClips: () => PITCH_CLIPS.map((file) => (0,_media_voices__WEBPACK_IMPORTED_MODULE_24__.pickVoiceSlot)('call pitch', file, path__WEBPACK_IMPORTED_MODULE_3___default().resolve(process.cwd(), file))).filter((file) => fs__WEBPACK_IMPORTED_MODULE_2___default().existsSync(file)),
+        pitchClips: () => PITCH_CLIPS.map((file) => (0,_media_voices__WEBPACK_IMPORTED_MODULE_25__.pickVoiceSlot)('call pitch', file, path__WEBPACK_IMPORTED_MODULE_3___default().resolve(process.cwd(), file))).filter((file) => fs__WEBPACK_IMPORTED_MODULE_2___default().existsSync(file)),
         payAgainPrompt: async (chatId, user, kind) => {
             await sendLikeHuman(chatId, (0,_conversation_messages_call_messages__WEBPACK_IMPORTED_MODULE_5__.callPayAgainMessage)(kind, chatId, Number(user.payAmount) || 0), { ignoreCooldown: true });
         },
         privacyText: (chatId) => (0,_conversation_messages_call_messages__WEBPACK_IMPORTED_MODULE_5__.callPrivacyMessage)(chatId),
-        isEnabled: () => (0,_switch__WEBPACK_IMPORTED_MODULE_19__.isInHouseCallsEnabled)(),
+        isEnabled: () => (0,_switch__WEBPACK_IMPORTED_MODULE_20__.isInHouseCallsEnabled)(),
         isSupported: () => _tg_calls__WEBPACK_IMPORTED_MODULE_10__.CallEngine.isSupported() && binaryRuns('ffmpeg') && binaryRuns('ffprobe'),
         maxConcurrentCalls: maxCalls,
         createEngine: () => new _tg_calls__WEBPACK_IMPORTED_MODULE_10__.CallEngine(client, {
             logger: engineLogger,
-            video: (0,_video_policy__WEBPACK_IMPORTED_MODULE_20__.callVideoParams)(),
-            echo: (0,_video_policy__WEBPACK_IMPORTED_MODULE_20__.callEchoParams)(),
+            video: (0,_video_policy__WEBPACK_IMPORTED_MODULE_21__.callVideoParams)(),
+            echo: (0,_video_policy__WEBPACK_IMPORTED_MODULE_21__.callEchoParams)(),
             maxConcurrentCalls: maxCalls,
         }),
         readUser: async (chatId) => (await db.read(chatId)),
         readOtherProfiles: (chatId) => db.readOtherPersonaRows(chatId),
-        readPaymentProofs: (chatId) => (0,_chat_proofs__WEBPACK_IMPORTED_MODULE_21__.readChatProofs)(db, chatId),
+        readPaymentProofs: (chatId) => (0,_chat_proofs__WEBPACK_IMPORTED_MODULE_22__.readChatProofs)(db, chatId),
         saveProgress: async (chatId, videoId, progress) => {
             await db.update(chatId, { [`callProgress.${videoId}`]: progress });
         },
@@ -54692,7 +54883,9 @@ function createInHouseCallService(client, hooks) {
         callCooldown: hooks.callCooldown,
         // PEER_FLOOD is counted in the shared flood gate (health/analytics), a call FLOOD_WAIT is not: neither blocks texts:
         // the Zoom link to that user gets its own attempt (and marks the chat if Telegram refuses it).
-        reportFlood: (flood) => (0,_call_flood_cooldown__WEBPACK_IMPORTED_MODULE_16__.reportCallFloodToGate)(flood, _outbound_flood_gate__WEBPACK_IMPORTED_MODULE_15__.floodGate),
+        reportFlood: (flood) => (0,_call_flood_cooldown__WEBPACK_IMPORTED_MODULE_17__.reportCallFloodToGate)(flood, _outbound_flood_gate__WEBPACK_IMPORTED_MODULE_15__.floodGate),
+        // A hot account (SpamBot-limited / PEER_FLOOD in the last 6 h, as the send policy sees it) places no proof calls.
+        accountHot: () => _outbound_hot_account__WEBPACK_IMPORTED_MODULE_16__.hotAccount.view().hot,
         loadVoiceProofState: () => {
             try {
                 return JSON.parse(fs__WEBPACK_IMPORTED_MODULE_2___default().readFileSync(proofStateFile, 'utf8'));
@@ -54726,7 +54919,7 @@ function createInHouseCallService(client, hooks) {
             return hasPendingEventsForChat(chatId);
         },
         vcuiLink: (chatId) => `https://ZomCall.netlify.app/${process.env.clientId}/${chatId}`,
-        crashGuard: _crash_quarantine__WEBPACK_IMPORTED_MODULE_23__.callCrashGuard,
+        crashGuard: _crash_quarantine__WEBPACK_IMPORTED_MODULE_24__.callCrashGuard,
         warn: async (notice) => {
             await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_12__.BotConfig.getInstance().sendMessage(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_12__.ChannelCategory.VC_WARNINGS, notice);
         },
@@ -54734,7 +54927,7 @@ function createInHouseCallService(client, hooks) {
             await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_12__.BotConfig.getInstance().sendMessage(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_12__.ChannelCategory.CLIENT_UPDATES, notice);
         },
         // Restart safety: notice / retry bookkeeping is mirrored to Redis.
-        notes: (0,_call_notes__WEBPACK_IMPORTED_MODULE_18__.redisCallNotesStore)(),
+        notes: (0,_call_notes__WEBPACK_IMPORTED_MODULE_19__.redisCallNotesStore)(),
         requeue: hooks.requeue,
         isLineBusy: hooks.isLineBusy,
         resolvePeer: async (chatId) => {
@@ -54744,7 +54937,7 @@ function createInHouseCallService(client, hooks) {
             // After an account swap the new session has no access hash for the payer (divya2 …6824, 2026-10-24): try the
             // stored @username (rate-limited, id must match). Never the stored accessHash: it belongs to the old account.
             const row = await db.read(chatId).catch(() => undefined);
-            const byName = row?.username ? await (0,_tg_core_telegram_utils_resolveEntity__WEBPACK_IMPORTED_MODULE_22__.resolveByUsername)(client, chatId, row.username) : null;
+            const byName = row?.username ? await (0,_tg_core_telegram_utils_resolveEntity__WEBPACK_IMPORTED_MODULE_23__.resolveByUsername)(client, chatId, row.username) : null;
             if (byName)
                 logger.warn(`[in-house-calls] ${chatId}: not resolvable by id on this account (swap?); resolved via its username`);
             return byName ?? chatId;
@@ -55284,9 +55477,10 @@ function voiceProofLimits(env = process.env) {
         enabled: !['off', '0', 'false', 'no', 'disabled'].includes(flag),
         after: intIn(env.INHOUSE_VOICE_PROOF_AFTER, 2, 2, 10),
         windowMs: intIn(env.INHOUSE_VOICE_PROOF_WINDOW_MIN, 30, 1, 1440) * 60000,
-        perDay: intIn(env.INHOUSE_VOICE_PROOF_PER_DAY, 5, 1, 50),
         spacingMs: intIn(env.INHOUSE_VOICE_PROOF_SPACING_MIN, 10, 0, 240) * 60000,
+        perUserMax: intIn(env.PROOF_CALL_USER_MAX_PER_DAY, 2, 1, 10),
         perUserMs: VOICE_PROOF_DAY_MS,
+        declineMs: intIn(env.PROOF_CALL_DECLINE_HOURS, 24, 0, 24) * 60 * 60000,
     };
 }
 
@@ -55628,6 +55822,238 @@ async function recallAfterShow(chatId) {
 
 /***/ },
 
+/***/ "./src/calls/proof-moment.ts"
+/*!***********************************!*\
+  !*** ./src/calls/proof-moment.ts ***!
+  \***********************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   PROOF_DECLINE_TTL_MS: () => (/* binding */ PROOF_DECLINE_TTL_MS),
+/* harmony export */   PROOF_FALLBACK_FILES: () => (/* binding */ PROOF_FALLBACK_FILES),
+/* harmony export */   ProofDeclines: () => (/* binding */ ProofDeclines),
+/* harmony export */   deliverProof: () => (/* binding */ deliverProof),
+/* harmony export */   noteProofAsk: () => (/* binding */ noteProofAsk),
+/* harmony export */   proofDeclines: () => (/* binding */ proofDeclines)
+/* harmony export */ });
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! @tg/core/state/state-redis */ "../../packages/tg-core/src/state/state-redis.ts");
+/* harmony import */ var _telegram_client_access__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../telegram/client-access */ "./src/telegram/client-access.ts");
+/* harmony import */ var _data_user_data_crud__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../data/user-data-crud */ "./src/data/user-data-crud.ts");
+/* harmony import */ var _payments_service_eligibility__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../payments/service-eligibility */ "./src/payments/service-eligibility.ts");
+/* harmony import */ var _call_me__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ./call-me */ "./src/calls/call-me.ts");
+/* harmony import */ var _inhouse_voice_proof_config__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ./inhouse/voice-proof-config */ "./src/calls/inhouse/voice-proof-config.ts");
+/* harmony import */ var _voice_proof__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ./voice-proof */ "./src/calls/voice-proof.ts");
+/* harmony import */ var _conversation_messages_call_messages__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ../conversation/messages/call-messages */ "./src/conversation/messages/call-messages.ts");
+/* harmony import */ var _media_voices__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ../media/voices */ "./src/media/voices.ts");
+
+
+
+
+
+
+
+
+
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_0__.Logger('tg-aut:proof-moment');
+/** The voice note each slot sends when no proof call plays (trust: the file its step sends, given by the caller). */
+const PROOF_FALLBACK_FILES = {
+    notfake: './notfake.mp3',
+    voice: './voice.mp3',
+    liveReal: './confirm.mp3',
+};
+/** Proof calls declined (hung up while ringing): no proof call to that chat for 24 h (PROOF_CALL_DECLINE_HOURS). Memory + Redis mirror. */
+const PROOF_DECLINE_TTL_MS = _inhouse_voice_proof_config__WEBPACK_IMPORTED_MODULE_6__.VOICE_PROOF_DAY_MS;
+const PROOF_DECLINES_MAX = 5000;
+class ProofDeclines {
+    constructor(mirror, now = () => Date.now(), ttlMs = () => (0,_inhouse_voice_proof_config__WEBPACK_IMPORTED_MODULE_6__.voiceProofLimits)().declineMs) {
+        this.at = new Map();
+        this.seeding = null;
+        this.mirror = mirror;
+        this.now = now;
+        this.ttlMs = ttlMs;
+    }
+    /** True when chatId declined a proof call within the decline window (Redis is read once per process; never throws). */
+    async has(chatId) {
+        await this.seed();
+        const at = this.at.get(chatId);
+        if (at === undefined)
+            return false;
+        if (this.now() - at < this.ttlMs())
+            return true;
+        return false;
+    }
+    note(chatId) {
+        const now = this.now();
+        this.at.delete(chatId);
+        this.at.set(chatId, now);
+        if (this.at.size > PROOF_DECLINES_MAX)
+            this.at.delete(this.at.keys().next().value);
+        void this.mirror?.set(chatId, now).catch(() => false);
+    }
+    /** Tests. */
+    reset() {
+        this.at.clear();
+        this.seeding = Promise.resolve();
+        void this.mirror?.clear().catch(() => false);
+    }
+    seed() {
+        if (!this.seeding) {
+            this.seeding = (async () => {
+                try {
+                    const saved = await this.mirror?.load(this.now());
+                    for (const [chatId, at] of saved ?? [])
+                        if (!this.at.has(chatId))
+                            this.at.set(chatId, at);
+                }
+                catch (error) {
+                    logger.warn(`[PROOF-CALL] declines not loaded: ${error?.message ?? error}`);
+                }
+            })();
+        }
+        return this.seeding;
+    }
+}
+/** Process-wide store: Redis hash `tgaut::proofdeclined::<clientId>`, 24 h TTL (each field older than that is ignored). */
+const proofDeclines = new ProofDeclines(new _tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_1__.RedisHash(() => (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_1__.stateKey)('tgaut::proofdeclined', process.env.clientId), PROOF_DECLINE_TTL_MS, 'tgaut.proofdeclined'));
+/** A payer: proof calls are for people who have not paid, never for them or their pending show. */
+const PAID_AMOUNT = 15;
+const liveDeps = {
+    limits: () => (0,_inhouse_voice_proof_config__WEBPACK_IMPORTED_MODULE_6__.voiceProofLimits)(),
+    active: () => (0,_call_me__WEBPACK_IMPORTED_MODULE_5__.inHouseCallsActive)(),
+    service: async () => _telegram_client_access__WEBPACK_IMPORTED_MODULE_2__.TelegramManager.getInstance()?.callManager?.getInHouse?.(),
+    clip: () => (0,_voice_proof__WEBPACK_IMPORTED_MODULE_7__.pickVoiceProofClip)(),
+    now: () => Date.now(),
+    payerOrPending: async (chatId) => {
+        const user = await _data_user_data_crud__WEBPACK_IMPORTED_MODULE_3__.UserDataDtoCrud.getInstance().read(chatId);
+        return !!user && ((Number(user.payAmount) || 0) >= PAID_AMOUNT || (0,_payments_service_eligibility__WEBPACK_IMPORTED_MODULE_4__.hasPendingPaidService)(user));
+    },
+    showsPending: async () => {
+        const { hasPendingEventsForClient } = await Promise.resolve(/*! import() */).then(__webpack_require__.bind(__webpack_require__, /*! ./event-ladder/event-executor */ "./src/calls/event-ladder/event-executor.ts"));
+        return hasPendingEventsForClient();
+    },
+    declines: proofDeclines,
+    log: (line) => logger.log(line),
+};
+/** Counts a proof ask that has no call step of its own (the trust branch's first step), so the next ask can ring. */
+function noteProofAsk(chatId, deps = liveDeps) {
+    const limits = deps.limits();
+    if (limits.enabled)
+        (0,_voice_proof__WEBPACK_IMPORTED_MODULE_7__.recordProofRequest)(chatId, limits.windowMs, deps.now());
+}
+const SKIP_RESULT = { hot: 'hot', flood: 'flood', busy: 'busy', in_call: 'busy', privacy_blocked: 'privacy', capped: 'capped' };
+/** The log's result for a playVoiceProof outcome. */
+function resultOf(outcome) {
+    switch (outcome.status) {
+        case 'played': return 'played';
+        case 'declined': return 'declined';
+        case 'unanswered': return 'missed';
+        case 'privacy_restricted': return 'privacy';
+        case 'busy': return 'busy';
+        case 'flood': return 'flood';
+        case 'preempted': return 'preempted';
+        case 'skipped': return SKIP_RESULT[String(outcome.reason)] ?? 'skipped';
+        default: return 'skipped';
+    }
+}
+function fallbackFor(ctx, slot) {
+    const file = slot === 'trust' ? (ctx.fallbackFile ?? null) : PROOF_FALLBACK_FILES[slot];
+    // call-*.mp3 clips are call-only: never the voice-note fallback (owner 2026-10-29).
+    if (file && (0,_media_voices__WEBPACK_IMPORTED_MODULE_9__.isCallOnlyClip)(file)) {
+        logger.warn(`[PROOF-CALL] chat=${ctx.chatId} slot=${slot} fallback ${file} refused: call-only clip`);
+        return null;
+    }
+    return file;
+}
+/**
+ * A proof ask from ctx.chatId. Returns { placed: true } when a proof call was started: the caller must NOT send its
+ * voice note (or anything that would land mid-call, e.g. proof photos); this step sends the slot's voice note itself if
+ * the call does not play. { placed: false }: the caller replies exactly as before.
+ */
+async function deliverProof(ctx, slot, deps = liveDeps) {
+    const { chatId } = ctx;
+    const file = fallbackFor(ctx, slot);
+    const fileName = file ? file.replace(/^.*\//, '') : 'none';
+    const log = (result, reason, fallback) => {
+        const line = `[PROOF-CALL] chat=${chatId} slot=${slot} result=${result} reason=${reason || '-'} fallback=${fallback}`;
+        try {
+            (deps.log ?? ((l) => logger.log(l)))(line);
+        }
+        catch {
+            // logging never breaks the reply
+        }
+    };
+    const notPlaced = (result, reason) => {
+        log(result, reason, fileName);
+        return { placed: false };
+    };
+    try {
+        const limits = deps.limits();
+        if (!limits.enabled)
+            return notPlaced('skipped', 'off');
+        if ((0,_voice_proof__WEBPACK_IMPORTED_MODULE_7__.recordProofRequest)(chatId, limits.windowMs, deps.now()) < limits.after)
+            return notPlaced('skipped', 'first_ask');
+        if (!(await deps.active()))
+            return notPlaced('skipped', 'inhouse_off');
+        if (await deps.payerOrPending?.(chatId))
+            return notPlaced('skipped', 'payer');
+        if (await deps.declines?.has(chatId))
+            return notPlaced('skipped', 'declined_recently');
+        const service = await deps.service();
+        if (!service)
+            return notPlaced('skipped', 'no_service');
+        // Paid shows always win: no proof call while any user's show is owed on this account (a ladder will ring).
+        if (await deps.showsPending?.())
+            return notPlaced('busy', 'show_pending');
+        const check = service.canPlayVoiceProof(chatId);
+        if (!check.ok)
+            return notPlaced(SKIP_RESULT[String(check.reason)] ?? 'skipped', String(check.reason));
+        const clip = deps.clip();
+        if (!clip)
+            return notPlaced('skipped', 'no_clip');
+        (0,_voice_proof__WEBPACK_IMPORTED_MODULE_7__.forgetProofRequests)(chatId);
+        const sendFallback = async () => {
+            if (!file)
+                return 'none';
+            try {
+                await ctx.reply(ctx.fallbackText ?? '', file);
+            }
+            catch (error) {
+                logger.warn(`[PROOF-CALL] chat=${chatId} fallback ${fileName} not sent: ${error?.message ?? error}`);
+            }
+            return fileName;
+        };
+        const delay = ctx.delayMs && ctx.delayMs > 0
+            ? new Promise((resolve) => { const t = setTimeout(resolve, ctx.delayMs); t.unref?.(); })
+            : Promise.resolve();
+        void delay
+            // playVoiceProof sends the short "calling you" text just before it rings (only when it does ring).
+            .then(() => service.playVoiceProof(chatId, clip, { followUp: ctx.followUp, announce: (0,_conversation_messages_call_messages__WEBPACK_IMPORTED_MODULE_8__.pickVariation)(_conversation_messages_call_messages__WEBPACK_IMPORTED_MODULE_8__.proofCallingMessages, chatId, 'proofCalling') }))
+            .then(async (outcome) => {
+            const result = resultOf(outcome);
+            if (result === 'declined')
+                deps.declines?.note(chatId);
+            const reason = outcome.status === 'declined' ? 'hangup' : outcome.reason ?? (result === 'skipped' ? outcome.status : undefined);
+            log(result, reason, result === 'played' ? 'none' : await sendFallback());
+        })
+            .catch(async (error) => {
+            logger.warn(`[PROOF-CALL] chat=${chatId} call failed: ${error?.message ?? error}`);
+            log('skipped', 'error', await sendFallback());
+        });
+        return { placed: true };
+    }
+    catch (error) {
+        logger.warn(`[PROOF-CALL] chat=${chatId} not attempted: ${error?.message ?? error}`);
+        return notPlaced('skipped', 'error');
+    }
+}
+
+
+/***/ },
+
 /***/ "./src/calls/service-completion.ts"
 /*!*****************************************!*\
   !*** ./src/calls/service-completion.ts ***!
@@ -55910,43 +56336,32 @@ function schedulePostShow(chatId, args, delayMs) {
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   PROOF_REAL_CLIP_PATTERN: () => (/* binding */ PROOF_REAL_CLIP_PATTERN),
 /* harmony export */   VOICE_PROOF_CLIPS: () => (/* binding */ VOICE_PROOF_CLIPS),
 /* harmony export */   VOICE_PROOF_CLIP_PATTERN: () => (/* binding */ VOICE_PROOF_CLIP_PATTERN),
+/* harmony export */   forgetProofRequests: () => (/* binding */ forgetProofRequests),
 /* harmony export */   pickVoiceProofClip: () => (/* binding */ pickVoiceProofClip),
 /* harmony export */   recordProofRequest: () => (/* binding */ recordProofRequest),
-/* harmony export */   resetProofRequests: () => (/* binding */ resetProofRequests),
-/* harmony export */   tryVoiceProofCall: () => (/* binding */ tryVoiceProofCall)
+/* harmony export */   resetProofRequests: () => (/* binding */ resetProofRequests)
 /* harmony export */ });
 /* harmony import */ var fs__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! fs */ "fs");
 /* harmony import */ var fs__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(fs__WEBPACK_IMPORTED_MODULE_0__);
-/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
-/* harmony import */ var _telegram_client_access__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../telegram/client-access */ "./src/telegram/client-access.ts");
-/* harmony import */ var _data_user_data_crud__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../data/user-data-crud */ "./src/data/user-data-crud.ts");
-/* harmony import */ var _payments_service_eligibility__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../payments/service-eligibility */ "./src/payments/service-eligibility.ts");
-/* harmony import */ var _call_me__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ./call-me */ "./src/calls/call-me.ts");
-/* harmony import */ var _inhouse_voice_proof_config__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ./inhouse/voice-proof-config */ "./src/calls/inhouse/voice-proof-config.ts");
-/* harmony import */ var _media_voices__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ../media/voices */ "./src/media/voices.ts");
+/* harmony import */ var _media_voices__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../media/voices */ "./src/media/voices.ts");
 
 
-
-
-
-
-
-
-const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_1__.Logger('tg-aut:voice-proof');
 /**
  * The "pay first, then video" voice clips VCUI's payment page plays on its call screen
  * (payment-local/src/assets/audio, copied to apps/tg-aut/assets/voice-proof). They are not in the
  * bundle: every call-voice-*.mp3 in `<cwd>/assets/voices/<clientId>/` + `.../common/` (media/voices.ts),
  * else these fixed names in INHOUSE_VOICE_PROOF_DIR (default: the client's working directory, where the
  * other pitch clips live). No clip on the host = no call, the voice message goes out as before.
+ * The call flow itself is calls/proof-moment.ts (deliverProof).
  */
 const VOICE_PROOF_CLIPS = ['call-voice-1.mp3', 'call-voice-2.mp3', 'call-voice-3.mp3'];
 /** Variant clips in the voices dirs: call-voice-<anything>.mp3. */
 const VOICE_PROOF_CLIP_PATTERN = /^call-voice-.+\.mp3$/i;
-/** A payer: voice-proof calls are for people who have not paid, never for them or their pending show. */
-const PAID_AMOUNT = 15;
+/** "Hi, it's really me" proof clips in the voices dirs (call-real-<anything>.mp3): preferred over call-voice-*.mp3 when present. */
+const PROOF_REAL_CLIP_PATTERN = /^call-real-.+\.mp3$/i;
 const requests = new Map();
 let lastClip = null;
 /** Counts one voice/proof request from chatId; returns how many fall inside the window (this one included). */
@@ -55962,63 +56377,22 @@ function resetProofRequests() {
     requests.clear();
     lastClip = null;
 }
-/** An existing clip, rotating so the same user never hears the same one twice running. */
+/**
+ * An existing clip, rotating so the same user never hears the same one twice running: every call-real-*.mp3 in the
+ * voices dirs when there is one, else the call-voice-*.mp3 set exactly as before.
+ */
 function pickVoiceProofClip(env = process.env, exists = (fs__WEBPACK_IMPORTED_MODULE_0___default().existsSync), random = Math.random, { cwd = process.cwd(), readdir } = {}) {
-    const found = (0,_media_voices__WEBPACK_IMPORTED_MODULE_7__.listVoiceVariants)('voice-proof clips', VOICE_PROOF_CLIP_PATTERN, VOICE_PROOF_CLIPS, env.INHOUSE_VOICE_PROOF_DIR || cwd, { env, cwd, exists, readdir });
+    const real = (0,_media_voices__WEBPACK_IMPORTED_MODULE_1__.listVoiceVariants)('proof call-real clips', PROOF_REAL_CLIP_PATTERN, [], cwd, { env, cwd, exists, readdir });
+    const found = real.length > 0 ? real : (0,_media_voices__WEBPACK_IMPORTED_MODULE_1__.listVoiceVariants)('voice-proof clips', VOICE_PROOF_CLIP_PATTERN, VOICE_PROOF_CLIPS, env.INHOUSE_VOICE_PROOF_DIR || cwd, { env, cwd, exists, readdir });
     if (found.length === 0)
         return null;
     const options = found.length > 1 ? found.filter((file) => file !== lastClip) : found;
     lastClip = options[Math.floor(random() * options.length)];
     return lastClip;
 }
-const liveDeps = {
-    limits: () => (0,_inhouse_voice_proof_config__WEBPACK_IMPORTED_MODULE_6__.voiceProofLimits)(),
-    active: () => (0,_call_me__WEBPACK_IMPORTED_MODULE_5__.inHouseCallsActive)(),
-    service: async () => _telegram_client_access__WEBPACK_IMPORTED_MODULE_2__.TelegramManager.getInstance()?.callManager?.getInHouse?.(),
-    clip: () => pickVoiceProofClip(),
-    now: () => Date.now(),
-    payerOrPending: async (chatId) => {
-        const user = await _data_user_data_crud__WEBPACK_IMPORTED_MODULE_3__.UserDataDtoCrud.getInstance().read(chatId);
-        return !!user && ((Number(user.payAmount) || 0) >= PAID_AMOUNT || (0,_payments_service_eligibility__WEBPACK_IMPORTED_MODULE_4__.hasPendingPaidService)(user));
-    },
-};
-/**
- * Voice/proof request from chatId. Returns true when an in-house audio call was started for it (the
- * caller must NOT send the voice message), false when the caller should send it as before: first
- * request, feature off, in-house calls unavailable, the user is on a call, a slot is busy, a limit
- * is hit, privacy blocks calls, no clip on the host. If the call is placed but does not connect
- * (declined, unanswered, privacy, error) the voice message is sent afterwards via `fallback`.
- */
-async function tryVoiceProofCall(chatId, options, deps = liveDeps) {
-    try {
-        const limits = deps.limits();
-        if (!limits.enabled)
-            return false;
-        if (recordProofRequest(chatId, limits.windowMs, deps.now()) < limits.after)
-            return false;
-        if (!(await deps.active()))
-            return false;
-        if (await deps.payerOrPending?.(chatId))
-            return false;
-        const service = await deps.service();
-        if (!service || !service.canPlayVoiceProof(chatId).ok)
-            return false;
-        const clip = deps.clip();
-        if (!clip)
-            return false;
-        requests.delete(chatId);
-        const delay = options.delayMs && options.delayMs > 0 ? new Promise((resolve) => { const t = setTimeout(resolve, options.delayMs); t.unref?.(); }) : Promise.resolve();
-        void delay.then(() => service.playVoiceProof(chatId, clip, { followUp: options.followUp })).then(async (result) => {
-            logger.log(`[voice-proof] ${chatId}: ${result.status}${result.reason ? ` (${result.reason})` : ''}`);
-            if (result.status !== 'played')
-                await options.fallback();
-        }).catch((error) => logger.warn(`[voice-proof] ${chatId} failed: ${error?.message ?? error}`));
-        return true;
-    }
-    catch (error) {
-        logger.warn(`[voice-proof] ${chatId} not attempted: ${error?.message ?? error}`);
-        return false;
-    }
+/** A proof call was placed for chatId: its asks start counting again from zero. */
+function forgetProofRequests(chatId) {
+    requests.delete(chatId);
 }
 
 
@@ -61212,7 +61586,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   callUserEndedMessages: () => (/* binding */ callUserEndedMessages),
 /* harmony export */   callWaitMessages: () => (/* binding */ callWaitMessages),
 /* harmony export */   inHouseRecallMessages: () => (/* binding */ inHouseRecallMessages),
-/* harmony export */   pickVariation: () => (/* binding */ pickVariation)
+/* harmony export */   pickVariation: () => (/* binding */ pickVariation),
+/* harmony export */   proofCallingMessages: () => (/* binding */ proofCallingMessages)
 /* harmony export */ });
 /* harmony import */ var _upsell_messages__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./upsell-messages */ "./src/conversation/messages/upsell-messages.ts");
 /**
@@ -61337,6 +61712,12 @@ const callWaitMessages = [
     `I'm on another call baby 🙈\n\nGive me **{mins} mins**..\n\nI'll call you\nright after 😘`,
     `Just finishing with someone 🔥\n\n**{mins} mins** baby..\n\nYou're next\nDon't go anywhere`,
     `Wait na baby 🥺\n\nI'm busy for **{mins} mins**\n\nThen I'll call you\nstraight away`,
+];
+/** Sent just before a proof call rings (calls/proof-moment.ts): short, so it lands before the ring. */
+const proofCallingMessages = [
+    `Calling you 📞`,
+    `Wait.. calling you 📞`,
+    `Pick up, calling you 📞`,
 ];
 /** "Call me" replies when this account rings with in-house Telegram calls instead of the VCUI link. */
 const inHouseRecallMessages = [
@@ -64422,7 +64803,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _messages_sexual_replies__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../messages/sexual-replies */ "./src/conversation/messages/sexual-replies.ts");
 /* harmony import */ var _messages_standard_messages__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ../messages/standard-messages */ "./src/conversation/messages/standard-messages.ts");
 /* harmony import */ var _replier__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ../../replier */ "./src/replier/index.ts");
-/* harmony import */ var _calls_voice_proof__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ../../calls/voice-proof */ "./src/calls/voice-proof.ts");
+/* harmony import */ var _calls_proof_moment__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ../../calls/proof-moment */ "./src/calls/proof-moment.ts");
 /* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! telegram */ "telegram");
 /* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_8___default = /*#__PURE__*/__webpack_require__.n(telegram__WEBPACK_IMPORTED_MODULE_8__);
 /* harmony import */ var _data_user_data_crud__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ../../data/user-data-crud */ "./src/data/user-data-crud.ts");
@@ -64454,6 +64835,10 @@ __webpack_require__.r(__webpack_exports__);
 
 
 
+/** The proof-moment context for this chat: its texts / fallback voice note go through the normal reply path. */
+function proofContext(event, chatId, opts) {
+    return { chatId, reply: (text, file) => (0,_replier__WEBPACK_IMPORTED_MODULE_6__.pushToReplies)(event, chatId, text, file), ...opts };
+}
 
 
 const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_15__.Logger("tg-aut:unpaid-patterns");
@@ -64584,6 +64969,8 @@ function isLiveRealMediaRequest(text) {
     ]);
     return ((asksMedia && asksLiveOrReal) || liveOnlyFollowUp) && !isPriceQuestion && !declinesDemo;
 }
+/** "i am / im / i'm / iam not (a) fake|scam|fraud|cheat": the user denying, not a proof ask. */
+const SELF_DENIAL = /\bi(?:'|\s*a)?m\s+not\s+(?:a\s+)?(?:fak|fack|frau|scam|cheat)/i;
 /** A demo / price ask the merged handler answers with the demo price block ("price", "how much", "demo", "kitna hai"). */
 function isDemoPriceAsk(text) {
     // ===== isDemoPrice: bags-based classifier =====
@@ -64644,6 +65031,8 @@ async function handleTrustProofRequest(event, userDetails, context) {
     await sleep((prfcount % 4) * 4500);
     if (prfcount < 5) {
         if (prfcount % 4 === 1) {
+            // A proof ask with no voice note of its own: counted, so the next one (confirm / sabdika step) can ring.
+            (0,_calls_proof_moment__WEBPACK_IMPORTED_MODULE_7__.noteProofAsk)(context.chatId);
             await (0,_replier__WEBPACK_IMPORTED_MODULE_6__.pushToReplies)(event, context.chatId, (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)((0,_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_14__.getUpsellMessage)(0)));
             (0,_pattern_followup__WEBPACK_IMPORTED_MODULE_13__.schedulePatternFollowup)(event, context, 17000, {
                 kind: 'send', files: ['./prf1.jpg', './prf2.jpg'], message: 'Happy Customers👆',
@@ -64651,13 +65040,20 @@ async function handleTrustProofRequest(event, userDetails, context) {
         }
         else if (prfcount % 4 === 2) {
             await (0,_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, _messages_standard_messages__WEBPACK_IMPORTED_MODULE_5__.daily100);
+            // Proof moment: a call replaces the confirm voice note (sent afterwards if the call does not play).
+            const payCaption = (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)(['Pay Dear!', 'Pay na baby!', 'Pay first reyy!', 'Just pay baby!']);
+            if ((await (0,_calls_proof_moment__WEBPACK_IMPORTED_MODULE_7__.deliverProof)(proofContext(event, context.chatId, { followUp: true, delayMs: 5000, fallbackFile: './confirm.mp3', fallbackText: payCaption }), 'trust')).placed)
+                return;
             (0,_pattern_followup__WEBPACK_IMPORTED_MODULE_13__.schedulePatternFollowup)(event, context, 17000, {
-                kind: 'reply', text: (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)(['Pay Dear!', 'Pay na baby!', 'Pay first reyy!', 'Just pay baby!']), file: './confirm.mp3',
+                kind: 'reply', text: payCaption, file: './confirm.mp3',
             }, { label: 'unpaid.trust.payConfirm' });
         }
         else if (prfcount % 4 === 3) {
             await (0,_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, `LOGIN here 👇🏻👇🏻\n\n**${process.env.link}**\n**${process.env.link}**\n\nSend me Screenshot After Login!!`);
             await (0,_tp_messages__WEBPACK_IMPORTED_MODULE_10__.sendTpMsg)(event);
+            // The login link is the pay ask: no second pay prompt after the call.
+            if ((await (0,_calls_proof_moment__WEBPACK_IMPORTED_MODULE_7__.deliverProof)(proofContext(event, context.chatId, { followUp: false, delayMs: 5000, fallbackFile: './sabdika.mp3' }), 'trust')).placed)
+                return;
             (0,_pattern_followup__WEBPACK_IMPORTED_MODULE_13__.schedulePatternFollowup)(event, context, 17000, { kind: 'reply', text: '', file: './sabdika.mp3' }, { label: 'unpaid.trust.sabdika' });
         }
         else {
@@ -64759,6 +65155,10 @@ const unpaidPatterns = [
                 "This is real dear. Free live pics not possible.\n\nDemo pics 25₹, video call 50₹. Then you can check properly.",
                 "I will show live only after demo/payment baby.\n\nFirst take small demo, then decide."
             ]));
+            // Proof moment: a call replaces the proof photos + confirm voice note (they would land mid-call); the
+            // confirm note follows if the call does not play, the pay prompt if it does.
+            if ((await (0,_calls_proof_moment__WEBPACK_IMPORTED_MODULE_7__.deliverProof)(proofContext(event, context.chatId, { followUp: true, delayMs: 5000 }), 'liveReal')).placed)
+                return true;
             (0,_pattern_followup__WEBPACK_IMPORTED_MODULE_13__.schedulePatternFollowup)(event, context, 12000, {
                 kind: 'send', files: ['./prf1.jpg', './prf2.jpg'], message: 'Real proof 👆',
             }, { label: 'unpaid.liveReal.proof' });
@@ -64910,11 +65310,10 @@ const unpaidPatterns = [
                 userDetails = await db.updateSingleKey(context.chatId, _data_user_data_crud__WEBPACK_IMPORTED_MODULE_9__.user.cheatCount, cheatCount);
                 // "Fake" after earlier voice/proof requests: ring them with the voice instead of a voice note
                 // (a few seconds after our text, never straight after the pay menu).
-                const ringWith = (followUp) => (0,_calls_voice_proof__WEBPACK_IMPORTED_MODULE_7__.tryVoiceProofCall)(context.chatId, {
-                    followUp,
-                    delayMs: 5000,
-                    fallback: () => (0,_replier__WEBPACK_IMPORTED_MODULE_6__.pushToReplies)(event, context.chatId, '', './notfake.mp3'),
-                });
+                // "I am not fake" is the user denying, not asking for proof: never a proof call (the reply is unchanged).
+                const selfDenial = SELF_DENIAL.test(text);
+                const ringWith = async (followUp) => !selfDenial
+                    && (await (0,_calls_proof_moment__WEBPACK_IMPORTED_MODULE_7__.deliverProof)(proofContext(event, context.chatId, { followUp, delayMs: 5000 }), 'notfake')).placed;
                 // Adjust response based on accusation count
                 if (cheatCount > 2) {
                     // The proof photos (17 s later) would land mid-call: only when no call was placed.
@@ -78563,11 +78962,14 @@ async function downloadProfilePic(client, index) {
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   CALL_ONLY_CLIP: () => (/* binding */ CALL_ONLY_CLIP),
 /* harmony export */   COMMON_VOICES: () => (/* binding */ COMMON_VOICES),
 /* harmony export */   VOICES_SUBDIR: () => (/* binding */ VOICES_SUBDIR),
+/* harmony export */   isCallOnlyClip: () => (/* binding */ isCallOnlyClip),
 /* harmony export */   listVoiceVariants: () => (/* binding */ listVoiceVariants),
 /* harmony export */   perClientVoicesDir: () => (/* binding */ perClientVoicesDir),
 /* harmony export */   pickVoiceSlot: () => (/* binding */ pickVoiceSlot),
+/* harmony export */   refuseCallOnlyClip: () => (/* binding */ refuseCallOnlyClip),
 /* harmony export */   voiceSlotPattern: () => (/* binding */ voiceSlotPattern),
 /* harmony export */   voicesDirs: () => (/* binding */ voicesDirs)
 /* harmony export */ });
@@ -78633,9 +79035,18 @@ function voiceSlotPattern(fileName) {
     const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     return new RegExp(`^${esc(path__WEBPACK_IMPORTED_MODULE_1___default().basename(fileName, ext))}(?:-\\d+)?${esc(ext)}$`, 'i');
 }
-/** One random variant of slot `fileName` from per-client + common, else `legacyPath` unchanged. */
+/** call-real-*.mp3 / call-voice-*.mp3 (any call-*.mp3) are CALL-ONLY clips: never sent as a voice note (owner 2026-10-29). */
+const CALL_ONLY_CLIP = /^call-.*\.mp3$/i;
+const isCallOnlyClip = (file) => CALL_ONLY_CLIP.test(path__WEBPACK_IMPORTED_MODULE_1___default().basename(file));
+function refuseCallOnlyClip(file) {
+    if (isCallOnlyClip(file))
+        throw new Error(`${path__WEBPACK_IMPORTED_MODULE_1___default().basename(file)} is a call-only clip; refused as a voice note`);
+}
+/** One random variant of slot `fileName` from per-client + common, else `legacyPath` unchanged. Never a call-*.mp3. */
 function pickVoiceSlot(label, fileName, legacyPath, opts = {}) {
-    const found = listVoices(voiceSlotPattern(fileName), opts);
+    refuseCallOnlyClip(fileName);
+    refuseCallOnlyClip(legacyPath);
+    const found = listVoices(voiceSlotPattern(fileName), opts).filter((file) => !isCallOnlyClip(file));
     if (found.length === 0) {
         logOnce(label, `legacy ${path__WEBPACK_IMPORTED_MODULE_1___default().dirname(legacyPath)}`);
         return legacyPath;
@@ -84627,7 +85038,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _conversation_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ../../conversation/messages/upsell-messages */ "./src/conversation/messages/upsell-messages.ts");
 /* harmony import */ var _conversation_messages_post_show_resell__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ../../conversation/messages/post-show-resell */ "./src/conversation/messages/post-show-resell.ts");
 /* harmony import */ var _replier__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ../../replier */ "./src/replier/index.ts");
-/* harmony import */ var _calls_voice_proof__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ../../calls/voice-proof */ "./src/calls/voice-proof.ts");
+/* harmony import */ var _calls_proof_moment__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ../../calls/proof-moment */ "./src/calls/proof-moment.ts");
 /* harmony import */ var _conversation_patterns_pattern_followup__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ../../conversation/patterns/pattern-followup */ "./src/conversation/patterns/pattern-followup.ts");
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
 /* harmony import */ var _conversation_patterns_number_intent__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ../../conversation/patterns/number-intent */ "./src/conversation/patterns/number-intent.ts");
@@ -85053,11 +85464,12 @@ const smallTalkPatterns = [
                 logger.debug(`[VoiceCall] Detected voice call mention in: "${text}" (type: ${voiceType})`);
                 // Asked again for the voice (or proof): ring them and play it instead of another voice note.
                 // Falls back to the voice message below (first request, busy, limits, privacy, off).
-                const calling = await (0,_calls_voice_proof__WEBPACK_IMPORTED_MODULE_8__.tryVoiceProofCall)(context.chatId, {
+                const { placed } = await (0,_calls_proof_moment__WEBPACK_IMPORTED_MODULE_8__.deliverProof)({
+                    chatId: context.chatId,
+                    reply: (text, file) => (0,_replier__WEBPACK_IMPORTED_MODULE_7__.pushToReplies)(event, context.chatId, text, file),
                     followUp: (Number(userDetails.payAmount) || 0) < 15,
-                    fallback: () => (0,_replier__WEBPACK_IMPORTED_MODULE_7__.pushToReplies)(event, context.chatId, '', './voice.mp3'),
-                });
-                if (calling)
+                }, 'voice');
+                if (placed)
                     return true;
                 // Sub-type aware text intro before the voice sample (pools, never single line).
                 if (voiceType === 'explicit_command') {
@@ -108268,6 +108680,8 @@ class FileSender {
         return path__WEBPACK_IMPORTED_MODULE_2___default().resolve(moduleDir, "..", clientId, fileName);
     }
     normalizePath(filePath) {
+        // call-*.mp3 clips are call-only (the proof call plays them): never sent as a file / voice note.
+        (0,_media_voices__WEBPACK_IMPORTED_MODULE_5__.refuseCallOnlyClip)(filePath);
         if (path__WEBPACK_IMPORTED_MODULE_2___default().isAbsolute(filePath))
             return path__WEBPACK_IMPORTED_MODULE_2___default().normalize(filePath);
         const cmsPath = path__WEBPACK_IMPORTED_MODULE_2___default().normalize(this.getClientFilePath(filePath));
