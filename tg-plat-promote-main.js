@@ -27129,6 +27129,65 @@ class PromoteRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_1__.Ba
 
 /***/ },
 
+/***/ "../../packages/tg-db/src/collections/reply-failures.repository.ts"
+/*!*************************************************************************!*\
+  !*** ../../packages/tg-db/src/collections/reply-failures.repository.ts ***!
+  \*************************************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   REPLY_FAILURES_CLIENT_INDEX: () => (/* binding */ REPLY_FAILURES_CLIENT_INDEX),
+/* harmony export */   REPLY_FAILURES_TTL_INDEX: () => (/* binding */ REPLY_FAILURES_TTL_INDEX),
+/* harmony export */   REPLY_FAILURES_TTL_SECONDS: () => (/* binding */ REPLY_FAILURES_TTL_SECONDS),
+/* harmony export */   REPLY_FAILURE_TEXT_MAX: () => (/* binding */ REPLY_FAILURE_TEXT_MAX),
+/* harmony export */   ReplyFailuresRepository: () => (/* binding */ ReplyFailuresRepository)
+/* harmony export */ });
+/* harmony import */ var _base_repository__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../base-repository */ "../../packages/tg-db/src/base-repository.ts");
+
+/**
+ * `replyFailures`: one small row per user-facing send that did not go out (Telegram refused it, the queue dropped
+ * it, or it failed and will be retried), written fire-and-forget by tg-aut for debug review. LOG ONLY: no send path
+ * reads it except the debug route GET /diagnostics/reply-failures and mongosh (added 2026-10-28 for the PEER_FLOOD review).
+ *
+ * Indexes: TTL on `ts` (14 days) and `{ clientId: 1, ts: -1 }` for "this account's failures, newest first".
+ * Never stored: message text beyond 300 characters, user names, session data.
+ */
+const REPLY_FAILURES_TTL_SECONDS = 14 * 24 * 60 * 60;
+const REPLY_FAILURES_TTL_INDEX = 'ts_ttl';
+const REPLY_FAILURES_CLIENT_INDEX = 'clientId_ts';
+/** Longest stored text (characters). */
+const REPLY_FAILURE_TEXT_MAX = 300;
+class ReplyFailuresRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_0__.BaseRepository {
+    constructor() {
+        super(...arguments);
+        this.collectionName = 'replyFailures';
+    }
+    /** Never throws; false when the write failed (already logged by guardWrite). */
+    async insert(doc) {
+        return this.guardWrite(`insert(${String(doc.chatId)})`, () => this.collection.insertOne({ ...doc }));
+    }
+    /** This account's rows, newest first (served by clientId_ts). Debug reads only; [] on error. */
+    async recent(clientId, limit, filter = {}) {
+        const query = { clientId };
+        if (filter.errorClass)
+            query.errorClass = filter.errorClass;
+        if (filter.outcome)
+            query.outcome = filter.outcome;
+        if (filter.chatId)
+            query.chatId = filter.chatId;
+        const capped = Math.max(1, Math.min(500, Math.floor(limit) || 50));
+        return this.guard(`recent(${clientId})`, [], () => this.collection.find(query, { projection: { _id: 0 } }).sort({ ts: -1 }).limit(capped).toArray());
+    }
+    async ensureIndexes() {
+        await this.guardWrite('ensureIndexes(ts ttl)', () => this.collection.createIndex({ ts: 1 }, { name: REPLY_FAILURES_TTL_INDEX, expireAfterSeconds: REPLY_FAILURES_TTL_SECONDS }));
+        await this.guardWrite('ensureIndexes(clientId ts)', () => this.collection.createIndex({ clientId: 1, ts: -1 }, { name: REPLY_FAILURES_CLIENT_INDEX }));
+    }
+}
+
+
+/***/ },
+
 /***/ "../../packages/tg-db/src/collections/stats.repository.ts"
 /*!****************************************************************!*\
   !*** ../../packages/tg-db/src/collections/stats.repository.ts ***!
@@ -28128,11 +28187,16 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   DISPLAY_NAME_HISTORY: () => (/* reexport safe */ _collections_user_identity_repository__WEBPACK_IMPORTED_MODULE_4__.DISPLAY_NAME_HISTORY),
 /* harmony export */   DailyStatsRepository: () => (/* reexport safe */ _collections_daily_stats_repository__WEBPACK_IMPORTED_MODULE_5__.DailyStatsRepository),
 /* harmony export */   DbConnection: () => (/* reexport safe */ _connection__WEBPACK_IMPORTED_MODULE_0__.DbConnection),
-/* harmony export */   ERROR_ALERT_WINDOW_MS: () => (/* reexport safe */ _repositories__WEBPACK_IMPORTED_MODULE_11__.ERROR_ALERT_WINDOW_MS),
+/* harmony export */   ERROR_ALERT_WINDOW_MS: () => (/* reexport safe */ _repositories__WEBPACK_IMPORTED_MODULE_12__.ERROR_ALERT_WINDOW_MS),
 /* harmony export */   PERSONA_ASSIGNMENT_PROJECTION: () => (/* reexport safe */ _collections_promote_repository__WEBPACK_IMPORTED_MODULE_7__.PERSONA_ASSIGNMENT_PROJECTION),
 /* harmony export */   PROMOTE_RUNTIME_MIN_AGE_DAYS: () => (/* reexport safe */ _collections_promote_repository__WEBPACK_IMPORTED_MODULE_7__.PROMOTE_RUNTIME_MIN_AGE_DAYS),
 /* harmony export */   PromoteRepository: () => (/* reexport safe */ _collections_promote_repository__WEBPACK_IMPORTED_MODULE_7__.PromoteRepository),
-/* harmony export */   RepositoryContainer: () => (/* reexport safe */ _repositories__WEBPACK_IMPORTED_MODULE_11__.RepositoryContainer),
+/* harmony export */   REPLY_FAILURES_CLIENT_INDEX: () => (/* reexport safe */ _collections_reply_failures_repository__WEBPACK_IMPORTED_MODULE_10__.REPLY_FAILURES_CLIENT_INDEX),
+/* harmony export */   REPLY_FAILURES_TTL_INDEX: () => (/* reexport safe */ _collections_reply_failures_repository__WEBPACK_IMPORTED_MODULE_10__.REPLY_FAILURES_TTL_INDEX),
+/* harmony export */   REPLY_FAILURES_TTL_SECONDS: () => (/* reexport safe */ _collections_reply_failures_repository__WEBPACK_IMPORTED_MODULE_10__.REPLY_FAILURES_TTL_SECONDS),
+/* harmony export */   REPLY_FAILURE_TEXT_MAX: () => (/* reexport safe */ _collections_reply_failures_repository__WEBPACK_IMPORTED_MODULE_10__.REPLY_FAILURE_TEXT_MAX),
+/* harmony export */   ReplyFailuresRepository: () => (/* reexport safe */ _collections_reply_failures_repository__WEBPACK_IMPORTED_MODULE_10__.ReplyFailuresRepository),
+/* harmony export */   RepositoryContainer: () => (/* reexport safe */ _repositories__WEBPACK_IMPORTED_MODULE_12__.RepositoryContainer),
 /* harmony export */   StatsRepository: () => (/* reexport safe */ _collections_stats_repository__WEBPACK_IMPORTED_MODULE_9__.StatsRepository),
 /* harmony export */   USER_DATA_DEFAULTS: () => (/* reexport safe */ _collections_user_data_repository__WEBPACK_IMPORTED_MODULE_3__.USER_DATA_DEFAULTS),
 /* harmony export */   UserDataRepository: () => (/* reexport safe */ _collections_user_data_repository__WEBPACK_IMPORTED_MODULE_3__.UserDataRepository),
@@ -28142,20 +28206,20 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   availableMsgsUpdateExpression: () => (/* reexport safe */ _collections_channels_repository__WEBPACK_IMPORTED_MODULE_6__.availableMsgsUpdateExpression),
 /* harmony export */   buildLiveChannelUpsert: () => (/* reexport safe */ _collections_channels_repository__WEBPACK_IMPORTED_MODULE_6__.buildLiveChannelUpsert),
 /* harmony export */   createChannelsStore: () => (/* reexport safe */ _collections_channels_repository__WEBPACK_IMPORTED_MODULE_6__.createChannelsStore),
-/* harmony export */   createRepositories: () => (/* reexport safe */ _repositories__WEBPACK_IMPORTED_MODULE_11__.createRepositories),
+/* harmony export */   createRepositories: () => (/* reexport safe */ _repositories__WEBPACK_IMPORTED_MODULE_12__.createRepositories),
 /* harmony export */   describeError: () => (/* reexport safe */ _connection__WEBPACK_IMPORTED_MODULE_0__.describeError),
 /* harmony export */   emptyPromoteAvailability: () => (/* reexport safe */ _collections_promote_repository__WEBPACK_IMPORTED_MODULE_7__.emptyPromoteAvailability),
-/* harmony export */   ensureAllIndexes: () => (/* reexport safe */ _repositories__WEBPACK_IMPORTED_MODULE_11__.ensureAllIndexes),
+/* harmony export */   ensureAllIndexes: () => (/* reexport safe */ _repositories__WEBPACK_IMPORTED_MODULE_12__.ensureAllIndexes),
 /* harmony export */   getPromoteRuntimeEligibilityFilter: () => (/* reexport safe */ _collections_promote_repository__WEBPACK_IMPORTED_MODULE_7__.getPromoteRuntimeEligibilityFilter),
 /* harmony export */   neverPaidFilter: () => (/* reexport safe */ _collections_user_data_repository__WEBPACK_IMPORTED_MODULE_3__.neverPaidFilter),
 /* harmony export */   normalizeActiveChannelWrite: () => (/* reexport safe */ _collections_channels_repository__WEBPACK_IMPORTED_MODULE_6__.normalizeActiveChannelWrite),
 /* harmony export */   normalizeChannelKey: () => (/* reexport safe */ _collections_channels_repository__WEBPACK_IMPORTED_MODULE_6__.normalizeChannelKey),
 /* harmony export */   personaAssignmentFilter: () => (/* reexport safe */ _collections_promote_repository__WEBPACK_IMPORTED_MODULE_7__.personaAssignmentFilter),
-/* harmony export */   readDatabaseSize: () => (/* reexport safe */ _database_info__WEBPACK_IMPORTED_MODULE_10__.readDatabaseSize),
+/* harmony export */   readDatabaseSize: () => (/* reexport safe */ _database_info__WEBPACK_IMPORTED_MODULE_11__.readDatabaseSize),
 /* harmony export */   recordDailyAnalytics: () => (/* reexport safe */ _collections_daily_stats_repository__WEBPACK_IMPORTED_MODULE_5__.recordDailyAnalytics),
 /* harmony export */   sanitizeAvailableMsgs: () => (/* reexport safe */ _collections_channels_repository__WEBPACK_IMPORTED_MODULE_6__.sanitizeAvailableMsgs),
 /* harmony export */   usableChannelId: () => (/* reexport safe */ _collections_channels_repository__WEBPACK_IMPORTED_MODULE_6__.usableChannelId),
-/* harmony export */   withErrorReporter: () => (/* reexport safe */ _repositories__WEBPACK_IMPORTED_MODULE_11__.withErrorReporter)
+/* harmony export */   withErrorReporter: () => (/* reexport safe */ _repositories__WEBPACK_IMPORTED_MODULE_12__.withErrorReporter)
 /* harmony export */ });
 /* harmony import */ var _connection__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./connection */ "../../packages/tg-db/src/connection.ts");
 /* harmony import */ var _adopt_connection__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./adopt-connection */ "../../packages/tg-db/src/adopt-connection.ts");
@@ -28167,8 +28231,9 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _collections_promote_repository__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ./collections/promote.repository */ "../../packages/tg-db/src/collections/promote.repository.ts");
 /* harmony import */ var _collections_clients_repository__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ./collections/clients.repository */ "../../packages/tg-db/src/collections/clients.repository.ts");
 /* harmony import */ var _collections_stats_repository__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ./collections/stats.repository */ "../../packages/tg-db/src/collections/stats.repository.ts");
-/* harmony import */ var _database_info__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ./database-info */ "../../packages/tg-db/src/database-info.ts");
-/* harmony import */ var _repositories__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ./repositories */ "../../packages/tg-db/src/repositories.ts");
+/* harmony import */ var _collections_reply_failures_repository__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ./collections/reply-failures.repository */ "../../packages/tg-db/src/collections/reply-failures.repository.ts");
+/* harmony import */ var _database_info__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ./database-info */ "../../packages/tg-db/src/database-info.ts");
+/* harmony import */ var _repositories__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! ./repositories */ "../../packages/tg-db/src/repositories.ts");
 /**
  * @tg/db — the shared MongoDB layer.
  *
@@ -28209,6 +28274,7 @@ __webpack_require__.r(__webpack_exports__);
 
 
 
+
 /***/ },
 
 /***/ "../../packages/tg-db/src/repositories.ts"
@@ -28235,6 +28301,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _collections_stats_repository__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ./collections/stats.repository */ "../../packages/tg-db/src/collections/stats.repository.ts");
 /* harmony import */ var _collections_payment_proofs_repository__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ./collections/payment-proofs.repository */ "../../packages/tg-db/src/collections/payment-proofs.repository.ts");
 /* harmony import */ var _collections_vision_shadow_repository__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ./collections/vision-shadow.repository */ "../../packages/tg-db/src/collections/vision-shadow.repository.ts");
+/* harmony import */ var _collections_reply_failures_repository__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ./collections/reply-failures.repository */ "../../packages/tg-db/src/collections/reply-failures.repository.ts");
+
 
 
 
@@ -28270,6 +28338,7 @@ function createRepositories(connection, logger) {
         stats: new _collections_stats_repository__WEBPACK_IMPORTED_MODULE_7__.StatsRepository(connection, logger),
         paymentProofs: new _collections_payment_proofs_repository__WEBPACK_IMPORTED_MODULE_8__.PaymentProofsRepository(connection, logger),
         visionShadow: new _collections_vision_shadow_repository__WEBPACK_IMPORTED_MODULE_9__.VisionShadowRepository(connection, logger),
+        replyFailures: new _collections_reply_failures_repository__WEBPACK_IMPORTED_MODULE_10__.ReplyFailuresRepository(connection, logger),
     };
 }
 /**
@@ -28299,6 +28368,7 @@ async function ensureAllIndexes(repositories, logger) {
         ['stats', repositories.stats],
         ['paymentProofs', repositories.paymentProofs],
         ['visionShadow', repositories.visionShadow],
+        ['replyFailures', repositories.replyFailures],
     ];
     for (const [name, repository] of all) {
         try {
@@ -38086,8 +38156,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "a95a4ede97dc60954c967163e7d90d85f4435b91" : 0;
-    const builtAt =  true ? "2026-10-28T10:25:54.092Z" : 0;
+    const sha =  true ? "a428c7151bf21f7104ceb126ffbd3496a681a954" : 0;
+    const builtAt =  true ? "2026-10-28T11:31:49.155Z" : 0;
     return { sha, builtAt };
 }
 
