@@ -24449,20 +24449,22 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   BotConfig: () => (/* binding */ BotConfig),
 /* harmony export */   ChannelCategory: () => (/* binding */ ChannelCategory),
-/* harmony export */   NotificationSeverity: () => (/* reexport safe */ _notification_format__WEBPACK_IMPORTED_MODULE_6__.NotificationSeverity),
-/* harmony export */   escapeTelegramHtml: () => (/* reexport safe */ _notification_format__WEBPACK_IMPORTED_MODULE_6__.escapeTelegramHtml),
-/* harmony export */   formatRichNotification: () => (/* reexport safe */ _notification_format__WEBPACK_IMPORTED_MODULE_6__.formatRichNotification)
+/* harmony export */   NotificationSeverity: () => (/* reexport safe */ _notification_format__WEBPACK_IMPORTED_MODULE_7__.NotificationSeverity),
+/* harmony export */   escapeTelegramHtml: () => (/* reexport safe */ _notification_format__WEBPACK_IMPORTED_MODULE_7__.escapeTelegramHtml),
+/* harmony export */   formatRichNotification: () => (/* reexport safe */ _notification_format__WEBPACK_IMPORTED_MODULE_7__.formatRichNotification)
 /* harmony export */ });
 /* harmony import */ var _notice_digest__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./notice-digest */ "../../packages/tg-core/src/utils/notice-digest.ts");
 /* harmony import */ var axios__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! axios */ "axios");
 /* harmony import */ var axios__WEBPACK_IMPORTED_MODULE_1___default = /*#__PURE__*/__webpack_require__.n(axios__WEBPACK_IMPORTED_MODULE_1__);
 /* harmony import */ var form_data__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! form-data */ "form-data");
 /* harmony import */ var form_data__WEBPACK_IMPORTED_MODULE_2___default = /*#__PURE__*/__webpack_require__.n(form_data__WEBPACK_IMPORTED_MODULE_2__);
-/* harmony import */ var _parseError__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ./parseError */ "../../packages/tg-core/src/utils/parseError.ts");
-/* harmony import */ var _logger__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ./logger */ "../../packages/tg-core/src/utils/logger.ts");
-/* harmony import */ var _timers__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ./timers */ "../../packages/tg-core/src/utils/timers.ts");
-/* harmony import */ var _notification_format__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ./notification-format */ "../../packages/tg-core/src/utils/notification-format.ts");
-/* harmony import */ var _rich_message__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ./rich-message */ "../../packages/tg-core/src/utils/rich-message.ts");
+/* harmony import */ var fs__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! fs */ "fs");
+/* harmony import */ var fs__WEBPACK_IMPORTED_MODULE_3___default = /*#__PURE__*/__webpack_require__.n(fs__WEBPACK_IMPORTED_MODULE_3__);
+/* harmony import */ var _parseError__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ./parseError */ "../../packages/tg-core/src/utils/parseError.ts");
+/* harmony import */ var _logger__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ./logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _timers__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ./timers */ "../../packages/tg-core/src/utils/timers.ts");
+/* harmony import */ var _notification_format__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ./notification-format */ "../../packages/tg-core/src/utils/notification-format.ts");
+/* harmony import */ var _rich_message__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ./rich-message */ "../../packages/tg-core/src/utils/rich-message.ts");
 
 
 
@@ -24471,7 +24473,8 @@ __webpack_require__.r(__webpack_exports__);
 
 
 
-const logger = new _logger__WEBPACK_IMPORTED_MODULE_4__.Logger('tg-core:telegram-bots-config');
+
+const logger = new _logger__WEBPACK_IMPORTED_MODULE_5__.Logger('tg-core:telegram-bots-config');
 
 const ChannelCategory = Object.freeze({
     CLIENT_UPDATES: 'CLIENT_UPDATES',
@@ -24498,6 +24501,10 @@ const ChannelCategory = Object.freeze({
     /** The unwanted-updates group (private): bot fallback for unwanted photos when the client account cannot post there (2026-10-23). */
     UNWANTED_UPDATES: 'UNWANTED_UPDATES',
 });
+function isBotLocalFile(media) {
+    return typeof media === 'object' && media !== null && !Buffer.isBuffer(media)
+        && typeof media.localPath === 'string';
+}
 // CMS's bot-health job owns these fields. A retired bot is a revoked token (dead_token), one
 // that was never made channel admin (pending_admin — its sends fail), or one parked for a human
 // (manual_attention). Loading them only burns a failed send + retry and logs Unauthorized.
@@ -24613,7 +24620,7 @@ class BotConfig {
             logger.info(`BotConfig initialized successfully with ${this.categoryMap.size} categories.`);
         }
         catch (error) {
-            (0,_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, 'Failed to initialize BotConfig', false);
+            (0,_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, 'Failed to initialize BotConfig', false);
         }
         finally {
             this.initialized = true;
@@ -24642,7 +24649,7 @@ class BotConfig {
             this.carryBotState(this.categoryMap, next);
             this.categoryMap = next;
         })()
-            .catch(error => { (0,_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, 'Failed to refresh Telegram bot config', false); })
+            .catch(error => { (0,_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, 'Failed to refresh Telegram bot config', false); })
             .finally(() => { this.refreshing = null; });
     }
     /**
@@ -24783,7 +24790,7 @@ class BotConfig {
             }
         }
         catch (error) {
-            (0,_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, 'Failed to load Telegram bot config from Mongo bots collection', false);
+            (0,_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, 'Failed to load Telegram bot config from Mongo bots collection', false);
             return null;
         }
     }
@@ -24846,7 +24853,7 @@ class BotConfig {
                 logger.warn(`${category}: bot ${token.split(':')[0]} token revoked (401 Unauthorized), skipped; remove it from TELEGRAM_CHANNEL_CONFIG_*`);
                 return '';
             }
-            (0,_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, 'Error fetching bot username:', false);
+            (0,_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, 'Error fetching bot username:', false);
             return '';
         }
     }
@@ -24965,7 +24972,7 @@ class BotConfig {
         entry.lastUsed = new Date();
         this.pendingUsage.set(key, entry);
         if (!this.usageFlushTimer) {
-            this.usageFlushTimer = (0,_timers__WEBPACK_IMPORTED_MODULE_5__.scheduleUnrefTimeout)(() => {
+            this.usageFlushTimer = (0,_timers__WEBPACK_IMPORTED_MODULE_6__.scheduleUnrefTimeout)(() => {
                 this.usageFlushTimer = null;
                 void this.flushBotUsage();
             }, this.USAGE_FLUSH_MS);
@@ -25008,7 +25015,7 @@ class BotConfig {
             }
         }
         catch (error) {
-            (0,_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, 'Failed to record Telegram bot usage in Mongo bots collection', false);
+            (0,_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, 'Failed to record Telegram bot usage in Mongo bots collection', false);
         }
     }
     /**
@@ -25049,7 +25056,7 @@ class BotConfig {
      */
     clientPrefix(parseMode) {
         const clientId = process.env.clientId ?? 'unknown';
-        return parseMode === 'HTML' ? (0,_notification_format__WEBPACK_IMPORTED_MODULE_6__.escapeTelegramHtml)(clientId) : clientId;
+        return parseMode === 'HTML' ? (0,_notification_format__WEBPACK_IMPORTED_MODULE_7__.escapeTelegramHtml)(clientId) : clientId;
     }
     /** Client id alone on the first line (owner, 2026-10-19), as in rich cards. */
     prefixMessage(message, parseMode, gap = false) {
@@ -25069,9 +25076,9 @@ class BotConfig {
             const richInput = options.rich === true
                 ? { summary: message }
                 : { ...options.rich, summary: options.rich.summary ?? message };
-            return { text: (0,_notification_format__WEBPACK_IMPORTED_MODULE_6__.formatRichNotification)(houseStyle ? { ...richInput, houseStyle } : richInput), parseMode: 'HTML' };
+            return { text: (0,_notification_format__WEBPACK_IMPORTED_MODULE_7__.formatRichNotification)(houseStyle ? { ...richInput, houseStyle } : richInput), parseMode: 'HTML' };
         }
-        return { text: (0,_notification_format__WEBPACK_IMPORTED_MODULE_6__.formatRichNotification)(houseStyle ? { ...message, houseStyle } : message), parseMode: 'HTML' };
+        return { text: (0,_notification_format__WEBPACK_IMPORTED_MODULE_7__.formatRichNotification)(houseStyle ? { ...message, houseStyle } : message), parseMode: 'HTML' };
     }
     /** Rich-message HTML for a structured notice (Bot API sendRichMessage). */
     richMessageHtml(message, options, category) {
@@ -25079,7 +25086,7 @@ class BotConfig {
         if (category === ChannelCategory.CLIENT_UPDATES)
             input.houseStyle = true;
         const source = input.source ?? (options.prefix === false ? '' : process.env.clientId ?? '');
-        return (0,_rich_message__WEBPACK_IMPORTED_MODULE_7__.formatRichMessageHtml)(input, { prefix: source || undefined });
+        return (0,_rich_message__WEBPACK_IMPORTED_MODULE_8__.formatRichMessageHtml)(input, { prefix: source || undefined });
     }
     /** The notice's buttons, then any caller reply_markup rows, as one classic inline keyboard under the bubble. */
     richKeyboard(message, replyMarkup) {
@@ -25092,7 +25099,7 @@ class BotConfig {
                 markup = undefined;
             }
         }
-        const rows = [...((0,_rich_message__WEBPACK_IMPORTED_MODULE_7__.notificationKeyboard)(message)?.inline_keyboard ?? []), ...(Array.isArray(markup?.inline_keyboard) ? markup.inline_keyboard : [])];
+        const rows = [...((0,_rich_message__WEBPACK_IMPORTED_MODULE_8__.notificationKeyboard)(message)?.inline_keyboard ?? []), ...(Array.isArray(markup?.inline_keyboard) ? markup.inline_keyboard : [])];
         return rows.length ? { inline_keyboard: rows } : undefined;
     }
     /** True for failures that are about the bot/channel (rate limit, kicked...), not the rich payload. */
@@ -25277,7 +25284,7 @@ class BotConfig {
      * line on top. Bot failover is sendMedia's. `onSent` gets the photo's message id.
      */
     async sendPhotoCard(category, photo, card, options = {}) {
-        const caption = (0,_rich_message__WEBPACK_IMPORTED_MODULE_7__.formatPhotoCaptionHtml)(card, card.source ?? process.env.clientId ?? undefined);
+        const caption = (0,_rich_message__WEBPACK_IMPORTED_MODULE_8__.formatPhotoCaptionHtml)(card, card.source ?? process.env.clientId ?? undefined);
         return this.sendMedia(category, 'sendPhoto', photo, {
             caption,
             parseMode: 'HTML',
@@ -25285,7 +25292,7 @@ class BotConfig {
             disableNotification: options.disableNotification,
             replyToMessageId: options.replyToMessageId,
             allowSendingWithoutReply: options.replyToMessageId ? true : undefined,
-            replyMarkup: (0,_rich_message__WEBPACK_IMPORTED_MODULE_7__.notificationKeyboard)(card),
+            replyMarkup: (0,_rich_message__WEBPACK_IMPORTED_MODULE_8__.notificationKeyboard)(card),
             onSent: options.onSent,
         });
     }
@@ -25486,11 +25493,12 @@ class BotConfig {
         const channelId = String(options.targetChannelId || data.channelId);
         const formData = new (form_data__WEBPACK_IMPORTED_MODULE_2___default())();
         formData.append('chat_id', channelId);
+        let localStream;
         // Determine media field name based on method
         const mediaField = method === 'sendVideoNote'
             ? 'video_note'
             : method.replace('send', '').toLowerCase();
-        if (Buffer.isBuffer(media)) {
+        if (Buffer.isBuffer(media) || isBotLocalFile(media)) {
             // Determine appropriate filename and extension based on media type
             let filename = `${mediaField}.dat`;
             if (method === 'sendAudio') {
@@ -25522,7 +25530,21 @@ class BotConfig {
                 const extension = options.extension || 'mp4';
                 filename = `video_note.${extension}`;
             }
-            formData.append(mediaField, media, filename);
+            if (isBotLocalFile(media)) {
+                // Streamed from disk: the file is never read into memory whole (a fresh stream per attempt).
+                localStream = (0,fs__WEBPACK_IMPORTED_MODULE_3__.createReadStream)(media.localPath);
+                // The stream opens asynchronously: once abandoned (attempt over, file deleted by the caller) a late
+                // open/read error must not become an uncaughtException. A failure during the upload itself still
+                // fails the request (form-data forwards it) and is handled below.
+                localStream.on('error', (error) => logger.debug(`local media stream ${media.localPath}: ${error.message}`));
+                formData.append(mediaField, localStream, {
+                    filename,
+                    ...(typeof media.size === 'number' ? { knownLength: media.size } : {}),
+                });
+            }
+            else {
+                formData.append(mediaField, media, filename);
+            }
         }
         else {
             formData.append(mediaField, media);
@@ -25637,7 +25659,7 @@ class BotConfig {
         const url = `https://api.telegram.org/bot${token}/${method}`;
         try {
             const response = await axios__WEBPACK_IMPORTED_MODULE_1___default().post(url, formData, {
-                timeout: 30000, // 30 second timeout for media uploads
+                timeout: typeof options.timeoutMs === 'number' && options.timeoutMs > 0 ? options.timeoutMs : 30000, // 30 s default for media uploads
                 headers: {
                     ...formData.getHeaders(),
                 },
@@ -25656,13 +25678,17 @@ class BotConfig {
             throw this.createTelegramBotApiError(response, `Telegram Bot API returned ok=false for ${method}`);
         }
         catch (error) {
-            (0,_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, `Failed to send ${method} to ${channelId} using bot at index ${botIndex}:`, false);
+            localStream?.destroy(); // a failed upload never leaves the file open (the retry opens its own)
+            (0,_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, `Failed to send ${method} to ${channelId} using bot at index ${botIndex}:`, false);
             if (this.shouldRetryWithNextBot(data, category, botIndex, error)) {
                 logger.debug(`Retrying with next available bot for ${category}`);
                 data.lastUsedIndex = botIndex;
                 return this.sendMedia(category, method, media, options);
             }
             return false;
+        }
+        finally {
+            localStream?.destroy();
         }
     }
     /**
@@ -49611,8 +49637,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "ca8ef5fb76e9851d12e5dd9bd8b6769fe0609107" : 0;
-    const builtAt =  true ? "2026-10-28T15:26:10.553Z" : 0;
+    const sha =  true ? "f4e03380e870db5563e32f974977805e359ce428" : 0;
+    const builtAt =  true ? "2026-10-28T16:47:36.078Z" : 0;
     return { sha, builtAt };
 }
 
@@ -79496,7 +79522,12 @@ async function seedFloodGateFromRedis() {
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   BOT_API_UPLOAD_MAX_BYTES: () => (/* binding */ BOT_API_UPLOAD_MAX_BYTES),
+/* harmony export */   BOT_MTPROTO_MAX_BYTES: () => (/* binding */ BOT_MTPROTO_MAX_BYTES),
+/* harmony export */   PHOTO_ROUTE_MAX_BYTES: () => (/* binding */ PHOTO_ROUTE_MAX_BYTES),
+/* harmony export */   UNVDS_TMP_DIR: () => (/* binding */ UNVDS_TMP_DIR),
 /* harmony export */   cleanupForwardUtils: () => (/* binding */ cleanupForwardUtils),
+/* harmony export */   drainUnwantedForwards: () => (/* binding */ drainUnwantedForwards),
 /* harmony export */   forwardtoUnwanted: () => (/* binding */ forwardtoUnwanted)
 /* harmony export */ });
 /* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! telegram */ "telegram");
@@ -79511,6 +79542,22 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _tg_core_utils_withTimeout__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! @tg/core/utils/withTimeout */ "../../packages/tg-core/src/utils/withTimeout.ts");
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
 /* harmony import */ var _unwanted_photo__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ./unwanted-photo */ "./src/outbound/unwanted-photo.ts");
+/* harmony import */ var _chat_notice__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ./chat-notice */ "./src/outbound/chat-notice.ts");
+/* harmony import */ var _unvds_bot_uploader__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! ./unvds-bot-uploader */ "./src/outbound/unvds-bot-uploader.ts");
+/* harmony import */ var crypto__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! crypto */ "crypto");
+/* harmony import */ var crypto__WEBPACK_IMPORTED_MODULE_13___default = /*#__PURE__*/__webpack_require__.n(crypto__WEBPACK_IMPORTED_MODULE_13__);
+/* harmony import */ var fs__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! fs */ "fs");
+/* harmony import */ var fs__WEBPACK_IMPORTED_MODULE_14___default = /*#__PURE__*/__webpack_require__.n(fs__WEBPACK_IMPORTED_MODULE_14__);
+/* harmony import */ var os__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! os */ "os");
+/* harmony import */ var os__WEBPACK_IMPORTED_MODULE_15___default = /*#__PURE__*/__webpack_require__.n(os__WEBPACK_IMPORTED_MODULE_15__);
+/* harmony import */ var path__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! path */ "path");
+/* harmony import */ var path__WEBPACK_IMPORTED_MODULE_16___default = /*#__PURE__*/__webpack_require__.n(path__WEBPACK_IMPORTED_MODULE_16__);
+
+
+
+
+
+
 
 
 
@@ -79563,8 +79610,19 @@ const chatMediaCount = new TTLCount(/*window*/ 10 * 60 * 1000); // 10 min
 // MEMORY FIX: Add size limit to prevent unbounded growth
 const inflight = new Set();
 const MAX_INFLIGHT_SIZE = 1000; // Maximum concurrent in-flight operations
-// Reasonable safety limits to reduce CPU/memory churn
-const MAX_MEDIA_BYTES = 20 * 1024 * 1024; // 20 MB
+// Size routes (owner 2026-10-28: "it must forward properly all the media", up to 300 MB).
+const MB = 1024 * 1024;
+/** Public Bot API multipart upload limit is 50 MB per file; 1 MB headroom for the multipart framing + caption. */
+const BOT_API_UPLOAD_MAX_BYTES = 49 * MB;
+/** Bot API sendPhoto takes at most 10 MB: a bigger image file goes to UNVDS as a document, not the photo route. */
+const PHOTO_ROUTE_MAX_BYTES = 10 * MB;
+/** Above the Bot API limit, uploaded as the UNVDS bot over MTProto (bots may upload 2 GB); owner cap 300 MB. */
+const BOT_MTPROTO_MAX_BYTES = 300 * MB;
+/** Download/upload time budget: 30 s plus 4 s per MB (300 MB: ~21 min). */
+const transferTimeoutMs = (bytes) => 30000 + Math.ceil((bytes ?? BOT_API_UPLOAD_MAX_BYTES) / MB) * 4000;
+/** Downloaded media is staged on disk (never held whole in memory) and deleted after the post. */
+const UNVDS_TMP_DIR = path__WEBPACK_IMPORTED_MODULE_16___default().join(os__WEBPACK_IMPORTED_MODULE_15___default().tmpdir(), 'tg-aut-unvds');
+const STALE_TMP_MS = 2 * 60 * 60 * 1000;
 const MAX_CAPTION_CHARS = 1000; // Bot API caption limit 1024, minus the client-id line
 const REPLY_COOLDOWN_MS = 3000;
 const LAST_REPLY_TTL_MS = 60 * 60 * 1000; // 1 hour
@@ -79611,6 +79669,7 @@ function cleanupForwardUtils() {
     lastReplyAt.clear();
     inflight.clear();
     chatMediaCount.clear();
+    void (0,_unvds_bot_uploader__WEBPACK_IMPORTED_MODULE_12__.disposeUnvdsBotUploader)().catch(() => undefined);
     logger.log("[forwardUtils] Cleanup complete");
 }
 // Start cleanup on module load
@@ -79623,15 +79682,282 @@ function canReply(chatId) {
     lastReplyAt.set(chatId, now);
     return true;
 }
+/** Bounded concurrency: `limit` running, at most `maxWaiting` queued; a full gate refuses instead of growing. */
+class Gate {
+    constructor(limit, maxWaiting) {
+        this.active = 0;
+        this.waiting = [];
+        this.limit = limit;
+        this.maxWaiting = maxWaiting;
+    }
+    /** A promise for a release function, or null when the queue is full. */
+    enter() {
+        if (this.active < this.limit) {
+            this.active += 1;
+            return Promise.resolve(this.releaser());
+        }
+        if (this.waiting.length >= this.maxWaiting)
+            return null;
+        return new Promise((resolve) => this.waiting.push(() => resolve(this.releaser())));
+    }
+    releaser() {
+        let released = false;
+        return () => {
+            if (released)
+                return;
+            released = true;
+            const next = this.waiting.shift();
+            if (next)
+                next(); // the slot passes straight to the next waiter
+            else
+                this.active -= 1;
+        };
+    }
+}
+/** Up to the Bot API limit: 2 downloads/uploads at a time per process, 20 queued. */
+const botApiGate = new Gate(2, 20);
+/** Bot-over-MTProto (50-300 MB): one at a time per process, 3 queued. */
+const largeGate = new Gate(1, 3);
+/** Large forwards run detached from the inbound handler; tracked so tests / shutdown can wait for them. */
+const detachedForwards = new Set();
+/** Resolves when every detached (large) forward has finished. */
+async function drainUnwantedForwards() {
+    while (detachedForwards.size)
+        await Promise.allSettled([...detachedForwards]);
+}
+const fmtSize = (bytes) => bytes == null ? 'unknown' : `${(bytes / MB).toFixed(1)} MB (${bytes} B)`;
+function describeCtx(ctx) {
+    const d = ctx.detection;
+    return `chat=${ctx.chatId} | msg=${ctx.msgId} | kind=${d.kind ?? '-'} | mime=${d.mime || '-'} | size=${d.sizeBytes ?? 'unknown'} | user=${ctx.broadcastName ?? '-'}`;
+}
+/** One line per outcome: never a silent skip. */
+function logOutcome(level, outcome, reason, ctx) {
+    logger[level](`[Unwanted Media] ${outcome} | reason=${reason} | ${describeCtx(ctx)}`);
+}
+/** Text-only UNVDS notice for media that was not (or could not be) forwarded. Never throws. */
+async function postNotice(ctx, reason) {
+    const d = ctx.detection;
+    try {
+        const sent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_2__.BotConfig.getInstance().sendMessage(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_2__.ChannelCategory.UNVDS, (0,_chat_notice__WEBPACK_IMPORTED_MODULE_11__.chatNoticeInput)(ctx.chatId, {
+            title: 'Media not forwarded',
+            summary: reason,
+            fields: [
+                { label: 'User', value: ctx.broadcastName || '-', code: false },
+                { label: 'Kind', value: d.kind ?? '-', code: false },
+                { label: 'Size', value: fmtSize(d.sizeBytes), code: false },
+                { label: 'Mime', value: d.mime || '-' },
+                { label: 'Msg', value: String(ctx.msgId) },
+            ],
+            ...(ctx.event.message?.message ? { quote: ctx.event.message.message.slice(0, MAX_CAPTION_CHARS), quoteLabel: 'Caption' } : {}),
+        }));
+        if (!sent)
+            logOutcome('error', 'notice-failed', reason, ctx);
+    }
+    catch (error) {
+        logOutcome('error', 'notice-failed', `${reason}; ${error?.message ?? error}`, ctx);
+    }
+}
+let tmpSwept = false;
+/** Once per process: remove staged files a crashed process left behind (older than 2 h). */
+async function sweepStaleTmp() {
+    if (tmpSwept)
+        return;
+    tmpSwept = true;
+    try {
+        const cutoff = Date.now() - STALE_TMP_MS;
+        for (const name of await fs__WEBPACK_IMPORTED_MODULE_14__.promises.readdir(UNVDS_TMP_DIR)) {
+            const file = path__WEBPACK_IMPORTED_MODULE_16___default().join(UNVDS_TMP_DIR, name);
+            const stat = await fs__WEBPACK_IMPORTED_MODULE_14__.promises.stat(file).catch(() => null);
+            if (stat && stat.mtimeMs < cutoff)
+                await fs__WEBPACK_IMPORTED_MODULE_14__.promises.rm(file, { force: true });
+        }
+    }
+    catch { /* no dir yet */ }
+}
+/**
+ * Downloads the customer's media straight to `file` through a writer that awaits every disk write (bounded memory:
+ * GramJS holds one part at a time). Stops past `ceilingBytes` (a lying/absent size never fills the disk).
+ * Returns the bytes written.
+ */
+async function downloadToFile(ctx, file, ceilingBytes) {
+    await fs__WEBPACK_IMPORTED_MODULE_14__.promises.mkdir(UNVDS_TMP_DIR, { recursive: true });
+    void sweepStaleTmp();
+    const handle = await fs__WEBPACK_IMPORTED_MODULE_14__.promises.open(file, 'w');
+    let written = 0;
+    let stopped = null;
+    const writer = {
+        write: async (chunk) => {
+            if (stopped)
+                throw new Error(stopped);
+            written += chunk.length;
+            if (written > ceilingBytes) {
+                stopped = `download passed the ${fmtSize(ceilingBytes)} ceiling`;
+                throw new Error(stopped);
+            }
+            await handle.write(chunk);
+        },
+        close: () => undefined, // closed below, after the last awaited write
+    };
+    try {
+        await (0,_tg_core_utils_withTimeout__WEBPACK_IMPORTED_MODULE_8__.withTimeout)(() => ctx.event.client.downloadMedia(ctx.event.message, { outputFile: writer }), { timeout: transferTimeoutMs(ctx.detection.sizeBytes), errorMessage: 'UNVDS media download timed out' });
+    }
+    finally {
+        stopped ?? (stopped = 'download finished'); // a timed-out download that keeps running stops at its next part
+        await handle.close();
+    }
+    return written;
+}
+/** The Bot API method per kind (captions kept: round videos go as video, stickers as files). */
+function botMethodFor(kind) {
+    switch (kind) {
+        case 'video':
+        case 'video_note': return 'sendVideo';
+        case 'animation': return 'sendAnimation';
+        case 'voice': return 'sendVoice';
+        case 'audio': return 'sendAudio';
+        default: return 'sendDocument';
+    }
+}
+function captionFor(ctx) {
+    const text = ctx.event.message?.message;
+    const full = text && ctx.broadcastName ? `${ctx.broadcastName}: ${text}` : ctx.broadcastName ?? '';
+    // Bot API captions stop at 1024 chars and the bot adds a client-id line; a longer one ("caption is too long")
+    // lost the media (Premium users caption up to 4096).
+    return full.length > MAX_CAPTION_CHARS ? `${full.slice(0, MAX_CAPTION_CHARS - 1)}…` : full;
+}
+function documentFileName(d) {
+    return d.fileName || `${d.kind === 'sticker' ? 'sticker' : 'document'}.${d.fileExtension}`;
+}
+/** Bot API upload from the staged file: the typed method, then sendDocument if that fails. */
+async function sendViaBotApi(ctx, file, bytes) {
+    const d = ctx.detection;
+    const bot = _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_2__.BotConfig.getInstance();
+    const media = { localPath: file, size: bytes };
+    const common = { caption: captionFor(ctx), extension: d.fileExtension, timeoutMs: transferTimeoutMs(bytes) };
+    const method = botMethodFor(d.kind);
+    const documentOptions = {
+        ...common,
+        filename: documentFileName(d),
+        // A .webp/.tgs/.webm sticker file stays a file with its caption (no server-side sticker detection).
+        ...(d.kind === 'sticker' ? { disableContentTypeDetection: true } : {}),
+    };
+    if (method === 'sendDocument')
+        return bot.sendDocument(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_2__.ChannelCategory.UNVDS, media, documentOptions);
+    const typedOptions = { ...common };
+    if (d.duration)
+        typedOptions.duration = Math.round(d.duration);
+    if (method === 'sendVideo' || method === 'sendAnimation') {
+        if (d.width)
+            typedOptions.width = d.width;
+        if (d.height)
+            typedOptions.height = d.height;
+        if (method === 'sendVideo')
+            typedOptions.supportsStreaming = true;
+    }
+    if (method === 'sendAudio') {
+        if (d.performer)
+            typedOptions.performer = d.performer;
+        if (d.title)
+            typedOptions.title = d.title;
+    }
+    const sendTyped = bot[method].bind(bot);
+    if (await sendTyped(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_2__.ChannelCategory.UNVDS, media, typedOptions))
+        return true;
+    logOutcome('warn', 'typed-send-failed', `${method} failed; retrying as sendDocument`, ctx);
+    return bot.sendDocument(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_2__.ChannelCategory.UNVDS, media, documentOptions);
+}
+function stagedPath(ctx) {
+    return path__WEBPACK_IMPORTED_MODULE_16___default().join(UNVDS_TMP_DIR, `${process.pid}-${(0,crypto__WEBPACK_IMPORTED_MODULE_13__.randomUUID)()}.${ctx.detection.fileExtension || 'bin'}`);
+}
+/** Up to the Bot API limit: stage on disk, upload by bot, notice on any failure. */
+async function forwardViaBotApi(ctx) {
+    const ticket = botApiGate.enter();
+    if (!ticket) {
+        logOutcome('warn', 'notice', 'forward queue full', ctx);
+        await postNotice(ctx, 'Forward queue full: media not downloaded');
+        return;
+    }
+    const release = await ticket;
+    const file = stagedPath(ctx);
+    try {
+        let bytes;
+        try {
+            bytes = await downloadToFile(ctx, file, BOT_API_UPLOAD_MAX_BYTES);
+        }
+        catch (error) {
+            const reason = `download failed: ${error?.message ?? error}`;
+            logOutcome('error', 'notice', reason, ctx);
+            await postNotice(ctx, `Download failed (${error?.message ?? 'error'})`);
+            return;
+        }
+        if (bytes === 0) {
+            logOutcome('error', 'notice', 'empty download', ctx);
+            await postNotice(ctx, 'Download returned no bytes');
+            return;
+        }
+        logOutcome('log', 'forwarding', `bot-api ${botMethodFor(ctx.detection.kind)} ${bytes} B`, ctx);
+        if (!(await sendViaBotApi(ctx, file, bytes))) {
+            logOutcome('error', 'notice', 'bot upload failed (typed method and sendDocument)', ctx);
+            await postNotice(ctx, 'Bot upload failed: media not forwarded');
+        }
+    }
+    finally {
+        await fs__WEBPACK_IMPORTED_MODULE_14__.promises.rm(file, { force: true }).catch(() => undefined);
+        release();
+    }
+}
+/** 50-300 MB: stage on disk, upload as the UNVDS bot over MTProto (one at a time), notice on any failure. */
+async function forwardViaBotMtproto(ctx, release) {
+    const d = ctx.detection;
+    const file = stagedPath(ctx);
+    try {
+        let bytes;
+        try {
+            bytes = await downloadToFile(ctx, file, BOT_MTPROTO_MAX_BYTES);
+        }
+        catch (error) {
+            logOutcome('error', 'notice', `download failed: ${error?.message ?? error}`, ctx);
+            await postNotice(ctx, `Download failed (${error?.message ?? 'error'})`);
+            return;
+        }
+        if (bytes === 0) {
+            logOutcome('error', 'notice', 'empty download', ctx);
+            await postNotice(ctx, 'Download returned no bytes');
+            return;
+        }
+        logOutcome('log', 'forwarding', `bot-mtproto ${bytes} B`, ctx);
+        const ok = await (0,_unvds_bot_uploader__WEBPACK_IMPORTED_MODULE_12__.uploadToUnvdsAsBot)({
+            filePath: file,
+            fileName: documentFileName(d),
+            sizeBytes: bytes,
+            caption: captionFor(ctx),
+            forceDocument: d.kind === 'document' || d.kind === 'sticker',
+            attributes: d.attributes,
+            timeoutMs: transferTimeoutMs(bytes),
+        });
+        if (!ok) {
+            logOutcome('error', 'notice', 'bot MTProto upload failed', ctx);
+            await postNotice(ctx, `Large file (${fmtSize(bytes)}) could not be uploaded by the bot`);
+        }
+    }
+    finally {
+        await fs__WEBPACK_IMPORTED_MODULE_14__.promises.rm(file, { force: true }).catch(() => undefined);
+        release();
+    }
+}
 async function forwardtoUnwanted(event, broadcastName) {
     const chat = event.message?.chat;
     const chatId = chat?.id?.toString() || '';
     const msgId = event.message?.id;
-    if (!chatId || !msgId)
+    if (!chatId || !msgId) {
+        logger.warn(`[Unwanted Media] skip | reason=no chat/message id | chat=${chatId || '-'} | msg=${msgId ?? '-'}`);
         return;
+    }
     const key = `${chatId}:${msgId}`;
-    if (inflight.has(key))
+    if (inflight.has(key)) {
+        logger.log(`[Unwanted Media] skip | reason=duplicate in flight | chat=${chatId} | msg=${msgId}`);
         return;
+    }
     // MEMORY FIX: Enforce size limit to prevent unbounded growth
     if (inflight.size >= MAX_INFLIGHT_SIZE) {
         // Remove oldest entry (simple FIFO - could be improved with LRU)
@@ -79640,24 +79966,28 @@ async function forwardtoUnwanted(event, broadcastName) {
             inflight.delete(firstKey);
     }
     inflight.add(key);
+    let keyHeldByDetached = false;
     try {
         const detection = detectMedia(event);
-        if (!detection.forward || !detection.mediaType)
+        const ctx = { event, chatId, msgId, broadcastName, detection };
+        if (!detection.kind) {
+            logOutcome('log', 'skip', detection.skipReason ?? 'no forwardable media', ctx);
             return;
-        // Size pre-check for documents (avoid huge downloads)
-        if (detection.sizeBytes != null && detection.sizeBytes > MAX_MEDIA_BYTES)
-            return;
-        const download = async () => {
-            const buffer = await (0,_tg_core_utils_withTimeout__WEBPACK_IMPORTED_MODULE_8__.withTimeout)(() => event.client.downloadMedia(event.message), { timeout: 30000 });
-            return Buffer.isBuffer(buffer) && buffer.length > 0 ? buffer : null;
-        };
-        // Unwanted media is always deleted from the source regardless of the post outcome — this is
-        // junk we don't want to keep. A failed post is only worth a log line (it's not evidence
-        // we need to preserve), never a reason to leave the media in place.
-        if (detection.mediaType === 'photo') {
+        }
+        if (detection.viewOnce) {
+            // View-once media is never downloaded or re-posted (privacy): ops get a text notice only.
+            logOutcome('log', 'notice', 'view-once media not downloaded', ctx);
+            await postNotice(ctx, 'View-once media: not downloaded or forwarded');
+        }
+        else if (detection.kind === 'photo') {
             // Photos (blocked user, over the daily limit, forwarded, image files): client to the unwanted-updates
-            // group, bot there only if the client cannot; never UNVDS (owner, 2026-10-23).
+            // group, bot there only if the client cannot; never UNVDS (owner, 2026-10-23). Image files over the
+            // Bot API photo limit are documents (below), so this in-memory download stays under 10 MB.
             logger.log(`[Unwanted Media] Posting photo to the unwanted-updates group from : ${broadcastName} | ${chatId}`);
+            const download = async () => {
+                const buffer = await (0,_tg_core_utils_withTimeout__WEBPACK_IMPORTED_MODULE_8__.withTimeout)(() => event.client.downloadMedia(event.message), { timeout: 30000 });
+                return Buffer.isBuffer(buffer) && buffer.length > 0 ? buffer : null;
+            };
             const saved = await (0,_unwanted_photo__WEBPACK_IMPORTED_MODULE_10__.postUnwantedPhoto)({
                 event,
                 chatId,
@@ -79676,28 +80006,33 @@ async function forwardtoUnwanted(event, broadcastName) {
             if (!saved)
                 logger.error(`[Unwanted Media] photo not saved (deleting source anyway) | ${broadcastName} | ${chatId}`);
         }
-        else {
-            // Only download when we actually need to re-upload
-            const mediaBuffer = await download();
-            if (!mediaBuffer)
-                return;
-            const fullCaption = event.message?.message && broadcastName
-                ? `${broadcastName}: ${event.message.message}`
-                : broadcastName ?? '';
-            // Bot API captions stop at 1024 chars and the bot adds a client-id line; a longer one ("caption is too long")
-            // lost the media (Premium users caption up to 4096).
-            const captionText = fullCaption.length > MAX_CAPTION_CHARS ? `${fullCaption.slice(0, MAX_CAPTION_CHARS - 1)}…` : fullCaption;
-            const mediaContent = {
-                type: detection.mediaType,
-                media: mediaBuffer,
-                caption: captionText,
-                extension: detection.fileExtension ?? undefined,
-            };
-            logger.log(`[Unwanted Media] Forwarding media to unwanted channel from : ${broadcastName} | ${chatId} | type: ${detection.mediaType}.${mediaContent.extension}`);
-            const forwarded = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_2__.BotConfig.getInstance().sendMediaGroup(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_2__.ChannelCategory.UNVDS, [mediaContent]);
-            if (!forwarded) {
-                logger.error(`[Unwanted Media] UNVDS forward failed (deleting source anyway) | ${broadcastName} | ${chatId}`);
+        else if (detection.sizeBytes != null && detection.sizeBytes > BOT_MTPROTO_MAX_BYTES) {
+            // Never downloaded: too big for any upload path we run.
+            logOutcome('warn', 'notice', `over the ${fmtSize(BOT_MTPROTO_MAX_BYTES)} forward limit`, ctx);
+            await postNotice(ctx, `Too large to forward (limit ${fmtSize(BOT_MTPROTO_MAX_BYTES)})`);
+        }
+        else if (detection.sizeBytes != null && detection.sizeBytes > BOT_API_UPLOAD_MAX_BYTES) {
+            const ticket = largeGate.enter();
+            if (!ticket) {
+                logOutcome('warn', 'notice', 'large-file queue full', ctx);
+                await postNotice(ctx, 'Large-file forward queue full: media not downloaded');
             }
+            else {
+                // Detached: a large transfer must not hold the inbound handler. The key stays in flight until done.
+                keyHeldByDetached = true;
+                logOutcome('log', 'queued', 'large file, bot MTProto upload', ctx);
+                const job = ticket
+                    .then((release) => forwardViaBotMtproto(ctx, release))
+                    .catch((error) => logOutcome('error', 'failed', `large forward error: ${error?.message ?? error}`, ctx))
+                    .finally(() => {
+                    inflight.delete(key);
+                    detachedForwards.delete(job);
+                });
+                detachedForwards.add(job);
+            }
+        }
+        else {
+            await forwardViaBotApi(ctx);
         }
         if (detection.canDeleteMessage) {
             await (0,_telegram_delete_messages__WEBPACK_IMPORTED_MODULE_1__.deleteMessage)(event);
@@ -79723,101 +80058,130 @@ async function forwardtoUnwanted(event, broadcastName) {
         logger.error('forwardtoUnwanted error:', err);
     }
     finally {
-        inflight.delete(key);
+        if (!keyHeldByDetached)
+            inflight.delete(key);
     }
 }
+const DOCUMENT_EXTENSIONS = {
+    'application/pdf': 'pdf',
+    'application/msword': 'doc',
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'docx',
+    'application/vnd.ms-excel': 'xls',
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'xlsx',
+    'application/vnd.ms-powerpoint': 'ppt',
+    'application/vnd.openxmlformats-officedocument.presentationml.presentation': 'pptx',
+    'application/zip': 'zip',
+    'application/x-rar-compressed': 'rar',
+    'application/x-7z-compressed': '7z',
+    'text/plain': 'txt',
+    'application/json': 'json',
+    'application/xml': 'xml',
+    'text/csv': 'csv',
+};
+function audioExtension(mime) {
+    if (mime.includes('mpeg') || mime.includes('mp3'))
+        return 'mp3';
+    if (mime.includes('ogg'))
+        return 'ogg';
+    if (mime.includes('wav'))
+        return 'wav';
+    if (mime.includes('m4a'))
+        return 'm4a';
+    if (mime.includes('aac'))
+        return 'aac';
+    return null;
+}
 function detectMedia(event) {
-    let forward = false;
-    let mediaType = null;
-    let fileExtension = null;
-    let canDeleteMessage = false;
-    let sizeBytes = null;
+    const base = {
+        kind: null, mime: '', sizeBytes: null, fileName: null, fileExtension: 'bin', viewOnce: false, attributes: [], canDeleteMessage: false,
+    };
     const msg = event.message;
     if (!msg)
-        return { forward, mediaType, fileExtension, canDeleteMessage, sizeBytes };
-    if (msg.voice) {
-        return { forward: true, mediaType: 'voice', fileExtension: 'ogg', canDeleteMessage, sizeBytes };
-    }
-    if (msg.audio) {
-        return { forward: true, mediaType: 'audio', fileExtension: 'mp3', canDeleteMessage, sizeBytes };
-    }
-    if (msg.media instanceof telegram__WEBPACK_IMPORTED_MODULE_0__.Api.MessageMediaDocument && msg.media.document instanceof telegram__WEBPACK_IMPORTED_MODULE_0__.Api.Document) {
-        const doc = msg.media.document;
-        sizeBytes = Number(doc.size) || null;
+        return { ...base, skipReason: 'no message' };
+    const media = msg.media;
+    if (media instanceof telegram__WEBPACK_IMPORTED_MODULE_0__.Api.MessageMediaDocument && media.document instanceof telegram__WEBPACK_IMPORTED_MODULE_0__.Api.Document) {
+        const doc = media.document;
         const mime = (doc.mimeType || '').toLowerCase();
-        let fileNameLower = '';
-        let isVoice = false;
-        let isSticker = false;
         const attributes = Array.isArray(doc.attributes) ? doc.attributes : [];
+        const d = {
+            ...base,
+            mime,
+            sizeBytes: Number(doc.size) || null,
+            attributes,
+            viewOnce: Boolean(media.ttlSeconds),
+        };
+        let fileExtension = null;
+        let isVoice = false;
+        let isAudio = false;
+        let isSticker = false;
+        let isRound = false;
+        let isAnimated = false;
         for (const attr of attributes) {
             if (attr instanceof telegram__WEBPACK_IMPORTED_MODULE_0__.Api.DocumentAttributeFilename) {
-                fileNameLower = (attr.fileName || '').toLowerCase();
-                const m = fileNameLower.match(/\.([^.]+)$/);
+                d.fileName = attr.fileName || null;
+                const m = (attr.fileName || '').toLowerCase().match(/\.([^.]+)$/);
                 if (m)
                     fileExtension = m[1];
             }
             else if (attr instanceof telegram__WEBPACK_IMPORTED_MODULE_0__.Api.DocumentAttributeSticker) {
-                // Animated/video stickers are video/webm too, so detect them by ATTRIBUTE
-                // (not mime) — that's the only reliable way to tell a sticker from a real webm video.
+                // Animated/video stickers are video/webm too, so detect them by ATTRIBUTE (not mime).
                 isSticker = true;
             }
             else if (attr instanceof telegram__WEBPACK_IMPORTED_MODULE_0__.Api.DocumentAttributeAudio) {
+                isAudio = true;
                 if (attr.voice)
                     isVoice = true;
-                if (!fileExtension) {
-                    if (mime.includes('mpeg') || mime.includes('mp3'))
-                        fileExtension = 'mp3';
-                    else if (mime.includes('ogg'))
-                        fileExtension = 'ogg';
-                    else if (mime.includes('wav'))
-                        fileExtension = 'wav';
-                    else if (mime.includes('m4a'))
-                        fileExtension = 'm4a';
-                    else if (mime.includes('aac'))
-                        fileExtension = 'aac';
-                }
+                d.duration = attr.duration;
+                d.performer = attr.performer;
+                d.title = attr.title;
+            }
+            else if (attr instanceof telegram__WEBPACK_IMPORTED_MODULE_0__.Api.DocumentAttributeVideo) {
+                if (attr.roundMessage)
+                    isRound = true;
+                d.duration = attr.duration;
+                d.width = attr.w;
+                d.height = attr.h;
+            }
+            else if (attr instanceof telegram__WEBPACK_IMPORTED_MODULE_0__.Api.DocumentAttributeAnimated) {
+                isAnimated = true;
             }
         }
-        // Drop stickers (static image/webp, .tgs, and animated video/webm stickers) up front.
-        if (isSticker || mime.includes('sticker') || mime.includes('tgsticker') || mime === 'image/webp') {
-            return { forward: false, mediaType: null, fileExtension: null, canDeleteMessage: false, sizeBytes };
+        // Stickers (static .webp, animated .tgs, video .webm) are forwarded as files (captioned), no longer dropped.
+        if (isSticker || mime.includes('tgsticker') || mime === 'image/webp') {
+            const ext = fileExtension || (mime.includes('tgsticker') ? 'tgs' : mime.includes('webm') ? 'webm' : 'webp');
+            return { ...d, kind: 'sticker', fileExtension: ext };
         }
         if (isVoice)
-            return { forward: true, mediaType: 'voice', fileExtension: fileExtension || 'ogg', canDeleteMessage, sizeBytes };
-        if (mime.includes('audio'))
-            return { forward: true, mediaType: 'audio', fileExtension: fileExtension || 'mp3', canDeleteMessage, sizeBytes };
-        // Genuine videos — including video/webm — render inline. (webm was previously excluded to
-        // dodge animated stickers, but those are now filtered above by their sticker attribute.)
+            return { ...d, kind: 'voice', fileExtension: fileExtension || audioExtension(mime) || 'ogg' };
+        if (mime.includes('audio') || isAudio)
+            return { ...d, kind: 'audio', fileExtension: fileExtension || audioExtension(mime) || 'mp3' };
+        if (isRound)
+            return { ...d, kind: 'video_note', fileExtension: fileExtension || 'mp4' };
+        if (isAnimated)
+            return { ...d, kind: 'animation', fileExtension: fileExtension || (mime.includes('gif') ? 'gif' : 'mp4') };
         if (mime.includes('video')) {
             // Telegram plays webm inline as a video, so keep the webm extension for those.
-            const videoExt = fileExtension || (mime.includes('webm') ? 'webm' : 'mp4');
-            return { forward: true, mediaType: 'video', fileExtension: videoExt, canDeleteMessage, sizeBytes };
+            return { ...d, kind: 'video', fileExtension: fileExtension || (mime.includes('webm') ? 'webm' : 'mp4') };
         }
         if (mime.startsWith('image/')) {
-            return { forward: true, mediaType: 'photo', fileExtension: fileExtension || 'jpg', canDeleteMessage: true, sizeBytes };
+            const ext = fileExtension || mime.slice('image/'.length) || 'jpg';
+            // Small images take the photo route (unwanted-updates group, deleted). Bigger ones cannot be a Bot API
+            // photo: they go to UNVDS as a document.
+            if (d.sizeBytes == null || d.sizeBytes <= PHOTO_ROUTE_MAX_BYTES)
+                return { ...d, kind: 'photo', fileExtension: ext, canDeleteMessage: true };
+            return { ...d, kind: 'document', fileExtension: ext };
         }
-        const map = {
-            'application/pdf': 'pdf',
-            'application/msword': 'doc',
-            'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'docx',
-            'application/vnd.ms-excel': 'xls',
-            'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'xlsx',
-            'application/vnd.ms-powerpoint': 'ppt',
-            'application/vnd.openxmlformats-officedocument.presentationml.presentation': 'pptx',
-            'application/zip': 'zip',
-            'application/x-rar-compressed': 'rar',
-            'application/x-7z-compressed': '7z',
-            'text/plain': 'txt',
-            'application/json': 'json',
-            'application/xml': 'xml',
-            'text/csv': 'csv',
-        };
-        return { forward: true, mediaType: 'document', fileExtension: fileExtension || map[mime] || 'bin', canDeleteMessage, sizeBytes };
+        return { ...d, kind: 'document', fileExtension: fileExtension || DOCUMENT_EXTENSIONS[mime] || 'bin' };
     }
-    if (msg.media instanceof telegram__WEBPACK_IMPORTED_MODULE_0__.Api.MessageMediaPhoto) {
-        return { forward: true, mediaType: 'photo', fileExtension: 'jpg', canDeleteMessage: true, sizeBytes };
+    if (media instanceof telegram__WEBPACK_IMPORTED_MODULE_0__.Api.MessageMediaPhoto) {
+        return { ...base, kind: 'photo', fileExtension: 'jpg', canDeleteMessage: true, viewOnce: Boolean(media.ttlSeconds) };
     }
-    return { forward, mediaType, fileExtension, canDeleteMessage, sizeBytes };
+    // GramJS message getters, for media without a parsed Document (size unknown: the download ceiling applies).
+    if (msg.voice)
+        return { ...base, kind: 'voice', fileExtension: 'ogg' };
+    if (msg.audio)
+        return { ...base, kind: 'audio', fileExtension: 'mp3' };
+    return { ...base, skipReason: media ? `unsupported media ${media.className ?? typeof media}` : 'no media' };
 }
 
 
@@ -80854,6 +81218,144 @@ function logReplierOutcome(chatId, voiceKind, outcome, extra) {
         kind, chatId, decision: outcome === 'skipped' ? 'skip' : 'sendNow', reason: outcome === 'skipped' ? 'chat refused' : 'replier',
         outcome, hotReason: account.reason, arm: account.arm, now, extra,
     });
+}
+
+
+/***/ },
+
+/***/ "./src/outbound/unvds-bot-uploader.ts"
+/*!********************************************!*\
+  !*** ./src/outbound/unvds-bot-uploader.ts ***!
+  \********************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   disposeUnvdsBotUploader: () => (/* binding */ disposeUnvdsBotUploader),
+/* harmony export */   uploadToUnvdsAsBot: () => (/* binding */ uploadToUnvdsAsBot)
+/* harmony export */ });
+/* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! telegram */ "telegram");
+/* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(telegram__WEBPACK_IMPORTED_MODULE_0__);
+/* harmony import */ var telegram_sessions__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! telegram/sessions */ "telegram/sessions");
+/* harmony import */ var telegram_sessions__WEBPACK_IMPORTED_MODULE_1___default = /*#__PURE__*/__webpack_require__.n(telegram_sessions__WEBPACK_IMPORTED_MODULE_1__);
+/* harmony import */ var big_integer__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! big-integer */ "big-integer");
+/* harmony import */ var big_integer__WEBPACK_IMPORTED_MODULE_2___default = /*#__PURE__*/__webpack_require__.n(big_integer__WEBPACK_IMPORTED_MODULE_2__);
+/* harmony import */ var _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! @tg/core/utils/TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
+/* harmony import */ var _tg_core_utils_tg_config__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! @tg/core/utils/tg-config */ "../../packages/tg-core/src/utils/tg-config.ts");
+/* harmony import */ var _tg_core_utils_withTimeout__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! @tg/core/utils/withTimeout */ "../../packages/tg-core/src/utils/withTimeout.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/**
+ * Uploads a large file (over the public Bot API's 50 MB multipart limit) to the UNVDS channel AS THE UNVDS BOT over
+ * MTProto (bots may upload up to 2 GB that way). The customer-facing user account only downloads (as it already
+ * did); nothing is sent from it.
+ *
+ * - One long-lived bot client per process, created lazily on the first large forward. Its session lives in memory
+ *   only: a bot re-logs in with its token after a restart (bot logins are not phone-bound like user sessions).
+ * - Uploads read the file from disk part by part (GramJS reads >20 MB files by path), never the whole file.
+ * - No updates loop: the client only connects, uploads and posts.
+ * - Callers serialise large forwards (forward-unwanted.ts runs one at a time per process).
+ */
+
+
+
+
+
+
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_6__.Logger('tg-aut:unvds-bot-uploader');
+let current = null;
+const AUTH_ERROR = /AUTH_KEY|ACCESS_TOKEN|SESSION_REVOKED|USER_DEACTIVATED|BOT_.*INVALID|unauthori[sz]ed/i;
+function newBotSession(token, username) {
+    // Bots accept any api_id. The pick is seeded by the bot, never by a customer-facing mobile; no proxy.
+    const config = (0,_tg_core_utils_tg_config__WEBPACK_IMPORTED_MODULE_4__.generateRealisticConfig)(`unvds-bot:${username || token.split(':')[0]}`);
+    const client = new telegram__WEBPACK_IMPORTED_MODULE_0__.TelegramClient(new telegram_sessions__WEBPACK_IMPORTED_MODULE_1__.StringSession(''), config.apiId, config.apiHash, {
+        connectionRetries: 3,
+        requestRetries: 3,
+        retryDelay: 2000,
+        autoReconnect: true,
+        deviceModel: config.deviceModel,
+        systemVersion: config.systemVersion,
+        appVersion: config.appVersion,
+        langCode: config.langCode,
+        systemLangCode: config.systemLangCode,
+    });
+    const ready = (async () => {
+        await client.start({ botAuthToken: token });
+        logger.log(`[UNVDS bot] MTProto bot client ready | @${username || '?'} | api ${config.apiId}`);
+    })();
+    return { token, client, ready };
+}
+async function dropSession(reason) {
+    const old = current;
+    current = null;
+    if (!old)
+        return;
+    logger.warn(`[UNVDS bot] dropping MTProto bot client: ${reason}`);
+    try {
+        await old.client.destroy();
+    }
+    catch { /* already gone */ }
+}
+async function botSession() {
+    if (current) {
+        try {
+            await current.ready;
+            return current;
+        }
+        catch (error) {
+            await dropSession(`login failed: ${error?.message ?? error}`);
+            throw error;
+        }
+    }
+    const { token, username } = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_3__.BotConfig.getInstance().getBotAndChannel(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_3__.ChannelCategory.UNVDS);
+    if (!token)
+        throw new Error('no UNVDS bot token configured');
+    current = newBotSession(token, username);
+    try {
+        await current.ready;
+    }
+    catch (error) {
+        await dropSession(`login failed: ${error?.message ?? error}`);
+        throw error;
+    }
+    return current;
+}
+/** Upload one file to the UNVDS channel as the bot. Resolves true when posted; never throws. */
+async function uploadToUnvdsAsBot(request) {
+    try {
+        const channelId = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_3__.BotConfig.getInstance().getChannelId(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_3__.ChannelCategory.UNVDS);
+        if (!channelId)
+            throw new Error('no UNVDS channel configured');
+        const session = await botSession();
+        const caption = `${process.env.clientId ?? 'unknown'}\n${request.caption}`.slice(0, 1024);
+        await (0,_tg_core_utils_withTimeout__WEBPACK_IMPORTED_MODULE_5__.withTimeout)(async () => {
+            // A bot resolves a channel it belongs to by id (GramJS: channels.getChannels with access hash 0).
+            const peer = await session.client.getInputEntity(big_integer__WEBPACK_IMPORTED_MODULE_2___default()(channelId));
+            await session.client.sendFile(peer, {
+                file: request.filePath,
+                fileSize: request.sizeBytes,
+                caption,
+                parseMode: false, // plain text, as the Bot API captions (GramJS defaults to markdown)
+                forceDocument: request.forceDocument,
+                attributes: request.attributes.length ? request.attributes : undefined,
+                supportsStreaming: !request.forceDocument,
+                workers: 4,
+            });
+        }, { timeout: request.timeoutMs, errorMessage: 'UNVDS bot MTProto upload timed out' });
+        return true;
+    }
+    catch (error) {
+        const message = error?.message ?? String(error);
+        logger.error(`[UNVDS bot] MTProto upload failed | ${request.fileName} | ${request.sizeBytes} bytes | ${message}`);
+        if (AUTH_ERROR.test(message))
+            await dropSession(message);
+        return false;
+    }
+}
+/** Shutdown / tests: disconnect the bot client. */
+async function disposeUnvdsBotUploader() {
+    await dropSession('dispose');
 }
 
 
