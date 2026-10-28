@@ -1146,6 +1146,7 @@ const interceptors_1 = __webpack_require__(/*! ./interceptors */ "./src/intercep
 const event_manager_module_1 = __webpack_require__(/*! ./components/event-manager/event-manager.module */ "./src/components/event-manager/event-manager.module.ts");
 const collection_insights_module_1 = __webpack_require__(/*! ./components/collection-insights/collection-insights.module */ "./src/components/collection-insights/collection-insights.module.ts");
 const daily_analytics_module_1 = __webpack_require__(/*! ./components/daily-analytics/daily-analytics.module */ "./src/components/daily-analytics/daily-analytics.module.ts");
+const monitor_module_1 = __webpack_require__(/*! ./components/monitor/monitor.module */ "./src/components/monitor/monitor.module.ts");
 const file_module_1 = __webpack_require__(/*! ./components/files/file.module */ "./src/components/files/file.module.ts");
 const app_service_1 = __webpack_require__(/*! ./app.service */ "./src/app.service.ts");
 const runtime_config_service_1 = __webpack_require__(/*! ./control-plane/config/runtime-config.service */ "./src/control-plane/config/runtime-config.service.ts");
@@ -1180,6 +1181,7 @@ exports.AppModule = AppModule = __decorate([
             promote_msgs_module_1.PromoteMsgModule,
             promote_stat_module_1.PromoteStatModule,
             daily_analytics_module_1.DailyAnalyticsModule,
+            monitor_module_1.MonitorModule,
             stat_module_1.StatModule,
             stat2_module_1.Stat2Module,
             tg_signup_module_1.TgSignupModule,
@@ -36015,6 +36017,1304 @@ exports.JoinRequestSchema = mongoose_1.SchemaFactory.createForClass(JoinRequest)
 exports.JoinRequestSchema.index({ mobile: 1, channelId: 1 }, { unique: true });
 exports.JoinRequestSchema.index({ requestedAt: 1 }, { expireAfterSeconds: exports.JOIN_REQUEST_TTL_DAYS * 24 * 60 * 60 });
 exports.JOIN_REQUEST_MODEL_NAME = 'joinRequestModule';
+
+
+/***/ },
+
+/***/ "./src/components/monitor/monitor-cache.ts"
+/*!*************************************************!*\
+  !*** ./src/components/monitor/monitor-cache.ts ***!
+  \*************************************************/
+(__unused_webpack_module, exports) {
+
+
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.TtlCache = void 0;
+class TtlCache {
+    constructor(ttlMs, maxKeys = 50, now = () => Date.now()) {
+        this.ttlMs = ttlMs;
+        this.maxKeys = maxKeys;
+        this.now = now;
+        this.entries = new Map();
+        this.inflight = new Map();
+    }
+    async get(key, load) {
+        const hit = this.entries.get(key);
+        if (hit && this.now() - hit.at < this.ttlMs)
+            return hit;
+        const pending = this.inflight.get(key);
+        if (pending)
+            return pending;
+        const p = (async () => {
+            try {
+                const value = await load();
+                const entry = { value, at: this.now() };
+                this.set(key, entry);
+                return entry;
+            }
+            finally {
+                this.inflight.delete(key);
+            }
+        })();
+        this.inflight.set(key, p);
+        return p;
+    }
+    last(key) {
+        return this.entries.get(key);
+    }
+    set(key, entry) {
+        this.entries.delete(key);
+        this.entries.set(key, entry);
+        while (this.entries.size > this.maxKeys) {
+            const oldest = this.entries.keys().next().value;
+            this.entries.delete(oldest);
+        }
+    }
+}
+exports.TtlCache = TtlCache;
+
+
+/***/ },
+
+/***/ "./src/components/monitor/monitor-mongo.ts"
+/*!*************************************************!*\
+  !*** ./src/components/monitor/monitor-mongo.ts ***!
+  \*************************************************/
+(__unused_webpack_module, exports, __webpack_require__) {
+
+
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.TTFP_BUCKETS = exports.MONGO_MAX_TIME_MS = void 0;
+exports.oidAt = oidAt;
+exports.userCohortPipeline = userCohortPipeline;
+exports.flattenCohort = flattenCohort;
+exports.bufferPoolPipeline = bufferPoolPipeline;
+exports.promotePoolPipeline = promotePoolPipeline;
+exports.timeToFirstPayPipeline = timeToFirstPayPipeline;
+exports.mapTtfp = mapTtfp;
+const mongoose_1 = __webpack_require__(/*! mongoose */ "mongoose");
+exports.MONGO_MAX_TIME_MS = 8_000;
+const DAY_MS = 86_400_000;
+function oidAt(ms) {
+    return mongoose_1.Types.ObjectId.createFromTime(Math.floor(ms / 1000));
+}
+function userCohortPipeline(o) {
+    const created = { $toDate: '$_id' };
+    const paidCond = [{ $gt: ['$firstPaidAt', 0] }];
+    if (o.paidBefore)
+        paidCond.push({ $lt: ['$firstPaidAt', o.paidBefore] });
+    const match = { _id: { $gte: oidAt(o.start), $lt: oidAt(o.end) } };
+    if (o.clientId)
+        match.clientId = o.clientId;
+    return [
+        { $match: match },
+        {
+            $project: {
+                _id: 0,
+                c: '$clientId',
+                d: { $dateToString: { date: created, format: '%Y-%m-%d', timezone: 'Asia/Kolkata' } },
+                h: o.byHour ? { $hour: { date: created, timezone: 'Asia/Kolkata' } } : { $literal: null },
+                pd: {
+                    $cond: [
+                        { $and: paidCond },
+                        { $dateToString: { date: { $toDate: '$firstPaidAt' }, format: '%Y-%m-%d', timezone: 'Asia/Kolkata' } },
+                        null,
+                    ],
+                },
+            },
+        },
+        {
+            $group: {
+                _id: { c: '$c', d: '$d', h: '$h' },
+                n: { $sum: 1 },
+                same: { $sum: { $cond: [{ $eq: ['$pd', '$d'] }, 1, 0] } },
+            },
+        },
+    ];
+}
+function flattenCohort(rows) {
+    return rows.map((r) => ({
+        c: r._id.c ?? null,
+        d: r._id.d,
+        h: r._id.h ?? null,
+        n: Number(r.n) || 0,
+        same: Number(r.same) || 0,
+    }));
+}
+function bufferPoolPipeline(now, todayIst, clientId) {
+    const nowDate = new Date(now);
+    return [
+        ...(clientId ? [{ $match: { clientId } }] : []),
+        {
+            $group: {
+                _id: '$clientId',
+                total: { $sum: 1 },
+                harsh: { $sum: { $cond: [{ $eq: ['$spamStatus', 'harsh'] }, 1, 0] } },
+                eligible: {
+                    $sum: {
+                        $cond: [
+                            {
+                                $and: [
+                                    { $eq: ['$status', 'active'] },
+                                    { $ne: ['$inUse', true] },
+                                    { $eq: ['$warmupPhase', 'session_rotated'] },
+                                    { $gte: [{ $ifNull: ['$channels', 0] }, 200] },
+                                    { $lte: ['$createdAt', new Date(now - 15 * DAY_MS)] },
+                                    {
+                                        $or: [
+                                            { $ne: ['$spamStatus', 'harsh'] },
+                                            { $lte: [{ $ifNull: ['$spamCheckedAt', new Date(0)] }, new Date(now - 30 * DAY_MS)] },
+                                        ],
+                                    },
+                                    { $not: [{ $gt: [{ $ifNull: ['$limitedUntil', new Date(0)] }, nowDate] }] },
+                                    { $lte: ['$availableDate', todayIst] },
+                                ],
+                            },
+                            1,
+                            0,
+                        ],
+                    },
+                },
+            },
+        },
+    ];
+}
+function promotePoolPipeline(clientId) {
+    return [
+        ...(clientId ? [{ $match: { clientId } }] : []),
+        { $group: { _id: '$clientId', active: { $sum: { $cond: [{ $eq: ['$status', 'active'] }, 1, 0] } } } },
+    ];
+}
+exports.TTFP_BUCKETS = ['<10m', '10-30m', '30m-2h', '2-24h', '1-3d', '3d+'];
+function timeToFirstPayPipeline(clientId, start, end) {
+    return [
+        { $match: { clientId, firstPaidAt: { $gte: start, $lt: end } } },
+        { $project: { _id: 0, mins: { $divide: [{ $subtract: ['$firstPaidAt', { $toLong: { $toDate: '$_id' } }] }, 60000] } } },
+        {
+            $bucket: {
+                groupBy: '$mins',
+                boundaries: [-1e15, 0, 10, 30, 120, 1440, 4320, 1e15],
+                default: 'other',
+                output: { n: { $sum: 1 } },
+            },
+        },
+    ];
+}
+const TTFP_BY_LOWER = {
+    '0': '<10m',
+    '10': '10-30m',
+    '30': '30m-2h',
+    '120': '2-24h',
+    '1440': '1-3d',
+    '4320': '3d+',
+};
+function mapTtfp(rows) {
+    const counts = new Map(exports.TTFP_BUCKETS.map((b) => [b, 0]));
+    let negative = 0;
+    for (const r of rows) {
+        const label = TTFP_BY_LOWER[String(r._id)];
+        if (label)
+            counts.set(label, (counts.get(label) ?? 0) + Number(r.n || 0));
+        else
+            negative += Number(r.n || 0);
+    }
+    return { buckets: exports.TTFP_BUCKETS.map((b) => ({ bucket: b, count: counts.get(b) ?? 0 })), negative };
+}
+
+
+/***/ },
+
+/***/ "./src/components/monitor/monitor-sql.ts"
+/*!***********************************************!*\
+  !*** ./src/components/monitor/monitor-sql.ts ***!
+  \***********************************************/
+(__unused_webpack_module, exports) {
+
+
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.fleetRevenueSql = fleetRevenueSql;
+exports.fleetSparkSql = fleetSparkSql;
+exports.fleetDailyClientSql = fleetDailyClientSql;
+exports.fleetSendsIntradaySql = fleetSendsIntradaySql;
+exports.fleetDmsSql = fleetDmsSql;
+exports.clientPaymentsSql = clientPaymentsSql;
+exports.clientDailyClientSql = clientDailyClientSql;
+exports.clientDmsDailySql = clientDmsDailySql;
+exports.clientSendsHourlySql = clientSendsHourlySql;
+exports.clientMobilesSql = clientMobilesSql;
+exports.clientTopDmChannelsSql = clientTopDmChannelsSql;
+exports.clientChannelSendsSql = clientChannelSendsSql;
+const IST = `(ts AT TIME ZONE 'Asia/Kolkata')`;
+const iso = (ms) => new Date(ms).toISOString();
+const CLEAN_CREDIT = `amount < 1000 AND cheat_flagged IS NOT TRUE`;
+function fleetRevenueSql(cur, prev) {
+    const c = `ts >= $1::timestamptz AND ts < $2::timestamptz`;
+    const p = `ts >= $3::timestamptz AND ts < $4::timestamptz`;
+    return {
+        name: 'fleet.revenue',
+        sql: `SELECT client_id, GROUPING(client_id) AS is_total,
+  coalesce(sum(owner_amount) FILTER (WHERE ${c} AND amount < 1000), 0) AS revenue,
+  coalesce(sum(amount) FILTER (WHERE ${c}), 0) AS gross,
+  count(DISTINCT chat_id) FILTER (WHERE ${c} AND ${CLEAN_CREDIT}) AS payers,
+  coalesce(sum(owner_amount) FILTER (WHERE ${p} AND amount < 1000), 0) AS prev_revenue,
+  coalesce(sum(amount) FILTER (WHERE ${p}), 0) AS prev_gross,
+  count(DISTINCT chat_id) FILTER (WHERE ${p} AND ${CLEAN_CREDIT}) AS prev_payers
+FROM payment_event_owner
+WHERE amount > 0 AND ((${c}) OR (${p}))
+GROUP BY GROUPING SETS ((client_id), ())`,
+        params: [iso(cur.start), iso(cur.end), iso(prev.start), iso(prev.end)],
+    };
+}
+function fleetSparkSql(fromDayStart) {
+    return {
+        name: 'fleet.spark',
+        sql: `SELECT client_id, ${IST}::date::text AS d, coalesce(sum(owner_amount), 0) AS revenue
+FROM payment_event_owner
+WHERE amount > 0 AND amount < 1000 AND ts >= $1::timestamptz
+GROUP BY 1, 2`,
+        params: [iso(fromDayStart)],
+    };
+}
+function fleetDailyClientSql(from, to, prevFrom, prevTo) {
+    const c = `day BETWEEN $1::date AND $2::date`;
+    const p = `day BETWEEN $3::date AND $4::date`;
+    return {
+        name: 'fleet.daily_client',
+        sql: `SELECT client_id,
+  coalesce(sum(sent) FILTER (WHERE ${c}), 0) AS sent,
+  coalesce(sum(delivered) FILTER (WHERE ${c}), 0) AS delivered,
+  coalesce(sum(banned) FILTER (WHERE ${c}), 0) AS banned,
+  coalesce(sum(new_users) FILTER (WHERE ${c} AND namespace = 'tg-aut'), 0) AS new_users,
+  coalesce(sum(sent) FILTER (WHERE ${p}), 0) AS prev_sent,
+  coalesce(sum(delivered) FILTER (WHERE ${p}), 0) AS prev_delivered,
+  coalesce(sum(banned) FILTER (WHERE ${p}), 0) AS prev_banned,
+  coalesce(sum(new_users) FILTER (WHERE ${p} AND namespace = 'tg-aut'), 0) AS prev_new_users
+FROM daily_client
+WHERE day BETWEEN $3::date AND $2::date
+GROUP BY client_id`,
+        params: [from, to, prevFrom, prevTo],
+    };
+}
+function fleetSendsIntradaySql(cur, prev) {
+    const c = `ts >= $1::timestamptz`;
+    const p = `ts < $2::timestamptz`;
+    return {
+        name: 'fleet.promotion_send_intraday',
+        sql: `SELECT client_id,
+  count(*) FILTER (WHERE ${c} AND outcome <> 'deleted') AS sent,
+  count(*) FILTER (WHERE ${c} AND outcome = 'delivered') AS delivered,
+  count(*) FILTER (WHERE ${c} AND outcome = 'banned') AS banned,
+  count(*) FILTER (WHERE ${p} AND outcome <> 'deleted') AS prev_sent,
+  count(*) FILTER (WHERE ${p} AND outcome = 'delivered') AS prev_delivered,
+  count(*) FILTER (WHERE ${p} AND outcome = 'banned') AS prev_banned
+FROM promotion_send
+WHERE ts >= $3::timestamptz AND ts < $4::timestamptz AND (${c} OR ${p})
+GROUP BY client_id`,
+        params: [iso(cur.start), iso(prev.end), iso(prev.start), iso(cur.end)],
+    };
+}
+function fleetDmsSql(cur, prev) {
+    const c = `ts >= $1::timestamptz AND ts < $2::timestamptz`;
+    const p = `ts >= $3::timestamptz AND ts < $4::timestamptz`;
+    return {
+        name: 'fleet.dms',
+        sql: `SELECT client_id, GROUPING(client_id) AS is_total,
+  count(DISTINCT conversion_id) FILTER (WHERE ${c}) AS dms,
+  count(DISTINCT conversion_id) FILTER (WHERE ${p}) AS prev_dms
+FROM conversion_event
+WHERE kind = 'dm' AND ((${c}) OR (${p}))
+GROUP BY GROUPING SETS ((client_id), ())`,
+        params: [iso(cur.start), iso(cur.end), iso(prev.start), iso(prev.end)],
+    };
+}
+function clientPaymentsSql(clientId, start) {
+    return {
+        name: 'client.payments',
+        sql: `SELECT ts, chat_id, amount, owner_amount, cheat_flagged
+FROM payment_event_owner
+WHERE client_id = $1 AND ts >= $2::timestamptz AND amount > 0`,
+        params: [clientId, iso(start)],
+    };
+}
+function clientDailyClientSql(clientId, from) {
+    return {
+        name: 'client.daily_client',
+        sql: `SELECT day::text AS d,
+  coalesce(sum(sent), 0) AS sent, coalesce(sum(delivered), 0) AS delivered, coalesce(sum(banned), 0) AS banned,
+  coalesce(sum(new_users) FILTER (WHERE namespace = 'tg-aut'), 0) AS new_users
+FROM daily_client
+WHERE client_id = $1 AND day >= $2::date
+GROUP BY day`,
+        params: [clientId, from],
+    };
+}
+function clientDmsDailySql(clientId, start) {
+    return {
+        name: 'client.dms_daily',
+        sql: `SELECT ${IST}::date::text AS d, count(DISTINCT conversion_id) AS dms
+FROM conversion_event
+WHERE kind = 'dm' AND client_id = $1 AND ts >= $2::timestamptz
+GROUP BY 1`,
+        params: [clientId, iso(start)],
+    };
+}
+function clientSendsHourlySql(clientId, start) {
+    return {
+        name: 'client.promotion_send_hourly',
+        sql: `SELECT ${IST}::date::text AS d, extract(hour FROM ${IST})::int AS h,
+  count(*) FILTER (WHERE outcome <> 'deleted') AS sent
+FROM promotion_send
+WHERE client_id = $1 AND ts >= $2::timestamptz
+GROUP BY 1, 2`,
+        params: [clientId, iso(start)],
+    };
+}
+function clientMobilesSql(clientId, from) {
+    return {
+        name: 'client.daily_mobile',
+        sql: `SELECT mobile,
+  coalesce(sum(new_users) FILTER (WHERE namespace = 'tg-aut'), 0) AS new_users,
+  coalesce(sum(new_users) FILTER (WHERE namespace = 'promote-clients'), 0) AS dms,
+  coalesce(sum(sent), 0) AS sent, coalesce(sum(delivered), 0) AS delivered, coalesce(sum(banned), 0) AS banned,
+  min(day)::text AS first_day, max(day)::text AS last_day
+FROM daily_mobile
+WHERE client_id = $1 AND day >= $2::date
+GROUP BY mobile
+ORDER BY sent DESC`,
+        params: [clientId, from],
+    };
+}
+function clientTopDmChannelsSql(clientId, start) {
+    return {
+        name: 'client.channels_top_dms',
+        sql: `SELECT channel_id, count(DISTINCT conversion_id) AS dms
+FROM conversion_event
+WHERE kind = 'dm' AND client_id = $1 AND ts >= $2::timestamptz AND channel_id IS NOT NULL
+GROUP BY 1
+ORDER BY 2 DESC, 1
+LIMIT 20`,
+        params: [clientId, iso(start)],
+    };
+}
+function clientChannelSendsSql(clientId, start, channelIds) {
+    return {
+        name: 'client.channels_sends',
+        sql: `SELECT channel_id, count(*) FILTER (WHERE outcome <> 'deleted') AS sent
+FROM promotion_send
+WHERE channel_id = ANY($3::text[]) AND client_id = $1 AND ts >= $2::timestamptz
+GROUP BY 1`,
+        params: [clientId, iso(start), channelIds],
+    };
+}
+
+
+/***/ },
+
+/***/ "./src/components/monitor/monitor-time.ts"
+/*!************************************************!*\
+  !*** ./src/components/monitor/monitor-time.ts ***!
+  \************************************************/
+(__unused_webpack_module, exports) {
+
+
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.MONITOR_PERIODS = exports.DAY_MS = exports.IST_OFFSET_MS = void 0;
+exports.istDate = istDate;
+exports.istHour = istHour;
+exports.istDayStart = istDayStart;
+exports.addDays = addDays;
+exports.datesBetween = datesBetween;
+exports.resolvePeriod = resolvePeriod;
+exports.clientDaysRange = clientDaysRange;
+exports.IST_OFFSET_MS = 5.5 * 3600_000;
+exports.DAY_MS = 86_400_000;
+exports.MONITOR_PERIODS = ['today', '7d', '30d'];
+function istDate(ms) {
+    return new Date(ms + exports.IST_OFFSET_MS).toISOString().slice(0, 10);
+}
+function istHour(ms) {
+    return new Date(ms + exports.IST_OFFSET_MS).getUTCHours();
+}
+function istDayStart(date) {
+    return Date.parse(`${date}T00:00:00.000+05:30`);
+}
+function addDays(date, n) {
+    const ms = Date.parse(`${date}T00:00:00.000Z`) + n * exports.DAY_MS;
+    return new Date(ms).toISOString().slice(0, 10);
+}
+function datesBetween(from, to) {
+    const out = [];
+    for (let d = from; d <= to; d = addDays(d, 1))
+        out.push(d);
+    return out;
+}
+function resolvePeriod(period, now) {
+    const today = istDate(now);
+    const today0 = istDayStart(today);
+    if (period === 'today') {
+        const yday = addDays(today, -1);
+        return {
+            period,
+            now,
+            today,
+            range: { from: today, to: today },
+            prevRange: { from: yday, to: yday },
+            cur: { start: today0, end: now },
+            prev: { start: today0 - exports.DAY_MS, end: now - exports.DAY_MS },
+            wholeDays: false,
+        };
+    }
+    const n = period === '7d' ? 7 : 30;
+    const from = addDays(today, -n);
+    const to = addDays(today, -1);
+    const prevFrom = addDays(today, -2 * n);
+    const prevTo = addDays(today, -n - 1);
+    return {
+        period,
+        now,
+        today,
+        range: { from, to },
+        prevRange: { from: prevFrom, to: prevTo },
+        cur: { start: istDayStart(from), end: today0 },
+        prev: { start: istDayStart(prevFrom), end: istDayStart(from) },
+        wholeDays: true,
+    };
+}
+function clientDaysRange(days, now) {
+    const today = istDate(now);
+    const from = addDays(today, -(days - 1));
+    return { from, to: today, start: istDayStart(from), end: now };
+}
+
+
+/***/ },
+
+/***/ "./src/components/monitor/monitor-util.ts"
+/*!************************************************!*\
+  !*** ./src/components/monitor/monitor-util.ts ***!
+  \************************************************/
+(__unused_webpack_module, exports) {
+
+
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.DAILY_MOBILE_FROM = exports.REVENUE_HISTORY_FROM = exports.DMS_ATTRIBUTION_FROM = void 0;
+exports.maskMobile = maskMobile;
+exports.num = num;
+exports.round = round;
+exports.ratio = ratio;
+exports.pooledConversion = pooledConversion;
+exports.withTimeout = withTimeout;
+exports.historyNotes = historyNotes;
+exports.maskPayload = maskPayload;
+function maskMobile(m) {
+    if (m === null || m === undefined || m === '')
+        return null;
+    const s = String(m);
+    return `••••${s.slice(-4)}`;
+}
+function num(v) {
+    if (v === null || v === undefined || v === '')
+        return 0;
+    const n = Number(v);
+    return Number.isFinite(n) ? n : 0;
+}
+function round(n, dp) {
+    const f = 10 ** dp;
+    return Math.round(n * f) / f;
+}
+function ratio(numerator, denominator, dp = 4) {
+    if (numerator === null || denominator === null || !denominator)
+        return null;
+    return round(numerator / denominator, dp);
+}
+function pooledConversion(days) {
+    let n = 0;
+    let p = 0;
+    for (const d of days) {
+        n += d.newUsers;
+        p += d.sameDayPayers;
+    }
+    return ratio(p, n);
+}
+function withTimeout(p, ms, label) {
+    let timer;
+    const t = new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms} ms`)), ms);
+        timer.unref?.();
+    });
+    return Promise.race([p, t]).finally(() => clearTimeout(timer));
+}
+exports.DMS_ATTRIBUTION_FROM = '2026-10-26';
+exports.REVENUE_HISTORY_FROM = '2026-10-04';
+exports.DAILY_MOBILE_FROM = '2026-10-10';
+function historyNotes(ranges, opts = {}) {
+    const notes = [];
+    const earliest = ranges.reduce((m, r) => (r.from < m ? r.from : m), '9999-12-31');
+    if (earliest < exports.DMS_ATTRIBUTION_FROM) {
+        notes.push(`Per-client attribution of DMs and sends begins ${exports.DMS_ATTRIBUTION_FROM}; DMs before it are only in fleet totals (unattributed).`);
+    }
+    if (earliest < exports.REVENUE_HISTORY_FROM) {
+        notes.push('Revenue history begins 2026-10-03 20:32Z (2026-10-04 IST); earlier days show 0 revenue, not no revenue.');
+    }
+    if (opts.mobiles && earliest < exports.DAILY_MOBILE_FROM) {
+        notes.push(`Per-mobile rows (daily_mobile) begin ${exports.DAILY_MOBILE_FROM}.`);
+    }
+    return notes;
+}
+const MOBILE_KEYS = new Set(['mobile']);
+function maskPayload(value, depth = 0, parentKey = '') {
+    if (depth > 8)
+        return null;
+    if (Array.isArray(value))
+        return value.map((v) => maskPayload(v, depth + 1, parentKey));
+    if (value && typeof value === 'object') {
+        const out = {};
+        for (const [k, v] of Object.entries(value)) {
+            if (MOBILE_KEYS.has(k) || (parentKey === 'mobiles' && k === 'm')) {
+                out[k] = Array.isArray(v) ? v.map(maskMobile) : maskMobile(v);
+            }
+            else {
+                out[k] = maskPayload(v, depth + 1, k);
+            }
+        }
+        return out;
+    }
+    return value;
+}
+
+
+/***/ },
+
+/***/ "./src/components/monitor/monitor.controller.ts"
+/*!******************************************************!*\
+  !*** ./src/components/monitor/monitor.controller.ts ***!
+  \******************************************************/
+(__unused_webpack_module, exports, __webpack_require__) {
+
+
+var __decorate = (this && this.__decorate) || function (decorators, target, key, desc) {
+    var c = arguments.length, r = c < 3 ? target : desc === null ? desc = Object.getOwnPropertyDescriptor(target, key) : desc, d;
+    if (typeof Reflect === "object" && typeof Reflect.decorate === "function") r = Reflect.decorate(decorators, target, key, desc);
+    else for (var i = decorators.length - 1; i >= 0; i--) if (d = decorators[i]) r = (c < 3 ? d(r) : c > 3 ? d(target, key, r) : d(target, key)) || r;
+    return c > 3 && r && Object.defineProperty(target, key, r), r;
+};
+var __metadata = (this && this.__metadata) || function (k, v) {
+    if (typeof Reflect === "object" && typeof Reflect.metadata === "function") return Reflect.metadata(k, v);
+};
+var __param = (this && this.__param) || function (paramIndex, decorator) {
+    return function (target, key) { decorator(target, key, paramIndex); }
+};
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.MonitorController = void 0;
+exports.parsePeriod = parsePeriod;
+exports.parseDays = parseDays;
+exports.parseSvc = parseSvc;
+const common_1 = __webpack_require__(/*! @nestjs/common */ "@nestjs/common");
+const swagger_1 = __webpack_require__(/*! @nestjs/swagger */ "@nestjs/swagger");
+const monitor_time_1 = __webpack_require__(/*! ./monitor-time */ "./src/components/monitor/monitor-time.ts");
+const monitor_service_1 = __webpack_require__(/*! ./monitor.service */ "./src/components/monitor/monitor.service.ts");
+const CLIENT_ID_RE = /^[A-Za-z0-9_-]{1,40}$/;
+function parsePeriod(period) {
+    if (period === undefined || period === '')
+        return 'today';
+    if (monitor_time_1.MONITOR_PERIODS.includes(period))
+        return period;
+    throw new common_1.BadRequestException(`period must be one of ${monitor_time_1.MONITOR_PERIODS.join('|')}`);
+}
+function parseDays(days) {
+    if (days === undefined || days === '' || days === '7')
+        return 7;
+    if (days === '30')
+        return 30;
+    throw new common_1.BadRequestException('days must be 7 or 30');
+}
+function parseSvc(svc) {
+    if (svc === undefined || svc === '' || svc === 'all')
+        return 'all';
+    if (monitor_service_1.LIVE_SVCS.includes(svc))
+        return svc;
+    throw new common_1.BadRequestException(`svc must be one of ${monitor_service_1.LIVE_SVCS.join('|')}|all`);
+}
+let MonitorController = class MonitorController {
+    constructor(service) {
+        this.service = service;
+    }
+    async fleet(period) {
+        return this.service.fleet(parsePeriod(period));
+    }
+    async live(svc) {
+        return this.service.live(parseSvc(svc));
+    }
+    async client(clientId, days) {
+        if (!CLIENT_ID_RE.test(clientId ?? ''))
+            throw new common_1.BadRequestException('invalid clientId');
+        return this.service.client(clientId, parseDays(days));
+    }
+};
+exports.MonitorController = MonitorController;
+__decorate([
+    (0, common_1.Get)('fleet'),
+    (0, swagger_1.ApiQuery)({ name: 'period', required: false, enum: monitor_time_1.MONITOR_PERIODS }),
+    __param(0, (0, common_1.Query)('period')),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [String]),
+    __metadata("design:returntype", Promise)
+], MonitorController.prototype, "fleet", null);
+__decorate([
+    (0, common_1.Get)('live'),
+    (0, swagger_1.ApiQuery)({ name: 'svc', required: false, enum: ['tg-aut', 'promote', 'all'] }),
+    __param(0, (0, common_1.Query)('svc')),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [String]),
+    __metadata("design:returntype", Promise)
+], MonitorController.prototype, "live", null);
+__decorate([
+    (0, common_1.Get)('client/:clientId'),
+    (0, swagger_1.ApiParam)({ name: 'clientId' }),
+    (0, swagger_1.ApiQuery)({ name: 'days', required: false, enum: ['7', '30'] }),
+    __param(0, (0, common_1.Param)('clientId')),
+    __param(1, (0, common_1.Query)('days')),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [String, String]),
+    __metadata("design:returntype", Promise)
+], MonitorController.prototype, "client", null);
+exports.MonitorController = MonitorController = __decorate([
+    (0, swagger_1.ApiTags)('monitor'),
+    (0, common_1.Controller)('monitor'),
+    __metadata("design:paramtypes", [monitor_service_1.MonitorService])
+], MonitorController);
+
+
+/***/ },
+
+/***/ "./src/components/monitor/monitor.module.ts"
+/*!**************************************************!*\
+  !*** ./src/components/monitor/monitor.module.ts ***!
+  \**************************************************/
+(__unused_webpack_module, exports, __webpack_require__) {
+
+
+var __decorate = (this && this.__decorate) || function (decorators, target, key, desc) {
+    var c = arguments.length, r = c < 3 ? target : desc === null ? desc = Object.getOwnPropertyDescriptor(target, key) : desc, d;
+    if (typeof Reflect === "object" && typeof Reflect.decorate === "function") r = Reflect.decorate(decorators, target, key, desc);
+    else for (var i = decorators.length - 1; i >= 0; i--) if (d = decorators[i]) r = (c < 3 ? d(r) : c > 3 ? d(target, key, r) : d(target, key)) || r;
+    return c > 3 && r && Object.defineProperty(target, key, r), r;
+};
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.MonitorModule = void 0;
+const common_1 = __webpack_require__(/*! @nestjs/common */ "@nestjs/common");
+const redisClient_1 = __webpack_require__(/*! ../../utils/redisClient */ "./src/utils/redisClient.ts");
+const analytics_pg_reader_1 = __webpack_require__(/*! ../daily-analytics/analytics-pg.reader */ "./src/components/daily-analytics/analytics-pg.reader.ts");
+const monitor_controller_1 = __webpack_require__(/*! ./monitor.controller */ "./src/components/monitor/monitor.controller.ts");
+const monitor_service_1 = __webpack_require__(/*! ./monitor.service */ "./src/components/monitor/monitor.service.ts");
+let MonitorModule = class MonitorModule {
+};
+exports.MonitorModule = MonitorModule;
+exports.MonitorModule = MonitorModule = __decorate([
+    (0, common_1.Module)({
+        controllers: [monitor_controller_1.MonitorController],
+        providers: [
+            monitor_service_1.MonitorService,
+            analytics_pg_reader_1.AnalyticsPgReader,
+            {
+                provide: monitor_service_1.MONITOR_REDIS,
+                useFactory: () => ({
+                    smembers: (key) => redisClient_1.RedisClient.getClient().smembers(key),
+                    mget: (keys) => redisClient_1.RedisClient.getClient().mget(keys),
+                }),
+            },
+        ],
+    })
+], MonitorModule);
+
+
+/***/ },
+
+/***/ "./src/components/monitor/monitor.service.ts"
+/*!***************************************************!*\
+  !*** ./src/components/monitor/monitor.service.ts ***!
+  \***************************************************/
+(__unused_webpack_module, exports, __webpack_require__) {
+
+
+var __decorate = (this && this.__decorate) || function (decorators, target, key, desc) {
+    var c = arguments.length, r = c < 3 ? target : desc === null ? desc = Object.getOwnPropertyDescriptor(target, key) : desc, d;
+    if (typeof Reflect === "object" && typeof Reflect.decorate === "function") r = Reflect.decorate(decorators, target, key, desc);
+    else for (var i = decorators.length - 1; i >= 0; i--) if (d = decorators[i]) r = (c < 3 ? d(r) : c > 3 ? d(target, key, r) : d(target, key)) || r;
+    return c > 3 && r && Object.defineProperty(target, key, r), r;
+};
+var __metadata = (this && this.__metadata) || function (k, v) {
+    if (typeof Reflect === "object" && typeof Reflect.metadata === "function") return Reflect.metadata(k, v);
+};
+var __param = (this && this.__param) || function (paramIndex, decorator) {
+    return function (target, key) { decorator(target, key, paramIndex); }
+};
+var MonitorService_1;
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.MonitorService = exports.LIVE_SVCS = exports.HEARTBEAT_INDEX_KEY = exports.LIVE_TTL_MS = exports.CLIENT_TTL_MS = exports.FLEET_TTL_MS = exports.LIVE_REDIS_DEADLINE_MS = exports.MONGO_TIMEOUT_MS = exports.PG_TIMEOUT_MS = exports.MONITOR_REDIS = void 0;
+exports.classifyHeartbeat = classifyHeartbeat;
+const common_1 = __webpack_require__(/*! @nestjs/common */ "@nestjs/common");
+const mongoose_1 = __webpack_require__(/*! @nestjs/mongoose */ "@nestjs/mongoose");
+const mongoose_2 = __webpack_require__(/*! mongoose */ "mongoose");
+const analytics_pg_reader_1 = __webpack_require__(/*! ../daily-analytics/analytics-pg.reader */ "./src/components/daily-analytics/analytics-pg.reader.ts");
+const monitor_cache_1 = __webpack_require__(/*! ./monitor-cache */ "./src/components/monitor/monitor-cache.ts");
+const monitor_mongo_1 = __webpack_require__(/*! ./monitor-mongo */ "./src/components/monitor/monitor-mongo.ts");
+const monitor_sql_1 = __webpack_require__(/*! ./monitor-sql */ "./src/components/monitor/monitor-sql.ts");
+const monitor_time_1 = __webpack_require__(/*! ./monitor-time */ "./src/components/monitor/monitor-time.ts");
+const monitor_util_1 = __webpack_require__(/*! ./monitor-util */ "./src/components/monitor/monitor-util.ts");
+exports.MONITOR_REDIS = 'MONITOR_REDIS';
+exports.PG_TIMEOUT_MS = 10_500;
+exports.MONGO_TIMEOUT_MS = 10_000;
+exports.LIVE_REDIS_DEADLINE_MS = 2_000;
+exports.FLEET_TTL_MS = 60_000;
+exports.CLIENT_TTL_MS = 60_000;
+exports.LIVE_TTL_MS = 5_000;
+exports.HEARTBEAT_INDEX_KEY = 'heartbeat::index';
+exports.LIVE_SVCS = ['tg-aut', 'promote'];
+function classifyHeartbeat(payload, now) {
+    if (!payload)
+        return { state: 'no-heartbeat', ageSec: null, clockSkew: false };
+    const at = Number(payload.at);
+    if (!Number.isFinite(at) || at <= 0)
+        return { state: 'stale', ageSec: null, clockSkew: false };
+    const clockSkew = at > now + 5_000;
+    const ageSec = Math.max(0, Math.round((now - at) / 1000));
+    const interval = Number(payload.intervalSec) > 0 ? Number(payload.intervalSec) : 30;
+    if (payload.status === 'stopping' && ageSec <= 120)
+        return { state: 'stopping', ageSec, clockSkew };
+    if (ageSec <= 2 * interval + 10)
+        return { state: 'live', ageSec, clockSkew };
+    return { state: 'stale', ageSec, clockSkew };
+}
+const AMOUNT_BUCKETS = [
+    { bucket: '<100', lo: 0, hi: 100 },
+    { bucket: '100-199', lo: 100, hi: 200 },
+    { bucket: '200-299', lo: 200, hi: 300 },
+    { bucket: '300-499', lo: 300, hi: 500 },
+    { bucket: '500-999', lo: 500, hi: 1000 },
+];
+function credit(r) {
+    const amount = (0, monitor_util_1.num)(r.amount);
+    const under = amount < 1000;
+    return {
+        ms: new Date(r.ts).getTime(),
+        chat: String(r.chat_id),
+        amount,
+        gross: amount,
+        revenue: under ? (0, monitor_util_1.num)(r.owner_amount) : 0,
+        clean: under && r.cheat_flagged !== true,
+    };
+}
+let MonitorService = MonitorService_1 = class MonitorService {
+    constructor(pg, connection, redis) {
+        this.pg = pg;
+        this.connection = connection;
+        this.redis = redis;
+        this.logger = new common_1.Logger(MonitorService_1.name);
+        this.fleetCache = new monitor_cache_1.TtlCache(exports.FLEET_TTL_MS, 10);
+        this.clientCache = new monitor_cache_1.TtlCache(exports.CLIENT_TTL_MS, 100);
+        this.liveCache = new monitor_cache_1.TtlCache(exports.LIVE_TTL_MS, 2);
+        this.metaCache = new monitor_cache_1.TtlCache(exports.FLEET_TTL_MS, 1);
+    }
+    async pgRows(q, ctx) {
+        const t = Date.now();
+        let err;
+        try {
+            const rows = await (0, monitor_util_1.withTimeout)(this.pg.query(q.sql, q.params, (e) => (err = e)), exports.PG_TIMEOUT_MS, q.name);
+            if (!rows)
+                throw new Error(`${err?.kind ?? 'query'}: ${err?.message ?? 'no rows'}`);
+            return rows;
+        }
+        finally {
+            ctx.timings[q.name] = Date.now() - t;
+        }
+    }
+    async mongoAgg(collection, pipeline, name, ctx) {
+        const t = Date.now();
+        try {
+            const cursor = this.connection
+                .collection(collection)
+                .aggregate(pipeline, { maxTimeMS: monitor_mongo_1.MONGO_MAX_TIME_MS, readPreference: 'secondaryPreferred' });
+            return (await (0, monitor_util_1.withTimeout)(cursor.toArray(), exports.MONGO_TIMEOUT_MS, name));
+        }
+        finally {
+            ctx.timings[name] = Date.now() - t;
+        }
+    }
+    async mongoFind(collection, filter, projection, name, ctx) {
+        const t = Date.now();
+        try {
+            const cursor = this.connection
+                .collection(collection)
+                .find(filter, { projection, maxTimeMS: monitor_mongo_1.MONGO_MAX_TIME_MS, readPreference: 'secondaryPreferred' });
+            return (await (0, monitor_util_1.withTimeout)(cursor.toArray(), exports.MONGO_TIMEOUT_MS, name));
+        }
+        finally {
+            ctx.timings[name] = Date.now() - t;
+        }
+    }
+    async section(name, ctx, fn) {
+        try {
+            return await fn();
+        }
+        catch (err) {
+            const msg = String(err?.message ?? err).slice(0, 200);
+            ctx.notes.push(`${name} unavailable: ${msg}`);
+            this.logger.warn(`monitor ${name} failed: ${msg}`);
+            return null;
+        }
+    }
+    async clientMeta(ctx) {
+        const hit = await this.metaCache.get('clients', async () => {
+            const rows = await this.mongoFind('clients', {}, { _id: 0, clientId: 1, name: 1, promoteRepl: 1 }, 'mongo.clients', ctx);
+            return rows
+                .filter((r) => r.clientId)
+                .map((r) => ({ clientId: String(r.clientId), name: r.name ?? null, promote: !!r.promoteRepl }));
+        });
+        return hit.value;
+    }
+    async fleet(period) {
+        return (await this.fleetCache.get(period, () => this.buildFleet(period, Date.now()))).value;
+    }
+    async buildFleet(period, now) {
+        const ctx = { notes: [], timings: {} };
+        const w = (0, monitor_time_1.resolvePeriod)(period, now);
+        const sparkFrom = (0, monitor_time_1.addDays)(w.today, -6);
+        const [meta, rev, spark, sendRows, dmsRows, cohorts, pool] = await Promise.all([
+            this.section('clients', ctx, () => this.clientMeta(ctx)),
+            this.section('revenue', ctx, () => this.pgRows((0, monitor_sql_1.fleetRevenueSql)(w.cur, w.prev), ctx)),
+            this.section('spark', ctx, () => this.pgRows((0, monitor_sql_1.fleetSparkSql)((0, monitor_time_1.istDayStart)(sparkFrom)), ctx)),
+            this.section('sends', ctx, () => this.pgRows(w.wholeDays
+                ? (0, monitor_sql_1.fleetDailyClientSql)(w.range.from, w.range.to, w.prevRange.from, w.prevRange.to)
+                : (0, monitor_sql_1.fleetSendsIntradaySql)(w.cur, w.prev), ctx)),
+            this.section('dms', ctx, () => this.pgRows((0, monitor_sql_1.fleetDmsSql)(w.cur, w.prev), ctx)),
+            this.section('conversion', ctx, () => this.fleetCohorts(w, ctx)),
+            this.section('pool', ctx, () => this.poolByClient(now, w.today, undefined, ctx)),
+        ]);
+        const revBy = new Map();
+        let revTotal = null;
+        for (const r of rev ?? []) {
+            if ((0, monitor_util_1.num)(r.is_total) === 1)
+                revTotal = r;
+            else if (r.client_id)
+                revBy.set(r.client_id, r);
+        }
+        const dmsBy = new Map();
+        let dmsTotal = null;
+        for (const r of dmsRows ?? []) {
+            if ((0, monitor_util_1.num)(r.is_total) === 1)
+                dmsTotal = r;
+            else if (r.client_id)
+                dmsBy.set(r.client_id, r);
+        }
+        const sendsBy = new Map((sendRows ?? []).filter((r) => r.client_id).map((r) => [r.client_id, r]));
+        const sparkBy = new Map();
+        for (const r of spark ?? []) {
+            if (!r.client_id)
+                continue;
+            if (!sparkBy.has(r.client_id))
+                sparkBy.set(r.client_id, new Map());
+            sparkBy.get(r.client_id).set(r.d, (0, monitor_util_1.num)(r.revenue));
+        }
+        const sparkDates = (0, monitor_time_1.datesBetween)(sparkFrom, w.today);
+        const nuCur = (id) => {
+            if (w.wholeDays)
+                return sendRows ? (0, monitor_util_1.num)(sendsBy.get(id)?.new_users) : null;
+            return cohorts ? cohorts.cur.filter((c) => c.c === id).reduce((s, c) => s + c.n, 0) : null;
+        };
+        const nuPrev = (id) => {
+            if (w.wholeDays)
+                return sendRows ? (0, monitor_util_1.num)(sendsBy.get(id)?.prev_new_users) : null;
+            return cohorts ? cohorts.prev.filter((c) => c.c === id).reduce((s, c) => s + c.n, 0) : null;
+        };
+        const conv = (rows, id) => {
+            if (!rows)
+                return null;
+            const sel = id === undefined ? rows : rows.filter((c) => c.c === id);
+            return (0, monitor_util_1.ratio)(sel.reduce((s, c) => s + c.same, 0), sel.reduce((s, c) => s + c.n, 0));
+        };
+        const prevSwept = w.prevRange.from < (0, monitor_time_1.addDays)(w.today, -29);
+        const prevCohorts = prevSwept ? undefined : cohorts?.prev;
+        const metaBy = new Map((meta ?? []).map((m) => [m.clientId, m]));
+        const ids = new Set([...metaBy.keys(), ...revBy.keys(), ...sendsBy.keys(), ...dmsBy.keys()]);
+        for (const c of cohorts?.cur ?? [])
+            if (c.c)
+                ids.add(c.c);
+        const clients = [...ids].map((id) => {
+            const r = revBy.get(id);
+            const s = sendsBy.get(id);
+            const d = dmsBy.get(id);
+            const revenue = rev ? (0, monitor_util_1.num)(r?.revenue) : null;
+            const payers = rev ? (0, monitor_util_1.num)(r?.payers) : null;
+            const p = pool?.get(id);
+            return {
+                clientId: id,
+                name: metaBy.get(id)?.name ?? null,
+                revenue,
+                payers,
+                newUsers: nuCur(id),
+                conversion: conv(cohorts?.cur, id),
+                avgTicket: (0, monitor_util_1.ratio)(revenue, payers, 1),
+                sends: sendRows ? (0, monitor_util_1.num)(s?.sent) : null,
+                sendSuccess: sendRows ? (0, monitor_util_1.num)(s?.delivered) : null,
+                banned: sendRows ? (0, monitor_util_1.num)(s?.banned) : null,
+                dms: dmsRows ? (0, monitor_util_1.num)(d?.dms) : null,
+                pool: pool ? { buffersEligible: p?.eligible ?? 0, buffersTotal: p?.total ?? 0, promoteActive: p?.promoteActive ?? 0 } : null,
+                spark: spark ? sparkDates.map((dt) => sparkBy.get(id)?.get(dt) ?? 0) : null,
+                previous: {
+                    revenue: rev ? (0, monitor_util_1.num)(r?.prev_revenue) : null,
+                    payers: rev ? (0, monitor_util_1.num)(r?.prev_payers) : null,
+                    newUsers: nuPrev(id),
+                    conversion: conv(prevCohorts, id),
+                },
+            };
+        });
+        clients.sort((a, b) => (b.revenue ?? -1) - (a.revenue ?? -1) || a.clientId.localeCompare(b.clientId));
+        const sumSends = (k) => (sendRows ? sendRows.reduce((s, r) => s + (0, monitor_util_1.num)(r[k]), 0) : null);
+        const allCohort = (rows) => (rows ? rows.reduce((s, c) => s + c.n, 0) : null);
+        const totals = (prefix) => {
+            const revenue = rev ? (0, monitor_util_1.num)(revTotal?.[`${prefix}revenue`]) : null;
+            const gross = rev ? (0, monitor_util_1.num)(revTotal?.[`${prefix}gross`]) : null;
+            const payers = rev ? (0, monitor_util_1.num)(revTotal?.[`${prefix}payers`]) : null;
+            const cur = prefix === '';
+            return {
+                revenue,
+                grossRevenue: gross,
+                flaggedRevenue: revenue === null ? null : gross - revenue,
+                payers,
+                newUsers: w.wholeDays ? sumSends(`${prefix}new_users`) : allCohort(cur ? cohorts?.cur : cohorts?.prev),
+                conversion: conv(cur ? cohorts?.cur : prevCohorts),
+                avgTicket: (0, monitor_util_1.ratio)(revenue, payers, 1),
+                sends: sumSends(`${prefix}sent`),
+                sendSuccess: sumSends(`${prefix}delivered`),
+                banned: sumSends(`${prefix}banned`),
+                dms: dmsRows ? (0, monitor_util_1.num)(dmsTotal?.[`${prefix}dms`]) : null,
+            };
+        };
+        const notes = [...(0, monitor_util_1.historyNotes)([w.range, w.prevRange]), ...ctx.notes];
+        if (!w.wholeDays) {
+            notes.push(`previous = yesterday 00:00 to ${new Date(w.prev.end + 19_800_000).toISOString().slice(11, 16)} IST; today's sends come from promotion_send and new users/conversion from Mongo userData.`);
+        }
+        if (prevSwept) {
+            notes.push('previous.conversion is null: the previous window is older than ~30 days and userData docs are swept after 30 days idle. Current-window days older than ~30 days may also undercount.');
+        }
+        return {
+            generatedAt: new Date(now).toISOString(),
+            period,
+            range: w.range,
+            previousRange: w.prevRange,
+            fleet: totals(''),
+            previous: totals('prev_'),
+            clients,
+            notes,
+            timingsMs: ctx.timings,
+        };
+    }
+    async fleetCohorts(w, ctx) {
+        if (w.wholeDays) {
+            const rows = (0, monitor_mongo_1.flattenCohort)(await this.mongoAgg('userData', (0, monitor_mongo_1.userCohortPipeline)({ start: w.prev.start, end: w.cur.end }), 'mongo.userData_cohorts', ctx));
+            return {
+                cur: rows.filter((r) => r.d >= w.range.from && r.d <= w.range.to),
+                prev: rows.filter((r) => r.d >= w.prevRange.from && r.d <= w.prevRange.to),
+            };
+        }
+        const [cur, prev] = await Promise.all([
+            this.mongoAgg('userData', (0, monitor_mongo_1.userCohortPipeline)({ start: w.cur.start, end: w.cur.end }), 'mongo.userData_cohorts_today', ctx),
+            this.mongoAgg('userData', (0, monitor_mongo_1.userCohortPipeline)({ start: w.prev.start, end: w.prev.end, paidBefore: w.prev.end }), 'mongo.userData_cohorts_yday_same_time', ctx),
+        ]);
+        return { cur: (0, monitor_mongo_1.flattenCohort)(cur), prev: (0, monitor_mongo_1.flattenCohort)(prev) };
+    }
+    async poolByClient(now, today, clientId, ctx) {
+        const [buf, prom] = await Promise.all([
+            this.mongoAgg('bufferClients', (0, monitor_mongo_1.bufferPoolPipeline)(now, today, clientId), 'mongo.bufferClients_pool', ctx),
+            this.mongoAgg('promoteClients', (0, monitor_mongo_1.promotePoolPipeline)(clientId), 'mongo.promoteClients_pool', ctx),
+        ]);
+        const out = new Map();
+        const get = (id) => {
+            if (!out.has(id))
+                out.set(id, { total: 0, eligible: 0, harsh: 0, promoteActive: 0 });
+            return out.get(id);
+        };
+        for (const b of buf)
+            if (b._id)
+                Object.assign(get(b._id), { total: (0, monitor_util_1.num)(b.total), eligible: (0, monitor_util_1.num)(b.eligible), harsh: (0, monitor_util_1.num)(b.harsh) });
+        for (const p of prom)
+            if (p._id)
+                get(p._id).promoteActive = (0, monitor_util_1.num)(p.active);
+        return out;
+    }
+    async client(clientId, days) {
+        return (await this.clientCache.get(`${clientId}:${days}`, () => this.buildClient(clientId, days, Date.now()))).value;
+    }
+    async buildClient(clientId, days, now) {
+        const ctx = { notes: [], timings: {} };
+        const r = (0, monitor_time_1.clientDaysRange)(days, now);
+        const today = r.to;
+        const yday = (0, monitor_time_1.addDays)(today, -1);
+        const yday0 = (0, monitor_time_1.istDayStart)(yday);
+        const payStart = Math.min(r.start, yday0);
+        const [meta, fleet, payRows, dcRows, dmsRows, psHourly, mobileRows, channelRows, cohortDaily, cohortHourly, ttfpRows, pool] = await Promise.all([
+            this.section('clients', ctx, () => this.clientMeta(ctx)),
+            this.section('summary', ctx, () => this.fleet(days === 7 ? '7d' : '30d')),
+            this.section('payments', ctx, () => this.pgRows((0, monitor_sql_1.clientPaymentsSql)(clientId, payStart), ctx)),
+            this.section('daily_client', ctx, () => this.pgRows((0, monitor_sql_1.clientDailyClientSql)(clientId, r.from), ctx)),
+            this.section('dms', ctx, () => this.pgRows((0, monitor_sql_1.clientDmsDailySql)(clientId, r.start), ctx)),
+            this.section('hourly_sends', ctx, () => this.pgRows((0, monitor_sql_1.clientSendsHourlySql)(clientId, yday0), ctx)),
+            this.section('mobiles', ctx, () => this.pgRows((0, monitor_sql_1.clientMobilesSql)(clientId, r.from), ctx)),
+            this.section('channels', ctx, () => this.topChannels(clientId, r.start, ctx)),
+            this.section('conversion', ctx, async () => (0, monitor_mongo_1.flattenCohort)(await this.mongoAgg('userData', (0, monitor_mongo_1.userCohortPipeline)({ start: r.start, end: now, clientId }), 'mongo.userData_cohorts_client', ctx))),
+            this.section('hourly_new_users', ctx, async () => (0, monitor_mongo_1.flattenCohort)(await this.mongoAgg('userData', (0, monitor_mongo_1.userCohortPipeline)({ start: yday0, end: now, clientId, byHour: true }), 'mongo.userData_hourly_client', ctx))),
+            this.section('time_to_first_pay', ctx, () => this.mongoAgg('userData', (0, monitor_mongo_1.timeToFirstPayPipeline)(clientId, r.start, now), 'mongo.userData_ttfp_client', ctx)),
+            this.section('pool', ctx, () => this.poolByClient(now, today, clientId, ctx)),
+        ]);
+        const credits = (payRows ?? []).map(credit);
+        const inRange = credits.filter((c) => c.ms >= r.start && c.ms < now);
+        const dcBy = new Map((dcRows ?? []).map((x) => [x.d, x]));
+        const dmsBy = new Map((dmsRows ?? []).map((x) => [x.d, (0, monitor_util_1.num)(x.dms)]));
+        const cohortBy = new Map((cohortDaily ?? []).map((x) => [x.d, x]));
+        const daily = (0, monitor_time_1.datesBetween)(r.from, r.to).map((date) => {
+            const dayCredits = inRange.filter((c) => (0, monitor_time_1.istDate)(c.ms) === date);
+            const revenue = payRows ? dayCredits.reduce((s, c) => s + c.revenue, 0) : null;
+            const dc = dcBy.get(date);
+            const co = cohortBy.get(date);
+            return {
+                date,
+                revenue,
+                grossRevenue: payRows ? dayCredits.reduce((s, c) => s + c.gross, 0) : null,
+                payers: payRows ? new Set(dayCredits.filter((c) => c.clean).map((c) => c.chat)).size : null,
+                newUsers: dcRows ? (0, monitor_util_1.num)(dc?.new_users) : null,
+                conversion: cohortDaily ? (0, monitor_util_1.ratio)(co?.same ?? 0, co?.n ?? 0) : null,
+                sends: dcRows ? (0, monitor_util_1.num)(dc?.sent) : null,
+                sendSuccess: dcRows ? (0, monitor_util_1.num)(dc?.delivered) : null,
+                banned: dcRows ? (0, monitor_util_1.num)(dc?.banned) : null,
+                dms: dmsRows ? (dmsBy.get(date) ?? 0) : null,
+            };
+        });
+        const sendsHourBy = new Map((psHourly ?? []).map((x) => [`${x.d}:${(0, monitor_util_1.num)(x.h)}`, (0, monitor_util_1.num)(x.sent)]));
+        const nuHourBy = new Map();
+        for (const c of cohortHourly ?? [])
+            nuHourBy.set(`${c.d}:${c.h}`, (nuHourBy.get(`${c.d}:${c.h}`) ?? 0) + c.n);
+        const hourly = (date) => Array.from({ length: 24 }, (_, hour) => {
+            const hc = credits.filter((c) => (0, monitor_time_1.istDate)(c.ms) === date && (0, monitor_time_1.istHour)(c.ms) === hour);
+            return {
+                hour,
+                revenue: payRows ? hc.reduce((s, c) => s + c.revenue, 0) : null,
+                payers: payRows ? new Set(hc.filter((c) => c.clean).map((c) => c.chat)).size : null,
+                newUsers: cohortHourly ? (nuHourBy.get(`${date}:${hour}`) ?? 0) : null,
+                sends: psHourly ? (sendsHourBy.get(`${date}:${hour}`) ?? 0) : null,
+            };
+        });
+        const clean = inRange.filter((c) => c.clean);
+        const amount = payRows
+            ? AMOUNT_BUCKETS.map((b) => {
+                const inB = clean.filter((c) => c.amount >= b.lo && c.amount < b.hi);
+                return { bucket: b.bucket, count: inB.length, revenue: inB.reduce((s, c) => s + c.revenue, 0) };
+            })
+            : null;
+        const hourOfDay = payRows
+            ? Array.from({ length: 24 }, (_, hour) => {
+                const hc = clean.filter((c) => (0, monitor_time_1.istHour)(c.ms) === hour);
+                return { hour, revenue: hc.reduce((s, c) => s + c.revenue, 0), payers: new Set(hc.map((c) => c.chat)).size };
+            })
+            : null;
+        let repeat = null;
+        if (payRows) {
+            const byChat = new Map();
+            for (const c of clean) {
+                const e = byChat.get(c.chat) ?? { days: new Set(), revenue: 0 };
+                e.days.add((0, monitor_time_1.istDate)(c.ms));
+                e.revenue += c.revenue;
+                byChat.set(c.chat, e);
+            }
+            let one = 0;
+            let rep = 0;
+            let repRev = 0;
+            let totRev = 0;
+            for (const e of byChat.values()) {
+                totRev += e.revenue;
+                if (e.days.size > 1) {
+                    rep += 1;
+                    repRev += e.revenue;
+                }
+                else
+                    one += 1;
+            }
+            repeat = { oneTime: one, repeat: rep, repeatRevenueShare: (0, monitor_util_1.ratio)(repRev, totRev) };
+        }
+        let timeToFirstPay = null;
+        if (ttfpRows) {
+            const m = (0, monitor_mongo_1.mapTtfp)(ttfpRows);
+            timeToFirstPay = m.buckets;
+            if (m.negative)
+                ctx.notes.push(`timeToFirstPay: ${m.negative} first payment(s) predate their userData doc (doc recreated) and are excluded.`);
+        }
+        const mobiles = mobileRows
+            ? mobileRows.map((m) => ({
+                mobile: (0, monitor_util_1.maskMobile)(m.mobile),
+                newUsers: (0, monitor_util_1.num)(m.new_users),
+                sends: (0, monitor_util_1.num)(m.sent),
+                sendSuccess: (0, monitor_util_1.num)(m.delivered),
+                banned: (0, monitor_util_1.num)(m.banned),
+                dms: (0, monitor_util_1.num)(m.dms),
+                firstDay: m.first_day,
+                lastDay: m.last_day,
+            }))
+            : null;
+        let channels = null;
+        if (channelRows) {
+            const titles = (await this.section('channel_titles', ctx, () => this.channelTitles(channelRows.map((c) => String(c.channel_id)), ctx))) ?? new Map();
+            channels = channelRows.map((c) => {
+                const id = String(c.channel_id);
+                return {
+                    title: titles.get(id) ?? `channel …${id.slice(-4)}`,
+                    sends: (0, monitor_util_1.num)(c.sent),
+                    dms: (0, monitor_util_1.num)(c.dms),
+                    dmPerSend: (0, monitor_util_1.ratio)((0, monitor_util_1.num)(c.dms), (0, monitor_util_1.num)(c.sent)),
+                };
+            });
+        }
+        const p = pool?.get(clientId);
+        const metaRow = meta?.find((m) => m.clientId === clientId);
+        const summary = fleet?.clients.find((c) => c.clientId === clientId) ?? null;
+        const notes = [...(0, monitor_util_1.historyNotes)([r, ...(fleet ? [fleet.previousRange] : [])], { mobiles: true }), ...ctx.notes];
+        if (meta && !metaRow)
+            notes.push(`clientId ${clientId} is not in the clients collection.`);
+        notes.push(`daily covers ${r.from}..${r.to} IST; the last row (today) is partial. summary = ${days} complete IST days ending yesterday (same row as /monitor/fleet?period=${days}d).`);
+        notes.push('channels = top 20 by attributed DMs (conversion_event); channels with sends but no DMs are not listed.');
+        notes.push('mobiles[].dms = first DMs to that account as a promote account (daily_mobile promote-clients new_users), not attributed conversion_event DMs.');
+        return {
+            clientId,
+            name: metaRow?.name ?? null,
+            generatedAt: new Date(now).toISOString(),
+            days,
+            range: { from: r.from, to: r.to },
+            summary,
+            daily,
+            hourly: { today: hourly(today), yesterday: hourly(yday) },
+            distributions: { amount, hourOfDay, timeToFirstPay, repeat },
+            mobiles,
+            channels,
+            pool: pool ? { buffersEligible: p?.eligible ?? 0, buffersTotal: p?.total ?? 0, harsh: p?.harsh ?? 0, promoteActive: p?.promoteActive ?? 0 } : null,
+            notes,
+            timingsMs: ctx.timings,
+        };
+    }
+    async topChannels(clientId, start, ctx) {
+        const top = await this.pgRows((0, monitor_sql_1.clientTopDmChannelsSql)(clientId, start), ctx);
+        if (!top.length)
+            return [];
+        const ids = top.map((t) => String(t.channel_id));
+        const sends = await this.pgRows((0, monitor_sql_1.clientChannelSendsSql)(clientId, start, ids), ctx);
+        const sentBy = new Map(sends.map((x) => [String(x.channel_id), (0, monitor_util_1.num)(x.sent)]));
+        return top.map((t) => ({ channel_id: String(t.channel_id), dms: (0, monitor_util_1.num)(t.dms), sent: sentBy.get(String(t.channel_id)) ?? 0 }));
+    }
+    async channelTitles(ids, ctx) {
+        const variants = (id) => {
+            const bare = id.replace(/^-100/, '');
+            return [...new Set([id, bare, `-100${bare}`])];
+        };
+        const all = [...new Set(ids.flatMap(variants))];
+        const out = new Map();
+        for (const coll of ['activeChannels', 'channels']) {
+            const missing = ids.filter((id) => !out.has(id));
+            if (!missing.length)
+                break;
+            const rows = await this.mongoFind(coll, { channelId: { $in: all } }, { _id: 0, channelId: 1, title: 1 }, `mongo.${coll}_titles`, ctx);
+            const byId = new Map(rows.filter((x) => x.title).map((x) => [String(x.channelId), String(x.title)]));
+            for (const id of missing) {
+                const t = variants(id).map((v) => byId.get(v)).find(Boolean);
+                if (t)
+                    out.set(id, t);
+            }
+        }
+        return out;
+    }
+    async live(svc) {
+        let redis = 'ok';
+        let stale = false;
+        const notes = [];
+        let hit = undefined;
+        try {
+            hit = await this.liveCache.get('all', () => this.loadLive());
+        }
+        catch (err) {
+            redis = 'unavailable';
+            stale = true;
+            hit = this.liveCache.last('all');
+            notes.push(`redis unavailable: ${String(err?.message ?? err).slice(0, 160)}${hit ? '; serving last snapshot' : ''}`);
+        }
+        const now = Date.now();
+        const items = (hit?.value.entries ?? [])
+            .filter((e) => svc === 'all' || e.svc === svc)
+            .map((e) => {
+            const c = classifyHeartbeat(e.payload, now);
+            const masked = (e.payload ? (0, monitor_util_1.maskPayload)(e.payload) : {});
+            const item = { ...masked, svc: e.svc, clientId: e.clientId, state: c.state, ageSec: c.ageSec };
+            if (c.clockSkew)
+                item.clockSkew = true;
+            if (e.parseError)
+                item.parseError = true;
+            return item;
+        });
+        return {
+            generatedAt: new Date(now).toISOString(),
+            redis,
+            stale,
+            cacheAgeSec: hit ? Math.max(0, Math.round((now - hit.at) / 1000)) : null,
+            items,
+            notes: [...(hit?.value.notes ?? []), ...notes],
+        };
+    }
+    async loadLive() {
+        const ctx = { notes: [], timings: {} };
+        const meta = await this.section('clients', ctx, () => this.clientMeta(ctx));
+        const redisPart = async () => {
+            const members = await this.redis.smembers(exports.HEARTBEAT_INDEX_KEY);
+            const keys = new Map();
+            const add = (svc, clientId) => {
+                if (!exports.LIVE_SVCS.includes(svc) || !clientId)
+                    return;
+                keys.set(`heartbeat::${svc}::${clientId}`, { svc: svc, clientId });
+            };
+            for (const m of meta ?? []) {
+                add('tg-aut', m.clientId);
+                if (m.promote)
+                    add('promote', m.clientId);
+            }
+            for (const member of members ?? []) {
+                const i = member.indexOf('::');
+                if (i > 0)
+                    add(member.slice(0, i), member.slice(i + 2));
+            }
+            const keyList = [...keys.keys()];
+            const values = keyList.length ? await this.redis.mget(keyList) : [];
+            return keyList.map((k, i) => ({ ...keys.get(k), raw: values[i] ?? null }));
+        };
+        const rows = await (0, monitor_util_1.withTimeout)(redisPart(), exports.LIVE_REDIS_DEADLINE_MS, 'redis heartbeat read');
+        const entries = rows.map((r) => {
+            if (r.raw === null)
+                return { svc: r.svc, clientId: r.clientId, payload: null };
+            try {
+                const parsed = JSON.parse(r.raw);
+                if (parsed && typeof parsed === 'object' && !Array.isArray(parsed))
+                    return { svc: r.svc, clientId: r.clientId, payload: parsed };
+            }
+            catch {
+            }
+            return { svc: r.svc, clientId: r.clientId, payload: { at: null }, parseError: true };
+        });
+        entries.sort((a, b) => a.svc.localeCompare(b.svc) || a.clientId.localeCompare(b.clientId));
+        return { entries, notes: ctx.notes };
+    }
+};
+exports.MonitorService = MonitorService;
+exports.MonitorService = MonitorService = MonitorService_1 = __decorate([
+    (0, common_1.Injectable)(),
+    __param(1, (0, mongoose_1.InjectConnection)()),
+    __param(2, (0, common_1.Inject)(exports.MONITOR_REDIS)),
+    __metadata("design:paramtypes", [analytics_pg_reader_1.AnalyticsPgReader,
+        mongoose_2.Connection, Object])
+], MonitorService);
 
 
 /***/ },
