@@ -49637,8 +49637,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "419493f8a123a6cf540834514e0a8e1fb59115fd" : 0;
-    const builtAt =  true ? "2026-10-28T17:10:46.551Z" : 0;
+    const sha =  true ? "ec44fbad5a446f853d5048b9d20f374c6af54dd4" : 0;
+    const builtAt =  true ? "2026-10-28T17:12:38.191Z" : 0;
     return { sha, builtAt };
 }
 
@@ -57681,6 +57681,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _inbound_decision__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ./inbound-decision */ "./src/conversation/inbound/inbound-decision.ts");
 /* harmony import */ var _tg_core_state_durable_queue__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! @tg/core/state/durable-queue */ "../../packages/tg-core/src/state/durable-queue.ts");
 /* harmony import */ var _jobs_delayed__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ../../jobs/delayed */ "./src/jobs/delayed.ts");
+/* harmony import */ var _greetings_send_greetings__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ../../greetings/send-greetings */ "./src/greetings/send-greetings.ts");
 /**
  * Event Aggregation Service
  * Handles batching of multiple messages from the same chat
@@ -57690,6 +57691,7 @@ __webpack_require__.r(__webpack_exports__);
  * chat is still unread in Telegram (eventPrint marks it read), so the boot unread sweep handles the chats an
  * earlier process left buffered (takeRestoredInboundChats).
  */
+
 
 
 
@@ -57724,6 +57726,8 @@ async function processAggregatedEvent(event, allMsg, chatId, reason, batch = 1) 
     (0,_inbound_decision__WEBPACK_IMPORTED_MODULE_5__.markInbound)(event, "unknown", "no-decision");
     try {
         await (0,_event_print__WEBPACK_IMPORTED_MODULE_1__.eventPrint)(event, allMsg);
+        // The reply to this batch is queued: a greeting voice note held on a hot account goes behind it.
+        await (0,_greetings_send_greetings__WEBPACK_IMPORTED_MODULE_8__.sendHeldGreetingVoice)(chatId);
     }
     catch (error) {
         (0,_inbound_decision__WEBPACK_IMPORTED_MODULE_5__.markInbound)(event, "error", `exception: ${error?.message ?? String(error)}`.slice(0, 160));
@@ -59699,10 +59703,14 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _inbound_decision__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ./inbound-decision */ "./src/conversation/inbound/inbound-decision.ts");
 /* harmony import */ var _outbound_chat_voice__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ../../outbound/chat-voice */ "./src/outbound/chat-voice.ts");
 /* harmony import */ var _calls_call_attempt_cap__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ../../calls/call-attempt-cap */ "./src/calls/call-attempt-cap.ts");
+/* harmony import */ var _greetings_send_greetings__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ../../greetings/send-greetings */ "./src/greetings/send-greetings.ts");
+/* harmony import */ var _state_user_state__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ../state/user-state */ "./src/conversation/state/user-state.ts");
 /**
  * Private Message Handler
  * Main handler for private messages from users
  */
+
+
 
 
 
@@ -59719,7 +59727,7 @@ const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_2__.Logger("tg
  */
 async function handlePrivateMessage(event) {
     const chatId = event.message.chatId.toString();
-    (0,_outbound_chat_voice__WEBPACK_IMPORTED_MODULE_8__.noteUserMessage)(chatId, Date.now(), event.message.text); // every user message, new or existing (outbound/chat-voice)
+    (0,_outbound_chat_voice__WEBPACK_IMPORTED_MODULE_8__.noteUserMessage)(chatId, Date.now(), event.message.text, event.message.id); // every user message, new or existing (outbound/chat-voice)
     _calls_call_attempt_cap__WEBPACK_IMPORTED_MODULE_9__.callAttemptCap.userActed(chatId); // past the call attempt cap, a message may earn one more ring (calls/call-attempt-cap.ts)
     const db = _data_user_data_crud__WEBPACK_IMPORTED_MODULE_0__.UserDataDtoCrud.getInstance();
     const senderJson = await (0,_sender__WEBPACK_IMPORTED_MODULE_1__.getSenderJson)(event);
@@ -59738,6 +59746,11 @@ async function handlePrivateMessage(event) {
         await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_6__.sleep)(1000);
         await (0,_new_user_handler__WEBPACK_IMPORTED_MODULE_5__.handleNewUserMessage)(event, chatId, senderJson.firstName);
     }
+    // A greeting voice note held on a hot account goes behind the reply to this message. A text being batched
+    // (event-aggregation) is answered later: processAggregatedEvent sends it then. A picture (often a payment screenshot)
+    // keeps it held for the next text.
+    if (!event.message.media && (0,_greetings_send_greetings__WEBPACK_IMPORTED_MODULE_10__.hasHeldGreetingVoice)(chatId) && !_state_user_state__WEBPACK_IMPORTED_MODULE_11__.stateManager.getUserState(chatId).events)
+        await (0,_greetings_send_greetings__WEBPACK_IMPORTED_MODULE_10__.sendHeldGreetingVoice)(chatId);
 }
 /**
  * Check if should handle private message
@@ -65243,7 +65256,9 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _jobs_delayed__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ../jobs/delayed */ "./src/jobs/delayed.ts");
 /* harmony import */ var _respond__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ./respond */ "./src/conversation/respond.ts");
 /* harmony import */ var _outbound_send_executor__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ../outbound/send-executor */ "./src/outbound/send-executor.ts");
-/* harmony import */ var _policies_send_policy__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ../policies/send-policy */ "./src/policies/send-policy.ts");
+/* harmony import */ var _outbound_hot_account__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ../outbound/hot-account */ "./src/outbound/hot-account.ts");
+/* harmony import */ var _policies_send_policy__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ../policies/send-policy */ "./src/policies/send-policy.ts");
+
 
 
 
@@ -65256,8 +65271,12 @@ __webpack_require__.r(__webpack_exports__);
 
 
 const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_2__.Logger("tg-aut:inhandler-updated"); // 20 minutes
+/** The reping promo caption (pic.jpg in arm 'control', a text in arm 'noPic'). */
+function repingPromoCaption() {
+    return `Want more...?\n\nCall  Just **50₹**\nPics Just **25₹!!**\n**Full NUDE, With FACE!!\n\n${process.env.demolink}/${process.env.clientId}**`;
+}
 /** Most repings per user, every account (policies/send-policy.ts SEND_POLICY.repingCap; the "/4" was only log text before). */
-const REPING_CAP = _policies_send_policy__WEBPACK_IMPORTED_MODULE_10__.SEND_POLICY.repingCap;
+const REPING_CAP = _policies_send_policy__WEBPACK_IMPORTED_MODULE_11__.SEND_POLICY.repingCap;
 /** Delayed record 'reping': the re-engagement nudge if the user went quiet. */
 async function runReping(chatId, args) {
     logger.debug(`[EarlyReping] Reping timeout executing for user ${chatId}`);
@@ -65272,15 +65291,17 @@ async function runReping(chatId, args) {
         const shouldReping = timeSinceLastMessage > 260000; // 4.33 minutes
         if (shouldReping) {
             // Send policy (outbound/send-executor): the cap (every account), the refused mark, and on a hot account the
-            // staleness re-check against when the reping was planned.
+            // staleness re-check against when the reping was planned. `arm`: today's reping promo picture A/B arm.
+            const arm = _outbound_hot_account__WEBPACK_IMPORTED_MODULE_10__.hotAccount.arm();
             const { outcome, reason } = await (0,_outbound_send_executor__WEBPACK_IMPORTED_MODULE_9__.sendWithPolicy)({
                 kind: 'reping',
                 chatId,
                 label: 'reping',
                 scheduledAt: args.at,
                 repingCount: (0,_respond_to_msgs__WEBPACK_IMPORTED_MODULE_5__.getRepingMap)(chatId) || 0,
+                plannedArm: arm,
                 queued: true,
-                send: () => sendReping(chatId, args, userDetails.payAmount),
+                send: () => sendReping(chatId, args, userDetails.payAmount, arm),
             });
             if (outcome === 'skipped')
                 logger.log(`[EarlyReping] ${chatId}: ${reason}, not sent`);
@@ -65293,22 +65314,32 @@ async function runReping(chatId, args) {
         logger.error(`[EarlyReping] Failed to send reping message for ${chatId}:`, error);
     }
 }
-/** The reping itself (count + message + follow-up), at its send time. */
-async function sendReping(chatId, args, payAmount) {
+/**
+ * The reping itself (count + message + follow-up), at its send time. Repings #1-#3 to an unpaid user carry the promo:
+ * the picture in arm 'control' (as before), the same caption as a text in arm 'noPic' (send-policy repingSendsPicture).
+ * Every reping logs one `[REPING-AB]` line (all accounts) to compare refusal / reply / payment by arm.
+ */
+async function sendReping(chatId, args, payAmount, arm) {
     const currentReping = (0,_respond_to_msgs__WEBPACK_IMPORTED_MODULE_5__.getRepingMap)(chatId) || 0;
     (0,_respond_to_msgs__WEBPACK_IMPORTED_MODULE_5__.setRepingMap)(chatId, currentReping + 1);
     // Progressive re-engagement based on reping count
     const msg = currentReping === 0 ? (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_4__.pickOneMsg)(_messages_conversational_replies__WEBPACK_IMPORTED_MODULE_6__.uthereMsgs) : (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_4__.pickOneMsg)(_messages_conversational_replies__WEBPACK_IMPORTED_MODULE_6__.offerMsgs);
     // Enhanced promotional content for reping
+    let promo = 'none';
+    let promoSent = false;
     if (currentReping < 3 && payAmount < 30) {
-        // Second reping: Send promotional picture with retry logic
-        await (0,_greetings_promo_pic__WEBPACK_IMPORTED_MODULE_3__.sendPromoPic)(args.messageId, chatId, `Want more...?\n\nCall  Just **50₹**\nPics Just **25₹!!**\n**Full NUDE, With FACE!!\n\n${process.env.demolink}/${process.env.clientId}**`, `./pic.jpg`);
-        (0,_jobs_delayed__WEBPACK_IMPORTED_MODULE_7__.scheduleDelayed)(chatId, 'repingFollowup', { messageId: args.messageId, msg, at: Date.now() }, 15000, `repingfollow::${chatId}`);
+        // Second reping: Send promotional picture with retry logic (arm 'noPic': the caption as a text)
+        const withPicture = (0,_policies_send_policy__WEBPACK_IMPORTED_MODULE_11__.repingSendsPicture)(arm, currentReping + 1);
+        promo = withPicture ? 'pic' : 'text';
+        promoSent = await (0,_greetings_promo_pic__WEBPACK_IMPORTED_MODULE_3__.sendPromoPic)(args.messageId, chatId, repingPromoCaption(), withPicture ? `./pic.jpg` : null);
+        (0,_jobs_delayed__WEBPACK_IMPORTED_MODULE_7__.scheduleDelayed)(chatId, 'repingFollowup', { messageId: args.messageId, msg, at: Date.now(), arm }, 15000, `repingfollow::${chatId}`);
     }
     else {
         (0,_respond__WEBPACK_IMPORTED_MODULE_8__.respondInChat)(chatId, (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_4__.pickOneMsg)(_messages_conversational_replies__WEBPACK_IMPORTED_MODULE_6__.initMsgs), 'nudge', args.messageId).catch(e => (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_1__.parseError)(e, "Reping initial respond"));
-        (0,_jobs_delayed__WEBPACK_IMPORTED_MODULE_7__.scheduleDelayed)(chatId, 'repingFollowup', { messageId: args.messageId, msg, at: Date.now() }, 20000, `repingfollow::${chatId}`);
+        (0,_jobs_delayed__WEBPACK_IMPORTED_MODULE_7__.scheduleDelayed)(chatId, 'repingFollowup', { messageId: args.messageId, msg, at: Date.now(), arm }, 20000, `repingfollow::${chatId}`);
     }
+    // promoSent=0 with promo pic/text: the promo cap (2 per 12 h) or the queue held it back, in either arm alike.
+    logger.log(`[REPING-AB] arm=${arm} n=${currentReping + 1} promo=${promo} promoSent=${promoSent ? 1 : 0} hot=${_outbound_hot_account__WEBPACK_IMPORTED_MODULE_10__.hotAccount.view().reason || 'free'} chat=${chatId}`);
     logger.debug(`[EarlyReping] Sent reping message ${currentReping + 1}/${REPING_CAP} for user ${chatId}`);
 }
 /** Delayed record 'repingFollowup' (send policy: on a hot account skipped when the user wrote or paid since the reping). */
@@ -65319,6 +65350,7 @@ async function runRepingFollowup(chatId, args) {
             chatId,
             label: 'reping-followup',
             scheduledAt: args.at,
+            plannedArm: args.arm,
             queued: true,
             send: () => (0,_respond__WEBPACK_IMPORTED_MODULE_8__.respondInChat)(chatId, args.msg, 'nudge', args.messageId),
         });
@@ -65477,9 +65509,10 @@ __webpack_require__.r(__webpack_exports__);
 
 
 const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_19__.Logger("tg-aut:respond-to-msgs");
-// Service-period reset window after the second / full shows (owner 2026-10-27: 48 h, 72 h at ₹250+; was 20 h / 30 h).
-const SERVICE_RESET_MS = 48 * 60 * 60 * 1000;
-const HIGH_PAY_SERVICE_RESET_MS = 72 * 60 * 60 * 1000;
+// Service-period reset window after the second / full shows: 20 h, 30 h at ₹250+ (owner 2026-10-28: back from the
+// 48 h / 72 h of 2026-10-27).
+const SERVICE_RESET_MS = 20 * 60 * 60 * 1000;
+const HIGH_PAY_SERVICE_RESET_MS = 30 * 60 * 60 * 1000;
 // Initialize patterns once at module load
 (0,_patterns__WEBPACK_IMPORTED_MODULE_22__.initializePatterns)();
 // Migrated to UserState - using centralized state management with Redis persistence
@@ -65539,14 +65572,15 @@ async function respondToMsgs(event, allMsg) {
     }
     else if (userDetails.payAmount < 25 && userDetails.totalCount > 20 && Math.random() < 0.1) {
         // Urgency logic (10% chance for unpaid users with >20 messages)
-        await (0,_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)(_messages_objection_handling__WEBPACK_IMPORTED_MODULE_5__.urgencyMsgs));
+        // Filler: a newer reply in the same bubble queue replaces it (replier/reply-pieces).
+        await (0,_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)(_messages_objection_handling__WEBPACK_IMPORTED_MODULE_5__.urgencyMsgs), undefined, undefined, undefined, true);
         await (0,_respond__WEBPACK_IMPORTED_MODULE_1__.sendReaction)(event, '🔥');
         periodicPromptSent = true;
     }
     if (userDetails.canReply && userDetails.totalCount < 100 && userDetails.limitTime < Date.now()) {
         // Used-up reset: an exhausted paid user (10 cycle videos / 8 full shows) restarts the ladder at the ₹50 demo
         // 6-10 h after the last show (deterministic per chat, service-eligibility usedUpResetDelayMs). Its own window,
-        // separate from the 48/72 h reset below, which stays as it was for everyone else. `videos` and callTime are
+        // separate from the 20/30 h reset below, which stays as it was for everyone else. `videos` and callTime are
         // kept (old-receipt time checks read them); the cycle counts videos from cycleVideoBase.
         if ((userDetails.payAmount >= 25 || userDetails.paidCount > 2) && (0,_payments_service_eligibility__WEBPACK_IMPORTED_MODULE_7__.usedUpResetDue)(userDetails)) {
             logger.log(`[used-up-reset] ${chatId}`);
@@ -65556,14 +65590,19 @@ async function respondToMsgs(event, allMsg) {
         if (userDetails.payAmount >= 25 || userDetails.paidCount > 2) {
             logger.debug(`[${broadcastName}] flow entered: ${broadcastName} (${chatId}), payAmount: ${userDetails.payAmount}, paidCount: ${userDetails.paidCount}, totalCount: ${userDetails.totalCount}`);
             // Reset user if they've had service and time has passed
+            // Never over a payment credited since the last call: that payment is owed a show (Y4-R1: a ₹150 payer back
+            // after 21 h paid ₹200, missed the ring, and the next text dropped them to ₹50 with the price menu).
             if ((userDetails.secondShow || userDetails.fullShow > 1) &&
+                !(0,_calls_inhouse_video_policy__WEBPACK_IMPORTED_MODULE_12__.paidSinceLastShow)(userDetails) &&
                 ((userDetails.payAmount < 250 && userDetails.callTime < Date.now() - SERVICE_RESET_MS) ||
                     (userDetails.payAmount >= 250 && userDetails.callTime < Date.now() - HIGH_PAY_SERVICE_RESET_MS))) {
                 logger.debug(`[CallInitiation] Resetting user ${chatId} after service period`);
                 // A new service cycle (startServiceCycle: fullShow 0, secondShow false, fresh cycleVideoBase). A plain
                 // update kept the old video base, so every lifetime video counted against the new cycle (live sowmya2
                 // 2026-10-24: a ₹350 payer got one show, then show completion saw > 7 cycle videos and dropped them to ₹50).
-                userDetails = await (0,_payments_service_cycle__WEBPACK_IMPORTED_MODULE_8__.startServiceCycle)(chatId, 50, { payAmount: 50, highestPayAmount: 50, callTime: 0 });
+                // Owner 2026-10-28: the reset lands on "₹50 demo already given" (payAmount 50, demoGiven true), so the
+                // next asks are the ₹100/₹150 rungs and no ₹50 demo is owed (no free call), whatever demoGiven was.
+                userDetails = await (0,_payments_service_cycle__WEBPACK_IMPORTED_MODULE_8__.startServiceCycle)(chatId, 50, { payAmount: 50, demoGiven: true, highestPayAmount: 50, callTime: 0 });
             }
             // Used up (no show left at this pay): a call request in any words gets the call-over + next-rung price
             // once (used-up-answer); anything else is a normal paid message. Never initiateCall: it would promise a
@@ -65995,8 +66034,9 @@ async function respondInChat(chatId, message, kind, sourceMsgId) {
 /**
  * `kind`: what the message is for the per-chat voice check (default answer).
  * `solicitedPayAsk`: a pay ask the user asked for (they sent an amount); it passes the pitch window (chat-voice).
+ * `filler`: an opener / greeting / urgency add-on / small talk, dropped when a newer reply replaces it (replier/reply-pieces).
  */
-async function respond(event, message, isReply, kind, solicitedPayAsk) {
+async function respond(event, message, isReply, kind, solicitedPayAsk, filler) {
     const chatId = event.message.chatId.toString();
     const messageId = event.message.id;
     const messageText = event.message.text;
@@ -66010,10 +66050,10 @@ async function respond(event, message, isReply, kind, solicitedPayAsk) {
         try {
             if (message) {
                 if (isReply === true) {
-                    await (0,_replier__WEBPACK_IMPORTED_MODULE_2__.pushToReplies)(event, chatId, message, undefined, messageId, waitTime, kind, solicitedPayAsk);
+                    await (0,_replier__WEBPACK_IMPORTED_MODULE_2__.pushToReplies)(event, chatId, message, undefined, messageId, waitTime, kind, solicitedPayAsk, filler);
                 }
                 else {
-                    await (0,_replier__WEBPACK_IMPORTED_MODULE_2__.pushToReplies)(event, chatId, message, undefined, undefined, waitTime, kind, solicitedPayAsk);
+                    await (0,_replier__WEBPACK_IMPORTED_MODULE_2__.pushToReplies)(event, chatId, message, undefined, undefined, waitTime, kind, solicitedPayAsk, filler);
                 }
             }
             else {
@@ -66127,7 +66167,7 @@ __webpack_require__.r(__webpack_exports__);
 // runtime objects of this process, not chat history.
 const MOMENTS = new Set([
     'user', 'returned', 'replied', 'pitch', 'pitchSent', 'demo', 'fullShow', 'priceAsked', 'greeting', 'autoCall', 'paymentPhoto', 'paymentJudged', 'paymentVerdict', 'paymentCredited', 'fraudWarned',
-    'fraudReminder', 'demoPricePrompt', 'callRequestBlockedUntil', 'callPausedUntil', 'usedUpAnswered',
+    'fraudReminder', 'demoPricePrompt', 'callRequestBlockedUntil', 'callPausedUntil', 'usedUpAnswered', 'queued',
 ]);
 const MAX_CHATS = 5000;
 /** Matches the UserState TTL: nothing here is consulted after a day. */
@@ -69999,6 +70039,8 @@ const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_2__.Logger("tg
 /**
  * Send promo pic with automatic retry and state management
  * Only marks as sent if successful
+ * `picPath` null: the same promo as a text, without the picture (reping promo picture A/B arm 'noPic'); same cap,
+ * retries and promo-shown count as the picture.
  */
 async function sendPromoPic(sourceMsgId, chatId, message, picPath = './pic.jpg', maxRetries = 2) {
     // Check if already sent max times
@@ -70009,12 +70051,12 @@ async function sendPromoPic(sourceMsgId, chatId, message, picPath = './pic.jpg',
     let lastError = null;
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
         try {
-            logger.debug(`Sending promo pic to ${chatId} (attempt ${attempt}/${maxRetries})`);
+            logger.debug(`Sending promo ${picPath ? 'pic' : 'text'} to ${chatId} (attempt ${attempt}/${maxRetries})`);
             // Try to send the promo pic
-            await (0,_replier__WEBPACK_IMPORTED_MODULE_0__.queueReply)(chatId, message, { file: picPath, sourceMsgId });
+            await (0,_replier__WEBPACK_IMPORTED_MODULE_0__.queueReply)(chatId, message, picPath ? { file: picPath, sourceMsgId } : { sourceMsgId });
             // Success! Mark as sent
             _conversation_state_user_state__WEBPACK_IMPORTED_MODULE_1__.stateManager.setPromoShown(chatId, true);
-            logger.log(`✅ Promo pic sent successfully to ${chatId}`);
+            logger.log(`✅ Promo ${picPath ? 'pic' : 'text (no picture)'} sent successfully to ${chatId}`);
             return true;
         }
         catch (error) {
@@ -70056,9 +70098,12 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   NewUserRateLimiter: () => (/* binding */ NewUserRateLimiter),
 /* harmony export */   cleanup: () => (/* binding */ cleanup),
 /* harmony export */   getRateLimiterStats: () => (/* binding */ getRateLimiterStats),
+/* harmony export */   greetingVoiceRecordId: () => (/* binding */ greetingVoiceRecordId),
+/* harmony export */   hasHeldGreetingVoice: () => (/* binding */ hasHeldGreetingVoice),
 /* harmony export */   restoreGreetingState: () => (/* binding */ restoreGreetingState),
 /* harmony export */   runGreetingVoice: () => (/* binding */ runGreetingVoice),
 /* harmony export */   sendGreetings: () => (/* binding */ sendGreetings),
+/* harmony export */   sendHeldGreetingVoice: () => (/* binding */ sendHeldGreetingVoice),
 /* harmony export */   setGreetingClientResolver: () => (/* binding */ setGreetingClientResolver)
 /* harmony export */ });
 /* harmony import */ var _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../conversation/messages/standard-messages */ "./src/conversation/messages/standard-messages.ts");
@@ -70073,10 +70118,12 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _generate_greeting__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ./generate-greeting */ "./src/greetings/generate-greeting.ts");
 /* harmony import */ var _jobs_delayed__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ../jobs/delayed */ "./src/jobs/delayed.ts");
 /* harmony import */ var _outbound_send_executor__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ../outbound/send-executor */ "./src/outbound/send-executor.ts");
-/* harmony import */ var _outbound_flood_gate__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! ../outbound/flood-gate */ "./src/outbound/flood-gate.ts");
-/* harmony import */ var _outbound_hot_account__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! ../outbound/hot-account */ "./src/outbound/hot-account.ts");
-/* harmony import */ var _conversation_state_chat_moments__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! ../conversation/state/chat-moments */ "./src/conversation/state/chat-moments.ts");
-/* harmony import */ var _replier_human_typing__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! ../replier/human-typing */ "./src/replier/human-typing.ts");
+/* harmony import */ var _policies_send_policy__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! ../policies/send-policy */ "./src/policies/send-policy.ts");
+/* harmony import */ var _outbound_flood_gate__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! ../outbound/flood-gate */ "./src/outbound/flood-gate.ts");
+/* harmony import */ var _outbound_hot_account__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! ../outbound/hot-account */ "./src/outbound/hot-account.ts");
+/* harmony import */ var _conversation_state_chat_moments__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! ../conversation/state/chat-moments */ "./src/conversation/state/chat-moments.ts");
+/* harmony import */ var _replier_human_typing__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! ../replier/human-typing */ "./src/replier/human-typing.ts");
+
 
 
 
@@ -70098,7 +70145,8 @@ const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_7__.Logger("tg
 const DELAYS = {
     CHANNEL_LINKS: 5000,
     DEMO_PRICES: 10000,
-    // The intro voice note: SEND_POLICY.greetingVoiceDelayMs (policies/send-policy.ts), 200 s on a free account.
+    // The intro voice note: SEND_POLICY.greetingVoiceDelayMs (policies/send-policy.ts), 200 s on a free account; on a hot
+    // account held until the user's next message (sendHeldGreetingVoice).
 };
 const RATE_LIMITS = {
     MAX_PER_TEN_MINUTES: 10,
@@ -70154,6 +70202,47 @@ async function sendGreetingText(client, chatId, params, label) {
     const { result } = await (0,_outbound_send_executor__WEBPACK_IMPORTED_MODULE_11__.sendWithPolicy)({ kind: 'greetingText', chatId, label, send: () => (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_6__.sendMessageWithTimeout)(client, chatId, params) });
     return Boolean(result);
 }
+const GREETING_VOICE_CAPTION = "I'm not **Wearing Dress** Nw!🙈\n\nTake the **Demo** Babyy😚😚!!";
+const GREETING_VOICE_FILE = './intro.mp3';
+/** The chat's one greeting voice record (scheduled, or held on a hot account): a new greeting replaces it. */
+function greetingVoiceRecordId(chatId) {
+    return `greetingVoice::${chatId}`;
+}
+/** Hot account: keep the voice note for the user's next message; the record falls due (expires) after the pending horizon. */
+function holdGreetingVoice(chatId, at, hot) {
+    const remaining = at + _policies_send_policy__WEBPACK_IMPORTED_MODULE_12__.SEND_POLICY.greetingVoicePendingMs - Date.now();
+    if (remaining <= 0)
+        return;
+    const args = { at, held: true, hot };
+    (0,_jobs_delayed__WEBPACK_IMPORTED_MODULE_10__.scheduleDelayed)(chatId, 'greetingVoice', args, remaining, greetingVoiceRecordId(chatId));
+}
+/** A greeting voice note is held for this chat's next message. */
+function hasHeldGreetingVoice(chatId) {
+    return Boolean(_jobs_delayed__WEBPACK_IMPORTED_MODULE_10__.delayedQueue.queue.get(greetingVoiceRecordId(chatId))?.args?.held);
+}
+/**
+ * The user wrote: send the chat's held greeting voice note (if any) once, through the replier behind the reply to that
+ * message (kind 'answer', not filler: the replier never merges or drops a voice item). Called by the inbound path after
+ * the message's handler queued its reply. Cleared before sending, so a second message never sends it twice.
+ */
+async function sendHeldGreetingVoice(chatId) {
+    const id = greetingVoiceRecordId(chatId);
+    const record = _jobs_delayed__WEBPACK_IMPORTED_MODULE_10__.delayedQueue.queue.get(id);
+    const args = record?.args;
+    if (!args?.held)
+        return;
+    (0,_jobs_delayed__WEBPACK_IMPORTED_MODULE_10__.cancelDelayed)(id);
+    try {
+        await (0,_outbound_send_executor__WEBPACK_IMPORTED_MODULE_11__.sendHeldOnInbound)({
+            kind: 'greetingVoice', chatId, label: 'greeting-voice', plannedAt: args.at, queued: true,
+            // Loaded on use: the replier module starts its own loop and timers (bundled anyway: promo-pic imports it).
+            send: async () => (await Promise.resolve(/*! import() */).then(__webpack_require__.bind(__webpack_require__, /*! ../replier */ "./src/replier/index.ts"))).queueReply(chatId, GREETING_VOICE_CAPTION, { file: GREETING_VOICE_FILE, kind: 'answer' }),
+        });
+    }
+    catch (error) {
+        logger.error(`Held voice note failed for ${chatId}:`, error);
+    }
+}
 // MEMORY OPTIMIZATION: Greetings now accepts pre-extracted data instead of Full event/msgs objects
 async function GreetingsFromQueue(queueItem) {
     const { chatId, firstName, client, msgsTotal, hasMyMsg, doesUserExists } = queueItem;
@@ -70172,19 +70261,21 @@ async function GreetingsFromQueue(queueItem) {
             logger.log(`${firstName}: New user detected, sending welcome message...`);
             delivered = await handleNewUserDirect(client, chatId, firstName, msgsTotal);
         }
-        if (delivered === 0 && _outbound_flood_gate__WEBPACK_IMPORTED_MODULE_12__.floodGate.isRefused(chatId)) {
+        if (delivered === 0 && _outbound_flood_gate__WEBPACK_IMPORTED_MODULE_13__.floodGate.isRefused(chatId)) {
             // Nothing reached the user: not a greeting. The caller forgets the greeted marks, so the user's next message
             // (which lifts the refusal, inbound-event-router) gets a fresh greeting instead of `greeting-already-sent`.
             logger.warn(`${chatId}: greeting refused by Telegram (PEER_FLOOD), nothing delivered; not counted as greeted`);
             return 'refused';
         }
-        // Delayed record (survives a restart): the intro voice note, timed by the send policy (A/B on a hot account).
+        // Delayed record (survives a restart): the intro voice note, timed by the send policy (free account), or held
+        // for the user's next message (hot account).
         const plan = (0,_outbound_send_executor__WEBPACK_IMPORTED_MODULE_11__.planSend)('greetingVoice', chatId, 'greeting-voice');
-        if (plan) {
+        if (plan?.deferred) {
+            holdGreetingVoice(chatId, plan.plannedAt, plan.deferred.reason);
+        }
+        else if (plan) {
             const args = { at: plan.plannedAt, delayMs: plan.delayMs };
-            if (plan.arm)
-                args.arm = plan.arm;
-            (0,_jobs_delayed__WEBPACK_IMPORTED_MODULE_10__.scheduleDelayed)(chatId, 'greetingVoice', args, plan.delayMs);
+            (0,_jobs_delayed__WEBPACK_IMPORTED_MODULE_10__.scheduleDelayed)(chatId, 'greetingVoice', args, plan.delayMs, greetingVoiceRecordId(chatId));
         }
         return 'sent';
     }
@@ -70193,13 +70284,28 @@ async function GreetingsFromQueue(queueItem) {
         throw error;
     }
 }
-/** Delayed record 'greetingVoice' (send-policy kind 'greetingVoice': on a hot account skipped when paid since it was planned). */
+/**
+ * Delayed record 'greetingVoice' (send-policy kind 'greetingVoice'). A held record falling due = the user did not write
+ * within the pending horizon: dropped (logged). A scheduled one (free at plan): sent, unless the account is hot now,
+ * then held for the user's next message like one planned hot; on a hot account also skipped when paid since planned.
+ */
 async function runGreetingVoice(client, chatId, args = {}) {
+    if (args.held) {
+        const now = Date.now();
+        (0,_outbound_send_executor__WEBPACK_IMPORTED_MODULE_11__.logSendPolicy)({
+            kind: 'greetingVoice', chatId, decision: 'skip', reason: 'expired: the user did not write', outcome: 'skipped',
+            hotReason: _outbound_hot_account__WEBPACK_IMPORTED_MODULE_14__.hotAccount.view(now).reason || 'free', arm: undefined, now, label: 'greeting-voice',
+            extra: args.at !== undefined ? { sinceGreetingMs: now - args.at } : undefined,
+        });
+        return;
+    }
     try {
-        await (0,_outbound_send_executor__WEBPACK_IMPORTED_MODULE_11__.sendWithPolicy)({
+        const r = await (0,_outbound_send_executor__WEBPACK_IMPORTED_MODULE_11__.sendWithPolicy)({
             kind: 'greetingVoice', chatId, label: 'greeting-voice', scheduledAt: args.at, plannedArm: args.arm, plannedDelayMs: args.delayMs, queued: true,
             send: () => sendVoiceNoteDirect(client, chatId),
         });
+        if (r.outcome === 'deferred')
+            holdGreetingVoice(chatId, args.at ?? Date.now(), r.reason);
     }
     catch (error) {
         logger.error(`Voice note failed for ${chatId}:`, error);
@@ -70209,12 +70315,12 @@ async function runGreetingVoice(client, chatId, args = {}) {
 async function sendVoiceNoteDirect(client, chatId) {
     try {
         // floodSafe OUTSIDE withTimeout: its per-attempt timeout must not abandon a send that is waiting out a flood limit.
-        const caption = "I'm not **Wearing Dress** Nw!🙈\n\nTake the **Demo** Babyy😚😚!!";
+        const caption = GREETING_VOICE_CAPTION;
         await (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_6__.floodSafe)(() => (0,_tg_core_utils_withTimeout__WEBPACK_IMPORTED_MODULE_3__.withTimeout)(async () => client.sendFile(chatId, {
             caption,
-            file: await _telegram_file_sender__WEBPACK_IMPORTED_MODULE_4__.fileSender.getFileHandle('./intro.mp3'),
+            file: await _telegram_file_sender__WEBPACK_IMPORTED_MODULE_4__.fileSender.getFileHandle(GREETING_VOICE_FILE),
             voiceNote: true
-        })), { chatId, label: 'sendVoiceNoteDirect', record: { op: 'file', payload: { caption, file: './intro.mp3', voiceNote: true } } });
+        })), { chatId, label: 'sendVoiceNoteDirect', record: { op: 'file', payload: { caption, file: GREETING_VOICE_FILE, voiceNote: true } } });
     }
     catch (error) {
         (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, "Error sending voice note");
@@ -70225,14 +70331,14 @@ async function handleExistingUserDirect(client, chatId, firstName) {
     const demoPrices = `<b>DEMO</b> Nude pics: <b>25₹</b>\n<b>DEMO</b> Video Call: <b>50₹</b>\n<b>DEMO</b> Voice Call: <b>40₹</b>`;
     const payLink = `<b>My Website 👉🏻 <a href='https://${process.env.link}'>PaidGirl/${process.env.name?.split(" ")[0] || "Unknown"}</a></b>`;
     const message = `Hii ${firstName}...!!\n\n${payLink}`;
-    await (0,_replier_human_typing__WEBPACK_IMPORTED_MODULE_15__.showHumanTyping)(client, chatId, 5000);
+    await (0,_replier_human_typing__WEBPACK_IMPORTED_MODULE_16__.showHumanTyping)(client, chatId, 5000);
     let delivered = Number(await sendGreetingText(client, chatId, {
         message,
         parseMode: 'html'
     }, 'greeting-existing'));
     await new Promise(resolve => setTimeout(resolve, DELAYS.DEMO_PRICES));
     const secondMessage = `${demoPrices}\n\n${_conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_0__.getPynw()}`;
-    await (0,_replier_human_typing__WEBPACK_IMPORTED_MODULE_15__.showHumanTyping)(client, chatId, 6);
+    await (0,_replier_human_typing__WEBPACK_IMPORTED_MODULE_16__.showHumanTyping)(client, chatId, 6);
     delivered += Number(await sendGreetingText(client, chatId, {
         message: secondMessage,
         parseMode: 'html'
@@ -70245,10 +70351,10 @@ async function handleNewUserDirect(client, chatId, firstName, totalMsgs) {
         // Previous sales-first composition retained for quick rollback/reference:
         // const greeting = `Hii  **${firstName}${standardMessages.getNameGreet()}${generateRandomGreeting()}`;
         const greeting = (0,_generate_greeting__WEBPACK_IMPORTED_MODULE_9__.generateRandomGreeting)();
-        await (0,_replier_human_typing__WEBPACK_IMPORTED_MODULE_15__.showHumanTyping)(client, chatId, 10000);
+        await (0,_replier_human_typing__WEBPACK_IMPORTED_MODULE_16__.showHumanTyping)(client, chatId, 10000);
         let delivered = Number(await sendGreetingText(client, chatId, { message: greeting, linkPreview: true }, 'greeting'));
         await new Promise(resolve => setTimeout(resolve, DELAYS.CHANNEL_LINKS));
-        await (0,_replier_human_typing__WEBPACK_IMPORTED_MODULE_15__.showHumanTyping)(client, chatId, 5000);
+        await (0,_replier_human_typing__WEBPACK_IMPORTED_MODULE_16__.showHumanTyping)(client, chatId, 5000);
         const channelLinks = `<b>My Links👇🏻:</b>\n\n<b>My Website 👉🏻 <a href='https://${process.env.link}'>PaidGirl/${process.env.name?.split(" ")[0] || "Unknown"}</a></b>\n\nhttps://${process.env.link}`; //\n<b>JOIN 👉🏻 @${process.env.channelLink}</b>`;
         delivered += Number(await sendGreetingText(client, chatId, { message: channelLinks, linkPreview: true, parseMode: 'html' }, 'greeting-links'));
         return delivered;
@@ -70257,7 +70363,7 @@ async function handleNewUserDirect(client, chatId, firstName, totalMsgs) {
         const demoPrices = `• <b>DEMO</b> Nude pics: <b>25₹</b>\n• <b>DEMO</b> Video Call: <b>50₹</b>\n• <b>DEMO</b> Voice Call: <b>40₹</b>`;
         const payLink = `<b>Pay on My Website 👉🏻 <a href='https://${process.env.link}'>PaidGirl/${process.env.name?.split(" ")[0] || "Unknown"}</a></b>\n\nhttps://${process.env.link}`;
         const message = `${demoPrices}\n\n\n${payLink}\n\n${_conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_0__.getPynw()}`;
-        await (0,_replier_human_typing__WEBPACK_IMPORTED_MODULE_15__.showHumanTyping)(client, chatId, 3000);
+        await (0,_replier_human_typing__WEBPACK_IMPORTED_MODULE_16__.showHumanTyping)(client, chatId, 3000);
         return Number(await sendGreetingText(client, chatId, {
             message,
             parseMode: 'html'
@@ -70374,12 +70480,12 @@ class NewUserRateLimiter {
             if (outcome === 'refused') {
                 // Not greeted: forget the 20-min 'greeting' moment (event-print) and the 12 h claims, so the user's next
                 // message is answered with a fresh greeting. It still counts against the greeting rate window below.
-                (0,_conversation_state_chat_moments__WEBPACK_IMPORTED_MODULE_14__.clearMoments)(chatId, 'greeting');
+                (0,_conversation_state_chat_moments__WEBPACK_IMPORTED_MODULE_15__.clearMoments)(chatId, 'greeting');
                 if (claim === "claimed")
                     releaseGreeting(chatId);
                 (0,_outbound_send_executor__WEBPACK_IMPORTED_MODULE_11__.logSendPolicy)({
                     kind: 'greetingText', chatId, decision: 'sendNow', reason: 'greeting refused, not counted as greeted', outcome: 'refused',
-                    hotReason: _outbound_hot_account__WEBPACK_IMPORTED_MODULE_13__.hotAccount.view(now).reason, arm: _outbound_hot_account__WEBPACK_IMPORTED_MODULE_13__.hotAccount.arm(now), now,
+                    hotReason: _outbound_hot_account__WEBPACK_IMPORTED_MODULE_14__.hotAccount.view(now).reason, arm: undefined, now,
                 });
             }
             else {
@@ -79034,6 +79140,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   decide: () => (/* binding */ decide),
 /* harmony export */   heldPayAskStale: () => (/* binding */ heldPayAskStale),
 /* harmony export */   holdPayAsk: () => (/* binding */ holdPayAsk),
+/* harmony export */   lastUserMessageId: () => (/* binding */ lastUserMessageId),
 /* harmony export */   needsPitchSlot: () => (/* binding */ needsPitchSlot),
 /* harmony export */   noteQueued: () => (/* binding */ noteQueued),
 /* harmony export */   noteSent: () => (/* binding */ noteSent),
@@ -79278,6 +79385,7 @@ function releasePitchSlot(chatId, at) {
 /** A reply was queued: a queued pay ask counts for the cooldown already (it goes out within seconds). */
 function noteQueued(chatId, text, file, at = Date.now()) {
     (0,_conversation_state_chat_moments__WEBPACK_IMPORTED_MODULE_2__.noteMoment)(chatId, 'replied', at);
+    (0,_conversation_state_chat_moments__WEBPACK_IMPORTED_MODULE_2__.noteMoment)(chatId, 'queued', at);
     if (carriesPitch(text, file))
         (0,_conversation_state_chat_moments__WEBPACK_IMPORTED_MODULE_2__.noteMoment)(chatId, 'pitch', at);
 }
@@ -79307,16 +79415,28 @@ const RETURN_AFTER_SILENCE_MS = 4 * 60 * 60 * 1000;
  * The user wrote. After 4+ h of known silence it is also a 'returned' moment (no earlier message kept = no known gap).
  * `text` given: a price / new-call ask is also noted (upsell-quiet keeps its answer).
  */
-function noteUserMessage(chatId, at = Date.now(), text) {
+function noteUserMessage(chatId, at = Date.now(), text, msgId) {
+    if (typeof msgId === 'number' && Number.isFinite(msgId) && msgId > (lastUserMsgIds.get(chatId) ?? 0)) {
+        lastUserMsgIds.delete(chatId);
+        lastUserMsgIds.set(chatId, msgId);
+        if (lastUserMsgIds.size > LAST_SENT_MAX)
+            lastUserMsgIds.delete(lastUserMsgIds.keys().next().value);
+    }
     const previous = (0,_conversation_state_chat_moments__WEBPACK_IMPORTED_MODULE_2__.momentAt)(chatId, 'user');
     if (previous !== undefined && at - previous >= RETURN_AFTER_SILENCE_MS)
         (0,_conversation_state_chat_moments__WEBPACK_IMPORTED_MODULE_2__.noteMoment)(chatId, 'returned', at);
     (0,_conversation_state_chat_moments__WEBPACK_IMPORTED_MODULE_2__.noteMoment)(chatId, 'user', at);
     (0,_conversation_state_upsell_quiet__WEBPACK_IMPORTED_MODULE_3__.noteUserAsk)(chatId, text, at);
 }
+const lastUserMsgIds = new Map();
+/** Id of the newest message the user sent in this chat (this process; undefined after a restart). Ids only grow. */
+function lastUserMessageId(chatId) {
+    return lastUserMsgIds.get(String(chatId));
+}
 function resetChatVoice() {
-    (0,_conversation_state_chat_moments__WEBPACK_IMPORTED_MODULE_2__.resetChatMoments)('pitch', 'pitchSent', 'user', 'returned', 'replied');
+    (0,_conversation_state_chat_moments__WEBPACK_IMPORTED_MODULE_2__.resetChatMoments)('pitch', 'pitchSent', 'user', 'returned', 'replied', 'queued');
     lastSent.clear();
+    lastUserMsgIds.clear();
     heldPayAsks.clear();
 }
 
@@ -81082,6 +81202,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   logSendPolicy: () => (/* binding */ logSendPolicy),
 /* harmony export */   planSend: () => (/* binding */ planSend),
 /* harmony export */   replyBudget: () => (/* binding */ replyBudget),
+/* harmony export */   sendHeldOnInbound: () => (/* binding */ sendHeldOnInbound),
 /* harmony export */   sendWithPolicy: () => (/* binding */ sendWithPolicy)
 /* harmony export */ });
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
@@ -81137,8 +81258,8 @@ function logSendPolicy(fields) {
     logger.log(`[SEND-POLICY] ${parts.join(' ')}`);
 }
 /**
- * Plans a send (greeting voice note): the delay to schedule it with, or null when it must not be scheduled.
- * Free account: SEND_POLICY.greetingVoiceDelayMs.control, as before, and no arm (`arm` undefined: the A/B did not apply).
+ * Plans a send (greeting voice note): the delay to schedule it with, `deferred` (hold it until the user's next message:
+ * hot account), or null when it must not be scheduled. Free account: SEND_POLICY.greetingVoiceDelayMs, as before.
  */
 function planSend(kind, chatId, label) {
     const now = nowMs();
@@ -81146,10 +81267,14 @@ function planSend(kind, chatId, label) {
     const d = (0,_policies_send_policy__WEBPACK_IMPORTED_MODULE_2__.decideSend)(account, chatView(chatId), { kind, stage: 'plan' }, now);
     const delayMs = d.type === 'sendAt' ? Math.max(0, d.at - now) : d.type === 'sendNow' ? 0 : -1;
     logSendPolicy({
-        kind, chatId, decision: d.type, reason: d.reason, outcome: d.type === 'skip' ? 'skipped' : 'held', hotReason: account.reason,
-        arm: account.arm, now, label, extra: delayMs >= 0 ? { delayMs } : undefined,
+        kind, chatId, decision: d.type, reason: d.reason, outcome: d.type === 'skip' ? 'skipped' : d.type === 'defer' ? 'deferred' : 'held',
+        hotReason: account.reason, arm: undefined, now, label, extra: delayMs >= 0 ? { delayMs } : undefined,
     });
-    return d.type === 'skip' ? null : { delayMs, arm: account.hot ? account.arm : undefined, plannedAt: now };
+    if (d.type === 'skip')
+        return null;
+    if (d.type === 'defer')
+        return { delayMs: -1, plannedAt: now, deferred: { reason: d.reason } };
+    return { delayMs, plannedAt: now };
 }
 /**
  * Runs a policy-governed send: decide, then send or skip. Resolves `{ outcome, result }`; a failed send is logged and
@@ -81160,9 +81285,9 @@ async function sendWithPolicy(spec) {
     const now = nowMs();
     const account = hot().view(now);
     const d = (0,_policies_send_policy__WEBPACK_IMPORTED_MODULE_2__.decideSend)(account, chatView(spec.chatId, spec.repingCount), { kind: spec.kind, stage: 'fire', scheduledAt: spec.scheduledAt }, now);
-    // A planned greeting voice note carries the arm only when it was planned hot; otherwise it logs none (today's arm
-    // did not choose its delay). Other kinds log today's arm.
-    const arm = spec.kind === 'greetingVoice' && spec.scheduledAt !== undefined ? spec.plannedArm : spec.plannedArm ?? account.arm;
+    // A planned greeting voice note carries the arm only when it was planned hot; otherwise it logs none. Repings log
+    // the reping promo picture arm (given, else today's). Other kinds: no arm applies, none logged.
+    const arm = spec.kind === 'reping' || spec.kind === 'repingFollowup' ? spec.plannedArm ?? account.arm : spec.plannedArm;
     const planned = {};
     if (spec.scheduledAt !== undefined)
         planned.plannedAgoMs = now - spec.scheduledAt;
@@ -81172,9 +81297,10 @@ async function sendWithPolicy(spec) {
         kind: spec.kind, chatId: spec.chatId, decision: d.type, reason: d.reason, outcome, hotReason: account.reason, arm,
         now: nowMs(), label: spec.label, extra: Object.keys(planned).length ? planned : undefined,
     });
-    if (d.type === 'skip') {
-        log('skipped');
-        return { outcome: 'skipped', reason: d.reason };
+    if (d.type === 'skip' || d.type === 'defer') {
+        const outcome = d.type === 'skip' ? 'skipped' : 'deferred';
+        log(outcome);
+        return { outcome, reason: d.reason };
     }
     const refusedBefore = gate().isRefused(spec.chatId);
     try {
@@ -81188,6 +81314,35 @@ async function sendWithPolicy(spec) {
             : result === undefined || result === null || result === false ? (refusedNow ? 'refused' : 'failed') : 'sent';
         log(outcome);
         return { outcome, result, reason: d.reason };
+    }
+    catch (error) {
+        log(isRefusal(error) ? 'refused' : 'failed');
+        throw error;
+    }
+}
+/**
+ * A held greeting voice note (hot account at plan or send time): the user just wrote. decideSend at stage 'inbound'
+ * (skip when paid since the greeting, else send), then `send` (it queues behind the reply). Logged on any account
+ * (`hot=free` when the account cooled meanwhile), with the time since the greeting.
+ */
+async function sendHeldOnInbound(spec) {
+    const now = nowMs();
+    const account = hot().view(now);
+    const d = (0,_policies_send_policy__WEBPACK_IMPORTED_MODULE_2__.decideSend)(account, chatView(spec.chatId), { kind: spec.kind, stage: 'inbound', scheduledAt: spec.plannedAt }, now);
+    const log = (outcome) => logSendPolicy({
+        kind: spec.kind, chatId: spec.chatId, decision: d.type === 'sendNow' ? 'send-on-inbound' : d.type, reason: d.reason, outcome,
+        hotReason: account.reason || 'free', arm: undefined, now: nowMs(), label: spec.label,
+        extra: spec.plannedAt !== undefined ? { sinceGreetingMs: now - spec.plannedAt } : undefined,
+    });
+    if (d.type !== 'sendNow') {
+        log('skipped');
+        return { outcome: 'skipped', reason: d.reason };
+    }
+    try {
+        const result = await spec.send();
+        const outcome = spec.queued ? 'queued' : result === undefined || result === null || result === false ? 'failed' : 'sent';
+        log(outcome);
+        return { outcome, reason: d.reason };
     }
     catch (error) {
         log(isRefusal(error) ? 'refused' : 'failed');
@@ -81216,7 +81371,7 @@ function logReplierOutcome(chatId, voiceKind, outcome, extra) {
     const kind = voiceKind === 'pitch' || voiceKind === 'nudge' ? `replier-${voiceKind}` : 'reply';
     logSendPolicy({
         kind, chatId, decision: outcome === 'skipped' ? 'skip' : 'sendNow', reason: outcome === 'skipped' ? 'chat refused' : 'replier',
-        outcome, hotReason: account.reason, arm: account.arm, now, extra,
+        outcome, hotReason: account.reason, arm: undefined, now, extra,
     });
 }
 
@@ -82194,7 +82349,7 @@ const openingAndFallbackPatterns = [
             if (text === "hi" || (0,_conversation_text_match__WEBPACK_IMPORTED_MODULE_0__.startswith)(text, ['hello', 'hii', 'hai', 'hlw', 'hlo', 'hi ', 'hyy', 'hey', 'good morning', 'good mor', 'gud mor', 'good eve', 'good aft', 'good day', 'wassup', 'wasup', 'sup', 'namaste', 'namaskar', 'helo', 'hlllo'])) {
                 const array = ['Hello', 'Hii', 'Hai', 'Hlo', 'hlooo', 'Hi', 'Hyy', 'Hey'];
                 const randomElement = array[Math.floor(Math.random() * array.length)];
-                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, `${randomElement} **${context.senderJson.firstName}...**!!`, true);
+                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, `${randomElement} **${context.senderJson.firstName}...**!!`, true, undefined, undefined, true);
                 return true;
             }
             return false;
@@ -82254,7 +82409,7 @@ const openingAndFallbackPatterns = [
             if (trimmed.length < 2 || (0,_pattern_helpers__WEBPACK_IMPORTED_MODULE_9__.isOnlyDigits)(trimmed)) {
                 return false;
             }
-            await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_greetings_generate_init_msg__WEBPACK_IMPORTED_MODULE_8__.getCoreInitMsg)(), true);
+            await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_greetings_generate_init_msg__WEBPACK_IMPORTED_MODULE_8__.getCoreInitMsg)(), true, undefined, undefined, true);
             return true;
         }
     },
@@ -84364,7 +84519,7 @@ const smallTalkPatterns = [
                 return false;
             if (HOW_EXACT.includes(trimmed) || (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, HOW_PHRASES) ||
                 ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['hw', 'how']) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, [' u', 'you']) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, [' r ', 'are ']))) {
-                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_4__.fine, true);
+                await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_4__.fine, true, undefined, undefined, true);
                 return true;
             }
             return false;
@@ -84384,7 +84539,7 @@ const smallTalkPatterns = [
             const HMM_START = ['hm ', 'hmm ', 'hmmm ', 'hmmmm ', 'hmmmmm '];
             if (!HMM_EXACT.includes(normalized) && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(normalized, HMM_START))
                 return false;
-            await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)(["Hmm", "Hmm 🙈", "Hmmm...", "Haan baby"]));
+            await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)(["Hmm", "Hmm 🙈", "Hmmm...", "Haan baby"]), undefined, undefined, undefined, true);
             return true;
         }
     },
@@ -84468,7 +84623,7 @@ const smallTalkPatterns = [
             const OI_GREETING = ['oi', 'oy', 'oii', 'oyy', 'oye', 'oyee'];
             if (normalized.length > 16 || !OI_GREETING.includes(firstWord))
                 return false;
-            await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)(['haaa....', 'haaa baby....', 'haan reyy...', 'haaa 🙈']));
+            await (0,_conversation_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)(['haaa....', 'haaa baby....', 'haan reyy...', 'haaa 🙈']), undefined, undefined, undefined, true);
             return true;
         }
     },
@@ -92044,6 +92199,9 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   accountHotReason: () => (/* binding */ accountHotReason),
 /* harmony export */   armFor: () => (/* binding */ armFor),
 /* harmony export */   decideSend: () => (/* binding */ decideSend),
+/* harmony export */   isReplierReply: () => (/* binding */ isReplierReply),
+/* harmony export */   preferRepliesFirst: () => (/* binding */ preferRepliesFirst),
+/* harmony export */   repingSendsPicture: () => (/* binding */ repingSendsPicture),
 /* harmony export */   replyBudgetMs: () => (/* binding */ replyBudgetMs)
 /* harmony export */ });
 /**
@@ -92056,8 +92214,9 @@ __webpack_require__.r(__webpack_exports__);
  * paid-user and operator sends do not go through it: they are always sent (the refused-chat mark still applies in the
  * OutboundQueue / replier).
  *
- * Every account: the reping cap (4). Hot accounts only: the reply deadline, the greeting voice A/B timing, skipping
- * proactive sends to a refused chat and the staleness re-check of scheduled proactive sends. The other free-account
+ * Every account: the reping cap (4) and the reping promo picture A/B arm (armFor). Hot accounts only: the reply deadline,
+ * the greeting voice note held until the user writes, replies ahead of proactive replier items (preferRepliesFirst), skipping proactive
+ * sends to a refused chat and the staleness re-check of scheduled proactive sends. The other free-account
  * changes that ship with this policy (not decided here) are listed in the design doc, "Free accounts".
  */
 // ─── Config: every constant, with the evidence that chose it (pm2 logs, 3 VMs, 2026-10-20..27) ───────────────────────
@@ -92084,10 +92243,24 @@ const SEND_POLICY = {
     repingCap: 4,
     /**
      * Greeting voice note (intro.mp3 + "Take the Demo"), sent ~221 s after the greeting starts: 58 % of hot-account cold
-     * refusals, 11.3 % refused, while the greeting texts at +5 / +21 s to the same users are refused 0.23 %. A/B on hot
-     * accounts: 'control' keeps today's delay after the greeting texts; 'early' sends it 20 s after them.
+     * refusals, 11.3 % refused, while the greeting texts at +5 / +21 s to the same users are refused 0.23 %.
+     * Free accounts: sent this long after the greeting texts (unchanged). Hot accounts (owner 2026-10-28): never sent
+     * proactively; it is held and sent right after the user's next message (decision=defer, then send-on-inbound). The
+     * 10-27 A/B on hot accounts (pm2 logs 10-25..10-27) refused the proactive voice note at 200 s 108/420 (25.7 %) and at
+     * 20 s 9/293 (3.1 %); voice notes sent as replies were refused 0/713.
      */
-    greetingVoiceDelayMs: { control: 200000, early: 20000 },
+    greetingVoiceDelayMs: 200000,
+    /**
+     * A held greeting voice note (hot account) waits this long for the user's next message, then it is dropped: the
+     * 12 h greeting claim (greetings/send-greetings GREETED_TTL_SECONDS), after which the chat can be greeted again.
+     */
+    greetingVoicePendingMs: 12 * 60 * 60000,
+    /**
+     * Repings #1-#3 that carry the promo picture (pic.jpg + offer caption): A/B 2026-10-28. Arm 'noPic' sends the same
+     * caption as a text, arm 'control' the picture, as before. Reping promo picture refused 4.9 % (105/2,131) vs reping
+     * text 3.2 % (pm2 logs 10-25..10-27).
+     */
+    repingPicMaxNumber: 3,
     /** IST offset: the A/B arm rotates at IST midnight. */
     istOffsetMs: 330 * 60000,
 };
@@ -92098,13 +92271,13 @@ const STALE_CHECKS = {
     repingFollowup: { userWrote: true, paid: true },
     timepass: { userWrote: false, paid: true },
     campaign: { userWrote: false, paid: true },
-    // The voice note follows the greeting; the user writing back is the point of the 'early' arm, so only a payment
-    // makes it stale (same check on both arms, so the A/B compares timing only).
+    // The voice note follows the greeting (free accounts) or the user's next message (hot accounts): only a payment
+    // makes it stale.
     greetingVoice: { userWrote: false, paid: true },
 };
 /**
  * The A/B arm of an account on the IST day of `now`: FNV-1a 32-bit of `mobile:istDay`, mixed by the murmur3 fmix32
- * finaliser, top bit 0 = 'early'. (FNV-1a's own low bit is the parity of the input's character codes, so `h % 2` flipped
+ * finaliser, top bit 0 = 'noPic' (the half that was 'early' in the ended greeting voice A/B). (FNV-1a's own low bit is the parity of the input's character codes, so `h % 2` flipped
  * every account's arm every day; the finaliser makes consecutive days independent.)
  */
 function armFor(mobile, now) {
@@ -92120,7 +92293,29 @@ function armFor(mobile, now) {
     h ^= h >>> 13;
     h = Math.imul(h, 0xc2b2ae35);
     h ^= h >>> 16;
-    return (h >>> 31) === 0 ? 'early' : 'control';
+    return (h >>> 31) === 0 ? 'noPic' : 'control';
+}
+/**
+ * Reping number `repingNumber` (1-based) in arm `arm`: send the promo picture (true) or its caption as a text (false).
+ * Only repings #1-#3 that would carry the picture are split; every other send is unchanged.
+ */
+function repingSendsPicture(arm, repingNumber) {
+    return !(arm === 'noPic' && repingNumber >= 1 && repingNumber <= SEND_POLICY.repingPicMaxNumber);
+}
+/**
+ * Hot accounts: the replier sends the oldest due reply to a user ('answer' / 'system' items) before older proactive
+ * items ('pitch' / 'nudge': repings, reping follow-ups, offers). Refusal on hot accounts by time from the user's
+ * message to our first reply (pm2 logs 10-25..10-27): < 5 s 0/102, 5-30 s 0.3 %, 30-120 s 0.9 %, > 2 min 6.8 %
+ * (8/117). The replier sends one item at a time with its typing pause, so each proactive item ahead of a reply in the
+ * FIFO adds its typing time to the reply's wait. Free accounts: FIFO, as before. Only the order changes: no rate limit,
+ * flood wait or retry is touched, and nothing is dropped.
+ */
+function preferRepliesFirst(account) {
+    return account.hot;
+}
+/** A replier item that answers the user (absent kind = 'answer'); 'pitch' / 'nudge' items are proactive. */
+function isReplierReply(voiceKind) {
+    return voiceKind !== 'pitch' && voiceKind !== 'nudge';
 }
 /** Hot = SpamBot limited (daysLeft > 0) or a PEER_FLOOD within hotWindowMs of `now` (a future stamp = clock skew: hot). */
 function accountHotReason(spamBotDays, lastPeerFloodAt, now) {
@@ -92140,12 +92335,15 @@ function replyBudgetMs(userAt, now) {
  *  1. protected kinds   -> sendNow, ALWAYS (never skipped or delayed by the policy: a reply that can be sent is sent).
  *     On a hot account a reply also gets the deadline budget (shorter typing, never dropped). A refused chat is
  *     handled where it always was (OutboundQueue / replier), unchanged.
- *  2. refused chat, hot account -> skip a proactive send (logged). On a free account the refusal stays where it
+ *  2. greeting voice, inbound stage -> skip when a payment was credited since the greeting, else sendNow (any account:
+ *     the user wrote, so it is a reply now). Plan or fire stage on a hot account -> defer (held until the user writes;
+ *     a refused chat included: the user's message re-opens it).
+ *  3. refused chat, hot account -> skip a proactive send (logged). On a free account the refusal stays where it
  *     always was (the OutboundQueue drops the send), so free behaviour, side effects included, is unchanged.
- *  3. reping at the cap -> skip (every account)
- *  4. greeting voice, plan stage -> sendAt(now + delay of the arm on a hot account, else the control delay)
- *  5. hot account, fire stage, scheduled -> skip when stale (user wrote / paid since it was planned, per kind)
- *  6. otherwise         -> sendNow
+ *  4. reping at the cap -> skip (every account)
+ *  5. greeting voice, plan stage (free account) -> sendAt(now + greetingVoiceDelayMs)
+ *  6. hot account, fire stage, scheduled -> skip when stale (user wrote / paid since it was planned, per kind)
+ *  7. otherwise         -> sendNow
  */
 function decideSend(account, chat, send, now) {
     const { kind } = send;
@@ -92157,14 +92355,23 @@ function decideSend(account, chat, send, now) {
         }
         return { type: 'sendNow', reason: 'protected' };
     }
+    if (kind === 'greetingVoice') {
+        if (send.stage === 'inbound') {
+            if (send.scheduledAt !== undefined && chat.creditedAt !== undefined && chat.creditedAt > send.scheduledAt) {
+                return { type: 'skip', reason: 'a payment was credited since it was planned' };
+            }
+            return { type: 'sendNow', reason: 'the user wrote' };
+        }
+        if (account.hot)
+            return { type: 'defer', reason: `hot:${account.reason}` };
+    }
     if (chat.refused && account.hot)
         return { type: 'skip', reason: 'chat refused (PEER_FLOOD) until the user writes' };
     if (kind === 'reping' && (chat.repingCount ?? 0) >= SEND_POLICY.repingCap) {
         return { type: 'skip', reason: `reping cap reached (${chat.repingCount}/${SEND_POLICY.repingCap})` };
     }
     if (kind === 'greetingVoice' && send.stage === 'plan') {
-        const arm = account.hot ? account.arm : 'control';
-        return { type: 'sendAt', at: now + SEND_POLICY.greetingVoiceDelayMs[arm], reason: account.hot ? `arm ${arm}` : 'free' };
+        return { type: 'sendAt', at: now + SEND_POLICY.greetingVoiceDelayMs, reason: 'free' };
     }
     if (account.hot && send.scheduledAt !== undefined) {
         const checks = STALE_CHECKS[kind];
@@ -93638,11 +93845,13 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _replier__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./replier */ "./src/replier/replier.ts");
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
 /* harmony import */ var _media_throttle__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ./media-throttle */ "./src/replier/media-throttle.ts");
+/* harmony import */ var _reply_pieces__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ./reply-pieces */ "./src/replier/reply-pieces.ts");
 /**
  * Replier Module
  * Main entry point for replier functionality
  * Provides backward-compatible exports
  */
+
 
 
 
@@ -93686,12 +93895,12 @@ function getReplierInstance() {
  * When a clip is suppressed, any accompanying TEXT is still delivered — dropping the whole reply
  * would leave the user with silence, which reads as a dead bot.
  */
-async function pushToReplies(event, chatId, msg, file, msgId, waitTime, kind, solicitedPayAsk) {
-    await queueReply(chatId, msg, { file, msgId, waitTime, kind, sourceMsgId: event.message.id, ...(solicitedPayAsk ? { solicitedPayAsk } : {}) });
+async function pushToReplies(event, chatId, msg, file, msgId, waitTime, kind, solicitedPayAsk, filler) {
+    await queueReply(chatId, msg, { file, msgId, waitTime, kind, sourceMsgId: event.message.id, ...(solicitedPayAsk ? { solicitedPayAsk } : {}), ...(filler ? { filler } : {}) });
 }
 /** pushToReplies by chat id, for delayed work (no event after a restart). */
 async function queueReply(chatId, msg, options = {}) {
-    const { file, msgId, waitTime, kind, sourceMsgId, solicitedPayAsk } = options;
+    const { file, msgId, waitTime, kind, sourceMsgId, solicitedPayAsk, filler } = options;
     const replier = getReplierInstance();
     let effectiveFile = file;
     if (file && !(await (0,_media_throttle__WEBPACK_IMPORTED_MODULE_3__.claimMediaSend)(chatId, file))) {
@@ -93710,7 +93919,8 @@ async function queueReply(chatId, msg, options = {}) {
         }
     }
     (0,_outbound_chat_voice__WEBPACK_IMPORTED_MODULE_0__.noteQueued)(chatId, msg, effectiveFile);
-    await replier.queueReply(chatId, msg, effectiveFile, msgId, waitTime, sourceMsgId, kind, solicitedPayAsk);
+    (0,_reply_pieces__WEBPACK_IMPORTED_MODULE_4__.noteQueuedSource)(chatId, sourceMsgId);
+    await replier.queueReply(chatId, msg, effectiveFile, msgId, waitTime, sourceMsgId, kind, solicitedPayAsk, filler && !effectiveFile ? true : undefined);
 }
 /**
  * Main replier function (backward compatible)
@@ -93900,12 +94110,14 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   ReplierQueueManager: () => (/* binding */ ReplierQueueManager)
 /* harmony export */ });
-/* harmony import */ var _outbound_chat_voice__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../outbound/chat-voice */ "./src/outbound/chat-voice.ts");
+/* harmony import */ var _reply_pieces__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./reply-pieces */ "./src/replier/reply-pieces.ts");
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _policies_send_policy__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../policies/send-policy */ "./src/policies/send-policy.ts");
 /**
  * Replier Queue Manager
  * Manages the reply queue with size limits and deduplication
  */
+
 
 
 const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_1__.Logger("replier.queue-manager");
@@ -93913,16 +94125,21 @@ const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_1__.Logger("re
  * Queue manager for reply items
  */
 class ReplierQueueManager {
-    /** `isStale`: an item the processor will drop anyway (a call connected since it was queued); never merged into. */
+    /**
+     * `isStale`: an item the processor will drop anyway (a call connected since it was queued); never merged into.
+     * `preferReplies`: true (hot account, send-policy preferRepliesFirst) = shift() takes the oldest due reply before
+     * older proactive items ('pitch' / 'nudge'); false (default) = FIFO.
+     */
     constructor(maxSize = 500, opts = {}) {
         this.queue = [];
         this.maxSize = maxSize;
         this.isStale = opts.isStale ?? (() => false);
+        this.preferReplies = opts.preferReplies ?? (() => false);
     }
     /**
      * Add reply item to queue with deduplication logic
      */
-    async push(chatId, msg, file, msgId, waitTime, eventMessageId, kind, solicitedPayAsk) {
+    async push(chatId, msg, file, msgId, waitTime, eventMessageId, kind, solicitedPayAsk, filler) {
         try {
             if (!msg && !file) {
                 return; // Nothing to queue
@@ -93937,35 +94154,58 @@ class ReplierQueueManager {
                 pushedAt: Date.now(),
                 ...(kind && kind !== 'answer' ? { kind } : {}),
                 ...(solicitedPayAsk ? { solicitedPayAsk: true } : {}),
+                ...(filler ? { filler: true } : {}),
+                ...(eventMessageId !== undefined ? { sourceMsgId: eventMessageId } : {}),
             };
             // Deduplication: If no file, merge with existing text-only item
             if (!file) {
-                const existingIndex = this.queue.findIndex(item => item.chatId === chatId && !item.file);
+                // The chat's newest text bubble (a second one exists only when the first holds protected pieces only).
+                let existingIndex = -1;
+                for (let i = this.queue.length - 1; i >= 0; i--) {
+                    if (this.queue[i].chatId === chatId && !this.queue[i].file) {
+                        existingIndex = i;
+                        break;
+                    }
+                }
                 if (existingIndex !== -1 && this.isStale(this.queue[existingIndex])) {
                     // Merging into it would drop the new reply along with the stale one: replace it instead.
                     this.queue.splice(existingIndex, 1);
                 }
-                else if (existingIndex !== -1) {
-                    // Merge messages
-                    if (msg && msg !== '' && this.queue[existingIndex].msg && this.queue[existingIndex].msg !== '') {
-                        if (this.queue[existingIndex].msg.length < 150) {
-                            this.queue[existingIndex].msg = this.queue[existingIndex].msg + '\n\n' + msg;
-                        }
-                        else {
-                            // Append new message but truncate to prevent unbounded growth
-                            const combined = this.queue[existingIndex].msg + '\n\n' + msg;
-                            this.queue[existingIndex].msg = combined.slice(0, 500);
-                        }
+                else if (existingIndex !== -1 && msg && this.queue[existingIndex].msg) {
+                    // One bubble per chat, answering the user's latest state (replier/reply-pieces): older filler is
+                    // dropped, at most MAX_PIECES whole pieces, protected (pay / system) pieces never dropped.
+                    const existing = this.queue[existingIndex];
+                    const next = {
+                        text: msg,
+                        ...(kind && kind !== 'answer' ? { kind } : {}),
+                        ...(solicitedPayAsk ? { solicitedPayAsk: true } : {}),
+                        ...(filler ? { filler: true } : {}),
+                        ...(eventMessageId !== undefined ? { src: eventMessageId } : {}),
+                    };
+                    const result = (0,_reply_pieces__WEBPACK_IMPORTED_MODULE_0__.mergePieces)((0,_reply_pieces__WEBPACK_IMPORTED_MODULE_0__.piecesOf)(existing), next);
+                    if (result.action === 'skip-new') {
+                        logger.log(`[replier] ${chatId}: filler not added next to a queued answer`);
+                        return;
                     }
-                    // The merged item carries this pay ask the user asked for: it must still pass the pitch window.
-                    if (solicitedPayAsk)
-                        this.queue[existingIndex].solicitedPayAsk = true;
-                    const merged = (0,_outbound_chat_voice__WEBPACK_IMPORTED_MODULE_0__.strongerKind)(this.queue[existingIndex].kind, kind);
-                    if (merged === 'answer')
-                        delete this.queue[existingIndex].kind;
-                    else
-                        this.queue[existingIndex].kind = merged;
-                    return; // Item merged, no need to add
+                    if (result.action === 'merge') {
+                        if (result.dropped.length > 0) {
+                            logger.log(`[replier] ${chatId}: ${result.dropped.length} older filler/answer piece(s) replaced by the newer reply`);
+                        }
+                        (0,_reply_pieces__WEBPACK_IMPORTED_MODULE_0__.applyPieces)(existing, result.pieces);
+                        existing.msgId = replyMessageId; // reply to the newest message
+                        existing.lastPushedAt = replyItem.pushedAt;
+                        if (eventMessageId !== undefined)
+                            existing.sourceMsgId = eventMessageId;
+                        else
+                            delete existing.sourceMsgId;
+                        if (existing.heldForNewer) {
+                            // It was waiting for exactly this newer reply: the bubble now answers the latest message.
+                            delete existing.heldForNewer;
+                            delete existing.notBefore;
+                        }
+                        return; // Item merged, no need to add
+                    }
+                    // 'separate': the queued bubble holds only protected pieces; the newer reply gets its own bubble.
                 }
             }
             // Add new item
@@ -93986,9 +94226,20 @@ class ReplierQueueManager {
      */
     shift(now = Date.now()) {
         // Skip items deferred while their chat is on a call.
-        const idx = this.queue.findIndex(item => item.notBefore === undefined || item.notBefore <= now);
-        if (idx === -1)
+        const due = (item) => item.notBefore === undefined || item.notBefore <= now;
+        const first = this.queue.findIndex(due);
+        if (first === -1)
             return undefined;
+        let idx = first;
+        // Hot account: a reply to the user goes before older proactive items (order only; nothing dropped or delayed).
+        if (!(0,_policies_send_policy__WEBPACK_IMPORTED_MODULE_2__.isReplierReply)(this.queue[first].kind) && this.preferReplies()) {
+            const reply = this.queue.findIndex(item => due(item) && (0,_policies_send_policy__WEBPACK_IMPORTED_MODULE_2__.isReplierReply)(item.kind));
+            if (reply !== -1) {
+                idx = reply;
+                const passed = this.queue.slice(0, reply).filter(due).length;
+                logger.log(`[replier] reply to ${this.queue[reply].chatId} sent ahead of ${passed} proactive item(s) (hot account)`);
+            }
+        }
         return this.queue.splice(idx, 1)[0];
     }
     /** True when at least one item is eligible to be attempted now. */
@@ -94051,6 +94302,9 @@ class ReplierQueueManager {
             ...(item.notBefore !== undefined ? { notBefore: item.notBefore } : {}),
             ...(item.kind !== undefined ? { kind: item.kind } : {}),
             ...(item.solicitedPayAsk ? { solicitedPayAsk: true } : {}),
+            ...(item.filler ? { filler: true } : {}),
+            ...(item.pieces ? { pieces: item.pieces.map((p) => ({ ...p })) } : {}),
+            ...(item.lastPushedAt !== undefined ? { lastPushedAt: item.lastPushedAt } : {}),
         }));
     }
     /**
@@ -94269,8 +94523,8 @@ function isPermanentRecipientError(error) {
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   Replier: () => (/* binding */ Replier),
-/* harmony export */   isPermanentRecipientError: () => (/* reexport safe */ _recipient_errors__WEBPACK_IMPORTED_MODULE_21__.isPermanentRecipientError),
-/* harmony export */   isRecipientDeactivatedError: () => (/* reexport safe */ _recipient_errors__WEBPACK_IMPORTED_MODULE_21__.isRecipientDeactivatedError)
+/* harmony export */   isPermanentRecipientError: () => (/* reexport safe */ _recipient_errors__WEBPACK_IMPORTED_MODULE_23__.isPermanentRecipientError),
+/* harmony export */   isRecipientDeactivatedError: () => (/* reexport safe */ _recipient_errors__WEBPACK_IMPORTED_MODULE_23__.isRecipientDeactivatedError)
 /* harmony export */ });
 /* harmony import */ var telegram_errors__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! telegram/errors */ "telegram/errors");
 /* harmony import */ var telegram_errors__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(telegram_errors__WEBPACK_IMPORTED_MODULE_0__);
@@ -94289,17 +94543,21 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
 /* harmony import */ var _outbound_flood_gate__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! ../outbound/flood-gate */ "./src/outbound/flood-gate.ts");
 /* harmony import */ var _outbound_chat_voice__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! ../outbound/chat-voice */ "./src/outbound/chat-voice.ts");
-/* harmony import */ var _queue_manager__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! ./queue-manager */ "./src/replier/queue-manager.ts");
-/* harmony import */ var _rate_limiter__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! ./rate-limiter */ "./src/replier/rate-limiter.ts");
-/* harmony import */ var _health_checker__WEBPACK_IMPORTED_MODULE_17__ = __webpack_require__(/*! ./health-checker */ "./src/replier/health-checker.ts");
-/* harmony import */ var _state_persistence__WEBPACK_IMPORTED_MODULE_18__ = __webpack_require__(/*! ./state-persistence */ "./src/replier/state-persistence.ts");
-/* harmony import */ var _reply_processor__WEBPACK_IMPORTED_MODULE_19__ = __webpack_require__(/*! ./reply-processor */ "./src/replier/reply-processor.ts");
-/* harmony import */ var _retry_policy__WEBPACK_IMPORTED_MODULE_20__ = __webpack_require__(/*! ./retry-policy */ "./src/replier/retry-policy.ts");
-/* harmony import */ var _recipient_errors__WEBPACK_IMPORTED_MODULE_21__ = __webpack_require__(/*! ./recipient-errors */ "./src/replier/recipient-errors.ts");
+/* harmony import */ var _outbound_hot_account__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! ../outbound/hot-account */ "./src/outbound/hot-account.ts");
+/* harmony import */ var _policies_send_policy__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! ../policies/send-policy */ "./src/policies/send-policy.ts");
+/* harmony import */ var _queue_manager__WEBPACK_IMPORTED_MODULE_17__ = __webpack_require__(/*! ./queue-manager */ "./src/replier/queue-manager.ts");
+/* harmony import */ var _rate_limiter__WEBPACK_IMPORTED_MODULE_18__ = __webpack_require__(/*! ./rate-limiter */ "./src/replier/rate-limiter.ts");
+/* harmony import */ var _health_checker__WEBPACK_IMPORTED_MODULE_19__ = __webpack_require__(/*! ./health-checker */ "./src/replier/health-checker.ts");
+/* harmony import */ var _state_persistence__WEBPACK_IMPORTED_MODULE_20__ = __webpack_require__(/*! ./state-persistence */ "./src/replier/state-persistence.ts");
+/* harmony import */ var _reply_processor__WEBPACK_IMPORTED_MODULE_21__ = __webpack_require__(/*! ./reply-processor */ "./src/replier/reply-processor.ts");
+/* harmony import */ var _retry_policy__WEBPACK_IMPORTED_MODULE_22__ = __webpack_require__(/*! ./retry-policy */ "./src/replier/retry-policy.ts");
+/* harmony import */ var _recipient_errors__WEBPACK_IMPORTED_MODULE_23__ = __webpack_require__(/*! ./recipient-errors */ "./src/replier/recipient-errors.ts");
 /**
  * Main Replier Orchestrator
  * Coordinates all replier components
  */
+
+
 
 
 
@@ -94353,11 +94611,13 @@ class Replier {
         this.updateCount = 0; // Track updates for periodic cleanup
         this.config = config;
         this.rateLimitConfig = rateLimitConfig;
-        this.queueManager = new _queue_manager__WEBPACK_IMPORTED_MODULE_15__.ReplierQueueManager(config.maxRepliesArrSize, {
+        this.queueManager = new _queue_manager__WEBPACK_IMPORTED_MODULE_17__.ReplierQueueManager(config.maxRepliesArrSize, {
             isStale: (item) => (0,_outbound_chat_voice__WEBPACK_IMPORTED_MODULE_14__.supersededReason)(item.chatId, item.pushedAt) !== null,
+            // Hot account: replies to users before older proactive items (send-policy preferRepliesFirst).
+            preferReplies: () => (0,_policies_send_policy__WEBPACK_IMPORTED_MODULE_16__.preferRepliesFirst)(_outbound_hot_account__WEBPACK_IMPORTED_MODULE_15__.hotAccount.view()),
         });
-        this.rateLimiter = new _rate_limiter__WEBPACK_IMPORTED_MODULE_16__.ReplierRateLimiter(rateLimitConfig);
-        this.healthChecker = new _health_checker__WEBPACK_IMPORTED_MODULE_17__.ReplierHealthChecker();
+        this.rateLimiter = new _rate_limiter__WEBPACK_IMPORTED_MODULE_18__.ReplierRateLimiter(rateLimitConfig);
+        this.healthChecker = new _health_checker__WEBPACK_IMPORTED_MODULE_19__.ReplierHealthChecker();
         // Initialize state persistence, THEN start processing to avoid race condition
         this.initializeStatePersistence().finally(() => {
             this.startPeriodicProcessing();
@@ -94368,7 +94628,7 @@ class Replier {
      */
     async initializeStatePersistence() {
         try {
-            const state = await (0,_state_persistence__WEBPACK_IMPORTED_MODULE_18__.loadReplierState)(this.rateLimitConfig.minuteWindowDuration, this.rateLimitConfig.tenMinutesWindowDuration, this.rateLimitConfig.hourWindowDuration);
+            const state = await (0,_state_persistence__WEBPACK_IMPORTED_MODULE_20__.loadReplierState)(this.rateLimitConfig.minuteWindowDuration, this.rateLimitConfig.tenMinutesWindowDuration, this.rateLimitConfig.hourWindowDuration);
             if (state) {
                 this.queueManager.restoreQueue(state.repliesArr);
                 this.rateLimiter.restoreQueues(state.minuteQueue, state.tenMinutesQueue, state.hourQueue);
@@ -94430,7 +94690,7 @@ class Replier {
             sleepTime: this.sleepTime,
             globalSleepTime: this.globalSleepTime
         };
-        await (0,_state_persistence__WEBPACK_IMPORTED_MODULE_18__.saveReplierState)(state, this.rateLimitConfig.minuteWindowDuration, this.rateLimitConfig.tenMinutesWindowDuration, this.rateLimitConfig.hourWindowDuration);
+        await (0,_state_persistence__WEBPACK_IMPORTED_MODULE_20__.saveReplierState)(state, this.rateLimitConfig.minuteWindowDuration, this.rateLimitConfig.tenMinutesWindowDuration, this.rateLimitConfig.hourWindowDuration);
     }
     /**
      * Push reply to queue
@@ -94439,9 +94699,9 @@ class Replier {
         await this.queueReply(chatId, msg, file, msgId, waitTime, event.message.id, kind);
     }
     /** pushToReplies by chat id: `sourceMsgId` is the message being answered (delayed work has no event). */
-    async queueReply(chatId, msg, file, msgId, waitTime, sourceMsgId, kind, solicitedPayAsk) {
+    async queueReply(chatId, msg, file, msgId, waitTime, sourceMsgId, kind, solicitedPayAsk, filler) {
         await this.checkHealth();
-        await this.queueManager.push(chatId, msg, file, msgId, waitTime, sourceMsgId, kind, solicitedPayAsk);
+        await this.queueManager.push(chatId, msg, file, msgId, waitTime, sourceMsgId, kind, solicitedPayAsk, filler);
         await this.saveState().catch(error => {
             logger.warn(`Error saving state after queue push:`, error);
         });
@@ -94534,7 +94794,7 @@ class Replier {
                     const isMsgLimitReached = (msgStats.totalCount > 3200 || msgStats.userCount > 300);
                     const canSend = this.rateLimiter.canSendMessage();
                     if (canSend) {
-                        await (0,_tg_core_utils_withTimeout__WEBPACK_IMPORTED_MODULE_10__.withTimeout)(() => (0,_reply_processor__WEBPACK_IMPORTED_MODULE_19__.processSingleReply)(client, replyObj, isMsgLimitReached, this.sleepTime, () => { this.lastProcessed = Date.now(); }, (item) => { this.queueManager.pushItem(item); }, (error) => { this.handleFloodErrors(error); }, () => { this.updateQueues(); }), { timeout: 60000, errorMessage: `${PROCESS_TIMEOUT_PREFIX}: ${replyObj.chatId}` });
+                        await (0,_tg_core_utils_withTimeout__WEBPACK_IMPORTED_MODULE_10__.withTimeout)(() => (0,_reply_processor__WEBPACK_IMPORTED_MODULE_21__.processSingleReply)(client, replyObj, isMsgLimitReached, this.sleepTime, () => { this.lastProcessed = Date.now(); }, (item) => { this.queueManager.pushItem(item); }, (error) => { this.handleFloodErrors(error); }, () => { this.updateQueues(); }), { timeout: 60000, errorMessage: `${PROCESS_TIMEOUT_PREFIX}: ${replyObj.chatId}` });
                     }
                     else {
                         this.queueManager.unshift(replyObj);
@@ -94556,7 +94816,7 @@ class Replier {
                     // sleep and no retryCount bump, so one such recipient would hot-loop the whole reply
                     // queue forever and Slack-spam every 5s. (The account-permanent case is handled
                     // separately by startNewUserProcess below.)
-                    if ((0,_recipient_errors__WEBPACK_IMPORTED_MODULE_21__.isPermanentRecipientError)(error)) {
+                    if ((0,_recipient_errors__WEBPACK_IMPORTED_MODULE_23__.isPermanentRecipientError)(error)) {
                         logger.warn(`Dropping reply for permanently-unreachable recipient ${replyObj.chatId}: ${errorDetails.message}`);
                         this.scheduleStateSave("recipient permanent", 0);
                         continue;
@@ -94597,13 +94857,13 @@ class Replier {
                     // their own budget, not the error one.
                     if (replyObj) {
                         const transport = (0,_tg_core_telegram_utils_isTelegramRuntimeFailure__WEBPACK_IMPORTED_MODULE_2__.isTelegramTransportUnavailable)(error);
-                        const next = (0,_retry_policy__WEBPACK_IMPORTED_MODULE_20__.nextReplyRetry)(replyObj, transport ? 'transport' : 'error');
+                        const next = (0,_retry_policy__WEBPACK_IMPORTED_MODULE_22__.nextReplyRetry)(replyObj, transport ? 'transport' : 'error');
                         if (next) {
                             this.queueManager.unshift(next);
                             this.scheduleStateSave(transport ? "transport requeue" : "error requeue", 500);
                         }
                         else {
-                            logger.warn(`Dropping reply for ${replyObj.chatId} after ${transport ? `${_retry_policy__WEBPACK_IMPORTED_MODULE_20__.REPLY_TRANSPORT_MAX_RETRIES} transport` : `${_retry_policy__WEBPACK_IMPORTED_MODULE_20__.REPLY_ERROR_MAX_RETRIES} error-requeue`} retries: ${errorDetails.message}`);
+                            logger.warn(`Dropping reply for ${replyObj.chatId} after ${transport ? `${_retry_policy__WEBPACK_IMPORTED_MODULE_22__.REPLY_TRANSPORT_MAX_RETRIES} transport` : `${_retry_policy__WEBPACK_IMPORTED_MODULE_22__.REPLY_ERROR_MAX_RETRIES} error-requeue`} retries: ${errorDetails.message}`);
                             this.scheduleStateSave("error requeue exhausted", 0);
                         }
                     }
@@ -94754,6 +95014,8 @@ class Replier {
                 waitTime: item.waitTime,
                 ageSec: Math.max(0, Math.floor((now - item.pushedAt) / 1000)),
                 retryCount: item.retryCount ?? 0,
+                ...(item.pieces ? { pieces: item.pieces.length } : {}),
+                ...(item.filler ? { filler: true } : {}),
             };
         });
         return {
@@ -94781,6 +95043,170 @@ class Replier {
         this.rateLimiter.clearQueues();
         logger.log("Cleanup complete, state saved");
     }
+}
+
+
+/***/ },
+
+/***/ "./src/replier/reply-pieces.ts"
+/*!*************************************!*\
+  !*** ./src/replier/reply-pieces.ts ***!
+  \*************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   MAX_PIECES: () => (/* binding */ MAX_PIECES),
+/* harmony export */   PIECE_SEPARATOR: () => (/* binding */ PIECE_SEPARATOR),
+/* harmony export */   WAIT_FOR_NEWER_REPLY_MS: () => (/* binding */ WAIT_FOR_NEWER_REPLY_MS),
+/* harmony export */   applyPieces: () => (/* binding */ applyPieces),
+/* harmony export */   isProtectedPiece: () => (/* binding */ isProtectedPiece),
+/* harmony export */   latestStateCheck: () => (/* binding */ latestStateCheck),
+/* harmony export */   mergePieces: () => (/* binding */ mergePieces),
+/* harmony export */   newestAnsweredSource: () => (/* binding */ newestAnsweredSource),
+/* harmony export */   noteQueuedSource: () => (/* binding */ noteQueuedSource),
+/* harmony export */   piecesOf: () => (/* binding */ piecesOf),
+/* harmony export */   resetAnsweredSources: () => (/* binding */ resetAnsweredSources)
+/* harmony export */ });
+/* harmony import */ var _outbound_chat_voice__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../outbound/chat-voice */ "./src/outbound/chat-voice.ts");
+// What one queued bubble may hold (2026-10-28 live: one bubble of 6 pieces, urgency + "I'm fine, you?" + 3 openers +
+// "Hey <name>"; and fillers that answered older messages landing after newer ones). The owner wants short, simple replies
+// to the user's LATEST state:
+//  - a piece is `filler` when its producer marks it so (openers / fallback questions, greetings, the urgency add-on,
+//    small talk). Never inferred from text. Pieces of one turn (same source message) are one reply and stay together.
+//  - protected = never dropped here: system / pitch kinds, a pay ask the user asked for, a menu / price / QR, and any
+//    unmarked text that asks for money.
+//  - merging a newer reply into a queued bubble drops the bubble's older filler; a new filler is not added next to a
+//    real answer; at most MAX_PIECES pieces per bubble, whole pieces only (older unprotected answers go first; when only
+//    protected pieces are left the newer reply becomes its own bubble, so no pay ask is lost).
+
+const MAX_PIECES = 2;
+const PIECE_SEPARATOR = '\n\n';
+/** A piece that is never dropped by the merge / latest-state rules. */
+function isProtectedPiece(p) {
+    if (p.kind === 'system' || p.kind === 'pitch' || p.solicitedPayAsk)
+        return true;
+    if ((0,_outbound_chat_voice__WEBPACK_IMPORTED_MODULE_0__.carriesPitch)(p.text))
+        return true;
+    return !p.filler && (0,_outbound_chat_voice__WEBPACK_IMPORTED_MODULE_0__.asksForMoney)(p.text);
+}
+/** The pieces of a queued text item (an item from before pieces existed, or a single reply, is one piece). */
+function piecesOf(item) {
+    if (item.pieces && item.pieces.length > 0)
+        return item.pieces.map((p) => ({ ...p }));
+    return [{
+            text: item.msg,
+            ...(item.sourceMsgId !== undefined ? { src: item.sourceMsgId } : {}),
+            ...(item.kind ? { kind: item.kind } : {}),
+            ...(item.solicitedPayAsk ? { solicitedPayAsk: true } : {}),
+            ...(item.filler ? { filler: true } : {}),
+        }];
+}
+/** Write `pieces` back onto `item`: text, kind, pay-ask flag and filler flag follow the pieces kept. */
+function applyPieces(item, pieces) {
+    item.msg = pieces.map((p) => p.text).join(PIECE_SEPARATOR);
+    let kind;
+    for (const p of pieces)
+        kind = kind === undefined ? (p.kind ?? 'answer') : (0,_outbound_chat_voice__WEBPACK_IMPORTED_MODULE_0__.strongerKind)(kind, p.kind);
+    if (!kind || kind === 'answer')
+        delete item.kind;
+    else
+        item.kind = kind;
+    if (pieces.some((p) => p.solicitedPayAsk))
+        item.solicitedPayAsk = true;
+    else
+        delete item.solicitedPayAsk;
+    if (pieces.length > 0 && pieces.every((p) => p.filler))
+        item.filler = true;
+    else
+        delete item.filler;
+    if (pieces.length > 1)
+        item.pieces = pieces;
+    else
+        delete item.pieces;
+}
+/** How a newer reply joins the chat's queued bubble (header rules). */
+function mergePieces(existing, next) {
+    // Pieces of the same turn (same source message) are one reply: only pieces answering an OLDER message are "older".
+    const older = (p) => p.src === undefined || p.src !== next.src;
+    if (next.filler && !isProtectedPiece(next) && existing.some((p) => older(p) && (!p.filler || isProtectedPiece(p)))) {
+        return { action: 'skip-new' };
+    }
+    const dropped = [];
+    // The newer reply answers the user's latest state: older filler goes.
+    const kept = existing.filter((p) => {
+        if (older(p) && p.filler && !isProtectedPiece(p)) {
+            dropped.push(p.text);
+            return false;
+        }
+        return true;
+    });
+    // Cap: drop the oldest unprotected answers first (whole pieces).
+    while (kept.length + 1 > MAX_PIECES) {
+        const idx = kept.findIndex((p) => !isProtectedPiece(p));
+        if (idx === -1)
+            break;
+        dropped.push(kept[idx].text);
+        kept.splice(idx, 1);
+    }
+    if (kept.length + 1 > MAX_PIECES)
+        return { action: 'separate' };
+    return { action: 'merge', pieces: [...kept, next], dropped };
+}
+const MAX_CHATS = 5000;
+const answeredSources = new Map();
+/** A reply answering user message `src` was queued for the chat (replier/index queueReply). */
+function noteQueuedSource(chatId, src) {
+    if (!chatId || typeof src !== 'number' || !Number.isFinite(src))
+        return;
+    if (src <= (answeredSources.get(chatId) ?? 0))
+        return;
+    answeredSources.delete(chatId);
+    answeredSources.set(chatId, src);
+    if (answeredSources.size > MAX_CHATS)
+        answeredSources.delete(answeredSources.keys().next().value);
+}
+/** The newest user message id a reply was queued for (this process). */
+function newestAnsweredSource(chatId) {
+    return answeredSources.get(String(chatId));
+}
+function resetAnsweredSources() {
+    answeredSources.clear();
+}
+/** How long a filler for an older message waits for the newer message's own reply: inbound batching (5 s existing / 8 s new chat) + handler. Live 10-27/28 ([INBOUND] ms, text, n=43,084): p50 8.5 s, p90 13.8 s, p99 15.2 s, 1.3% over 15 s, 0.15% over 20 s (was 12 s: 20% over). */
+const WAIT_FOR_NEWER_REPLY_MS = 20000;
+/**
+ * Latest-state check at delivery. The user wrote after the message this item answers (newest user message id > the
+ * item's source id) and a reply for a newer message was queued: the item's filler pieces (opener, greeting, urgency,
+ * small talk) answer an older state and go; the rest is sent. A newer message with no reply yet gets one short wait,
+ * up to WAIT_FOR_NEWER_REPLY_MS after the user wrote (its handler may still be running); after that the item is sent as
+ * is, so the user's newest message is never left with no reply by this check. Protected pieces are never touched.
+ * Items without ids (delayed work, restored queue): the user wrote after the item was queued and another reply was
+ * queued after it.
+ */
+function latestStateCheck(item, user, newer, now = Date.now()) {
+    if (item.file !== undefined || !item.msg)
+        return { action: 'send' };
+    const pieces = piecesOf(item);
+    const kept = pieces.filter((p) => !p.filler || isProtectedPiece(p));
+    if (kept.length === pieces.length)
+        return { action: 'send' };
+    if (item.sourceMsgId !== undefined && user.msgId !== undefined) {
+        if (user.msgId <= item.sourceMsgId)
+            return { action: 'send' };
+        if (newer.answeredSrc !== undefined && newer.answeredSrc > item.sourceMsgId)
+            return { action: 'strip', kept };
+        if (item.heldForNewer)
+            return { action: 'send' };
+        // The newer message's handler had its time (inbound batching 5-8 s) and queued nothing: answer with this one.
+        const until = (user.at ?? now) + WAIT_FOR_NEWER_REPLY_MS;
+        return until > now ? { action: 'wait', until } : { action: 'send' };
+    }
+    const at = item.lastPushedAt ?? item.pushedAt;
+    if (user.at !== undefined && user.at > at && newer.queuedAt !== undefined && newer.queuedAt > at)
+        return { action: 'strip', kept };
+    return { action: 'send' };
 }
 
 
@@ -94824,10 +95250,14 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _outbound_send_executor__WEBPACK_IMPORTED_MODULE_20__ = __webpack_require__(/*! ../outbound/send-executor */ "./src/outbound/send-executor.ts");
 /* harmony import */ var _policies_send_policy__WEBPACK_IMPORTED_MODULE_21__ = __webpack_require__(/*! ../policies/send-policy */ "./src/policies/send-policy.ts");
 /* harmony import */ var _outbound_reply_failures__WEBPACK_IMPORTED_MODULE_22__ = __webpack_require__(/*! ../outbound/reply-failures */ "./src/outbound/reply-failures.ts");
+/* harmony import */ var _conversation_state_chat_moments__WEBPACK_IMPORTED_MODULE_23__ = __webpack_require__(/*! ../conversation/state/chat-moments */ "./src/conversation/state/chat-moments.ts");
+/* harmony import */ var _reply_pieces__WEBPACK_IMPORTED_MODULE_24__ = __webpack_require__(/*! ./reply-pieces */ "./src/replier/reply-pieces.ts");
 /**
  * Reply Processor
  * Handles processing and sending of individual replies
  */
+
+
 
 
 
@@ -94990,6 +95420,32 @@ function noteReplyFailure(replyObj, outcome, extra) {
         ...rest,
     });
 }
+/**
+ * Latest user state (replier/reply-pieces latestStateCheck): filler (opener, greeting, urgency, small talk) answering a
+ * message the user has written past is dropped once the newer message has its own reply; while that reply is not queued
+ * yet the item waits once (until WAIT_FOR_NEWER_REPLY_MS after the user wrote). Signal: the newest inbound message id (chat-voice
+ * lastUserMessageId, noted for every message by private-message-handler before any handler runs) against the item's
+ * source message id, and the newest message id a reply was queued for (noteQueuedSource, replier/index).
+ * Returns true when the item is done here (dropped or re-queued to wait).
+ */
+function latestStateHandled(replyObj, onRequeue, where) {
+    const check = (0,_reply_pieces__WEBPACK_IMPORTED_MODULE_24__.latestStateCheck)(replyObj, { msgId: (0,_outbound_chat_voice__WEBPACK_IMPORTED_MODULE_18__.lastUserMessageId)(replyObj.chatId), at: (0,_conversation_state_chat_moments__WEBPACK_IMPORTED_MODULE_23__.momentAt)(replyObj.chatId, 'user') }, { answeredSrc: (0,_reply_pieces__WEBPACK_IMPORTED_MODULE_24__.newestAnsweredSource)(replyObj.chatId), queuedAt: (0,_conversation_state_chat_moments__WEBPACK_IMPORTED_MODULE_23__.momentAt)(replyObj.chatId, 'queued') });
+    if (check.action === 'send')
+        return false;
+    if (check.action === 'wait') {
+        logger.log(`[replier] ${replyObj.chatId} filler held${where}: the user wrote since, waiting up to ${Math.ceil((check.until - Date.now()) / 1000)}s for that message's reply`);
+        onRequeue({ ...replyObj, heldForNewer: true, notBefore: check.until });
+        return true;
+    }
+    if (check.kept.length === 0) {
+        logger.log(`[replier] ${replyObj.chatId} reply dropped${where}: filler for an older message, a newer message has its reply kind=${classifyReply(replyObj)}`);
+        (0,_outbound_send_executor__WEBPACK_IMPORTED_MODULE_20__.logReplierOutcome)(replyObj.chatId, replyObj.kind, 'skipped');
+        return true;
+    }
+    logger.log(`[replier] ${replyObj.chatId} filler for an older message removed${where}; ${check.kept.length} piece(s) still sent`);
+    (0,_reply_pieces__WEBPACK_IMPORTED_MODULE_24__.applyPieces)(replyObj, check.kept);
+    return false;
+}
 function maxAgeFor(item) {
     return (item.retryCount ?? 0) > 0 ? RETRY_MAX_AGE_MS : RECENT_MAX_AGE_MS;
 }
@@ -95024,6 +95480,8 @@ async function processSingleReply(client, replyObj, isMsgLimitReached, sleepTime
             logger.log(`[replier] ${replyObj.chatId} reply dropped: ${voice.reason} kind=${classifyReply(replyObj)}`);
             return;
         }
+        if (latestStateHandled(replyObj, onRequeue, ''))
+            return;
         const entity = await getEntity(replyObj.chatId, client);
         if (!entity) {
             logger.warn(`Could not get entity for chatId: ${replyObj.chatId}`);
@@ -95278,6 +95736,9 @@ async function sendReply(client, replyObj, userDetail, entity, onSuccess, onRequ
     try {
         // Add 1 second delay before sending response
         await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_2__.sleep)(PRE_SEND_PAUSE_MS);
+        // The user may have written (and got a newer reply queued) during the typing pause: check again at the send.
+        if (latestStateHandled(replyObj, onRequeue, ' at send'))
+            return;
         // ToS safety: mask sensitive keywords in the outgoing text right before it
         // leaves for Telegram. Catalogs stay clean plaintext; this single seam handles
         // every outgoing message (text + file caption read replyObj.msg in sendFile).
