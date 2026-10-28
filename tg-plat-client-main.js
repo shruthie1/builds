@@ -49637,8 +49637,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "04d1278f25d6aa3a873185183b256aa4b5371fd2" : 0;
-    const builtAt =  true ? "2026-10-28T17:27:06.779Z" : 0;
+    const sha =  true ? "56f5c2cbae5d8204fb87a975453144671f198b61" : 0;
+    const builtAt =  true ? "2026-10-28T17:52:05.106Z" : 0;
     return { sha, builtAt };
 }
 
@@ -61502,9 +61502,9 @@ __webpack_require__.r(__webpack_exports__);
 // fingerprint); sensitive words are additionally masked at the send chokepoint.
 // Order + labels + prices for the demo menu. Edit here to change everywhere.
 const demoMenuRows = [
-    { label: "Vdo Cal", amount: "𝟱𝟬₹" },
+    { label: "Video Cal", amount: "𝟱𝟬₹" },
     { label: "Voice Cal", amount: "𝟰𝟬₹" },
-    { label: "Prvt Pics", amount: "𝟮𝟱₹" },
+    { label: "Prvt Pics ", amount: "𝟮𝟱₹" },
 ];
 /**
  * Render the demo menu as a column-aligned list inside a monospace code fence (the only way to
@@ -61518,13 +61518,17 @@ const buildDemoMenu = (rows = demoMenuRows, opts = {}) => {
     const width = Math.max(...rows.map((r) => r.label.length));
     // Indent each line inside the fence for a tidy list look.
     const lines = rows.map((r) => `   ${bullet}${r.label.padEnd(width)} : ${r.amount}`);
-    // Wrap in a ``` fence for monospace column alignment. Two client quirks handled here so EVERY
+    // Wrap in a ``` fence for monospace column alignment. Client quirks handled here so EVERY
     // caller aligns without needing surrounding text:
-    //  - leading "\n": separates the fence from any preceding header so it parses as a block.
+    //  - leading "\n": puts the rows on their own line after any preceding header (callers write
+    //    "**Header:**${buildDemoMenu()}" with no newline of their own).
     //  - trailing "\n​" (newline + zero-width space): a fence that is the LAST content of a
     //    message does NOT render as a block on some clients; an invisible trailing char after the
     //    close guarantees it renders (verified). Zero-width so it adds nothing visible / no CTA.
-    return "\n```\n" + lines.join("\n") + "\n```\n​";
+    //  - NO newline inside the fence: tg-aut sends with GramJS's default markdown, which treats ```
+    //    as inline code and keeps any newline inside it as a visible blank line before/after the rows.
+    //    "```rows```" gives one code entity covering exactly the rows (monospace columns kept).
+    return "\n```" + lines.join("\n") + "```\n​";
 };
 
 
@@ -62615,7 +62619,7 @@ const entry50Menus = [
 const menu150 = [
     `**𝗠𝗲𝗻𝘂:**\n• No Face                 **𝟭𝟬𝟬₹**\n• With Face               **𝟭𝟱𝟬₹**`,
     `**𝗢𝗽𝘁𝗶𝗼𝗻𝘀:**\n• No Face        **𝟭𝟬𝟬₹**\n• With Face      **𝟭𝟱𝟬₹**`,
-    `**𝗟𝗶𝘀𝘁:**\n• No Face                 **𝟭𝟬𝟬₹**\n• With Face               **𝟭𝟱𝟬₹**`,
+    `**𝗟𝗶𝘀𝘁:**\n• No Face                 **𝟭𝟬𝟬₹**\n• With Face              **𝟭𝟱𝟬₹**`,
     `**𝗣𝗿𝗶𝗰𝗲𝘀:**\n• No Face          **𝟭𝟬𝟬₹**\n• With Face        **𝟭𝟱𝟬₹**`,
 ];
 const menu350 = [
