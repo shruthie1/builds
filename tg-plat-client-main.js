@@ -47936,7 +47936,7 @@ class ExpressServer {
         // Authentication middleware
         this.app.use(_http_middlewares_auth_middleware__WEBPACK_IMPORTED_MODULE_22__.authMiddleware);
         // CORS
-        this.app.use(cors__WEBPACK_IMPORTED_MODULE_1___default()());
+        this.app.use(cors__WEBPACK_IMPORTED_MODULE_1___default()({ exposedHeaders: ["X-Media-Variant", "Content-Range", "Accept-Ranges"] }));
         // Early flush middleware
         this.app.use(this.earlyFlushMiddleware);
         // Rate limiting
@@ -77263,6 +77263,95 @@ function photoByteSize(photo) {
 
 /***/ },
 
+/***/ "./src/media/media-thumb.ts"
+/*!**********************************!*\
+  !*** ./src/media/media-thumb.ts ***!
+  \**********************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   MAX_THUMB_BYTES: () => (/* binding */ MAX_THUMB_BYTES),
+/* harmony export */   pickThumbSize: () => (/* binding */ pickThumbSize),
+/* harmony export */   sniffThumbMimeType: () => (/* binding */ sniffThumbMimeType)
+/* harmony export */ });
+/* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! telegram */ "telegram");
+/* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(telegram__WEBPACK_IMPORTED_MODULE_0__);
+
+/** Largest thumbnail the media endpoint serves; anything bigger is answered as "no thumbnail". */
+const MAX_THUMB_BYTES = 64 * 1024;
+/** Smallest edge (px) a real thumbnail size should have; below this only the stripped preview is used. */
+const MIN_THUMB_EDGE = 90;
+/**
+ * Thumbnail size to request from Telegram for a message, as the size `type` GramJS `downloadMedia({ thumb })`
+ * matches on, or null when the message has no image thumbnail.
+ *
+ * Photos: the smallest stored size with an edge >= 90px (usually `s` or `m`); documents: the same over
+ * `document.thumbs`. The stripped/cached inline preview (GramJS expands stripped bytes to a JPEG) is the fallback
+ * when no real size qualifies. Path sizes (SVG outlines) and video thumbs (`videoThumbs`, MP4) are never chosen.
+ * `reportedBytes` is Telegram's byte size for the chosen size, when it reports one.
+ */
+function pickThumbSize(message) {
+    let candidates = [];
+    if (message.media instanceof telegram__WEBPACK_IMPORTED_MODULE_0__.Api.MessageMediaPhoto) {
+        const photo = message.photo;
+        if (photo instanceof telegram__WEBPACK_IMPORTED_MODULE_0__.Api.Photo)
+            candidates = photo.sizes ?? [];
+    }
+    else if (message.media instanceof telegram__WEBPACK_IMPORTED_MODULE_0__.Api.MessageMediaDocument) {
+        const doc = message.document;
+        if (doc instanceof telegram__WEBPACK_IMPORTED_MODULE_0__.Api.Document)
+            candidates = doc.thumbs ?? [];
+    }
+    let best;
+    let inline;
+    // Classified by className (set on every GramJS TL object) so plain TL-shaped objects work too.
+    for (const size of candidates) {
+        const record = size;
+        const kind = record.className;
+        if (!record.type)
+            continue;
+        if (kind === "PhotoStrippedSize" || kind === "PhotoCachedSize") {
+            const bytes = record.bytes?.length ?? 0;
+            if (bytes > 0 && !inline)
+                inline = { type: record.type, bytes };
+            continue;
+        }
+        if (kind !== "PhotoSize" && kind !== "PhotoSizeProgressive")
+            continue; // PhotoPathSize, PhotoSizeEmpty, VideoSize
+        if (Math.max(record.w || 0, record.h || 0) < MIN_THUMB_EDGE)
+            continue;
+        const bytes = kind === "PhotoSize"
+            ? record.size
+            : record.sizes?.length ? Math.max(...record.sizes) : undefined;
+        const area = (record.w || 0) * (record.h || 0);
+        if (!best || area < best.area)
+            best = { type: record.type, area, bytes };
+    }
+    if (best && (best.bytes === undefined || best.bytes <= MAX_THUMB_BYTES)) {
+        return { type: best.type, reportedBytes: best.bytes };
+    }
+    if (inline)
+        return { type: inline.type, reportedBytes: undefined };
+    if (best)
+        return { type: best.type, reportedBytes: best.bytes }; // oversize: the caller answers NO_THUMBNAIL
+    return null;
+}
+/** Image content type from a thumbnail's magic bytes, or null when it is not a JPEG/WebP/PNG image. */
+function sniffThumbMimeType(body) {
+    if (body.length >= 3 && body[0] === 0xff && body[1] === 0xd8 && body[2] === 0xff)
+        return "image/jpeg";
+    if (body.length >= 12 && body.toString("latin1", 0, 4) === "RIFF" && body.toString("latin1", 8, 12) === "WEBP")
+        return "image/webp";
+    if (body.length >= 8 && body.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])))
+        return "image/png";
+    return null;
+}
+
+
+/***/ },
+
 /***/ "./src/media/profile-pic.ts"
 /*!**********************************!*\
   !*** ./src/media/profile-pic.ts ***!
@@ -101427,7 +101516,9 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
 /* harmony import */ var _http_api_response__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ../../http/api-response */ "./src/http/api-response.ts");
 /* harmony import */ var _media_media_size__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ../../media/media-size */ "./src/media/media-size.ts");
-/* harmony import */ var _route_responses__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ./route-responses */ "./src/routes/telegram/route-responses.ts");
+/* harmony import */ var _media_media_thumb__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ../../media/media-thumb */ "./src/media/media-thumb.ts");
+/* harmony import */ var _route_responses__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ./route-responses */ "./src/routes/telegram/route-responses.ts");
+
 
 
 
@@ -101448,44 +101539,65 @@ const MAX_CONCURRENT_DOWNLOADS = 2;
 /** Recently served files, so a player's follow-up Range requests do not download again. */
 const RECENT_TTL_MS = 2 * 60000;
 const RECENT_MAX_BYTES = MAX_MEDIA_BYTES;
+/** Thumbnails: browser-cacheable for a day; server cache bounded by total bytes. */
+const THUMB_CACHE_CONTROL = "private, max-age=86400";
+const THUMB_RECENT_TTL_MS = 30 * 60000;
+const THUMB_RECENT_MAX_BYTES = 5 * 1024 * 1024;
+const THUMB_DOWNLOAD_TIMEOUT_MS = 30000;
+/** Byte-bounded, TTL'd, insertion-ordered (oldest evicted first) body cache. */
+class RecentBodies {
+    constructor(ttlMs, maxBytes) {
+        this.entries = new Map();
+        this.bytes = 0;
+        this.ttlMs = ttlMs;
+        this.maxBytes = maxBytes;
+    }
+    clear() {
+        this.entries.clear();
+        this.bytes = 0;
+    }
+    remember(key, body, mimeType) {
+        if (body.length > this.maxBytes)
+            return;
+        const now = Date.now();
+        this.drop(key);
+        for (const [k, entry] of this.entries) {
+            if (now - entry.at > this.ttlMs)
+                this.drop(k);
+        }
+        while (this.bytes + body.length > this.maxBytes && this.entries.size > 0) {
+            this.drop(this.entries.keys().next().value);
+        }
+        this.entries.set(key, { body, mimeType, at: now });
+        this.bytes += body.length;
+    }
+    read(key) {
+        const entry = this.entries.get(key);
+        if (!entry)
+            return undefined;
+        if (Date.now() - entry.at > this.ttlMs) {
+            this.drop(key);
+            return undefined;
+        }
+        return entry;
+    }
+    drop(key) {
+        const entry = this.entries.get(key);
+        if (!entry)
+            return;
+        this.entries.delete(key);
+        this.bytes -= entry.body.length;
+    }
+}
 const inflight = new Map();
-const recent = new Map();
-let recentBytes = 0;
+const recent = new RecentBodies(RECENT_TTL_MS, RECENT_MAX_BYTES);
+const recentThumbs = new RecentBodies(THUMB_RECENT_TTL_MS, THUMB_RECENT_MAX_BYTES);
 let activeDownloads = 0;
 const downloadQueue = [];
-/** Test/shutdown hook: forget cached bodies. In-flight downloads finish normally. */
+/** Test/shutdown hook: forget cached bodies (full and thumbnail). In-flight downloads finish normally. */
 function clearMediaCache() {
     recent.clear();
-    recentBytes = 0;
-}
-function rememberRecent(key, body, mimeType) {
-    if (body.length > RECENT_MAX_BYTES)
-        return;
-    const now = Date.now();
-    for (const [k, entry] of recent) {
-        if (now - entry.at > RECENT_TTL_MS) {
-            recent.delete(k);
-            recentBytes -= entry.body.length;
-        }
-    }
-    while (recentBytes + body.length > RECENT_MAX_BYTES && recent.size > 0) {
-        const [oldestKey, oldest] = recent.entries().next().value;
-        recent.delete(oldestKey);
-        recentBytes -= oldest.body.length;
-    }
-    recent.set(key, { body, mimeType, at: now });
-    recentBytes += body.length;
-}
-function readRecent(key) {
-    const entry = recent.get(key);
-    if (!entry)
-        return undefined;
-    if (Date.now() - entry.at > RECENT_TTL_MS) {
-        recent.delete(key);
-        recentBytes -= entry.body.length;
-        return undefined;
-    }
-    return entry;
+    recentThumbs.clear();
 }
 async function withDownloadSlot(work) {
     if (activeDownloads >= MAX_CONCURRENT_DOWNLOADS) {
@@ -101526,12 +101638,17 @@ async function resolvePeer(chatId) {
         || (await (0,_tg_core_telegram_utils_getSafeEntity__WEBPACK_IMPORTED_MODULE_2__.safeGetEntity)(client, chatId).catch(() => null))
         || chatId;
 }
-async function loadMedia(chatId, messageId) {
+async function lookupMessage(chatId, messageId) {
     const client = _telegram_client_access__WEBPACK_IMPORTED_MODULE_1__.TelegramManager.getClient();
     const peer = await resolvePeer(chatId);
     const found = await (0,_tg_core_utils_withTimeout__WEBPACK_IMPORTED_MODULE_3__.withTimeout)(() => client.getMessages(peer, { ids: [messageId] }), { timeout: LOOKUP_TIMEOUT_MS, errorMessage: `Media message lookup timeout for ${chatId}/${messageId}`, throwErr: true });
     const message = Array.isArray(found) ? found[0] : undefined;
-    if (!(message instanceof telegram__WEBPACK_IMPORTED_MODULE_0__.Api.Message))
+    return message instanceof telegram__WEBPACK_IMPORTED_MODULE_0__.Api.Message ? message : null;
+}
+async function loadMedia(chatId, messageId) {
+    const client = _telegram_client_access__WEBPACK_IMPORTED_MODULE_1__.TelegramManager.getClient();
+    const message = await lookupMessage(chatId, messageId);
+    if (!message)
         return { kind: "not-found", reason: "Message not found" };
     const described = describeMessageMedia(message);
     if (!described)
@@ -101548,6 +101665,38 @@ async function loadMedia(chatId, messageId) {
     if (downloaded.length > MAX_MEDIA_BYTES)
         return { kind: "too-large", size: downloaded.length };
     return { kind: "ok", body: downloaded, mimeType: described.mimeType };
+}
+/**
+ * Downloads only Telegram's small thumbnail of a message (never the file itself): `downloadMedia` with
+ * `thumb` = the chosen size type. Stripped previews are expanded to a JPEG by GramJS without a network call.
+ */
+async function loadThumb(chatId, messageId) {
+    const client = _telegram_client_access__WEBPACK_IMPORTED_MODULE_1__.TelegramManager.getClient();
+    const message = await lookupMessage(chatId, messageId);
+    if (!message)
+        return { kind: "not-found", reason: "Message not found" };
+    if (!describeMessageMedia(message))
+        return { kind: "not-found", reason: "Message has no media" };
+    const picked = (0,_media_media_thumb__WEBPACK_IMPORTED_MODULE_8__.pickThumbSize)(message);
+    if (!picked)
+        return { kind: "no-thumbnail", reason: "Media has no thumbnail" };
+    if (picked.reportedBytes !== undefined && picked.reportedBytes > _media_media_thumb__WEBPACK_IMPORTED_MODULE_8__.MAX_THUMB_BYTES) {
+        return { kind: "no-thumbnail", reason: `Thumbnail is larger than ${_media_media_thumb__WEBPACK_IMPORTED_MODULE_8__.MAX_THUMB_BYTES} bytes` };
+    }
+    // GramJS types `thumb` as number | TypePhotoSize, but its getThumb also matches a size `type` string
+    // (telegram/client/downloads.js getThumb); a string is the only form that also selects PhotoSizeProgressive.
+    const thumb = picked.type;
+    const download = withDownloadSlot(() => client.downloadMedia(message, { thumb }));
+    download.catch(() => undefined);
+    const downloaded = await (0,_tg_core_utils_withTimeout__WEBPACK_IMPORTED_MODULE_3__.withTimeout)(() => download, { timeout: THUMB_DOWNLOAD_TIMEOUT_MS, errorMessage: `Thumbnail download timeout for ${chatId}/${messageId}`, throwErr: true });
+    if (!Buffer.isBuffer(downloaded) || downloaded.length === 0)
+        return { kind: "no-thumbnail", reason: "Thumbnail could not be downloaded" };
+    if (downloaded.length > _media_media_thumb__WEBPACK_IMPORTED_MODULE_8__.MAX_THUMB_BYTES)
+        return { kind: "no-thumbnail", reason: `Thumbnail is larger than ${_media_media_thumb__WEBPACK_IMPORTED_MODULE_8__.MAX_THUMB_BYTES} bytes` };
+    const mimeType = (0,_media_media_thumb__WEBPACK_IMPORTED_MODULE_8__.sniffThumbMimeType)(downloaded);
+    if (!mimeType)
+        return { kind: "no-thumbnail", reason: "Thumbnail is not an image" };
+    return { kind: "ok", body: downloaded, mimeType };
 }
 /** Single byte range from a `Range` header: null = serve the whole body, "unsatisfiable" = 416. */
 function parseByteRange(header, total) {
@@ -101568,14 +101717,25 @@ function parseByteRange(header, total) {
         return "unsatisfiable";
     return { start, end };
 }
-function sendMediaBody(req, res, body, mimeType) {
-    const total = body.length;
+function setCommonMediaHeaders(res, mimeType, variant) {
     res.setHeader("Content-Type", mimeType);
-    res.setHeader("Cache-Control", MEDIA_CACHE_CONTROL);
-    res.setHeader("Accept-Ranges", "bytes");
+    res.setHeader("X-Media-Variant", variant);
     // User-supplied files served from the API origin: never sniffed, never run as a page.
     res.setHeader("X-Content-Type-Options", "nosniff");
     res.setHeader("Content-Security-Policy", "sandbox");
+}
+/** Thumbnails are always the whole (small) body: no Range support. */
+function sendThumbBody(res, body, mimeType) {
+    setCommonMediaHeaders(res, mimeType, "thumb");
+    res.setHeader("Cache-Control", THUMB_CACHE_CONTROL);
+    res.setHeader("Content-Length", String(body.length));
+    res.status(200).end(body);
+}
+function sendMediaBody(req, res, body, mimeType) {
+    const total = body.length;
+    setCommonMediaHeaders(res, mimeType, "full");
+    res.setHeader("Cache-Control", MEDIA_CACHE_CONTROL);
+    res.setHeader("Accept-Ranges", "bytes");
     const rangeHeader = typeof req.headers?.range === "string" ? req.headers.range : undefined;
     const range = parseByteRange(rangeHeader, total);
     if (range === "unsatisfiable") {
@@ -101602,16 +101762,23 @@ function sendMediaBody(req, res, body, mimeType) {
  *       Downloads the message's media through the account's Telegram client and returns the raw bytes.
  *       Content-Type is the document mimeType (photos are image/jpeg). Supports a single `Range: bytes=`
  *       range (206). 404 when the message has no media, 413 when it is over 50 MB (checked before download).
+ *       Full responses carry `X-Media-Variant: full`.
+ *
+ *       `?thumb=1` returns only Telegram's small thumbnail instead (the smallest stored size >= 90px, or the
+ *       stripped inline preview), never the file: 200 with image/jpeg|webp|png, `X-Media-Variant: thumb`,
+ *       `Cache-Control: private, max-age=86400`, no Range support. 404 `NO_THUMBNAIL` when the media has no
+ *       thumbnail or it is over 64 KB.
  *     tags: [Telegram]
  *     security:
  *       - ApiKeyAuth: []
  *     parameters:
  *       - { in: path, name: chatId, required: true, schema: { type: string } }
  *       - { in: path, name: messageId, required: true, schema: { type: integer } }
+ *       - { in: query, name: thumb, required: false, schema: { type: string, enum: ["1"] }, description: Return the thumbnail only }
  *     responses:
  *       200: { description: Media bytes }
  *       206: { description: Requested byte range }
- *       404: { description: Message not found or has no media }
+ *       404: { description: Message not found, has no media, or (thumb=1) has no thumbnail up to 64 KB (NO_THUMBNAIL) }
  *       413: { description: Media larger than 50 MB }
  *       416: { description: Range not satisfiable }
  */
@@ -101626,19 +101793,24 @@ const handleMedia = async (req, res) => {
             (0,_http_api_response__WEBPACK_IMPORTED_MODULE_6__.sendValidationError)(res, "Invalid path parameters", "chatId is required and messageId must be a positive integer", requestId);
             return;
         }
-        const key = `${chatId}:${messageId}`;
-        const cached = readRecent(key);
+        const thumb = req.query?.thumb === "1";
+        const key = thumb ? `${chatId}:${messageId}:thumb` : `${chatId}:${messageId}`;
+        const cache = thumb ? recentThumbs : recent;
+        const cached = cache.read(key);
         if (cached) {
-            sendMediaBody(req, res, cached.body, cached.mimeType);
+            if (thumb)
+                sendThumbBody(res, cached.body, cached.mimeType);
+            else
+                sendMediaBody(req, res, cached.body, cached.mimeType);
             return;
         }
         if (!(await _telegram_client_access__WEBPACK_IMPORTED_MODULE_1__.TelegramManager.instanceExist())) {
-            await (0,_route_responses__WEBPACK_IMPORTED_MODULE_8__.sendTelegramUnavailable)(req, res, operation, true, "Telegram client instance not available");
+            await (0,_route_responses__WEBPACK_IMPORTED_MODULE_9__.sendTelegramUnavailable)(req, res, operation, true, "Telegram client instance not available");
             return;
         }
         let pending = inflight.get(key);
         if (!pending) {
-            pending = loadMedia(chatId, messageId).finally(() => inflight.delete(key));
+            pending = (thumb ? loadThumb(chatId, messageId) : loadMedia(chatId, messageId)).finally(() => inflight.delete(key));
             inflight.set(key, pending);
         }
         const result = await pending;
@@ -101648,18 +101820,25 @@ const handleMedia = async (req, res) => {
             (0,_http_api_response__WEBPACK_IMPORTED_MODULE_6__.sendError)(res, result.reason, 404, "NOT_FOUND", undefined, requestId);
             return;
         }
+        if (result.kind === "no-thumbnail") {
+            (0,_http_api_response__WEBPACK_IMPORTED_MODULE_6__.sendError)(res, result.reason, 404, "NO_THUMBNAIL", undefined, requestId);
+            return;
+        }
         if (result.kind === "too-large") {
             (0,_http_api_response__WEBPACK_IMPORTED_MODULE_6__.sendError)(res, "Media is larger than 50 MB", 413, "MEDIA_TOO_LARGE", `size=${result.size} max=${MAX_MEDIA_BYTES}`, requestId);
             return;
         }
-        rememberRecent(key, result.body, result.mimeType);
-        sendMediaBody(req, res, result.body, result.mimeType);
+        cache.remember(key, result.body, result.mimeType);
+        if (thumb)
+            sendThumbBody(res, result.body, result.mimeType);
+        else
+            sendMediaBody(req, res, result.body, result.mimeType);
     }
     catch (error) {
         logger.warn(`[${requestId}] media fetch failed:`, error instanceof Error ? error.message : String(error));
         (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, "Error in /media/:chatId/:messageId endpoint", false);
         if (!res.headersSent) {
-            (0,_route_responses__WEBPACK_IMPORTED_MODULE_8__.sendTelegramOperationFailure)(req, res, operation, error, "Failed to retrieve media", "Telegram media download failed", true);
+            (0,_route_responses__WEBPACK_IMPORTED_MODULE_9__.sendTelegramOperationFailure)(req, res, operation, error, "Failed to retrieve media", "Telegram media download failed", true);
         }
     }
 };
@@ -103169,7 +103348,12 @@ async function getMessagesNew(chatId, offset, minId, limit = 15, maxId = 0, opti
                 media = parseMediaMetadata(message);
             }
             // MEMORY FIX: Only download media for first N messages to prevent memory leaks
-            if (includeMedia && message.media && index < MAX_MEDIA_DOWNLOADS) {
+            if (includeMedia && message.media && index < MAX_MEDIA_DOWNLOADS && !hasImageThumbnail(message)) {
+                // Voice, audio, stickers and thumbless documents: describe them without downloading. The
+                // download for these used to return the whole file, which went out inline as a JSON Buffer.
+                media = await parseMediaInfo(message, undefined);
+            }
+            else if (includeMedia && message.media && index < MAX_MEDIA_DOWNLOADS) {
                 try {
                     // Determine priority based on position
                     let priority = 'low';
@@ -103193,7 +103377,7 @@ async function getMessagesNew(chatId, offset, minId, limit = 15, maxId = 0, opti
                         throwErr: false, // Don't throw, just return null on timeout
                     });
                     if (thumbnailUrl) {
-                        media = await parseMediaInfo(message, thumbnailUrl);
+                        media = await parseMediaInfo(message, toThumbnailDataUri(thumbnailUrl));
                     }
                     else {
                         // Log timeout but don't fail the entire message
@@ -103358,6 +103542,60 @@ async function getMessagesNew(chatId, offset, minId, limit = 15, maxId = 0, opti
         (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_1__.parseError)(error, "Error at getMessagesNew", false);
         return [];
     }
+}
+/** Largest thumbnail inlined in a chat response; a bigger one is left out and the viewer uses /media. */
+const MAX_INLINE_THUMBNAIL_BYTES = 128 * 1024;
+/**
+ * True when the message has an image thumbnail worth downloading: a photo, or a document (video, GIF,
+ * image, file) with `thumbs`. Voice, audio and stickers never qualify: media-service downloads the whole
+ * file for them.
+ */
+function hasImageThumbnail(message) {
+    if (message.media instanceof telegram__WEBPACK_IMPORTED_MODULE_0__.Api.MessageMediaPhoto)
+        return true;
+    if (!(message.media instanceof telegram__WEBPACK_IMPORTED_MODULE_0__.Api.MessageMediaDocument))
+        return false;
+    const doc = message.document;
+    if (!doc)
+        return false;
+    const mimeType = doc.mimeType || '';
+    const attributes = (doc.attributes || []);
+    if (mimeType === 'application/x-tgsticker' || mimeType === 'image/webp'
+        || attributes.some((attr) => attr.className === 'DocumentAttributeSticker'))
+        return false;
+    if (mimeType.startsWith('audio/') || attributes.some((attr) => attr.className === 'DocumentAttributeAudio'))
+        return false;
+    return Array.isArray(doc.thumbs) && doc.thumbs.length > 0;
+}
+function imageMimeType(bytes) {
+    if (bytes.length < 4)
+        return null;
+    if (bytes[0] === 0xff && bytes[1] === 0xd8)
+        return 'image/jpeg';
+    if (bytes[0] === 0x89 && bytes.toString('latin1', 1, 4) === 'PNG')
+        return 'image/png';
+    if (bytes.toString('latin1', 0, 3) === 'GIF')
+        return 'image/gif';
+    if (bytes.length >= 12 && bytes.toString('latin1', 0, 4) === 'RIFF' && bytes.toString('latin1', 8, 12) === 'WEBP')
+        return 'image/webp';
+    return null;
+}
+/**
+ * The only form `thumbnailUrl` may take: a small `data:image/...;base64,` URI. Anything that is not an
+ * image, or is over MAX_INLINE_THUMBNAIL_BYTES, is dropped (undefined) rather than sent inline.
+ */
+function toThumbnailDataUri(downloaded) {
+    if (!downloaded)
+        return undefined;
+    if (typeof downloaded === 'string') {
+        return downloaded.startsWith('data:image/') && downloaded.length <= Math.ceil(MAX_INLINE_THUMBNAIL_BYTES * 4 / 3) + 64
+            ? downloaded
+            : undefined;
+    }
+    if (!Buffer.isBuffer(downloaded) || downloaded.length > MAX_INLINE_THUMBNAIL_BYTES)
+        return undefined;
+    const mime = imageMimeType(downloaded);
+    return mime ? `data:${mime};base64,${downloaded.toString('base64')}` : undefined;
 }
 async function parseMediaInfo(message, thumbnailUrl) {
     if (message.media instanceof telegram__WEBPACK_IMPORTED_MODULE_0__.Api.MessageMediaPhoto) {
