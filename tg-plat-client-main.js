@@ -49637,8 +49637,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "30618c410e2c52bf310749984af73f52848caf73" : 0;
-    const builtAt =  true ? "2026-10-28T19:33:08.626Z" : 0;
+    const sha =  true ? "8d889500b8db676d62465422e7766f91c3dd0c59" : 0;
+    const builtAt =  true ? "2026-10-28T20:32:59.583Z" : 0;
     return { sha, builtAt };
 }
 
@@ -54429,7 +54429,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   inHouseCallsSwitchState: () => (/* reexport safe */ _switch__WEBPACK_IMPORTED_MODULE_19__.inHouseCallsSwitchState),
 /* harmony export */   isInHouseCallsEnabled: () => (/* reexport safe */ _switch__WEBPACK_IMPORTED_MODULE_19__.isInHouseCallsEnabled),
 /* harmony export */   maxInHouseCalls: () => (/* binding */ maxInHouseCalls),
-/* harmony export */   restoreCallPrivacyIfLeftOpen: () => (/* reexport safe */ _privacy_restore__WEBPACK_IMPORTED_MODULE_24__.restoreCallPrivacyIfLeftOpen),
+/* harmony export */   restoreCallPrivacyIfLeftOpen: () => (/* reexport safe */ _privacy_restore__WEBPACK_IMPORTED_MODULE_25__.restoreCallPrivacyIfLeftOpen),
 /* harmony export */   sendInHouseText: () => (/* binding */ sendInHouseText),
 /* harmony export */   setInHouseCallsOverride: () => (/* reexport safe */ _switch__WEBPACK_IMPORTED_MODULE_19__.setInHouseCallsOverride)
 /* harmony export */ });
@@ -54461,7 +54461,9 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _chat_proofs__WEBPACK_IMPORTED_MODULE_21__ = __webpack_require__(/*! ../chat-proofs */ "./src/calls/chat-proofs.ts");
 /* harmony import */ var _tg_core_telegram_utils_resolveEntity__WEBPACK_IMPORTED_MODULE_22__ = __webpack_require__(/*! @tg/core/telegram-utils/resolveEntity */ "../../packages/tg-core/src/telegram-utils/resolveEntity.ts");
 /* harmony import */ var _crash_quarantine__WEBPACK_IMPORTED_MODULE_23__ = __webpack_require__(/*! ./crash-quarantine */ "./src/calls/inhouse/crash-quarantine.ts");
-/* harmony import */ var _privacy_restore__WEBPACK_IMPORTED_MODULE_24__ = __webpack_require__(/*! ./privacy-restore */ "./src/calls/inhouse/privacy-restore.ts");
+/* harmony import */ var _media_voices__WEBPACK_IMPORTED_MODULE_24__ = __webpack_require__(/*! ../../media/voices */ "./src/media/voices.ts");
+/* harmony import */ var _privacy_restore__WEBPACK_IMPORTED_MODULE_25__ = __webpack_require__(/*! ./privacy-restore */ "./src/calls/inhouse/privacy-restore.ts");
+
 
 
 
@@ -54574,7 +54576,7 @@ async function readCallPrivacy(client) {
 }
 function createCallAllowList(client) {
     const db = _data_user_data_crud__WEBPACK_IMPORTED_MODULE_14__.UserDataDtoCrud.getInstance();
-    const stateFile = (0,_privacy_restore__WEBPACK_IMPORTED_MODULE_24__.allowListStateFile)();
+    const stateFile = (0,_privacy_restore__WEBPACK_IMPORTED_MODULE_25__.allowListStateFile)();
     const setRules = (rules) => client.invoke(new telegram__WEBPACK_IMPORTED_MODULE_4__.Api.account.SetPrivacy({ key: new telegram__WEBPACK_IMPORTED_MODULE_4__.Api.InputPrivacyKeyPhoneCall(), rules }));
     return new _call_allow_list__WEBPACK_IMPORTED_MODULE_6__.CallAllowList({
         isEnabled: () => (0,_switch__WEBPACK_IMPORTED_MODULE_19__.isInHouseCallsEnabled)(),
@@ -54626,7 +54628,7 @@ async function sendInHouseText(client, chatId, text, urgent) {
 function createInHouseCallService(client, hooks) {
     const db = _data_user_data_crud__WEBPACK_IMPORTED_MODULE_14__.UserDataDtoCrud.getInstance();
     const maxCalls = maxInHouseCalls();
-    const proofStateFile = (0,_privacy_restore__WEBPACK_IMPORTED_MODULE_24__.voiceProofStateFile)();
+    const proofStateFile = (0,_privacy_restore__WEBPACK_IMPORTED_MODULE_25__.voiceProofStateFile)();
     // Same formalities as the replier: gate, read, pause, typing scaled to the text, then send.
     const sendLikeHuman = (0,_human_send__WEBPACK_IMPORTED_MODULE_7__.createHumanSender)({
         readGate: async (chatId) => (await db.read(chatId)),
@@ -54641,8 +54643,8 @@ function createInHouseCallService(client, hooks) {
     });
     return new _in_house_call_service__WEBPACK_IMPORTED_MODULE_17__.InHouseCallService({
         allowList: createCallAllowList(client),
-        // The same pay-prompt voice notes the chat flow sends, from the client's working directory.
-        pitchClips: () => PITCH_CLIPS.map((file) => path__WEBPACK_IMPORTED_MODULE_3___default().resolve(process.cwd(), file)).filter((file) => fs__WEBPACK_IMPORTED_MODULE_2___default().existsSync(file)),
+        // The same pay-prompt voice notes the chat flow sends: a variant from voices/<clientId> + voices/common, else the working directory.
+        pitchClips: () => PITCH_CLIPS.map((file) => (0,_media_voices__WEBPACK_IMPORTED_MODULE_24__.pickVoiceSlot)('call pitch', file, path__WEBPACK_IMPORTED_MODULE_3___default().resolve(process.cwd(), file))).filter((file) => fs__WEBPACK_IMPORTED_MODULE_2___default().existsSync(file)),
         payAgainPrompt: async (chatId, user, kind) => {
             await sendLikeHuman(chatId, (0,_conversation_messages_call_messages__WEBPACK_IMPORTED_MODULE_5__.callPayAgainMessage)(kind, chatId, Number(user.payAmount) || 0), { ignoreCooldown: true });
         },
@@ -55909,6 +55911,7 @@ function schedulePostShow(chatId, args, delayMs) {
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   VOICE_PROOF_CLIPS: () => (/* binding */ VOICE_PROOF_CLIPS),
+/* harmony export */   VOICE_PROOF_CLIP_PATTERN: () => (/* binding */ VOICE_PROOF_CLIP_PATTERN),
 /* harmony export */   pickVoiceProofClip: () => (/* binding */ pickVoiceProofClip),
 /* harmony export */   recordProofRequest: () => (/* binding */ recordProofRequest),
 /* harmony export */   resetProofRequests: () => (/* binding */ resetProofRequests),
@@ -55916,14 +55919,13 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ });
 /* harmony import */ var fs__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! fs */ "fs");
 /* harmony import */ var fs__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(fs__WEBPACK_IMPORTED_MODULE_0__);
-/* harmony import */ var path__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! path */ "path");
-/* harmony import */ var path__WEBPACK_IMPORTED_MODULE_1___default = /*#__PURE__*/__webpack_require__.n(path__WEBPACK_IMPORTED_MODULE_1__);
-/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
-/* harmony import */ var _telegram_client_access__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../telegram/client-access */ "./src/telegram/client-access.ts");
-/* harmony import */ var _data_user_data_crud__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../data/user-data-crud */ "./src/data/user-data-crud.ts");
-/* harmony import */ var _payments_service_eligibility__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ../payments/service-eligibility */ "./src/payments/service-eligibility.ts");
-/* harmony import */ var _call_me__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ./call-me */ "./src/calls/call-me.ts");
-/* harmony import */ var _inhouse_voice_proof_config__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ./inhouse/voice-proof-config */ "./src/calls/inhouse/voice-proof-config.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _telegram_client_access__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../telegram/client-access */ "./src/telegram/client-access.ts");
+/* harmony import */ var _data_user_data_crud__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../data/user-data-crud */ "./src/data/user-data-crud.ts");
+/* harmony import */ var _payments_service_eligibility__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../payments/service-eligibility */ "./src/payments/service-eligibility.ts");
+/* harmony import */ var _call_me__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ./call-me */ "./src/calls/call-me.ts");
+/* harmony import */ var _inhouse_voice_proof_config__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ./inhouse/voice-proof-config */ "./src/calls/inhouse/voice-proof-config.ts");
+/* harmony import */ var _media_voices__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ../media/voices */ "./src/media/voices.ts");
 
 
 
@@ -55932,14 +55934,17 @@ __webpack_require__.r(__webpack_exports__);
 
 
 
-const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_2__.Logger('tg-aut:voice-proof');
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_1__.Logger('tg-aut:voice-proof');
 /**
  * The "pay first, then video" voice clips VCUI's payment page plays on its call screen
  * (payment-local/src/assets/audio, copied to apps/tg-aut/assets/voice-proof). They are not in the
- * bundle: put them in INHOUSE_VOICE_PROOF_DIR (default: the client's working directory, where the
+ * bundle: every call-voice-*.mp3 in `<cwd>/assets/voices/<clientId>/` + `.../common/` (media/voices.ts),
+ * else these fixed names in INHOUSE_VOICE_PROOF_DIR (default: the client's working directory, where the
  * other pitch clips live). No clip on the host = no call, the voice message goes out as before.
  */
 const VOICE_PROOF_CLIPS = ['call-voice-1.mp3', 'call-voice-2.mp3', 'call-voice-3.mp3'];
+/** Variant clips in the voices dirs: call-voice-<anything>.mp3. */
+const VOICE_PROOF_CLIP_PATTERN = /^call-voice-.+\.mp3$/i;
 /** A payer: voice-proof calls are for people who have not paid, never for them or their pending show. */
 const PAID_AMOUNT = 15;
 const requests = new Map();
@@ -55958,9 +55963,8 @@ function resetProofRequests() {
     lastClip = null;
 }
 /** An existing clip, rotating so the same user never hears the same one twice running. */
-function pickVoiceProofClip(env = process.env, exists = (fs__WEBPACK_IMPORTED_MODULE_0___default().existsSync), random = Math.random) {
-    const dir = env.INHOUSE_VOICE_PROOF_DIR || process.cwd();
-    const found = VOICE_PROOF_CLIPS.map((file) => path__WEBPACK_IMPORTED_MODULE_1___default().resolve(dir, file)).filter((file) => exists(file));
+function pickVoiceProofClip(env = process.env, exists = (fs__WEBPACK_IMPORTED_MODULE_0___default().existsSync), random = Math.random, { cwd = process.cwd(), readdir } = {}) {
+    const found = (0,_media_voices__WEBPACK_IMPORTED_MODULE_7__.listVoiceVariants)('voice-proof clips', VOICE_PROOF_CLIP_PATTERN, VOICE_PROOF_CLIPS, env.INHOUSE_VOICE_PROOF_DIR || cwd, { env, cwd, exists, readdir });
     if (found.length === 0)
         return null;
     const options = found.length > 1 ? found.filter((file) => file !== lastClip) : found;
@@ -55968,14 +55972,14 @@ function pickVoiceProofClip(env = process.env, exists = (fs__WEBPACK_IMPORTED_MO
     return lastClip;
 }
 const liveDeps = {
-    limits: () => (0,_inhouse_voice_proof_config__WEBPACK_IMPORTED_MODULE_7__.voiceProofLimits)(),
-    active: () => (0,_call_me__WEBPACK_IMPORTED_MODULE_6__.inHouseCallsActive)(),
-    service: async () => _telegram_client_access__WEBPACK_IMPORTED_MODULE_3__.TelegramManager.getInstance()?.callManager?.getInHouse?.(),
+    limits: () => (0,_inhouse_voice_proof_config__WEBPACK_IMPORTED_MODULE_6__.voiceProofLimits)(),
+    active: () => (0,_call_me__WEBPACK_IMPORTED_MODULE_5__.inHouseCallsActive)(),
+    service: async () => _telegram_client_access__WEBPACK_IMPORTED_MODULE_2__.TelegramManager.getInstance()?.callManager?.getInHouse?.(),
     clip: () => pickVoiceProofClip(),
     now: () => Date.now(),
     payerOrPending: async (chatId) => {
-        const user = await _data_user_data_crud__WEBPACK_IMPORTED_MODULE_4__.UserDataDtoCrud.getInstance().read(chatId);
-        return !!user && ((Number(user.payAmount) || 0) >= PAID_AMOUNT || (0,_payments_service_eligibility__WEBPACK_IMPORTED_MODULE_5__.hasPendingPaidService)(user));
+        const user = await _data_user_data_crud__WEBPACK_IMPORTED_MODULE_3__.UserDataDtoCrud.getInstance().read(chatId);
+        return !!user && ((Number(user.payAmount) || 0) >= PAID_AMOUNT || (0,_payments_service_eligibility__WEBPACK_IMPORTED_MODULE_4__.hasPendingPaidService)(user));
     },
 };
 /**
@@ -78545,6 +78549,122 @@ async function downloadProfilePic(client, index) {
     catch (err) {
         logger.error("Error:", err);
     }
+}
+
+
+/***/ },
+
+/***/ "./src/media/voices.ts"
+/*!*****************************!*\
+  !*** ./src/media/voices.ts ***!
+  \*****************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   COMMON_VOICES: () => (/* binding */ COMMON_VOICES),
+/* harmony export */   VOICES_SUBDIR: () => (/* binding */ VOICES_SUBDIR),
+/* harmony export */   listVoiceVariants: () => (/* binding */ listVoiceVariants),
+/* harmony export */   perClientVoicesDir: () => (/* binding */ perClientVoicesDir),
+/* harmony export */   pickVoiceSlot: () => (/* binding */ pickVoiceSlot),
+/* harmony export */   voiceSlotPattern: () => (/* binding */ voiceSlotPattern),
+/* harmony export */   voicesDirs: () => (/* binding */ voicesDirs)
+/* harmony export */ });
+/* harmony import */ var fs__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! fs */ "fs");
+/* harmony import */ var fs__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(fs__WEBPACK_IMPORTED_MODULE_0__);
+/* harmony import */ var path__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! path */ "path");
+/* harmony import */ var path__WEBPACK_IMPORTED_MODULE_1___default = /*#__PURE__*/__webpack_require__.n(path__WEBPACK_IMPORTED_MODULE_1__);
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+
+
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_2__.Logger('tg-aut:voices');
+/**
+ * Where voice audio (chat voice notes, voice-proof call-voice-*.mp3, in-house call pitch clips) is read
+ * from. The shruthie1/server clients-N branches ship the files onto the VM:
+ *
+ *   <cwd>/assets/voices/<clientId>/   clips that say this client's / persona's name
+ *   <cwd>/assets/voices/common/       generic clips shared by every client
+ *   legacy location                   CMS-downloaded src/<dbcoll>/ (voice notes) or the cwd root (call
+ *                                     clips): the last fallback, i.e. today's behaviour
+ *
+ * Variants: a slot `<name>.mp3` is every `<name>.mp3` / `<name>-<N>.mp3` across per-client + common
+ * (deduped by file name, per-client wins on a clash), one picked at random. None there = legacy file.
+ * The voice-proof set is every call-voice-*.mp3 the same way. No new files on the host = no change.
+ */
+const VOICES_SUBDIR = path__WEBPACK_IMPORTED_MODULE_1___default().join('assets', 'voices');
+const COMMON_VOICES = 'common';
+function safeReaddir(dir) {
+    try {
+        return fs__WEBPACK_IMPORTED_MODULE_0___default().readdirSync(dir);
+    }
+    catch {
+        return [];
+    }
+}
+/** `<cwd>/assets/voices/<clientId>`, or null without a usable clientId. */
+function perClientVoicesDir(env = process.env, cwd = process.cwd()) {
+    const clientId = env.clientId?.trim();
+    if (!clientId || !/^[A-Za-z0-9_.-]+$/.test(clientId) || clientId === '.' || clientId === '..' || clientId === COMMON_VOICES)
+        return null;
+    return path__WEBPACK_IMPORTED_MODULE_1___default().resolve(cwd, VOICES_SUBDIR, clientId);
+}
+/** Per-client (when there is a clientId) then common. */
+function voicesDirs(env = process.env, cwd = process.cwd()) {
+    const perClient = perClientVoicesDir(env, cwd);
+    const common = path__WEBPACK_IMPORTED_MODULE_1___default().resolve(cwd, VOICES_SUBDIR, COMMON_VOICES);
+    return perClient ? [perClient, common] : [common];
+}
+/** Every file matching pattern across per-client + common, deduped by name (per-client wins). */
+function listVoices(pattern, { env = process.env, cwd = process.cwd(), readdir = safeReaddir }) {
+    const byName = new Map();
+    for (const dir of voicesDirs(env, cwd)) {
+        for (const name of [...readdir(dir)].sort()) {
+            if (pattern.test(name) && !byName.has(name))
+                byName.set(name, path__WEBPACK_IMPORTED_MODULE_1___default().join(dir, name));
+        }
+    }
+    return [...byName.values()];
+}
+/** Matches `<slot>.<ext>` and `<slot>-<N>.<ext>` for a slot file name like `confirm.mp3`. */
+function voiceSlotPattern(fileName) {
+    const ext = path__WEBPACK_IMPORTED_MODULE_1___default().extname(fileName);
+    const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return new RegExp(`^${esc(path__WEBPACK_IMPORTED_MODULE_1___default().basename(fileName, ext))}(?:-\\d+)?${esc(ext)}$`, 'i');
+}
+/** One random variant of slot `fileName` from per-client + common, else `legacyPath` unchanged. */
+function pickVoiceSlot(label, fileName, legacyPath, opts = {}) {
+    const found = listVoices(voiceSlotPattern(fileName), opts);
+    if (found.length === 0) {
+        logOnce(label, `legacy ${path__WEBPACK_IMPORTED_MODULE_1___default().dirname(legacyPath)}`);
+        return legacyPath;
+    }
+    logOnce(label, `${dirsOf(found)} (${found.length} variants)`);
+    return found[Math.floor((opts.random ?? Math.random)() * found.length)];
+}
+/** Every pattern match across per-client + common; when there are none, the existing legacyFiles in legacyDir. */
+function listVoiceVariants(label, pattern, legacyFiles, legacyDir, opts = {}) {
+    const found = listVoices(pattern, opts);
+    if (found.length > 0) {
+        logOnce(label, `${dirsOf(found)} (${found.length} clips)`);
+        return found;
+    }
+    const exists = opts.exists ?? (fs__WEBPACK_IMPORTED_MODULE_0___default().existsSync);
+    const legacy = legacyFiles.map((file) => path__WEBPACK_IMPORTED_MODULE_1___default().resolve(legacyDir, file)).filter((file) => exists(file));
+    logOnce(label, `legacy ${path__WEBPACK_IMPORTED_MODULE_1___default().resolve(legacyDir)} (${legacy.length} clips)`);
+    return legacy;
+}
+const dirsOf = (files) => [...new Set(files.map((file) => path__WEBPACK_IMPORTED_MODULE_1___default().dirname(file)))].join(', ');
+const logged = new Set();
+function logOnce(label, where) {
+    const key = `${label}|${where}`;
+    if (logged.has(key))
+        return;
+    if (logged.size > 100)
+        logged.clear();
+    logged.add(key);
+    logger.log(`[voices] ${label} from ${where}`);
 }
 
 
@@ -108103,6 +108223,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var url__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! url */ "url");
 /* harmony import */ var url__WEBPACK_IMPORTED_MODULE_3___default = /*#__PURE__*/__webpack_require__.n(url__WEBPACK_IMPORTED_MODULE_3__);
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _media_voices__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ../media/voices */ "./src/media/voices.ts");
+
 
 
 
@@ -108118,7 +108240,7 @@ const moduleDir =  true
     ? __webpack_dirname__
     : 0;
 class FileSender {
-    constructor(externalLogger) {
+    constructor(externalLogger, voicesOptions = {}) {
         this.fileHandles = new Map();
         this.uploadingLocks = new Map();
         /** Uploaded handle -> its file path, so a queued send can be backed up as a path and re-uploaded after a restart. */
@@ -108128,6 +108250,7 @@ class FileSender {
         this.MAX_CACHE_SIZE = 100; // Maximum number of cached file handles
         this.cleanupInterval = null;
         this.externalLogger = externalLogger;
+        this.voicesOptions = voicesOptions;
         this.startPeriodicCleanup();
     }
     log(message, level = 'info') {
@@ -108145,7 +108268,15 @@ class FileSender {
         return path__WEBPACK_IMPORTED_MODULE_2___default().resolve(moduleDir, "..", clientId, fileName);
     }
     normalizePath(filePath) {
-        return path__WEBPACK_IMPORTED_MODULE_2___default().normalize(path__WEBPACK_IMPORTED_MODULE_2___default().isAbsolute(filePath) ? filePath : this.getClientFilePath(filePath));
+        if (path__WEBPACK_IMPORTED_MODULE_2___default().isAbsolute(filePath))
+            return path__WEBPACK_IMPORTED_MODULE_2___default().normalize(filePath);
+        const cmsPath = path__WEBPACK_IMPORTED_MODULE_2___default().normalize(this.getClientFilePath(filePath));
+        // A voice-note slot ('./confirm.mp3'): a variant from assets/voices/<clientId> + common, else the CMS file.
+        const name = path__WEBPACK_IMPORTED_MODULE_2___default().normalize(filePath);
+        if (path__WEBPACK_IMPORTED_MODULE_2___default().dirname(name) === "." && path__WEBPACK_IMPORTED_MODULE_2___default().extname(name).toLowerCase() === ".mp3") {
+            return path__WEBPACK_IMPORTED_MODULE_2___default().normalize((0,_media_voices__WEBPACK_IMPORTED_MODULE_5__.pickVoiceSlot)(`voice-note ${name}`, name, cmsPath, this.voicesOptions));
+        }
+        return cmsPath;
     }
     async uploadFile(filePath) {
         const resolvedPath = this.normalizePath(filePath);
