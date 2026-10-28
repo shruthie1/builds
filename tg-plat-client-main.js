@@ -49637,8 +49637,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "ec44fbad5a446f853d5048b9d20f374c6af54dd4" : 0;
-    const builtAt =  true ? "2026-10-28T17:12:38.191Z" : 0;
+    const sha =  true ? "04d1278f25d6aa3a873185183b256aa4b5371fd2" : 0;
+    const builtAt =  true ? "2026-10-28T17:27:06.779Z" : 0;
     return { sha, builtAt };
 }
 
@@ -106429,8 +106429,10 @@ async function unblockUser(chatId) {
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   MAX_VIEWER_ENTITIES: () => (/* binding */ MAX_VIEWER_ENTITIES),
 /* harmony export */   getHistoryPage: () => (/* binding */ getHistoryPage),
-/* harmony export */   getMessagesNew: () => (/* binding */ getMessagesNew)
+/* harmony export */   getMessagesNew: () => (/* binding */ getMessagesNew),
+/* harmony export */   toViewerEntities: () => (/* binding */ toViewerEntities)
 /* harmony export */ });
 /* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! telegram */ "telegram");
 /* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(telegram__WEBPACK_IMPORTED_MODULE_0__);
@@ -106450,6 +106452,61 @@ __webpack_require__.r(__webpack_exports__);
 
 
 const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_5__.Logger('tg-aut:core-utils');
+/** Bounds on what one message may carry to the viewer. */
+const MAX_VIEWER_ENTITIES = 100;
+const MAX_ENTITY_URL_CHARS = 2048;
+const MAX_ENTITY_LANGUAGE_CHARS = 32;
+/**
+ * Maps GramJS `message.entities` to plain viewer entities. Keeps only non-empty entities that fit inside `text`, at
+ * most MAX_VIEWER_ENTITIES; returns undefined when none survive, so the field is left out of the response.
+ */
+function toViewerEntities(rawEntities, text) {
+    if (!Array.isArray(rawEntities) || rawEntities.length === 0 || !text)
+        return undefined;
+    const out = [];
+    for (const raw of rawEntities) {
+        if (out.length >= MAX_VIEWER_ENTITIES)
+            break;
+        if (!raw || typeof raw !== 'object')
+            continue;
+        const entity = raw;
+        const className = typeof entity['className'] === 'string' ? entity['className'] : '';
+        if (!className.startsWith('MessageEntity') || className === 'MessageEntityUnknown')
+            continue;
+        const offset = entity['offset'];
+        const length = entity['length'];
+        if (typeof offset !== 'number' || typeof length !== 'number')
+            continue;
+        if (!Number.isInteger(offset) || !Number.isInteger(length) || offset < 0 || length <= 0)
+            continue;
+        if (offset + length > text.length)
+            continue;
+        const type = className
+            .replace(/^MessageEntity/, '')
+            .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
+            .toLowerCase();
+        const mapped = { type, offset, length };
+        if (type === 'text_url') {
+            const url = entity['url'];
+            if (typeof url !== 'string' || url.length === 0 || url.length > MAX_ENTITY_URL_CHARS)
+                continue;
+            mapped.url = url;
+        }
+        else if (type === 'pre') {
+            const language = entity['language'];
+            if (typeof language === 'string' && language.length > 0 && language.length <= MAX_ENTITY_LANGUAGE_CHARS) {
+                mapped.language = language;
+            }
+        }
+        else if (type === 'mention_name') {
+            const userId = entity['userId'];
+            if (userId !== undefined && userId !== null)
+                mapped.userId = String(userId);
+        }
+        out.push(mapped);
+    }
+    return out.length > 0 ? out : undefined;
+}
 async function getMessagesNew(chatId, offset, minId, limit = 15, maxId = 0, options = {}) {
     return (await getHistoryPage(chatId, offset, minId, limit, maxId, options)).messages;
 }
@@ -106649,6 +106706,8 @@ async function getHistoryPage(chatId, offset, minId, limit = 15, maxId = 0, opti
             const visibleText = rawText
                 || (message.out && !media && !action ? '[outgoing action/message without text]' : '');
             const senderId = message.senderId?.toString() || null;
+            // Only real text carries entities; the placeholder above never does.
+            const entities = rawText ? toViewerEntities(message.entities, rawText) : undefined;
             return {
                 id: message.id,
                 text: visibleText,
@@ -106667,7 +106726,8 @@ async function getHistoryPage(chatId, offset, minId, limit = 15, maxId = 0, opti
                 edit_date: message.editDate,
                 is_pinned: message.pinned || false,
                 reactions,
-                action
+                action,
+                ...(entities ? { entities } : {})
             };
         });
         // MEMORY FIX: Process messages in smaller batches to prevent memory spikes
