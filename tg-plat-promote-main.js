@@ -38311,8 +38311,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "f4e03380e870db5563e32f974977805e359ce428" : 0;
-    const builtAt =  true ? "2026-10-28T16:47:40.746Z" : 0;
+    const sha =  true ? "419493f8a123a6cf540834514e0a8e1fb59115fd" : 0;
+    const builtAt =  true ? "2026-10-28T17:10:45.410Z" : 0;
     return { sha, builtAt };
 }
 
