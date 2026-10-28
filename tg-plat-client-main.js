@@ -49611,8 +49611,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "e49ba15a218875c65e8034df0045e98b823efede" : 0;
-    const builtAt =  true ? "2026-10-28T14:03:29.256Z" : 0;
+    const sha =  true ? "ca8ef5fb76e9851d12e5dd9bd8b6769fe0609107" : 0;
+    const builtAt =  true ? "2026-10-28T15:26:10.553Z" : 0;
     return { sha, builtAt };
 }
 
@@ -77576,6 +77576,166 @@ function getClientFilePath(fileName) {
 
 /***/ },
 
+/***/ "./src/media/media-availability.ts"
+/*!*****************************************!*\
+  !*** ./src/media/media-availability.ts ***!
+  \*****************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   clearUnavailableMedia: () => (/* binding */ clearUnavailableMedia),
+/* harmony export */   mediaAvailability: () => (/* binding */ mediaAvailability),
+/* harmony export */   rememberUnavailableMedia: () => (/* binding */ rememberUnavailableMedia),
+/* harmony export */   unavailableMediaReason: () => (/* binding */ unavailableMediaReason)
+/* harmony export */ });
+/* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! telegram */ "telegram");
+/* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(telegram__WEBPACK_IMPORTED_MODULE_0__);
+// Media the tg-chats viewer must not (or cannot) download, decided from the message alone, without a Telegram call
+// (chat-viewer edge cases, 2026-10-28).
+//
+// View-once media (`ttlSeconds` on MessageMediaPhoto/MessageMediaDocument) is never downloaded, expired or not:
+// it is private by design and a download by this account could interfere with the user-facing view-once state.
+// Once viewed/expired Telegram sends the media without its photo/document. Polls, locations, contacts, stories, paid
+// media and other non-file media have nothing /media could serve.
+//
+// /chat serialisation remembers every such message here, so GET /media/:chatId/:messageId refuses it at once (410)
+// with no Telegram call at all; a message not seen by /chat yet is refused after its one lookup (no download).
+
+function textOf(value) {
+    if (typeof value === 'string')
+        return value;
+    if (value && typeof value === 'object' && typeof value.text === 'string') {
+        return value.text;
+    }
+    return '';
+}
+function withLabel(prefix, detail) {
+    const trimmed = detail.trim().slice(0, 80);
+    return trimmed ? `${prefix}: ${trimmed}` : prefix;
+}
+function documentType(doc, media) {
+    const mimeType = doc?.mimeType || '';
+    const attributes = (doc?.attributes || []);
+    if (media.voice || attributes.some((a) => a.className === 'DocumentAttributeAudio' && a.voice === true))
+        return 'voice';
+    if (media.video || media.round || mimeType.startsWith('video/'))
+        return 'video';
+    if (mimeType.startsWith('audio/'))
+        return 'audio';
+    if (mimeType.startsWith('image/'))
+        return 'photo';
+    return 'document';
+}
+/** A photo/document object that is there and not the *Empty placeholder Telegram sends for a deleted one. */
+function isPresent(value, emptyClassName) {
+    if (!value || typeof value !== 'object')
+        return false;
+    return value.className !== emptyClassName;
+}
+function other(kind, unavailable, label) {
+    return { type: 'other', kind, unavailable, label };
+}
+/**
+ * Why this message's media cannot be fetched by the viewer, or null when it is ordinary downloadable media (a photo or
+ * document that is present and not view-once) or has none to show (no media, MessageMediaEmpty, web page preview).
+ */
+function mediaAvailability(message) {
+    const media = message.media;
+    if (!media)
+        return null;
+    // message.photo / message.document are GramJS getters over media.photo / media.document (Api.Photo / Api.Document
+    // only; PhotoEmpty / DocumentEmpty read as absent), the same accessors the download path uses.
+    if (media instanceof telegram__WEBPACK_IMPORTED_MODULE_0__.Api.MessageMediaPhoto) {
+        const present = isPresent(message.photo, 'PhotoEmpty');
+        if (media.ttlSeconds) {
+            return present
+                ? { type: 'photo', viewOnce: true, unavailable: 'VIEW_ONCE' }
+                : { type: 'photo', viewOnce: true, expired: true, unavailable: 'MEDIA_EXPIRED' };
+        }
+        return present ? null : { type: 'photo', expired: true, unavailable: 'MEDIA_EXPIRED' };
+    }
+    if (media instanceof telegram__WEBPACK_IMPORTED_MODULE_0__.Api.MessageMediaDocument) {
+        const doc = isPresent(message.document, 'DocumentEmpty') ? message.document : undefined;
+        const type = documentType(doc, media);
+        if (media.ttlSeconds) {
+            return doc
+                ? { type, viewOnce: true, unavailable: 'VIEW_ONCE' }
+                : { type, viewOnce: true, expired: true, unavailable: 'MEDIA_EXPIRED' };
+        }
+        // DocumentEmpty or no document at all: deleted from Telegram's side; nothing to download.
+        return doc ? null : { type, unavailable: 'MEDIA_UNAVAILABLE' };
+    }
+    // The rest by className (not instanceof): every GramJS TL object carries it, and a class this GramJS build lacks
+    // must not throw here.
+    const m = media;
+    switch (m.className) {
+        case 'MessageMediaEmpty':
+        case 'MessageMediaWebPage':
+            return null; // nothing to show beyond the text (a web page preview is its link in the text)
+        case 'MessageMediaPaidMedia':
+            return other('paid', 'PAID_MEDIA', 'Paid media');
+        case 'MessageMediaStory':
+            return other('story', 'STORY', 'Story');
+        case 'MessageMediaPoll':
+            return other('poll', 'NOT_DOWNLOADABLE', withLabel('Poll', textOf(m.poll?.question)));
+        case 'MessageMediaGeoLive':
+            return other('live_location', 'NOT_DOWNLOADABLE', 'Live location');
+        case 'MessageMediaVenue':
+            return other('venue', 'NOT_DOWNLOADABLE', withLabel('Location', textOf(m.title)));
+        case 'MessageMediaGeo':
+            return other('location', 'NOT_DOWNLOADABLE', 'Location');
+        case 'MessageMediaContact':
+            // Name only: the contact's phone number is not put into the viewer payload.
+            return other('contact', 'NOT_DOWNLOADABLE', withLabel('Contact', `${textOf(m.firstName)} ${textOf(m.lastName)}`));
+        case 'MessageMediaDice':
+            return other('dice', 'NOT_DOWNLOADABLE', `${textOf(m.emoticon) || '🎲'} ${typeof m.value === 'number' ? m.value : ''}`.trim());
+        case 'MessageMediaGame':
+            return other('game', 'NOT_DOWNLOADABLE', withLabel('Game', textOf(m.game?.title)));
+        case 'MessageMediaInvoice':
+            return other('invoice', 'NOT_DOWNLOADABLE', withLabel('Invoice', textOf(m.title)));
+        case 'MessageMediaGiveaway':
+        case 'MessageMediaGiveawayResults':
+            return other('giveaway', 'NOT_DOWNLOADABLE', 'Giveaway');
+        default:
+            // MessageMediaUnsupported, or a media type newer than this code.
+            return typeof m.className === 'string' && m.className.startsWith('MessageMedia')
+                ? other('unsupported', 'UNSUPPORTED', 'Unsupported message')
+                : null;
+    }
+}
+const UNAVAILABLE_TTL_MS = 60 * 60000;
+const UNAVAILABLE_MAX_ENTRIES = 5000;
+/** chatId:messageId -> reason, remembered by /chat so /media can refuse without a Telegram call. Oldest evicted first. */
+const unavailable = new Map();
+const keyOf = (chatId, messageId) => `${chatId}:${messageId}`;
+function rememberUnavailableMedia(chatId, messageId, reason) {
+    const key = keyOf(chatId, messageId);
+    unavailable.delete(key);
+    unavailable.set(key, { reason, at: Date.now() });
+    while (unavailable.size > UNAVAILABLE_MAX_ENTRIES)
+        unavailable.delete(unavailable.keys().next().value);
+}
+function unavailableMediaReason(chatId, messageId) {
+    const key = keyOf(chatId, messageId);
+    const entry = unavailable.get(key);
+    if (!entry)
+        return null;
+    if (Date.now() - entry.at > UNAVAILABLE_TTL_MS) {
+        unavailable.delete(key);
+        return null;
+    }
+    return entry.reason;
+}
+/** Tests/shutdown. */
+function clearUnavailableMedia() {
+    unavailable.clear();
+}
+
+
+/***/ },
+
 /***/ "./src/media/media-service.ts"
 /*!************************************!*\
   !*** ./src/media/media-service.ts ***!
@@ -101719,8 +101879,10 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
 /* harmony import */ var _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! @tg/core/cache/EntityCacheManager */ "../../packages/tg-core/src/cache/EntityCacheManager.ts");
 /* harmony import */ var _http_api_response__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ../../http/api-response */ "./src/http/api-response.ts");
-/* harmony import */ var _route_responses__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ./route-responses */ "./src/routes/telegram/route-responses.ts");
-/* harmony import */ var _viewer_peer__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! ./viewer-peer */ "./src/routes/telegram/viewer-peer.ts");
+/* harmony import */ var _outbound_flood_error__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ../../outbound/flood-error */ "./src/outbound/flood-error.ts");
+/* harmony import */ var _route_responses__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! ./route-responses */ "./src/routes/telegram/route-responses.ts");
+/* harmony import */ var _viewer_peer__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! ./viewer-peer */ "./src/routes/telegram/viewer-peer.ts");
+
 
 
 
@@ -101743,9 +101905,9 @@ const SEARCH_MAX_QUERY_LENGTH = 100;
 /** True when the chat is in this account's dialog or entity cache (no Telegram call); else answers 404 UNKNOWN_CHAT. */
 async function knownViewerChat(res, chatId, requestId) {
     const dialogManager = _telegram_client_access__WEBPACK_IMPORTED_MODULE_1__.TelegramManager.getInstance()?.dialogManager;
-    if (await (0,_viewer_peer__WEBPACK_IMPORTED_MODULE_12__.resolveViewerPeer)(dialogManager, _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_9__.EntityCacheManager.getInstance(), chatId))
+    if (await (0,_viewer_peer__WEBPACK_IMPORTED_MODULE_13__.resolveViewerPeer)(dialogManager, _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_9__.EntityCacheManager.getInstance(), chatId))
         return true;
-    (0,_viewer_peer__WEBPACK_IMPORTED_MODULE_12__.sendUnknownChat)(res, requestId);
+    (0,_viewer_peer__WEBPACK_IMPORTED_MODULE_13__.sendUnknownChat)(res, requestId);
     return false;
 }
 /**
@@ -101793,7 +101955,14 @@ async function knownViewerChat(res, chatId, requestId) {
  *           Not a non-negative integer -> 400.
  *     responses:
  *       200:
- *         description: Messages retrieved successfully
+ *         description: |
+ *           Messages retrieved successfully. `pagination.hasMore` is true only when Telegram returned a full page
+ *           (counted before any per-message processing drop) whose oldest id is above 1. ADDITIVE (2026-10-28):
+ *           `pagination.endReached` (history requests without afterId: true = no older messages, stop paging) and
+ *           `pagination.nextMaxId` (the oldest id Telegram returned; pass it as maxId for the next older page).
+ *       429:
+ *         description: Telegram FloodWait while reading history ({ error "FLOOD_WAIT", retryAfter }). Before 2026-10-28
+ *           a Telegram error was answered as an empty 200 page, which looked like the end of history.
  *         content:
  *           application/json:
  *             schema:
@@ -101810,13 +101979,13 @@ const handleChat = async (req, res) => {
             (0,_http_api_response__WEBPACK_IMPORTED_MODULE_10__.sendValidationError)(res, "chatId is required", "Missing required parameter", requestId);
             return;
         }
-        const offset = (0,_route_responses__WEBPACK_IMPORTED_MODULE_11__.parseOptionalNonNegativeInteger)(req.query.offset, 0);
-        const minId = (0,_route_responses__WEBPACK_IMPORTED_MODULE_11__.parseOptionalNonNegativeInteger)(req.query.minId, 0);
-        const limit = (0,_route_responses__WEBPACK_IMPORTED_MODULE_11__.parseOptionalNonNegativeInteger)(req.query.limit, 20);
-        const maxId = (0,_route_responses__WEBPACK_IMPORTED_MODULE_11__.parseOptionalNonNegativeInteger)(req.query.maxId, 0);
+        const offset = (0,_route_responses__WEBPACK_IMPORTED_MODULE_12__.parseOptionalNonNegativeInteger)(req.query.offset, 0);
+        const minId = (0,_route_responses__WEBPACK_IMPORTED_MODULE_12__.parseOptionalNonNegativeInteger)(req.query.minId, 0);
+        const limit = (0,_route_responses__WEBPACK_IMPORTED_MODULE_12__.parseOptionalNonNegativeInteger)(req.query.limit, 20);
+        const maxId = (0,_route_responses__WEBPACK_IMPORTED_MODULE_12__.parseOptionalNonNegativeInteger)(req.query.maxId, 0);
         const includeMedia = String(req.query.includeMedia || "true").toLowerCase() !== "false";
         const afterIdGiven = req.query.afterId !== undefined;
-        const afterId = afterIdGiven ? (0,_route_responses__WEBPACK_IMPORTED_MODULE_11__.parseOptionalNonNegativeInteger)(req.query.afterId, 0) : null;
+        const afterId = afterIdGiven ? (0,_route_responses__WEBPACK_IMPORTED_MODULE_12__.parseOptionalNonNegativeInteger)(req.query.afterId, 0) : null;
         if (afterIdGiven && afterId === null) {
             (0,_http_api_response__WEBPACK_IMPORTED_MODULE_10__.sendValidationError)(res, "Invalid query parameters", "afterId must be a non-negative integer", requestId);
             return;
@@ -101832,7 +102001,7 @@ const handleChat = async (req, res) => {
         const safeLimit = Math.min(Math.max(requestedLimit, 1), maxLimit);
         if (!(await _telegram_client_access__WEBPACK_IMPORTED_MODULE_1__.TelegramManager.instanceExist())) {
             logger.error("Telegram manager unavailable for chat history");
-            await (0,_route_responses__WEBPACK_IMPORTED_MODULE_11__.sendTelegramUnavailable)(req, res, operation, true, "Telegram client instance not available");
+            await (0,_route_responses__WEBPACK_IMPORTED_MODULE_12__.sendTelegramUnavailable)(req, res, operation, true, "Telegram client instance not available");
             return;
         }
         if (!(await knownViewerChat(res, chatId, requestId)))
@@ -101840,23 +102009,41 @@ const handleChat = async (req, res) => {
         logger.log(`ChatRequest: ${chatId}, offset: ${offset}, minId: ${minId}, maxId: ${maxId}, limit: ${safeLimit}`);
         let messages = [];
         let hasMore = false;
+        let page = {};
         try {
-            const result = await (0,_tg_core_utils_withTimeout__WEBPACK_IMPORTED_MODULE_6__.withTimeout)(() => afterIdGiven
-                ? (0,_telegram_chat_history__WEBPACK_IMPORTED_MODULE_2__.getMessagesNew)(chatId, 0, 0, safeLimit, 0, { includeMedia, afterId: afterId })
-                : (0,_telegram_chat_history__WEBPACK_IMPORTED_MODULE_2__.getMessagesNew)(chatId, offset, minId, safeLimit, maxId, { includeMedia }), {
+            page = (await (0,_tg_core_utils_withTimeout__WEBPACK_IMPORTED_MODULE_6__.withTimeout)(() => afterIdGiven
+                ? (0,_telegram_chat_history__WEBPACK_IMPORTED_MODULE_2__.getHistoryPage)(chatId, 0, 0, safeLimit, 0, { includeMedia, afterId: afterId })
+                : (0,_telegram_chat_history__WEBPACK_IMPORTED_MODULE_2__.getHistoryPage)(chatId, offset, minId, safeLimit, maxId, { includeMedia }), {
                 timeout: 30000,
                 errorMessage: `GetMessages timeout for chatId: ${chatId}`,
                 throwErr: true,
-            });
-            messages = result || [];
-            // Check if there are more messages
-            hasMore = messages.length === safeLimit;
+            })) || {};
+            messages = page.messages || [];
+            // More exist only when Telegram filled the page. Counted on what Telegram returned (a message dropped by
+            // the per-message timeout must not make a full page look like the last one); id 1 is the first message.
+            const rawCount = typeof page.rawCount === "number" ? page.rawCount : messages.length;
+            hasMore = rawCount >= safeLimit && !(page.oldestRawId === 1 && !afterIdGiven);
         }
         catch (timeoutError) {
             logger.warn(`[GetMessages] Timeout for chatId ${chatId}:`, timeoutError instanceof Error ? timeoutError.message : String(timeoutError));
-            (0,_route_responses__WEBPACK_IMPORTED_MODULE_11__.sendTelegramOperationFailure)(req, res, operation, timeoutError, "Failed to retrieve messages within timeout period", "Telegram chat history timed out", true);
+            (0,_route_responses__WEBPACK_IMPORTED_MODULE_12__.sendTelegramOperationFailure)(req, res, operation, timeoutError, "Failed to retrieve messages within timeout period", "Telegram chat history timed out", true);
             return;
         }
+        // A Telegram failure is not an empty history: answering it as an empty 200 page told the viewer the chat had
+        // ended. FloodWait -> 429 with retryAfter (an expected viewer answer); anything else -> the usual failure.
+        if (page.error !== undefined) {
+            const flood = (0,_outbound_flood_error__WEBPACK_IMPORTED_MODULE_11__.classifyFlood)(page.error);
+            if (flood && !res.headersSent) {
+                const retryAfter = flood.kind === "wait" ? Math.max(1, Math.ceil(flood.seconds)) : 60;
+                res.setHeader?.("Retry-After", String(retryAfter));
+                res.status(429).json({ success: false, status: 429, error: "FLOOD_WAIT", message: "Telegram flood wait while reading history", retryAfter, requestId });
+                return;
+            }
+            (0,_route_responses__WEBPACK_IMPORTED_MODULE_12__.sendTelegramOperationFailure)(req, res, operation, page.error, "Failed to retrieve chat history", "Telegram chat history failed", true);
+            return;
+        }
+        const ids = messages.map((m) => m.id);
+        const oldestId = typeof page.oldestRawId === "number" ? page.oldestRawId : (ids.length > 0 ? Math.min(...ids) : null);
         // Send standardized paginated response
         if (!res.headersSent) {
             res.status(200).json({
@@ -101870,8 +102057,10 @@ const handleChat = async (req, res) => {
                     offset,
                     hasMore,
                     nextOffset: hasMore ? offset + safeLimit : null,
-                    minId: messages.length > 0 ? Math.min(...messages.map((m) => m.id)) : null,
-                    maxId: messages.length > 0 ? Math.max(...messages.map((m) => m.id)) : null
+                    minId: ids.length > 0 ? Math.min(...ids) : null,
+                    maxId: ids.length > 0 ? Math.max(...ids) : null,
+                    // ADDITIVE (2026-10-28): explicit end of older history (history requests only) and the next maxId.
+                    ...(afterIdGiven ? {} : { endReached: !hasMore, nextMaxId: hasMore ? oldestId : null }),
                 },
                 timestamp: new Date().toISOString(),
                 requestId
@@ -101883,7 +102072,7 @@ const handleChat = async (req, res) => {
     }
     catch (error) {
         (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, "Error in /chat/:chatId endpoint");
-        (0,_route_responses__WEBPACK_IMPORTED_MODULE_11__.sendTelegramOperationFailure)(req, res, operation, error, "Failed to retrieve chat history", "Telegram chat history failed", true);
+        (0,_route_responses__WEBPACK_IMPORTED_MODULE_12__.sendTelegramOperationFailure)(req, res, operation, error, "Failed to retrieve chat history", "Telegram chat history failed", true);
     }
 };
 /**
@@ -101921,14 +102110,14 @@ const handleChatSearch = async (req, res) => {
             (0,_http_api_response__WEBPACK_IMPORTED_MODULE_10__.sendValidationError)(res, "Invalid query parameters", `q must be 1..${SEARCH_MAX_QUERY_LENGTH} characters after trimming`, requestId);
             return;
         }
-        const limit = (0,_route_responses__WEBPACK_IMPORTED_MODULE_11__.parseOptionalNonNegativeInteger)(req.query.limit, SEARCH_DEFAULT_LIMIT);
+        const limit = (0,_route_responses__WEBPACK_IMPORTED_MODULE_12__.parseOptionalNonNegativeInteger)(req.query.limit, SEARCH_DEFAULT_LIMIT);
         if (limit === null || limit < 1) {
             (0,_http_api_response__WEBPACK_IMPORTED_MODULE_10__.sendValidationError)(res, "Invalid query parameters", "limit must be an integer >= 1", requestId);
             return;
         }
         const safeLimit = Math.min(limit, SEARCH_MAX_LIMIT);
         if (!(await _telegram_client_access__WEBPACK_IMPORTED_MODULE_1__.TelegramManager.instanceExist())) {
-            await (0,_route_responses__WEBPACK_IMPORTED_MODULE_11__.sendTelegramUnavailable)(req, res, operation, true, "Telegram client instance not available");
+            await (0,_route_responses__WEBPACK_IMPORTED_MODULE_12__.sendTelegramUnavailable)(req, res, operation, true, "Telegram client instance not available");
             return;
         }
         if (!(await knownViewerChat(res, chatId, requestId)))
@@ -101939,7 +102128,7 @@ const handleChatSearch = async (req, res) => {
         }
         catch (timeoutError) {
             logger.warn(`[ChatSearch] Timeout for chatId ${chatId}:`, timeoutError instanceof Error ? timeoutError.message : String(timeoutError));
-            (0,_route_responses__WEBPACK_IMPORTED_MODULE_11__.sendTelegramOperationFailure)(req, res, operation, timeoutError, "Failed to search messages within timeout period", "Telegram chat search timed out", true);
+            (0,_route_responses__WEBPACK_IMPORTED_MODULE_12__.sendTelegramOperationFailure)(req, res, operation, timeoutError, "Failed to search messages within timeout period", "Telegram chat search timed out", true);
             return;
         }
         if (!res.headersSent)
@@ -101948,7 +102137,7 @@ const handleChatSearch = async (req, res) => {
     catch (error) {
         (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, "Error in /chat/:chatId/search endpoint");
         if (!res.headersSent) {
-            (0,_route_responses__WEBPACK_IMPORTED_MODULE_11__.sendTelegramOperationFailure)(req, res, operation, error, "Failed to search chat", "Telegram chat search failed", true);
+            (0,_route_responses__WEBPACK_IMPORTED_MODULE_12__.sendTelegramOperationFailure)(req, res, operation, error, "Failed to search chat", "Telegram chat search failed", true);
         }
     }
 };
@@ -101981,7 +102170,7 @@ const handleSenddmp = async (req, res) => {
     const operation = "send-demo-media-package";
     try {
         const chatId = req.params.chatId;
-        const tg = await (0,_route_responses__WEBPACK_IMPORTED_MODULE_11__.getTelegramClientForOperation)(req, res, operation);
+        const tg = await (0,_route_responses__WEBPACK_IMPORTED_MODULE_12__.getTelegramClientForOperation)(req, res, operation);
         if (!tg)
             return;
         const files = await _telegram_file_sender__WEBPACK_IMPORTED_MODULE_3__.fileSender.getFileHandles(["dmp1.jpg", "dmp2.jpg", "dmp3.jpg", "dmp4.jpg"]);
@@ -101991,16 +102180,16 @@ const handleSenddmp = async (req, res) => {
             message: "Take Demo Video Call, I Will show you Directly!!\nI'm not wearing clothes now!!♥️🙈\n\n**Just 50₹!!**",
         };
         // The files are fileSender handles: backed up by path and re-uploaded after a restart.
-        const sentDmp = await (0,_route_responses__WEBPACK_IMPORTED_MODULE_11__.sendOrQueued)((0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_0__.floodSafe)(() => tg.sendMessage(peer, dmp), { chatId, label: "senddmp", kind: "media", record: (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_0__.outboundRecord)("text", dmp, (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_0__.outboundTarget)(chatId, peer)) }), "senddmp");
+        const sentDmp = await (0,_route_responses__WEBPACK_IMPORTED_MODULE_12__.sendOrQueued)((0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_0__.floodSafe)(() => tg.sendMessage(peer, dmp), { chatId, label: "senddmp", kind: "media", record: (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_0__.outboundRecord)("text", dmp, (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_0__.outboundTarget)(chatId, peer)) }), "senddmp");
         if (sentDmp.queued) {
-            (0,_route_responses__WEBPACK_IMPORTED_MODULE_11__.sendTelegramOperationSuccess)(req, res, operation, "Demo media package queued", { chatId, queued: true, sent: false, fileCount: files.length });
+            (0,_route_responses__WEBPACK_IMPORTED_MODULE_12__.sendTelegramOperationSuccess)(req, res, operation, "Demo media package queued", { chatId, queued: true, sent: false, fileCount: files.length });
             return;
         }
-        (0,_route_responses__WEBPACK_IMPORTED_MODULE_11__.sendTelegramOperationSuccess)(req, res, operation, "Demo media package sent", { chatId, fileCount: files.length });
+        (0,_route_responses__WEBPACK_IMPORTED_MODULE_12__.sendTelegramOperationSuccess)(req, res, operation, "Demo media package sent", { chatId, fileCount: files.length });
     }
     catch (error) {
         (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, "Error sending demo video call");
-        (0,_route_responses__WEBPACK_IMPORTED_MODULE_11__.sendTelegramOperationFailure)(req, res, operation, error, "Failed to send demo media package", "Telegram demo media send failed", false);
+        (0,_route_responses__WEBPACK_IMPORTED_MODULE_12__.sendTelegramOperationFailure)(req, res, operation, error, "Failed to send demo media package", "Telegram demo media send failed", false);
     }
 };
 /**
@@ -102032,17 +102221,17 @@ const handleDeletechat = async (req, res) => {
     const operation = "delete-chat";
     try {
         const chatId = req.params.chatId;
-        if (!(await (0,_route_responses__WEBPACK_IMPORTED_MODULE_11__.getTelegramClientForOperation)(req, res, operation)))
+        if (!(await (0,_route_responses__WEBPACK_IMPORTED_MODULE_12__.getTelegramClientForOperation)(req, res, operation)))
             return;
         const deleted = await (0,_telegram_chat_actions__WEBPACK_IMPORTED_MODULE_5__.deleteChat)(chatId);
         if (deleted === false) {
             throw new Error("deleteChat returned false");
         }
-        (0,_route_responses__WEBPACK_IMPORTED_MODULE_11__.sendTelegramOperationSuccess)(req, res, operation, "Chat deleted", { chatId });
+        (0,_route_responses__WEBPACK_IMPORTED_MODULE_12__.sendTelegramOperationSuccess)(req, res, operation, "Chat deleted", { chatId });
     }
     catch (error) {
         (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, "Error in /deletechat endpoint");
-        (0,_route_responses__WEBPACK_IMPORTED_MODULE_11__.sendTelegramOperationFailure)(req, res, operation, error, "Failed to delete chat", "Telegram delete chat failed", false);
+        (0,_route_responses__WEBPACK_IMPORTED_MODULE_12__.sendTelegramOperationFailure)(req, res, operation, error, "Failed to delete chat", "Telegram delete chat failed", false);
     }
 };
 /**
@@ -102074,17 +102263,17 @@ const handleBlockuser = async (req, res) => {
     const operation = "block-user";
     try {
         const chatId = req.params.chatId;
-        if (!(await (0,_route_responses__WEBPACK_IMPORTED_MODULE_11__.getTelegramClientForOperation)(req, res, operation)))
+        if (!(await (0,_route_responses__WEBPACK_IMPORTED_MODULE_12__.getTelegramClientForOperation)(req, res, operation)))
             return;
         const blocked = await (0,_telegram_chat_actions__WEBPACK_IMPORTED_MODULE_5__.blockUser)(chatId);
         if (blocked === false) {
             throw new Error("blockUser returned false");
         }
-        (0,_route_responses__WEBPACK_IMPORTED_MODULE_11__.sendTelegramOperationSuccess)(req, res, operation, "User blocked", { chatId });
+        (0,_route_responses__WEBPACK_IMPORTED_MODULE_12__.sendTelegramOperationSuccess)(req, res, operation, "User blocked", { chatId });
     }
     catch (error) {
         (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, "Error in /blockuser endpoint");
-        (0,_route_responses__WEBPACK_IMPORTED_MODULE_11__.sendTelegramOperationFailure)(req, res, operation, error, "Failed to block user", "Telegram block user failed", false);
+        (0,_route_responses__WEBPACK_IMPORTED_MODULE_12__.sendTelegramOperationFailure)(req, res, operation, error, "Failed to block user", "Telegram block user failed", false);
     }
 };
 /**
@@ -102116,17 +102305,17 @@ const handleUnblockuser = async (req, res) => {
     const operation = "unblock-user";
     try {
         const chatId = req.params.chatId;
-        if (!(await (0,_route_responses__WEBPACK_IMPORTED_MODULE_11__.getTelegramClientForOperation)(req, res, operation)))
+        if (!(await (0,_route_responses__WEBPACK_IMPORTED_MODULE_12__.getTelegramClientForOperation)(req, res, operation)))
             return;
         const unblocked = await (0,_telegram_chat_actions__WEBPACK_IMPORTED_MODULE_5__.unblockUser)(chatId);
         if (unblocked === false) {
             throw new Error("unblockUser returned false");
         }
-        (0,_route_responses__WEBPACK_IMPORTED_MODULE_11__.sendTelegramOperationSuccess)(req, res, operation, "User unblock completed", { chatId });
+        (0,_route_responses__WEBPACK_IMPORTED_MODULE_12__.sendTelegramOperationSuccess)(req, res, operation, "User unblock completed", { chatId });
     }
     catch (error) {
         (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, "Error in /unblockuser endpoint");
-        (0,_route_responses__WEBPACK_IMPORTED_MODULE_11__.sendTelegramOperationFailure)(req, res, operation, error, "Failed to unblock user", "Telegram unblock user failed", false);
+        (0,_route_responses__WEBPACK_IMPORTED_MODULE_12__.sendTelegramOperationFailure)(req, res, operation, error, "Failed to unblock user", "Telegram unblock user failed", false);
     }
 };
 
@@ -103026,11 +103215,13 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _http_api_response__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ../../http/api-response */ "./src/http/api-response.ts");
 /* harmony import */ var _media_media_size__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ../../media/media-size */ "./src/media/media-size.ts");
 /* harmony import */ var _media_media_thumb__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ../../media/media-thumb */ "./src/media/media-thumb.ts");
-/* harmony import */ var _media_avatar_cache__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ../../media/avatar-cache */ "./src/media/avatar-cache.ts");
-/* harmony import */ var _outbound_flood_error__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ../../outbound/flood-error */ "./src/outbound/flood-error.ts");
-/* harmony import */ var _route_responses__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ./route-responses */ "./src/routes/telegram/route-responses.ts");
-/* harmony import */ var _viewer_peer__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! ./viewer-peer */ "./src/routes/telegram/viewer-peer.ts");
-/* harmony import */ var _health_route_health__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! ../../health/route-health */ "./src/health/route-health.ts");
+/* harmony import */ var _media_media_availability__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ../../media/media-availability */ "./src/media/media-availability.ts");
+/* harmony import */ var _media_avatar_cache__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ../../media/avatar-cache */ "./src/media/avatar-cache.ts");
+/* harmony import */ var _outbound_flood_error__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ../../outbound/flood-error */ "./src/outbound/flood-error.ts");
+/* harmony import */ var _route_responses__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! ./route-responses */ "./src/routes/telegram/route-responses.ts");
+/* harmony import */ var _viewer_peer__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! ./viewer-peer */ "./src/routes/telegram/viewer-peer.ts");
+/* harmony import */ var _health_route_health__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! ../../health/route-health */ "./src/health/route-health.ts");
+
 
 
 
@@ -103165,11 +103356,11 @@ const inflight = new Map();
 const recent = new RecentBodies(RECENT_TTL_MS, RECENT_MAX_BYTES, RECENT_MAX_AGE_MS);
 const recentThumbs = new RecentBodies(THUMB_RECENT_TTL_MS, THUMB_RECENT_MAX_BYTES);
 /** /media downloads (full and thumb), lookup included: at most 2 at once, at most 8 waiting. */
-const mediaSlots = new _media_avatar_cache__WEBPACK_IMPORTED_MODULE_9__.ConcurrencyLimiter(MAX_CONCURRENT_DOWNLOADS, MAX_WAITING_DOWNLOADS);
-const avatarBodies = new _media_avatar_cache__WEBPACK_IMPORTED_MODULE_9__.AvatarBodyCache(AVATAR_TTL_MS, AVATAR_CACHE_MAX_BYTES);
-const avatarNoPhoto = new _media_avatar_cache__WEBPACK_IMPORTED_MODULE_9__.ExpiringKeySet(AVATAR_TTL_MS, AVATAR_NO_PHOTO_MAX_ENTRIES);
-const avatarFlood = new _media_avatar_cache__WEBPACK_IMPORTED_MODULE_9__.FloodCircuit();
-const avatarSlots = new _media_avatar_cache__WEBPACK_IMPORTED_MODULE_9__.ConcurrencyLimiter(AVATAR_MAX_CONCURRENT_DOWNLOADS, MAX_WAITING_DOWNLOADS);
+const mediaSlots = new _media_avatar_cache__WEBPACK_IMPORTED_MODULE_10__.ConcurrencyLimiter(MAX_CONCURRENT_DOWNLOADS, MAX_WAITING_DOWNLOADS);
+const avatarBodies = new _media_avatar_cache__WEBPACK_IMPORTED_MODULE_10__.AvatarBodyCache(AVATAR_TTL_MS, AVATAR_CACHE_MAX_BYTES);
+const avatarNoPhoto = new _media_avatar_cache__WEBPACK_IMPORTED_MODULE_10__.ExpiringKeySet(AVATAR_TTL_MS, AVATAR_NO_PHOTO_MAX_ENTRIES);
+const avatarFlood = new _media_avatar_cache__WEBPACK_IMPORTED_MODULE_10__.FloodCircuit();
+const avatarSlots = new _media_avatar_cache__WEBPACK_IMPORTED_MODULE_10__.ConcurrencyLimiter(AVATAR_MAX_CONCURRENT_DOWNLOADS, MAX_WAITING_DOWNLOADS);
 const avatarInflight = new Map();
 /** Test/shutdown hook: forget cached bodies (full and thumbnail). In-flight downloads finish normally. */
 function clearMediaCache() {
@@ -103178,6 +103369,7 @@ function clearMediaCache() {
     avatarBodies.clear();
     avatarNoPhoto.clear();
     avatarFlood.clear();
+    (0,_media_media_availability__WEBPACK_IMPORTED_MODULE_9__.clearUnavailableMedia)();
 }
 function viewerDialogs() {
     return _telegram_client_access__WEBPACK_IMPORTED_MODULE_1__.TelegramManager.getInstance()?.dialogManager;
@@ -103190,14 +103382,14 @@ function sendBusy(res, requestId, operation) {
     locals.expectedViewerError = "BUSY";
     res.setHeader("Retry-After", String(BUSY_RETRY_AFTER_SECONDS));
     const message = "Too many media downloads waiting; retry shortly";
-    (0,_health_route_health__WEBPACK_IMPORTED_MODULE_13__.sendRouteHealthFailureResponse)(res, {
+    (0,_health_route_health__WEBPACK_IMPORTED_MODULE_14__.sendRouteHealthFailureResponse)(res, {
         operation,
         readOnly: true,
         statusCode: 503,
         error: "BUSY",
         message,
         requestId,
-        evidence: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_13__.createRouteComponentFailureEvidence)({
+        evidence: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_14__.createRouteComponentFailureEvidence)({
             requestId,
             component: "telegram.media",
             owner: "telegram",
@@ -103225,6 +103417,27 @@ function describeMessageMedia(message) {
         return { mimeType: doc.mimeType || "application/octet-stream", size: Number.isFinite(size) ? size : undefined };
     }
     return null;
+}
+const UNAVAILABLE_MESSAGES = {
+    VIEW_ONCE: "View-once media is never downloaded by the viewer",
+    MEDIA_EXPIRED: "The media has expired or was viewed",
+    MEDIA_UNAVAILABLE: "The media is no longer available on Telegram",
+    PAID_MEDIA: "Paid media is not downloaded by the viewer",
+    STORY: "Stories are not downloaded by the viewer",
+    NOT_DOWNLOADABLE: "This message has no downloadable file",
+    UNSUPPORTED: "Unsupported media",
+};
+/** 410 + reason code (VIEW_ONCE, MEDIA_EXPIRED, ...): the viewer shows a placeholder and never asks again. */
+function sendMediaUnavailable(res, reason, requestId) {
+    (0,_http_api_response__WEBPACK_IMPORTED_MODULE_6__.sendError)(res, UNAVAILABLE_MESSAGES[reason] ?? "Media unavailable", 410, reason, undefined, requestId);
+}
+/** View-once, expired and non-file media: refused after the lookup, before any download (see media-availability). */
+function refuseUnavailable(message, chatId, messageId) {
+    const blocked = (0,_media_media_availability__WEBPACK_IMPORTED_MODULE_9__.mediaAvailability)(message);
+    if (!blocked)
+        return null;
+    (0,_media_media_availability__WEBPACK_IMPORTED_MODULE_9__.rememberUnavailableMedia)(chatId, messageId, blocked.unavailable);
+    return { kind: "unavailable", reason: blocked.unavailable };
 }
 async function lookupMessage(peer, chatId, messageId) {
     const client = _telegram_client_access__WEBPACK_IMPORTED_MODULE_1__.TelegramManager.getClient();
@@ -103263,6 +103476,9 @@ async function loadMedia(peer, chatId, messageId, signal) {
         const message = await lookupMessage(peer, chatId, messageId);
         if (!message)
             return { kind: "not-found", reason: "Message not found" };
+        const refused = refuseUnavailable(message, chatId, messageId);
+        if (refused)
+            return refused;
         const described = describeMessageMedia(message);
         if (!described)
             return { kind: "not-found", reason: "Message has no media" };
@@ -103286,6 +103502,9 @@ async function loadThumb(peer, chatId, messageId, signal) {
         const message = await lookupMessage(peer, chatId, messageId);
         if (!message)
             return { kind: "not-found", reason: "Message not found" };
+        const refused = refuseUnavailable(message, chatId, messageId);
+        if (refused)
+            return refused;
         if (!describeMessageMedia(message))
             return { kind: "not-found", reason: "Message has no media" };
         const picked = (0,_media_media_thumb__WEBPACK_IMPORTED_MODULE_8__.pickThumbSize)(message);
@@ -103389,6 +103608,7 @@ function sendMediaBody(req, res, body, mimeType) {
  *       200: { description: Media bytes }
  *       206: { description: Requested byte range }
  *       404: { description: Message not found, has no media, or (thumb=1) has no thumbnail up to 64 KB (NO_THUMBNAIL) }
+ *       410: { description: "ADDITIVE 2026-10-28: never downloaded: error.code VIEW_ONCE (view-once media, never fetched), MEDIA_EXPIRED, MEDIA_UNAVAILABLE, PAID_MEDIA, STORY, NOT_DOWNLOADABLE (poll/location/contact/...), UNSUPPORTED. No Telegram call when /chat already listed the message." }
  *       413: { description: Media larger than 50 MB }
  *       416: { description: Range not satisfiable }
  */
@@ -103414,19 +103634,29 @@ const handleMedia = async (req, res) => {
                 sendMediaBody(req, res, cached.body, cached.mimeType);
             return;
         }
-        if (!(await _telegram_client_access__WEBPACK_IMPORTED_MODULE_1__.TelegramManager.instanceExist())) {
-            await (0,_route_responses__WEBPACK_IMPORTED_MODULE_11__.sendTelegramUnavailable)(req, res, operation, true, "Telegram client instance not available");
+        // Already known (from /chat or an earlier lookup) to be view-once/expired/non-file: no Telegram call at all.
+        const knownUnavailable = (0,_media_media_availability__WEBPACK_IMPORTED_MODULE_9__.unavailableMediaReason)(chatId, messageId);
+        if (knownUnavailable) {
+            sendMediaUnavailable(res, knownUnavailable, requestId);
             return;
         }
-        const resolved = await (0,_viewer_peer__WEBPACK_IMPORTED_MODULE_12__.resolveViewerPeer)(viewerDialogs(), _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_2__.EntityCacheManager.getInstance(), chatId);
+        if (!(await _telegram_client_access__WEBPACK_IMPORTED_MODULE_1__.TelegramManager.instanceExist())) {
+            await (0,_route_responses__WEBPACK_IMPORTED_MODULE_12__.sendTelegramUnavailable)(req, res, operation, true, "Telegram client instance not available");
+            return;
+        }
+        const resolved = await (0,_viewer_peer__WEBPACK_IMPORTED_MODULE_13__.resolveViewerPeer)(viewerDialogs(), _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_2__.EntityCacheManager.getInstance(), chatId);
         if (!resolved) {
-            (0,_viewer_peer__WEBPACK_IMPORTED_MODULE_12__.sendUnknownChat)(res, requestId);
+            (0,_viewer_peer__WEBPACK_IMPORTED_MODULE_13__.sendUnknownChat)(res, requestId);
             return;
         }
         const peer = resolved.peer;
         const result = await joinFlight(inflight, key, (signal) => (thumb ? loadThumb(peer, chatId, messageId, signal) : loadMedia(peer, chatId, messageId, signal)), res);
         if (res.headersSent)
             return;
+        if (result.kind === "unavailable") {
+            sendMediaUnavailable(res, result.reason, requestId);
+            return;
+        }
         if (result.kind === "not-found") {
             (0,_http_api_response__WEBPACK_IMPORTED_MODULE_6__.sendError)(res, result.reason, 404, "NOT_FOUND", undefined, requestId);
             return;
@@ -103446,16 +103676,16 @@ const handleMedia = async (req, res) => {
             sendMediaBody(req, res, result.body, result.mimeType);
     }
     catch (error) {
-        if (error instanceof _media_avatar_cache__WEBPACK_IMPORTED_MODULE_9__.LimiterBusyError) {
+        if (error instanceof _media_avatar_cache__WEBPACK_IMPORTED_MODULE_10__.LimiterBusyError) {
             sendBusy(res, requestId, operation);
             return;
         }
-        if (error instanceof _media_avatar_cache__WEBPACK_IMPORTED_MODULE_9__.LimiterAbortedError)
+        if (error instanceof _media_avatar_cache__WEBPACK_IMPORTED_MODULE_10__.LimiterAbortedError)
             return; // the client already went away
         logger.warn(`[${requestId}] media fetch failed:`, error instanceof Error ? error.message : String(error));
         (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, "Error in /media/:chatId/:messageId endpoint", false);
         if (!res.headersSent) {
-            (0,_route_responses__WEBPACK_IMPORTED_MODULE_11__.sendTelegramOperationFailure)(req, res, operation, error, "Failed to retrieve media", "Telegram media download failed", true);
+            (0,_route_responses__WEBPACK_IMPORTED_MODULE_12__.sendTelegramOperationFailure)(req, res, operation, error, "Failed to retrieve media", "Telegram media download failed", true);
         }
     }
 };
@@ -103471,7 +103701,7 @@ async function loadAvatar(chatId, signal) {
         const client = _telegram_client_access__WEBPACK_IMPORTED_MODULE_1__.TelegramManager.getClient();
         // The full entity carries `photo`, so GramJS downloads straight from it; a bare peer would make it call
         // getEntity (users.GetUsers) first. Entity-cache first; Telegram only on a genuine miss, inside this slot.
-        const resolved = await (0,_viewer_peer__WEBPACK_IMPORTED_MODULE_12__.resolveViewerPeer)(viewerDialogs(), _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_2__.EntityCacheManager.getInstance(), chatId, { needEntity: true });
+        const resolved = await (0,_viewer_peer__WEBPACK_IMPORTED_MODULE_13__.resolveViewerPeer)(viewerDialogs(), _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_2__.EntityCacheManager.getInstance(), chatId, { needEntity: true });
         if (!resolved?.entity)
             throw new Error(`Avatar entity unavailable for ${chatId}`);
         const entity = resolved.entity;
@@ -103482,7 +103712,7 @@ async function loadAvatar(chatId, signal) {
             downloaded = await (0,_tg_core_utils_withTimeout__WEBPACK_IMPORTED_MODULE_3__.withTimeout)(() => download, { timeout: AVATAR_DOWNLOAD_TIMEOUT_MS, errorMessage: `Avatar download timeout for ${chatId}`, throwErr: true });
         }
         catch (error) {
-            const flood = (0,_outbound_flood_error__WEBPACK_IMPORTED_MODULE_10__.classifyFlood)(error);
+            const flood = (0,_outbound_flood_error__WEBPACK_IMPORTED_MODULE_11__.classifyFlood)(error);
             if (flood?.kind === "wait") {
                 avatarFlood.open(flood.seconds);
                 return { kind: "flood", retryAfter: avatarFlood.remainingSeconds() };
@@ -103559,12 +103789,12 @@ const handleAvatar = async (req, res) => {
             return;
         }
         if (!(await _telegram_client_access__WEBPACK_IMPORTED_MODULE_1__.TelegramManager.instanceExist())) {
-            await (0,_route_responses__WEBPACK_IMPORTED_MODULE_11__.sendTelegramUnavailable)(req, res, operation, true, "Telegram client instance not available");
+            await (0,_route_responses__WEBPACK_IMPORTED_MODULE_12__.sendTelegramUnavailable)(req, res, operation, true, "Telegram client instance not available");
             return;
         }
         // Unknown chat: answered from memory, zero Telegram calls.
-        if (!(await (0,_viewer_peer__WEBPACK_IMPORTED_MODULE_12__.resolveViewerPeer)(viewerDialogs(), _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_2__.EntityCacheManager.getInstance(), chatId))) {
-            (0,_viewer_peer__WEBPACK_IMPORTED_MODULE_12__.sendUnknownChat)(res, requestId);
+        if (!(await (0,_viewer_peer__WEBPACK_IMPORTED_MODULE_13__.resolveViewerPeer)(viewerDialogs(), _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_2__.EntityCacheManager.getInstance(), chatId))) {
+            (0,_viewer_peer__WEBPACK_IMPORTED_MODULE_13__.sendUnknownChat)(res, requestId);
             return;
         }
         const result = await joinFlight(avatarInflight, chatId, (signal) => loadAvatar(chatId, signal), res);
@@ -103582,16 +103812,16 @@ const handleAvatar = async (req, res) => {
             sendAvatarBody(res, result.body, result.mimeType);
     }
     catch (error) {
-        if (error instanceof _media_avatar_cache__WEBPACK_IMPORTED_MODULE_9__.LimiterBusyError) {
+        if (error instanceof _media_avatar_cache__WEBPACK_IMPORTED_MODULE_10__.LimiterBusyError) {
             sendBusy(res, requestId, operation);
             return;
         }
-        if (error instanceof _media_avatar_cache__WEBPACK_IMPORTED_MODULE_9__.LimiterAbortedError)
+        if (error instanceof _media_avatar_cache__WEBPACK_IMPORTED_MODULE_10__.LimiterAbortedError)
             return; // the client already went away
         logger.warn(`[${requestId}] avatar fetch failed:`, error instanceof Error ? error.message : String(error));
         (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, "Error in /media/avatar/:chatId endpoint", false);
         if (!res.headersSent) {
-            (0,_route_responses__WEBPACK_IMPORTED_MODULE_11__.sendTelegramOperationFailure)(req, res, operation, error, "Failed to retrieve avatar", "Telegram avatar download failed", true);
+            (0,_route_responses__WEBPACK_IMPORTED_MODULE_12__.sendTelegramOperationFailure)(req, res, operation, error, "Failed to retrieve avatar", "Telegram avatar download failed", true);
         }
     }
 };
@@ -104253,8 +104483,11 @@ const VIEWER_READ_PATHS = [
     /^\/media\/avatar\/[^/]+\/?$/i,
     /^\/media\/[^/]+\/[^/]+\/?$/i,
 ];
-/** Statuses a viewer route returns as normal answers: validation, unknown/absent chat/media/photo, too large, bad range, FloodWait/rate limit. */
-const EXPECTED_VIEWER_STATUSES = new Set([400, 404, 413, 416, 429]);
+/**
+ * Statuses a viewer route returns as normal answers: validation, unknown/absent chat/media/photo, view-once/expired
+ * media (410, 2026-10-28), too large, bad range, FloodWait/rate limit.
+ */
+const EXPECTED_VIEWER_STATUSES = new Set([400, 404, 410, 413, 416, 429]);
 function withoutQuery(raw) {
     const q = raw.indexOf("?");
     return q === -1 ? raw : raw.slice(0, q);
@@ -104274,7 +104507,7 @@ function isChatViewerRead(req) {
 }
 /**
  * Whether a finished response should post an HTTP-failure alert. Real 5xx always alert; on viewer reads the
- * expected answers do not (404 NO_PHOTO/NO_THUMBNAIL/UNKNOWN_CHAT/NOT_FOUND, 400 VALIDATION_ERROR, 413, 416, 429,
+ * expected answers do not (404 NO_PHOTO/NO_THUMBNAIL/UNKNOWN_CHAT/NOT_FOUND, 410 VIEW_ONCE/MEDIA_EXPIRED/..., 400 VALIDATION_ERROR, 413, 416, 429,
  * and a 503 the route marked as BUSY via res.locals.expectedViewerError).
  */
 function shouldAlertHttpFailure(req, res) {
@@ -105233,6 +105466,7 @@ async function unblockUser(chatId) {
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   getHistoryPage: () => (/* binding */ getHistoryPage),
 /* harmony export */   getMessagesNew: () => (/* binding */ getMessagesNew)
 /* harmony export */ });
 /* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! telegram */ "telegram");
@@ -105243,6 +105477,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _client_access__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ./client-access */ "./src/telegram/client-access.ts");
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
 /* harmony import */ var _media_media_size__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ../media/media-size */ "./src/media/media-size.ts");
+/* harmony import */ var _media_media_availability__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ../media/media-availability */ "./src/media/media-availability.ts");
+
 
 
 
@@ -105252,6 +105488,9 @@ __webpack_require__.r(__webpack_exports__);
 
 const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_5__.Logger('tg-aut:core-utils');
 async function getMessagesNew(chatId, offset, minId, limit = 15, maxId = 0, options = {}) {
+    return (await getHistoryPage(chatId, offset, minId, limit, maxId, options)).messages;
+}
+async function getHistoryPage(chatId, offset, minId, limit = 15, maxId = 0, options = {}) {
     try {
         const client = _client_access__WEBPACK_IMPORTED_MODULE_4__.TelegramManager.getClient();
         let query = { limit };
@@ -105286,12 +105525,16 @@ async function getMessagesNew(chatId, offset, minId, limit = 15, maxId = 0, opti
         const resolved = await (0,_routes_telegram_viewer_peer__WEBPACK_IMPORTED_MODULE_3__.resolveViewerPeer)(_client_access__WEBPACK_IMPORTED_MODULE_4__.TelegramManager.getInstance()?.dialogManager, _tg_core_cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_2__.EntityCacheManager.getInstance(), chatId);
         if (!resolved) {
             logger.debug(`getMessagesNew: unknown chat ${chatId}, not reading`);
-            return [];
+            return { messages: [], rawCount: 0, oldestRawId: null, newestRawId: null, unknownChat: true };
         }
         let messages = await client.getMessages(resolved.peer, query);
         if (!messages || messages.length === 0) {
-            return [];
+            return { messages: [], rawCount: 0, oldestRawId: null, newestRawId: null };
         }
+        const rawCount = messages.length;
+        const rawIds = messages.map((message) => message.id).filter((id) => Number.isFinite(id));
+        const oldestRawId = rawIds.length > 0 ? Math.min(...rawIds) : null;
+        const newestRawId = rawIds.length > 0 ? Math.max(...rawIds) : null;
         if (afterId !== undefined) {
             messages = messages.filter((message) => message.id > afterId).reverse();
         }
@@ -105306,16 +105549,24 @@ async function getMessagesNew(chatId, offset, minId, limit = 15, maxId = 0, opti
         // First pass: Get all message metadata and queue media downloads
         const messagePromises = messages.map(async (message, index) => {
             let media = null;
-            if (!includeMedia && message.media) {
+            // View-once, expired/deleted and non-file media: described for a placeholder, never downloaded, and
+            // remembered so GET /media refuses it without a Telegram call.
+            const unavailableMedia = message.media ? (0,_media_media_availability__WEBPACK_IMPORTED_MODULE_7__.mediaAvailability)(message) : null;
+            if (unavailableMedia) {
+                media = { ...unavailableMedia };
+                (0,_media_media_availability__WEBPACK_IMPORTED_MODULE_7__.rememberUnavailableMedia)(chatId, message.id, unavailableMedia.unavailable);
+            }
+            if (!media && !includeMedia && message.media) {
                 media = parseMediaMetadata(message);
             }
             // MEMORY FIX: Only download media for first N messages to prevent memory leaks
-            if (includeMedia && message.media && index < MAX_MEDIA_DOWNLOADS && !hasImageThumbnail(message)) {
+            const mayDownload = !unavailableMedia && includeMedia && Boolean(message.media) && index < MAX_MEDIA_DOWNLOADS;
+            if (mayDownload && !hasImageThumbnail(message)) {
                 // Voice, audio, stickers and thumbless documents: describe them without downloading. The
                 // download for these used to return the whole file, which went out inline as a JSON Buffer.
                 media = await parseMediaInfo(message, undefined);
             }
-            else if (includeMedia && message.media && index < MAX_MEDIA_DOWNLOADS) {
+            else if (mayDownload) {
                 try {
                     // Determine priority based on position
                     let priority = 'low';
@@ -105498,11 +105749,11 @@ async function getMessagesNew(chatId, offset, minId, limit = 15, maxId = 0, opti
         messages.length = 0;
         // MEMORY FIX: Clear messagePromises array reference to help GC
         messagePromises.length = 0;
-        return allResults;
+        return { messages: allResults, rawCount, oldestRawId, newestRawId };
     }
     catch (error) {
         (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_1__.parseError)(error, "Error at getMessagesNew", false);
-        return [];
+        return { messages: [], rawCount: 0, oldestRawId: null, newestRawId: null, error };
     }
 }
 /** Largest thumbnail inlined in a chat response; a bigger one is left out and the viewer uses /media. */
