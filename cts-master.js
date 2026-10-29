@@ -37333,6 +37333,345 @@ function funnelOrigins(credits, dms, newUsers, origin, id) {
 
 /***/ },
 
+/***/ "./src/components/monitor/monitor-reactions.ts"
+/*!*****************************************************!*\
+  !*** ./src/components/monitor/monitor-reactions.ts ***!
+  \*****************************************************/
+(__unused_webpack_module, exports, __webpack_require__) {
+
+
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.REACTIONS_DAILY_CLIENT_FROM = exports.REACT_LIMITS = exports.REACT_WINDOWS = void 0;
+exports.reactRowsFromHist = reactRowsFromHist;
+exports.reactRowsFromToday = reactRowsFromToday;
+exports.reactRedisBatch = reactRedisBatch;
+exports.readReactBatch = readReactBatch;
+exports.isSilent = isSilent;
+exports.reactDaily = reactDaily;
+exports.buildReactions = buildReactions;
+exports.yesterdayTotals = yesterdayTotals;
+exports.restrictedChannelsPipeline = restrictedChannelsPipeline;
+exports.readRestrictedChannels = readRestrictedChannels;
+const monitor_family_1 = __webpack_require__(/*! ./monitor-family */ "./src/components/monitor/monitor-family.ts");
+const monitor_time_1 = __webpack_require__(/*! ./monitor-time */ "./src/components/monitor/monitor-time.ts");
+const monitor_util_1 = __webpack_require__(/*! ./monitor-util */ "./src/components/monitor/monitor-util.ts");
+exports.REACT_WINDOWS = ['today', '7d', '30d'];
+exports.REACT_LIMITS = {
+    HOURLY_CAP: 150,
+    CAPPED_AT: 145,
+    SUCCESS_WARN: 0.7,
+    SUCCESS_BAD: 0.5,
+    RESTRICTED_WARN: 0.25,
+    RESTRICTED_BAD: 0.4,
+    FLOODS_PER_DAY_WARN: 10,
+    FLOODS_PER_DAY_BAD: 30,
+    SILENT_MIN_HOURS: 2,
+};
+exports.REACTIONS_DAILY_CLIENT_FROM = '2026-09-18';
+const isTrue = (v) => v === true || v === 't' || v === 'true';
+const counts = (r) => ({
+    success: (0, monitor_util_1.num)(r.reactions_success),
+    restricted: (0, monitor_util_1.num)(r.reactions_restricted),
+    failed: (0, monitor_util_1.num)(r.reactions_failed),
+    floods: (0, monitor_util_1.num)(r.reactions_floods),
+});
+function reactRowsFromHist(rows) {
+    return rows.map((r) => ({
+        cur: isTrue(r.cur),
+        family: (0, monitor_family_1.familyOf)(r.namespace),
+        clientId: r.client_id ?? null,
+        mobile: r.mobile ? String(r.mobile) : null,
+        profile: r.profile ? String(r.profile) : null,
+        lastDay: r.last_day ? String(r.last_day) : null,
+        promoSent: (0, monitor_util_1.num)(r.sent),
+        promoBanned: (0, monitor_util_1.num)(r.banned),
+        ...counts(r),
+    }));
+}
+function reactRowsFromToday(rows, today) {
+    return rows.map((r) => {
+        const c = counts(r);
+        return {
+            cur: true,
+            family: (0, monitor_family_1.familyOf)(r.namespace),
+            clientId: r.client_id ?? null,
+            mobile: r.mobile ? String(r.mobile) : null,
+            profile: r.profile ? String(r.profile) : null,
+            lastDay: c.success + c.restricted + c.failed + c.floods > 0 ? today : null,
+            promoSent: 0,
+            promoBanned: 0,
+            ...c,
+        };
+    });
+}
+function reactRedisBatch(mobiles, now) {
+    const from = now - 3_600_000;
+    const out = [];
+    for (const m of mobiles) {
+        out.push(['zcount', `reactions::hourly::${m}`, from, '+inf']);
+        out.push(['zcount', `reactions::floods::${m}`, from, '+inf']);
+        out.push(['hgetall', `reactions::state::${m}`]);
+        out.push(['hlen', `reactions::restricted::${m}`]);
+    }
+    return out;
+}
+const fin = (v) => {
+    if (v === undefined || v === null || v === '' || v === 'null')
+        return null;
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+};
+function readReactBatch(mobiles, results, now) {
+    const out = new Map();
+    let i = 0;
+    for (const m of mobiles) {
+        const lastHour = (0, monitor_util_1.num)(results[i++]);
+        const floods = (0, monitor_util_1.num)(results[i++]);
+        const h = (results[i++] ?? {});
+        const restricted = (0, monitor_util_1.num)(results[i++]);
+        const last = fin(h.lastReactionAt);
+        const release = fin(h.floodReleaseAt);
+        out.set(m, {
+            lastHour,
+            capped: lastHour >= exports.REACT_LIMITS.CAPPED_AT,
+            floodsLastHour: floods,
+            lastReactionAgeSec: last !== null && last > 0 ? Math.max(0, Math.round((now - last) / 1000)) : null,
+            pausedUntil: release !== null && release > now ? new Date(release).toISOString() : null,
+            timeoutPauses: fin(h.reactionTimeoutPauses),
+            restrictedChannels: restricted,
+        });
+    }
+    return out;
+}
+function isSilent(hb, live) {
+    if (!hb || hb.connected === false || !live)
+        return false;
+    if (live.lastHour > 0)
+        return false;
+    return live.lastReactionAgeSec === null || live.lastReactionAgeSec >= exports.REACT_LIMITS.SILENT_MIN_HOURS * 3600;
+}
+function react(c, mobilesReacting, days) {
+    const attempts = c.success + c.restricted + c.failed;
+    return {
+        success: c.success,
+        restricted: c.restricted,
+        failed: c.failed,
+        floods: c.floods,
+        attempts,
+        successRate: (0, monitor_util_1.ratio)(c.success, attempts),
+        restrictedRate: (0, monitor_util_1.ratio)(c.restricted, attempts),
+        floodsPerMobileDay: mobilesReacting ? Math.round((c.floods / (mobilesReacting * days)) * 100) / 100 : mobilesReacting === 0 ? 0 : null,
+        mobilesReacting,
+    };
+}
+const sumCounts = (xs) => xs.reduce((t, x) => ({ success: t.success + x.success, restricted: t.restricted + x.restricted, failed: t.failed + x.failed, floods: t.floods + x.floods }), {
+    success: 0,
+    restricted: 0,
+    failed: 0,
+    floods: 0,
+});
+function reactDaily(dcRows, from, to, client) {
+    const acc = new Map();
+    for (const d of (0, monitor_time_1.datesBetween)(from, to))
+        for (const f of monitor_family_1.FAMILIES)
+            acc.set(`${d}|${f}`, { day: d, family: f, success: 0, restricted: 0, failed: 0, floods: 0 });
+    for (const r of dcRows) {
+        const day = String(r.d);
+        const f = (0, monitor_family_1.familyOf)(r.namespace);
+        if (!f || day < from || day > to)
+            continue;
+        if (client !== null && r.client_id !== client)
+            continue;
+        const a = acc.get(`${day}|${f}`);
+        const c = counts(r);
+        a.success += c.success;
+        a.restricted += c.restricted;
+        a.failed += c.failed;
+        a.floods += c.floods;
+    }
+    return [...acc.values()];
+}
+const key = (f, c, m) => `${f}|${c ?? ''}|${m ?? ''}`;
+function aggregate(rows) {
+    const out = new Map();
+    for (const r of rows) {
+        if (!r.family)
+            continue;
+        const k = key(r.family, r.clientId, r.mobile);
+        const a = out.get(k) ??
+            { family: r.family, clientId: r.clientId, mobile: r.mobile, profile: null, lastDay: null, success: 0, restricted: 0, failed: 0, floods: 0, promoSent: 0, promoBanned: 0 };
+        a.success += r.success;
+        a.restricted += r.restricted;
+        a.failed += r.failed;
+        a.floods += r.floods;
+        a.promoSent += r.promoSent;
+        a.promoBanned += r.promoBanned;
+        if (r.profile)
+            a.profile = r.profile;
+        if (r.lastDay !== null && (a.lastDay === null || r.lastDay > a.lastDay))
+            a.lastDay = r.lastDay;
+        out.set(k, a);
+    }
+    return out;
+}
+const windowDays = (w) => (w.window === '30d' ? 30 : w.window === '7d' ? 7 : 1);
+function familiesFor(i, client) {
+    const { w } = i;
+    const days = windowDays(w);
+    const inScope = (c) => client === null || c === client;
+    const rows = i.rows.filter((r) => inScope(r.clientId));
+    const cur = aggregate(rows.filter((r) => r.cur));
+    const prev = aggregate(rows.filter((r) => !r.cur));
+    for (const k of i.known) {
+        if (!inScope(k.clientId))
+            continue;
+        const id = key(k.family, k.clientId, k.mobile);
+        if (!cur.has(id))
+            cur.set(id, { family: k.family, clientId: k.clientId, mobile: k.mobile, profile: null, lastDay: null, success: 0, restricted: 0, failed: 0, floods: 0, promoSent: 0, promoBanned: 0 });
+    }
+    const reacting = (aggs) => aggs.filter((a) => a.mobile && a.success > 0).length;
+    const out = {};
+    for (const f of monitor_family_1.FAMILIES) {
+        const fc = [...cur.values()].filter((a) => a.family === f);
+        const fp = [...prev.values()].filter((a) => a.family === f);
+        const mobiles = fc
+            .filter((a) => a.mobile)
+            .map((a) => {
+            const live = i.live && a.mobile ? (i.live.get(a.mobile) ?? null) : null;
+            const hb = i.heartbeats && a.clientId && a.mobile ? (i.heartbeats.mobiles.get(`${a.clientId}|${a.mobile.slice(-4)}`) ?? null) : null;
+            const attempts = a.success + a.restricted + a.failed;
+            return {
+                mobile: (0, monitor_util_1.maskMobile)(a.mobile),
+                clientId: a.clientId,
+                profile: a.profile,
+                success: a.success,
+                restricted: a.restricted,
+                failed: a.failed,
+                floods: a.floods,
+                successRate: (0, monitor_util_1.ratio)(a.success, attempts),
+                restrictedRate: (0, monitor_util_1.ratio)(a.restricted, attempts),
+                floodsPerDay: Math.round((a.floods / days) * 100) / 100,
+                lastDay: a.lastDay,
+                promoSent: w.intraday ? null : a.promoSent,
+                promoBanRate: w.intraday ? null : (0, monitor_util_1.ratio)(a.promoBanned, a.promoSent),
+                live,
+                heartbeat: hb,
+                silent: isSilent(hb, live),
+            };
+        })
+            .sort((x, y) => y.success - x.success || String(x.clientId).localeCompare(String(y.clientId)) || String(x.mobile).localeCompare(String(y.mobile)));
+        const totals = react(sumCounts(fc), reacting(fc), days);
+        let previous;
+        if (w.intraday)
+            previous = i.yesterday ? react(i.yesterday[f], null, 1) : null;
+        else
+            previous = react(sumCounts(fp), reacting(fp), days);
+        const ids = new Set();
+        for (const a of fc)
+            if (a.clientId)
+                ids.add(a.clientId);
+        const clients = [...ids].map((id) => {
+            const mine = fc.filter((a) => a.clientId === id);
+            const last = mine.reduce((m, a) => (a.lastDay !== null && (m === null || a.lastDay > m) ? a.lastDay : m), null);
+            return { clientId: id, name: i.names.get(id) ?? null, ...react(sumCounts(mine), reacting(mine), days), mobiles: mine.filter((a) => a.mobile).length, lastDay: last };
+        });
+        clients.sort((a, b) => b.success - a.success || a.clientId.localeCompare(b.clientId));
+        out[f] = { totals, previous, clients, mobiles };
+    }
+    return out;
+}
+function bothOf(fams, days) {
+    const t = fams['tg-aut'].totals;
+    const p = fams.promote.totals;
+    const m = t.mobilesReacting === null || p.mobilesReacting === null ? null : t.mobilesReacting + p.mobilesReacting;
+    return react(sumCounts([t, p]), m, days);
+}
+function buildReactions(i) {
+    const { w, client } = i;
+    const days = windowDays(w);
+    const families = familiesFor(i, client);
+    const both = bothOf(families, days);
+    let fleet = null;
+    if (client !== null) {
+        const ff = familiesFor(i, null);
+        fleet = { both: bothOf(ff, days), families: { 'tg-aut': { totals: ff['tg-aut'].totals }, promote: { totals: ff.promote.totals } } };
+    }
+    let now = null;
+    if (i.live) {
+        const mobiles = monitor_family_1.FAMILIES.flatMap((f) => families[f].mobiles);
+        const lives = mobiles.map((m) => m.live).filter((l) => !!l);
+        now = {
+            reactionsLastHour: lives.reduce((s, l) => s + l.lastHour, 0),
+            mobilesReacting: lives.filter((l) => l.lastHour > 0).length,
+            mobilesCapped: lives.filter((l) => l.capped).length,
+            floodsLastHour: lives.reduce((s, l) => s + l.floodsLastHour, 0),
+            mobilesPaused: lives.filter((l) => l.pausedUntil !== null).length,
+        };
+    }
+    const notes = [];
+    if (w.intraday)
+        notes.push('today: counts since IST midnight (daily_mobile, ~5 min lag); previous = yesterday full day (daily_client), so compare rates and pace per hour, not counts.');
+    else
+        notes.push('7d/30d: closed IST days from daily_mobile; previous = the same number of days before.');
+    const earliest = w.intraday ? w.range.from : w.previousRange.from;
+    if (earliest < monitor_util_1.DAILY_MOBILE_FROM)
+        notes.push(`Per-mobile reaction rows start ${monitor_util_1.DAILY_MOBILE_FROM} (daily_mobile); earlier days count as zero in totals and previous.`);
+    if (!w.intraday && w.range.from < exports.REACTIONS_DAILY_CLIENT_FROM)
+        notes.push(`Daily reaction counters start ${exports.REACTIONS_DAILY_CLIENT_FROM}.`);
+    notes.push('restricted counts both reaction sends and message fetches refused with CHANNEL_RESTRICTED; floods are FLOOD_WAIT/PEER_FLOOD waits (not attempts).');
+    notes.push(`capped = >= ${exports.REACT_LIMITS.CAPPED_AT} reactions in the last hour (hourly cap ${exports.REACT_LIMITS.HOURLY_CAP}, a code constant); silent = heartbeat up, nothing in the last hour and no reaction for ${exports.REACT_LIMITS.SILENT_MIN_HOURS} h.`);
+    notes.push('restrictedChannels: fleet-wide (activeChannels.reactRestricted), refreshed hourly; not filtered by client.');
+    if (!i.live)
+        notes.push('live state unavailable (Redis): now and mobiles[].live are null.');
+    return {
+        window: w.window,
+        range: w.range,
+        previousRange: w.intraday ? { from: (0, monitor_time_1.addDays)(w.today, -1), to: (0, monitor_time_1.addDays)(w.today, -1) } : w.previousRange,
+        scope: { client },
+        hoursElapsed: w.intraday ? Math.round(((i.now - w.cur.start) / 3_600_000) * 100) / 100 : null,
+        families,
+        both,
+        fleet,
+        daily: w.intraday ? [] : (i.daily ?? []),
+        now,
+        restrictedChannels: i.restrictedChannels,
+        limits: exports.REACT_LIMITS,
+        notes,
+    };
+}
+function yesterdayTotals(dcRows, day, client) {
+    const out = { 'tg-aut': { success: 0, restricted: 0, failed: 0, floods: 0 }, promote: { success: 0, restricted: 0, failed: 0, floods: 0 } };
+    for (const d of reactDaily(dcRows, day, day, client)) {
+        out[d.family] = { success: d.success, restricted: d.restricted, failed: d.failed, floods: d.floods };
+    }
+    return out;
+}
+function restrictedChannelsPipeline(since) {
+    return [
+        { $match: { reactRestricted: true } },
+        {
+            $facet: {
+                total: [{ $count: 'n' }],
+                byDay: [
+                    { $match: { reactRestrictedAt: { $gte: since } } },
+                    { $group: { _id: { $dateToString: { format: '%Y-%m-%d', date: '$reactRestrictedAt', timezone: '+05:30' } }, n: { $sum: 1 } } },
+                    { $sort: { _id: 1 } },
+                ],
+            },
+        },
+    ];
+}
+function readRestrictedChannels(rows) {
+    const r = rows[0] ?? {};
+    return {
+        total: (0, monitor_util_1.num)(r.total?.[0]?.n),
+        byDay: (r.byDay ?? []).filter((d) => d._id).map((d) => ({ day: String(d._id), n: (0, monitor_util_1.num)(d.n) })),
+    };
+}
+
+
+/***/ },
+
 /***/ "./src/components/monitor/monitor-sql.ts"
 /*!***********************************************!*\
   !*** ./src/components/monitor/monitor-sql.ts ***!
@@ -37341,7 +37680,7 @@ function funnelOrigins(credits, dms, newUsers, origin, id) {
 
 
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.ROUTED_COLUMNS = void 0;
+exports.ROUTED_COLUMNS = exports.REACTION_COLUMNS = void 0;
 exports.paymentRowsSql = paymentRowsSql;
 exports.dailyClientSql = dailyClientSql;
 exports.routedDailySql = routedDailySql;
@@ -37375,12 +37714,14 @@ function paymentRowsSql(name, start, end) {
 FROM payment_event_owner
 WHERE ${range} AND amount > 0`, params);
 }
+exports.REACTION_COLUMNS = ['reactions_success', 'reactions_restricted', 'reactions_failed', 'reactions_floods'];
+const REACTION_SUMS = exports.REACTION_COLUMNS.map((c) => `, coalesce(sum(${c}), 0) AS ${c}`).join('');
 function dailyClientSql(name, from, to) {
     return q(name, `SELECT day::text AS d, client_id, namespace,
   coalesce(sum(sent), 0) AS sent, coalesce(sum(delivered), 0) AS delivered, coalesce(sum(banned), 0) AS banned,
   coalesce(sum(failed), 0) AS failed,
   coalesce(sum(new_users) FILTER (WHERE namespace = 'tg-aut'), 0) AS new_users,
-  coalesce(sum(new_users), 0) AS ns_new_users
+  coalesce(sum(new_users), 0) AS ns_new_users${REACTION_SUMS}
 FROM daily_client
 WHERE day BETWEEN $1::date AND $2::date
 GROUP BY day, client_id, namespace`, [from, to]);
@@ -37520,13 +37861,13 @@ GROUP BY 1, 2, 3, 4, 5`, [iso(cur.start), iso(prev.start), iso(cur.end), iso(pre
 function promoMobilesHistSql(prevFrom, curFrom, to, routed = []) {
     return q('promo_mobiles_hist', `SELECT day >= $2::date AS cur, namespace, client_id, mobile, max(profile) AS profile,
   coalesce(sum(sent), 0) AS sent, coalesce(sum(delivered), 0) AS delivered, coalesce(sum(banned), 0) AS banned,
-  coalesce(sum(failed), 0) AS failed, coalesce(sum(new_users), 0) AS new_users, max(day)::text AS last_day${routedSums(routed)}
+  coalesce(sum(failed), 0) AS failed, coalesce(sum(new_users), 0) AS new_users, max(day)::text AS last_day${REACTION_SUMS}${routedSums(routed)}
 FROM daily_mobile
 WHERE day BETWEEN $1::date AND $3::date
 GROUP BY 1, 2, 3, 4`, [prevFrom, curFrom, to]);
 }
 function promoMobilesTodaySql(today, routed = []) {
-    return q('promo_mobiles_today', `SELECT namespace, client_id, mobile, max(profile) AS profile, coalesce(sum(new_users), 0) AS new_users${routedSums(routed)}
+    return q('promo_mobiles_today', `SELECT namespace, client_id, mobile, max(profile) AS profile, coalesce(sum(new_users), 0) AS new_users${REACTION_SUMS}${routedSums(routed)}
 FROM daily_mobile
 WHERE day = $1::date
 GROUP BY 1, 2, 3`, [today]);
@@ -37741,6 +38082,7 @@ Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.MonitorController = void 0;
 exports.parsePeriod = parsePeriod;
 exports.parseWindow = parseWindow;
+exports.parseReactWindow = parseReactWindow;
 exports.parseDays = parseDays;
 exports.parseSvc = parseSvc;
 exports.parsePaidDate = parsePaidDate;
@@ -37749,6 +38091,7 @@ const common_1 = __webpack_require__(/*! @nestjs/common */ "@nestjs/common");
 const swagger_1 = __webpack_require__(/*! @nestjs/swagger */ "@nestjs/swagger");
 const monitor_time_1 = __webpack_require__(/*! ./monitor-time */ "./src/components/monitor/monitor-time.ts");
 const monitor_promotions_1 = __webpack_require__(/*! ./monitor-promotions */ "./src/components/monitor/monitor-promotions.ts");
+const monitor_reactions_1 = __webpack_require__(/*! ./monitor-reactions */ "./src/components/monitor/monitor-reactions.ts");
 const monitor_util_1 = __webpack_require__(/*! ./monitor-util */ "./src/components/monitor/monitor-util.ts");
 const monitor_service_1 = __webpack_require__(/*! ./monitor.service */ "./src/components/monitor/monitor.service.ts");
 const CLIENT_ID_RE = /^[A-Za-z0-9_-]{1,40}$/;
@@ -37765,6 +38108,13 @@ function parseWindow(window) {
     if (monitor_promotions_1.PROMO_WINDOWS.includes(window))
         return window;
     throw new common_1.BadRequestException(`window must be one of ${monitor_promotions_1.PROMO_WINDOWS.join('|')}`);
+}
+function parseReactWindow(window) {
+    if (window === undefined || window === '')
+        return 'today';
+    if (monitor_reactions_1.REACT_WINDOWS.includes(window))
+        return window;
+    throw new common_1.BadRequestException(`window must be one of ${monitor_reactions_1.REACT_WINDOWS.join('|')} (reactions are daily counters; no 24h)`);
 }
 function parseDays(days) {
     if (days === undefined || days === '' || days === '7')
@@ -37818,6 +38168,9 @@ let MonitorController = class MonitorController {
     }
     promotions(window, client) {
         return this.service.promotions(parseWindow(window), parseOptionalClientId(client));
+    }
+    reactions(window, client) {
+        return this.service.reactions(parseReactWindow(window), parseOptionalClientId(client));
     }
     funnel(period, client) {
         return this.service.funnel(parsePeriod(period), parseOptionalClientId(client));
@@ -37873,6 +38226,16 @@ __decorate([
     __metadata("design:paramtypes", [String, String]),
     __metadata("design:returntype", void 0)
 ], MonitorController.prototype, "promotions", null);
+__decorate([
+    (0, common_1.Get)('reactions'),
+    (0, swagger_1.ApiQuery)({ name: 'window', required: false, enum: monitor_reactions_1.REACT_WINDOWS }),
+    (0, swagger_1.ApiQuery)({ name: 'client', required: false }),
+    __param(0, (0, common_1.Query)('window')),
+    __param(1, (0, common_1.Query)('client')),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [String, String]),
+    __metadata("design:returntype", void 0)
+], MonitorController.prototype, "reactions", null);
 __decorate([
     (0, common_1.Get)('funnel'),
     (0, swagger_1.ApiQuery)({ name: 'period', required: false, enum: monitor_time_1.MONITOR_PERIODS }),
@@ -37939,8 +38302,12 @@ exports.MonitorModule = MonitorModule = __decorate([
                     get: (key) => redisClient_1.RedisClient.getClient().get(key),
                     set: (key, value, mode, ttlSec) => redisClient_1.RedisClient.getClient().set(key, value, mode, ttlSec),
                     readPipeline: async (cmds) => {
+                        const allowed = new Set(['hgetall', 'hlen', 'zcard', 'zcount']);
+                        for (const [cmd] of cmds)
+                            if (!allowed.has(cmd))
+                                throw new Error(`monitor readPipeline: ${cmd} is not a read command`);
                         const results = await redisClient_1.RedisClient.getClient()
-                            .pipeline(cmds.map(([cmd, key]) => [cmd, key]))
+                            .pipeline(cmds.map(([cmd, key, ...args]) => [cmd, key, ...args]))
                             .exec();
                         return (results ?? []).map(([err, value]) => (err ? null : value));
                     },
@@ -37974,7 +38341,7 @@ var __param = (this && this.__param) || function (paramIndex, decorator) {
 };
 var MonitorService_1;
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.MonitorService = exports.FLEET_DETAIL_ID = exports.PAID_ENRICH_MAX = exports.PAID_HIST_KEYS = exports.LIVE_SVCS = exports.HEARTBEAT_INDEX_KEY = exports.CLIENT_TTL_MS = exports.FLEET_TTL_MS = exports.PREWARM_PAGES = exports.MIDNIGHT_PREWARM_AFTER_MS = exports.PREWARM_DELAY_MS = exports.SNAPSHOT_TTL_SEC = exports.SNAPSHOT_KEY_PREFIX = exports.SNAPSHOT_FRESH_MS = exports.LIVE_TTL_MS = exports.CHANNEL_CANDIDATES = exports.HISTORY_DAYS = exports.POOL_FRESH_MS = exports.HISTORY_FRESH_MS = exports.TODAY_MAX_STALE_MS = exports.TODAY_FRESH_MS = exports.LIVE_REDIS_DEADLINE_MS = exports.MONGO_TIMEOUT_MS = exports.PG_TIMEOUT_MS = exports.MONITOR_REDIS = void 0;
+exports.MonitorService = exports.FLEET_DETAIL_ID = exports.PAID_ENRICH_MAX = exports.PAID_HIST_KEYS = exports.LIVE_SVCS = exports.HEARTBEAT_INDEX_KEY = exports.CLIENT_TTL_MS = exports.FLEET_TTL_MS = exports.PREWARM_PAGES = exports.MIDNIGHT_PREWARM_AFTER_MS = exports.PREWARM_DELAY_MS = exports.SNAPSHOT_TTL_SEC = exports.SNAPSHOT_KEY_PREFIX = exports.SNAPSHOT_FRESH_MS = exports.RESTRICTED_FRESH_MS = exports.LIVE_TTL_MS = exports.CHANNEL_CANDIDATES = exports.HISTORY_DAYS = exports.POOL_FRESH_MS = exports.HISTORY_FRESH_MS = exports.TODAY_MAX_STALE_MS = exports.TODAY_FRESH_MS = exports.LIVE_REDIS_DEADLINE_MS = exports.MONGO_TIMEOUT_MS = exports.PG_TIMEOUT_MS = exports.MONITOR_REDIS = void 0;
 exports.fleetSummaryRow = fleetSummaryRow;
 exports.withSnapshotCache = withSnapshotCache;
 exports.toPaidChat = toPaidChat;
@@ -37987,6 +38354,7 @@ const monitor_cache_1 = __webpack_require__(/*! ./monitor-cache */ "./src/compon
 const monitor_merge_1 = __webpack_require__(/*! ./monitor-merge */ "./src/components/monitor/monitor-merge.ts");
 const monitor_family_1 = __webpack_require__(/*! ./monitor-family */ "./src/components/monitor/monitor-family.ts");
 const monitor_promotions_1 = __webpack_require__(/*! ./monitor-promotions */ "./src/components/monitor/monitor-promotions.ts");
+const monitor_reactions_1 = __webpack_require__(/*! ./monitor-reactions */ "./src/components/monitor/monitor-reactions.ts");
 const monitor_mongo_1 = __webpack_require__(/*! ./monitor-mongo */ "./src/components/monitor/monitor-mongo.ts");
 const monitor_sql_1 = __webpack_require__(/*! ./monitor-sql */ "./src/components/monitor/monitor-sql.ts");
 const monitor_time_1 = __webpack_require__(/*! ./monitor-time */ "./src/components/monitor/monitor-time.ts");
@@ -38002,6 +38370,7 @@ exports.POOL_FRESH_MS = 10 * 60_000;
 exports.HISTORY_DAYS = 60;
 exports.CHANNEL_CANDIDATES = 40;
 exports.LIVE_TTL_MS = 5_000;
+exports.RESTRICTED_FRESH_MS = 60 * 60_000;
 exports.SNAPSHOT_FRESH_MS = exports.TODAY_FRESH_MS;
 exports.SNAPSHOT_KEY_PREFIX = 'monitor::snapshot::';
 exports.SNAPSHOT_TTL_SEC = 36 * 3600;
@@ -38180,6 +38549,7 @@ let MonitorService = MonitorService_1 = class MonitorService {
         this.prewarmTimer = null;
         this.prewarming = null;
         this.pgGate = new monitor_cache_1.ConcurrencyGate(2, 1);
+        this.restrictedCache = new monitor_cache_1.SwrCache({ freshMs: exports.RESTRICTED_FRESH_MS, maxKeys: 2 });
         const store = typeof redis?.get === 'function' && typeof redis?.set === 'function'
             ? { get: (k) => redis.get(k), set: (k, v, mode, ttl) => redis.set(k, v, mode, ttl) }
             : null;
@@ -38257,6 +38627,8 @@ let MonitorService = MonitorService_1 = class MonitorService {
             return this.buildDetail(null, Number(b), now, background);
         if (kind === 'promotions')
             return this.buildPromotions(a, b === '*' ? null : b, now, background);
+        if (kind === 'reactions')
+            return this.buildReactions(a, b === '*' ? null : b, now, background);
         if (kind === 'funnel')
             return this.buildFunnel(a, b === '*' ? null : b, now, background);
         return this.buildDetail(a, Number(b), now, background);
@@ -39094,7 +39466,7 @@ let MonitorService = MonitorService_1 = class MonitorService {
             const from = dmT.asOf - monitor_time_1.DAY_MS;
             dmsCur = (0, monitor_family_1.dmsFamilyRows)([...dmY.filter((r) => new Date(r.ts).getTime() >= from), ...dmT.rows]);
         }
-        const inScope = (c) => client === null || c === client;
+        const inScope = (_c) => true;
         const mobiles = new Set();
         const promote = new Set();
         for (const r of rows) {
@@ -39112,7 +39484,7 @@ let MonitorService = MonitorService_1 = class MonitorService {
         }
         const acct = await this.section('redis_state', ctx, () => this.redisAccountState([...mobiles].sort(), promote, ctx));
         const entries = (live?.entries ?? []).map((e) => ({ svc: e.svc, clientId: e.clientId, payload: e.payload, state: classifyHeartbeat(e.payload, now).state }));
-        const body = (0, monitor_promotions_1.buildPromotions)({
+        const inputs = {
             w,
             rows,
             extra: extraRows ? (0, monitor_promotions_1.extrasFromToday)(extraRows, routedCols) : null,
@@ -39124,6 +39496,101 @@ let MonitorService = MonitorService_1 = class MonitorService {
             names: new Map((meta ?? []).map((m) => [m.clientId, m.name])),
             routedCols,
             client,
+        };
+        const body = (0, monitor_promotions_1.buildPromotions)(inputs);
+        if (client !== null && meta && !meta.some((m) => m.clientId === client))
+            ctx.notes.push(`clientId ${client} is not in the clients collection.`);
+        let fleet;
+        if (client !== null) {
+            const f = (0, monitor_promotions_1.buildPromotions)({ ...inputs, client: null });
+            fleet = { both: f.both, families: { 'tg-aut': { totals: f.families['tg-aut'].totals }, promote: { totals: f.families.promote.totals } } };
+        }
+        return {
+            generatedAt: new Date(now).toISOString(),
+            ...body,
+            ...(fleet ? { fleet } : {}),
+            notes: [...body.notes, ...ctx.notes],
+            timingsMs: ctx.timings,
+            cache: ctx.cache(Date.now()),
+        };
+    }
+    async reactions(window, client) {
+        try {
+            return await this.snap(`reactions:${window}:${client ?? '*'}`);
+        }
+        catch (err) {
+            if (err instanceof common_1.ServiceUnavailableException)
+                throw err;
+            const msg = String(err?.message ?? err).slice(0, 200);
+            this.logger.warn(`monitor reactions ${window} failed: ${msg}`);
+            throw new common_1.ServiceUnavailableException(`reactions unavailable: ${msg}`);
+        }
+    }
+    restrictedChannels(ctx) {
+        return this.part(ctx, 'history', 'react_restricted_channels', async (now, t) => {
+            const since = new Date((0, monitor_time_1.istDayStart)((0, monitor_time_1.addDays)((0, monitor_time_1.istDate)(now), -29)));
+            return (0, monitor_reactions_1.readRestrictedChannels)(await this.mongoAgg('activeChannels', (0, monitor_reactions_1.restrictedChannelsPipeline)(since), 'mongo.activeChannels_react_restricted', t));
+        }, this.restrictedCache).then((l) => l.value);
+    }
+    async redisReactionState(mobiles, now, ctx) {
+        if (typeof this.redis?.readPipeline !== 'function')
+            throw new Error('Redis pipeline not configured');
+        if (!mobiles.length)
+            return new Map();
+        const t = Date.now();
+        try {
+            const results = await (0, monitor_util_1.withTimeout)(this.redis.readPipeline((0, monitor_reactions_1.reactRedisBatch)(mobiles, now)), exports.LIVE_REDIS_DEADLINE_MS, 'redis reaction state');
+            return (0, monitor_reactions_1.readReactBatch)(mobiles, results, now);
+        }
+        finally {
+            ctx.timings['redis.reaction_state'] = Date.now() - t;
+        }
+    }
+    async buildReactions(window, client, now, background = false) {
+        const ctx = new Ctx(background);
+        const w = (0, monitor_promotions_1.promoWindows)(window, now);
+        const intraday = w.intraday;
+        const routed = await this.section('routed_columns', ctx, () => this.routedColumns(ctx));
+        const routedCols = routed?.mobile ?? [];
+        const mobileP = intraday ? this.promoMobilesToday(ctx, routedCols) : this.promoHist(ctx, window, routedCols);
+        const [mobileRows, dcH, meta, assigned, live, restricted] = await Promise.all([
+            mobileP.catch((err) => {
+                const msg = String(err?.message ?? err).slice(0, 200);
+                throw new common_1.ServiceUnavailableException(`reaction counts unavailable: ${msg}`);
+            }),
+            this.section('daily_client', ctx, () => this.dcHist(ctx)),
+            this.section('clients', ctx, () => this.clientMeta(ctx)),
+            this.section('assigned', ctx, () => this.promoteAssigned(ctx)),
+            this.section('heartbeats', ctx, async () => (await this.liveCache.get('all', () => this.loadLive())).value),
+            this.section('restricted_channels', ctx, () => this.restrictedChannels(ctx)),
+        ]);
+        const rows = intraday ? (0, monitor_reactions_1.reactRowsFromToday)(mobileRows, w.today) : (0, monitor_reactions_1.reactRowsFromHist)(mobileRows);
+        const entries = (live?.entries ?? []).map((e) => ({ svc: e.svc, clientId: e.clientId, payload: e.payload, state: classifyHeartbeat(e.payload, now).state }));
+        const known = (assigned ?? []).map((a) => ({ family: 'promote', clientId: a.clientId, mobile: a.mobile }));
+        for (const e of entries) {
+            const m = e.payload?.mobile;
+            if (e.svc === 'tg-aut' && m && /^\d{6,}$/.test(String(m)) && (e.state === 'live' || e.state === 'stopping'))
+                known.push({ family: 'tg-aut', clientId: e.clientId, mobile: String(m) });
+        }
+        const mobiles = new Set();
+        for (const r of rows)
+            if (r.cur && r.mobile && r.family)
+                mobiles.add(r.mobile);
+        for (const k of known)
+            mobiles.add(k.mobile);
+        const reactLive = await this.section('redis_reactions', ctx, () => this.redisReactionState([...mobiles].sort(), now, ctx));
+        const body = (0, monitor_reactions_1.buildReactions)({
+            w,
+            rows,
+            yesterday: intraday && dcH ? (0, monitor_reactions_1.yesterdayTotals)(dcH, (0, monitor_time_1.addDays)(w.today, -1), client) : null,
+            daily: !intraday && dcH ? (0, monitor_reactions_1.reactDaily)(dcH, w.range.from, w.range.to, client) : null,
+            live: reactLive,
+            heartbeats: live ? (0, monitor_promotions_1.heartbeatJoins)(entries) : null,
+            known,
+            names: new Map((meta ?? []).map((m) => [m.clientId, m.name])),
+            restrictedChannels: restricted,
+            client,
+            now,
         });
         if (client !== null && meta && !meta.some((m) => m.clientId === client))
             ctx.notes.push(`clientId ${client} is not in the clients collection.`);
@@ -39250,6 +39717,12 @@ let MonitorService = MonitorService_1 = class MonitorService {
                 dmsByFamily: d.byFamily ? { 'tg-aut': d.byFamily['tg-aut'].dms, promote: d.byFamily.promote.dms } : null,
             }))
             : null;
+        const fleetBlock = client !== null && fleet
+            ? {
+                totals: { newUsers: fleet.fleet.newUsers, payers: fleet.fleet.payers, revenue: fleet.fleet.revenue, conversion: fleet.fleet.conversion },
+                byOrigin: origins(curCredits, dmsCur, fleet.fleet.newUsers, null),
+            }
+            : undefined;
         const notes = [...(0, monitor_util_1.historyNotes)([w.range, w.prevRange]), ...ctx.notes];
         notes.push('byOrigin: direct = first attributed DM from a tg-aut promotion (service t), routed = from a promote account (service p); payers/revenue by origin are attributed only (chats with an attributed DM since 2026-10-25), the rest is unattributed.');
         notes.push('byOrigin newUsers: direct/routed = attributed DMs of that origin; unattributed = newUsers minus both (floored at 0).');
@@ -39275,6 +39748,7 @@ let MonitorService = MonitorService_1 = class MonitorService {
             daily,
             ttfp: detail?.distributions?.timeToFirstPay ?? null,
             repeat: detail?.distributions?.repeat ?? null,
+            ...(fleetBlock ? { fleet: fleetBlock } : {}),
             notes,
             timingsMs: ctx.timings,
             cache: ctx.cache(Date.now()),
