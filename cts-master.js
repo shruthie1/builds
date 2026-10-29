@@ -36231,6 +36231,16 @@ class SnapshotCache {
         if (e) {
             if (now - e.at < this.opts.freshMs)
                 return { value: e.value, at: e.at, state: 'hit', source: e.source };
+            if (now - e.at >= (this.opts.maxServeStaleMs ?? Number.POSITIVE_INFINITY)) {
+                try {
+                    const b = await (this.inflight.get(`${day}|${name}`) ?? this.start(name, build, false));
+                    return { value: b.value, at: b.at, state: 'miss', source: 'build' };
+                }
+                catch (err) {
+                    this.opts.onError?.(`rebuild ${name}`, err);
+                    return { value: e.value, at: e.at, state: 'stale', source: e.source };
+                }
+            }
             this.refresh(name, build).catch((err) => this.opts.onError?.(`rebuild ${name}`, err));
             return { value: e.value, at: e.at, state: 'stale', source: e.source };
         }
@@ -38341,7 +38351,7 @@ var __param = (this && this.__param) || function (paramIndex, decorator) {
 };
 var MonitorService_1;
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.MonitorService = exports.FLEET_DETAIL_ID = exports.PAID_ENRICH_MAX = exports.PAID_HIST_KEYS = exports.LIVE_SVCS = exports.HEARTBEAT_INDEX_KEY = exports.CLIENT_TTL_MS = exports.FLEET_TTL_MS = exports.PREWARM_PAGES = exports.MIDNIGHT_PREWARM_AFTER_MS = exports.PREWARM_DELAY_MS = exports.SNAPSHOT_TTL_SEC = exports.SNAPSHOT_KEY_PREFIX = exports.SNAPSHOT_FRESH_MS = exports.RESTRICTED_FRESH_MS = exports.LIVE_TTL_MS = exports.CHANNEL_CANDIDATES = exports.HISTORY_DAYS = exports.POOL_FRESH_MS = exports.HISTORY_FRESH_MS = exports.TODAY_MAX_STALE_MS = exports.TODAY_FRESH_MS = exports.LIVE_REDIS_DEADLINE_MS = exports.MONGO_TIMEOUT_MS = exports.PG_TIMEOUT_MS = exports.MONITOR_REDIS = void 0;
+exports.MonitorService = exports.FLEET_DETAIL_ID = exports.PAID_ENRICH_MAX = exports.PAID_HIST_KEYS = exports.LIVE_SVCS = exports.HEARTBEAT_INDEX_KEY = exports.CLIENT_TTL_MS = exports.FLEET_TTL_MS = exports.PREWARM_PAGES = exports.MIDNIGHT_PREWARM_AFTER_MS = exports.PREWARM_DELAY_MS = exports.SNAPSHOT_TTL_SEC = exports.SNAPSHOT_KEY_PREFIX = exports.SNAPSHOT_MAX_SERVE_STALE_MS = exports.SNAPSHOT_FRESH_MS = exports.RESTRICTED_FRESH_MS = exports.LIVE_TTL_MS = exports.CHANNEL_CANDIDATES = exports.HISTORY_DAYS = exports.POOL_FRESH_MS = exports.HISTORY_FRESH_MS = exports.TODAY_MAX_STALE_MS = exports.TODAY_FRESH_MS = exports.LIVE_REDIS_DEADLINE_MS = exports.MONGO_TIMEOUT_MS = exports.PG_TIMEOUT_MS = exports.MONITOR_REDIS = void 0;
 exports.fleetSummaryRow = fleetSummaryRow;
 exports.withSnapshotCache = withSnapshotCache;
 exports.toPaidChat = toPaidChat;
@@ -38372,6 +38382,7 @@ exports.CHANNEL_CANDIDATES = 40;
 exports.LIVE_TTL_MS = 5_000;
 exports.RESTRICTED_FRESH_MS = 60 * 60_000;
 exports.SNAPSHOT_FRESH_MS = exports.TODAY_FRESH_MS;
+exports.SNAPSHOT_MAX_SERVE_STALE_MS = 120_000;
 exports.SNAPSHOT_KEY_PREFIX = 'monitor::snapshot::';
 exports.SNAPSHOT_TTL_SEC = 36 * 3600;
 exports.PREWARM_DELAY_MS = 5_000;
@@ -38555,6 +38566,7 @@ let MonitorService = MonitorService_1 = class MonitorService {
             : null;
         this.snapshots = new monitor_cache_1.SnapshotCache({
             freshMs: exports.SNAPSHOT_FRESH_MS,
+            maxServeStaleMs: exports.SNAPSHOT_MAX_SERVE_STALE_MS,
             day: (t) => (0, monitor_time_1.istDate)(t),
             store,
             keyPrefix: exports.SNAPSHOT_KEY_PREFIX,
