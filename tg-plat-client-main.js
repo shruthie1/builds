@@ -49637,8 +49637,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "8b298d343a1c4a0e197d49fb6d738c144bcab17b" : 0;
-    const builtAt =  true ? "2026-10-29T04:19:11.573Z" : 0;
+    const sha =  true ? "71aedf2b2892030455e2575116769e5341bf8a63" : 0;
+    const builtAt =  true ? "2026-10-29T04:25:23.349Z" : 0;
     return { sha, builtAt };
 }
 
@@ -53599,11 +53599,9 @@ class InHouseCallService {
                     this.noteCallFlood(flood, chatId);
                     return { status: 'flood', reason: record.endReason ?? undefined };
                 }
-                // Hung up while ringing = declined (pauses ladder rings like a declined show call).
-                if (!record.answeredAt && record.endReason === 'hangup') {
-                    (0,_call_pause__WEBPACK_IMPORTED_MODULE_8__.noteCallDeclined)(chatId);
+                // Hung up while ringing = declined. Only proof calls back off (proof-moment decline store); service calls are not paused.
+                if (!record.answeredAt && record.endReason === 'hangup')
                     return { status: 'declined' };
-                }
                 return { status: 'unanswered', ...(record.endReason ? { reason: record.endReason } : {}) };
             }
             // Connected but the clip never played (audio source died): the user heard nothing, send the voice note.
@@ -55477,7 +55475,7 @@ function voiceProofLimits(env = process.env) {
         enabled: !['off', '0', 'false', 'no', 'disabled'].includes(flag),
         after: intIn(env.INHOUSE_VOICE_PROOF_AFTER, 2, 2, 10),
         windowMs: intIn(env.INHOUSE_VOICE_PROOF_WINDOW_MIN, 30, 1, 1440) * 60000,
-        spacingMs: intIn(env.INHOUSE_VOICE_PROOF_SPACING_MIN, 10, 0, 240) * 60000,
+        spacingMs: intIn(env.INHOUSE_VOICE_PROOF_SPACING_MIN, 5, 0, 240) * 60000,
         perUserMax: intIn(env.PROOF_CALL_USER_MAX_PER_DAY, 2, 1, 10),
         perUserMs: VOICE_PROOF_DAY_MS,
         declineMs: intIn(env.PROOF_CALL_DECLINE_HOURS, 24, 0, 24) * 60 * 60000,
