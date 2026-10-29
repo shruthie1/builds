@@ -4827,18 +4827,34 @@ const REQUIRED_COLUMNS = {
     daily_client: new Set(["day", "client_id", "namespace"]),
     daily_mobile: new Set(["day", "client_id", "namespace", "mobile"]),
 };
-/** The 11 accumulating counters shared by daily_client and daily_mobile (revenue deliberately absent). */
-const COUNTER_COLUMNS = [
+/** The 11 original accumulating counters shared by daily_client and daily_mobile (revenue deliberately absent). */
+const BASE_COUNTER_COLUMNS = [
     "sent", "delivered", "banned", "failed",
     "new_users", "active_users", "payers",
     "reactions_success", "reactions_restricted", "reactions_failed", "reactions_floods",
 ];
+/**
+ * Routed-user counters, added 2026-10-29 (analytics/upgrade-2026-10-29-route-counters.sql). Written
+ * only by promote-clients. DEPLOY-ORDER SAFETY: insertBatch names these columns only when a row in
+ * the statement carries a non-zero route counter, so a build that runs before the upgrade SQL keeps
+ * writing every other counter; only statements with route activity fail 42703 (transient: kept,
+ * retried with the same batch id, spooled, onStall) until the columns exist.
+ */
+const ROUTE_COUNTER_COLUMNS = ["routes_sent", "routed_reached", "route_calls_ok", "route_calls_failed"];
+const COUNTER_COLUMNS = [...BASE_COUNTER_COLUMNS, ...ROUTE_COUNTER_COLUMNS];
+const COUNTER_COLUMN_SET = new Set(COUNTER_COLUMNS);
 const COUNTER_FIELDS = [
     "sent", "delivered", "banned", "failed",
     "newUsers", "activeUsers", "payers",
     "reactionsSuccess", "reactionsRestricted", "reactionsFailed", "reactionsFloods",
+    "routesSent", "routedReached", "routeCallsOk", "routeCallsFailed",
 ];
-const accumulate = (t) => COUNTER_COLUMNS.map((c) => `${c} = ${t}.${c} + EXCLUDED.${c}`).join(", ");
+const accumulate = (t, cols = COUNTER_COLUMNS) => cols.map((c) => `${c} = ${t}.${c} + EXCLUDED.${c}`).join(", ");
+const DAILY_CLIENT_KEY = ["day", "client_id", "namespace"];
+const DAILY_MOBILE_KEY = ["day", "client_id", "namespace", "mobile", "profile"];
+const DAILY_CLIENT_CONFLICT = "ON CONFLICT (day, client_id, namespace) DO UPDATE SET ";
+const DAILY_MOBILE_CONFLICT = "ON CONFLICT (day, client_id, namespace, mobile) DO UPDATE SET "
+    + "profile = COALESCE(daily_mobile.profile, EXCLUDED.profile), ";
 /**
  * Stored value of the `service` column (analytics/upgrade-2026-10-25-service.sql). One character,
  * not the full name: promotion_send is the largest table on the 0.5 GB free tier and 'p' costs
@@ -4873,17 +4889,49 @@ const TABLES = {
     payment_event: { columns: ["ts", "chat_id", "client_id", "persona_id", "amount", "balance_after", "lifetime_after", "is_cheat", "source"] },
     cheat_flag: { columns: ["ts", "chat_id", "client_id", "persona_id", "cheat_count"] },
     daily_client: {
-        columns: ["day", "client_id", "namespace", ...COUNTER_COLUMNS],
+        columns: [...DAILY_CLIENT_KEY, ...COUNTER_COLUMNS],
         keyCount: 3,
-        conflict: `ON CONFLICT (day, client_id, namespace) DO UPDATE SET ${accumulate("daily_client")}`,
+        conflict: DAILY_CLIENT_CONFLICT + accumulate("daily_client"),
+        legacyColumns: [[...DAILY_CLIENT_KEY, ...BASE_COUNTER_COLUMNS]],
+        compact: {
+            columns: [...DAILY_CLIENT_KEY, ...BASE_COUNTER_COLUMNS],
+            conflict: DAILY_CLIENT_CONFLICT + accumulate("daily_client", BASE_COUNTER_COLUMNS),
+        },
     },
     daily_mobile: {
-        columns: ["day", "client_id", "namespace", "mobile", "profile", ...COUNTER_COLUMNS],
+        columns: [...DAILY_MOBILE_KEY, ...COUNTER_COLUMNS],
         keyCount: 4,
-        conflict: "ON CONFLICT (day, client_id, namespace, mobile) DO UPDATE SET "
-            + `profile = COALESCE(daily_mobile.profile, EXCLUDED.profile), ${accumulate("daily_mobile")}`,
+        conflict: DAILY_MOBILE_CONFLICT + accumulate("daily_mobile"),
+        legacyColumns: [[...DAILY_MOBILE_KEY, ...BASE_COUNTER_COLUMNS]],
+        compact: {
+            columns: [...DAILY_MOBILE_KEY, ...BASE_COUNTER_COLUMNS],
+            conflict: DAILY_MOBILE_CONFLICT + accumulate("daily_mobile", BASE_COUNTER_COLUMNS),
+        },
     },
 };
+/**
+ * The (columns, values, conflict) a daily_* INSERT actually uses: the compact pre-2026-10-29 list
+ * when no row carries a non-zero route counter, else the full list. Deterministic on a fixed row
+ * set, so a retried batch builds the same statement.
+ */
+function counterStatementShape(table, rows) {
+    const spec = TABLES[table];
+    const conflict = spec?.conflict ? ` ${spec.conflict}` : "";
+    if (!spec?.compact || rows.length === 0)
+        return { rows, conflict };
+    const cols = rows[0].columns;
+    const routeIdx = ROUTE_COUNTER_COLUMNS.map((c) => cols.indexOf(c)).filter((i) => i >= 0);
+    const hasRoute = rows.some((r) => routeIdx.some((i) => typeof r.values[i] === "number" && r.values[i] !== 0));
+    if (hasRoute)
+        return { rows, conflict };
+    const keep = spec.compact.columns.map((c) => cols.indexOf(c));
+    if (keep.some((i) => i < 0))
+        return { rows, conflict };
+    return {
+        rows: rows.map((r) => ({ table: r.table, columns: spec.compact.columns, values: keep.map((i) => r.values[i]) })),
+        conflict: ` ${spec.compact.conflict}`,
+    };
+}
 function sanitizeInstanceKey(raw) {
     const cleaned = String(raw ?? "").replace(/[^A-Za-z0-9_-]/g, "_");
     return cleaned || "default";
@@ -5697,7 +5745,8 @@ class AnalyticsSink {
             const own = batch.table === COUNTERS_KIND ? batch.rows.filter((r) => r.table === table) : batch.rows;
             if (own.length === 0)
                 continue;
-            const rows = coalesceOnConflictKey(own, TABLES[table]?.keyCount ?? 0);
+            const shaped = counterStatementShape(table, coalesceOnConflictKey(own, TABLES[table]?.keyCount ?? 0));
+            const rows = shaped.rows;
             const tuples = [];
             for (const row of rows) {
                 const placeholders = row.values.map((value) => {
@@ -5706,7 +5755,7 @@ class AnalyticsSink {
                 });
                 tuples.push(`(${placeholders.join(",")})`);
             }
-            const conflict = TABLES[table]?.conflict ? ` ${TABLES[table].conflict}` : "";
+            const conflict = shaped.conflict;
             inserts.push(`INSERT INTO ${table} (${rows[0].columns.join(",")}) VALUES ${tuples.join(",")}${conflict}`);
         }
         if (inserts.length === 0)
@@ -6448,12 +6497,15 @@ class AnalyticsSink {
     /**
      * A spool line from an older build: pad it to the current column list. `service` is filled with
      * THIS process's code — spool files are per instance (pm2 app) and per app directory, so the line
-     * was written by the same app — and any other new column with NULL. The batch id is unchanged, so
+     * was written by the same app — a missing daily counter with 0, and any other new column with NULL. The batch id is unchanged, so
      * the analytics_batch ledger still makes the replay exactly-once.
      */
     upgradeLegacyValues(columns, legacy, values) {
         const byName = new Map(legacy.map((c, i) => [c, values[i]]));
-        return columns.map((c) => (byName.has(c) ? byName.get(c) : c === "service" ? this.serviceCode : null));
+        // A counter column the older line lacks is 0, never NULL: `x = t.x + NULL` would null the stored total.
+        return columns.map((c) => (byName.has(c)
+            ? byName.get(c)
+            : c === "service" ? this.serviceCode : COUNTER_COLUMN_SET.has(c) ? 0 : null));
     }
     /** Healthy and idle: pick up files spilled at runtime (overflow) or left by a dead process. */
     async maybeRescanSpool() {
@@ -49712,8 +49764,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "7c1dac4a9987502656e41a9c432f71117c0eb6ec" : 0;
-    const builtAt =  true ? "2026-10-29T05:33:09.876Z" : 0;
+    const sha =  true ? "c07383c16c7b090592eca57377fb3c04a319ab71" : 0;
+    const builtAt =  true ? "2026-10-29T06:08:45.851Z" : 0;
     return { sha, builtAt };
 }
 
