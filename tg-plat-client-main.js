@@ -6774,6 +6774,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   shutdownAnalytics: () => (/* binding */ shutdownAnalytics)
 /* harmony export */ });
 /* harmony import */ var _analytics_sink__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./analytics-sink */ "../../packages/tg-analytics/src/analytics-sink.ts");
+/* harmony import */ var _loss_notifier__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./loss-notifier */ "../../packages/tg-analytics/src/loss-notifier.ts");
+
 
 /**
  * The process-wide analytics handle.
@@ -6958,6 +6960,9 @@ async function shutdownAnalytics() {
     const sink = instance;
     if (sink)
         await sink.stop();
+    // Last: stop() can itself report a loss/stall. Sends the alert a notifier's quiet-window timer still holds
+    // (10d gap 2), waiting at most 2 s so a dead notification channel never holds up exit.
+    await (0,_loss_notifier__WEBPACK_IMPORTED_MODULE_1__.flushAnalyticsNotifiers)(2000);
 }
 /** Test seam. `null` also resets the pre-init buffer. */
 function __setAnalyticsForTests(sink) {
@@ -7004,6 +7009,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   createAlertNotifier: () => (/* reexport safe */ _loss_notifier__WEBPACK_IMPORTED_MODULE_1__.createAlertNotifier),
 /* harmony export */   createLossNotifier: () => (/* reexport safe */ _loss_notifier__WEBPACK_IMPORTED_MODULE_1__.createLossNotifier),
 /* harmony export */   defaultSpoolDir: () => (/* reexport safe */ _analytics_sink__WEBPACK_IMPORTED_MODULE_0__.defaultSpoolDir),
+/* harmony export */   flushAnalyticsNotifiers: () => (/* reexport safe */ _loss_notifier__WEBPACK_IMPORTED_MODULE_1__.flushAnalyticsNotifiers),
 /* harmony export */   getAnalytics: () => (/* reexport safe */ _analytics__WEBPACK_IMPORTED_MODULE_2__.getAnalytics),
 /* harmony export */   initAnalytics: () => (/* reexport safe */ _analytics__WEBPACK_IMPORTED_MODULE_2__.initAnalytics),
 /* harmony export */   sanitizeInstanceKey: () => (/* reexport safe */ _analytics_sink__WEBPACK_IMPORTED_MODULE_0__.sanitizeInstanceKey),
@@ -7029,8 +7035,41 @@ __webpack_require__.r(__webpack_exports__);
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   createAlertNotifier: () => (/* binding */ createAlertNotifier),
-/* harmony export */   createLossNotifier: () => (/* binding */ createLossNotifier)
+/* harmony export */   createLossNotifier: () => (/* binding */ createLossNotifier),
+/* harmony export */   flushAnalyticsNotifiers: () => (/* binding */ flushAnalyticsNotifiers)
 /* harmony export */ });
+/** Flushers of every notifier in this process (one pair per app, created at module load). */
+const flushers = new Set();
+/**
+ * Shutdown: send every notifier's pending (trailing-window) message now. Waits at most `timeoutMs` for the sends;
+ * a slow or dead notification channel never holds up exit. Never throws.
+ */
+async function flushAnalyticsNotifiers(timeoutMs = 2000) {
+    const sends = [];
+    for (const flush of flushers) {
+        try {
+            const result = flush();
+            if (result && typeof result.then === "function") {
+                sends.push(Promise.resolve(result).catch(() => { }));
+            }
+        }
+        catch { /* never */ }
+    }
+    if (sends.length === 0)
+        return;
+    let timer = null;
+    const timeout = new Promise((resolve) => {
+        timer = setTimeout(resolve, timeoutMs);
+        timer?.unref?.();
+    });
+    try {
+        await Promise.race([Promise.all(sends), timeout]);
+    }
+    finally {
+        if (timer)
+            clearTimeout(timer);
+    }
+}
 function createRateLimited(send, format, options) {
     const minIntervalMs = options.minIntervalMs ?? 30 * 60000;
     const now = options.now ?? (() => Date.now());
@@ -7042,7 +7081,7 @@ function createRateLimited(send, format, options) {
     const emit = () => {
         try {
             if (pendingCount === 0)
-                return;
+                return undefined;
             lastSentAt = now();
             const text = format(pendingRows, [...pendingReasons]);
             pendingRows = 0;
@@ -7052,9 +7091,18 @@ function createRateLimited(send, format, options) {
             if (result && typeof result.catch === "function") {
                 result.catch(() => { });
             }
+            return result;
         }
         catch { /* a notifier must never break the sink */ }
+        return undefined;
     };
+    flushers.add(() => {
+        if (trailing) {
+            clearTimeout(trailing);
+            trailing = null;
+        }
+        return emit();
+    });
     return (reason, rows) => {
         try {
             pendingRows += rows;
@@ -45697,9 +45745,11 @@ function createOcrSpaceProvider(opts = {}) {
             const v2 = v2Call ?? opts.v2;
             try {
                 const p = pool.get((0,_provider__WEBPACK_IMPORTED_MODULE_4__.envOf)(opts), v2);
-                if (!p.hasKeys)
-                    return { status: 'unavailable', wordCount: 0, text: '', detail: 'no API keys configured' };
                 p.restoreExpired();
+                if (!p.hasKeys) {
+                    const detail = p.originalSize > 0 ? 'all API keys parked (quota cooldown)' : 'no API keys configured';
+                    return { status: 'unavailable', wordCount: 0, text: '', detail };
+                }
                 const apiKey = p.next();
                 if (!apiKey)
                     return { status: 'unavailable', wordCount: 0, text: '', detail: 'no valid API key available' };
@@ -48094,6 +48144,13 @@ async function withTimeout(fn, ms, label, parent) {
         parent?.removeEventListener('abort', onParentAbort);
     }
 }
+/** No usable key: `config` only when none were configured; configured keys that are all parked are `quota`. */
+function noKeyError(name, pool, keyEnvNames) {
+    if (pool.originalSize > 0) {
+        return new ProviderError(`All ${name} API keys parked (rate limit/quota cooldown); none available yet`, { errorClass: 'quota' });
+    }
+    return new ProviderError(`${name} API key(s) not configured${keyEnvNames?.length ? `. Set ${keyEnvNames.join(' or ')}.` : ''}`, { errorClass: 'config' });
+}
 /**
  * Bounded key rotation (R20-R23): at most ONE pass over the keys; a rate-limited key is removed (cooldown) and the
  * next tried; a transient error is retried exactly ONCE on the same key after 400 ms (capacityRetryDelayMs when the provider
@@ -48103,9 +48160,11 @@ async function runWithKeys(opts) {
     const { name, pool } = opts;
     const v2 = opts.v2 ?? _rules_v2__WEBPACK_IMPORTED_MODULE_0__.NO_RULES;
     const sleep = opts.sleep ?? delay;
-    if (!pool.hasKeys) {
-        throw new ProviderError(`${name} API key(s) not configured${opts.keyEnvNames?.length ? `. Set ${opts.keyEnvNames.join(' or ')}.` : ''}`, { errorClass: 'config' });
-    }
+    // Restore before the empty check: the pool is cached per process, so a pool whose keys were all parked for quota
+    // must come back once the cooldown passes instead of reading as "not configured" until restart.
+    pool.restoreExpired();
+    if (!pool.hasKeys)
+        throw noKeyError(name, pool, opts.keyEnvNames);
     const maxAttempts = Math.max(1, pool.originalSize || pool.size || 1);
     const maxTransientRetries = 1;
     let transientRetries = 0;
@@ -48113,7 +48172,7 @@ async function runWithKeys(opts) {
         pool.restoreExpired();
         const apiKey = pool.next();
         if (!apiKey)
-            throw new ProviderError(`No valid ${name} API key available`, { errorClass: 'config' });
+            throw noKeyError(name, pool, opts.keyEnvNames);
         const keyIndex = pool.indexOf(apiKey);
         try {
             const value = await withTimeout((signal) => opts.call(apiKey, signal), opts.timeoutMs, name, opts.signal);
@@ -49678,7 +49737,8 @@ async function cleanupResources(signal) {
         if (cloudinaryService) {
             cloudinaryService.cleanup();
         }
-        // Drain whatever analytics rows are still buffered. Best-effort and never throws; a slow or
+        // Drain whatever analytics rows are still buffered, then send any loss/stall alert still held by the
+        // notifiers' 30-min quiet window (bounded to 2 s). Best-effort and never throws; a slow or
         // dead sink must not hold up shutdown.
         try {
             await (0,_tg_analytics__WEBPACK_IMPORTED_MODULE_24__.shutdownAnalytics)();
@@ -49764,8 +49824,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "c07383c16c7b090592eca57377fb3c04a319ab71" : 0;
-    const builtAt =  true ? "2026-10-29T06:08:45.851Z" : 0;
+    const sha =  true ? "6b3f617d80b085471862f9c62b21d32d27f4788e" : 0;
+    const builtAt =  true ? "2026-10-29T06:24:24.561Z" : 0;
     return { sha, builtAt };
 }
 
@@ -51686,7 +51746,7 @@ CallManager.activeInstances = new Map();
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
-/* harmony export */   inHouseCallsActive: () => (/* binding */ inHouseCallsActive),
+/* harmony export */   inHouseCallsActive: () => (/* reexport safe */ _inhouse_active__WEBPACK_IMPORTED_MODULE_6__.inHouseCallsActive),
 /* harmony export */   offerCallOrLink: () => (/* binding */ offerCallOrLink),
 /* harmony export */   recallNowInHouse: () => (/* binding */ recallNowInHouse)
 /* harmony export */ });
@@ -51696,9 +51756,11 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _data_user_data_crud__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../data/user-data-crud */ "./src/data/user-data-crud.ts");
 /* harmony import */ var _telegram_client_access__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../telegram/client-access */ "./src/telegram/client-access.ts");
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
-/* harmony import */ var _inhouse_switch__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ./inhouse/switch */ "./src/calls/inhouse/switch.ts");
+/* harmony import */ var _inhouse_active__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ./inhouse-active */ "./src/calls/inhouse-active.ts");
 /* harmony import */ var _call_setup__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ./call-setup */ "./src/calls/call-setup.ts");
 /* harmony import */ var _call_attempt_cap__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ./call-attempt-cap */ "./src/calls/call-attempt-cap.ts");
+/* harmony import */ var _call_pause__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ./call-pause */ "./src/calls/call-pause.ts");
+
 
 
 
@@ -51710,22 +51772,10 @@ __webpack_require__.r(__webpack_exports__);
 
 const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_5__.Logger('tg-aut:call-me');
 const RECALL_GAP_MS = 4 * 60 * 1000;
-/** True when this account's calls go out as in-house Telegram video calls (switch on and host able). */
-async function inHouseCallsActive(callManager) {
-    if (!(0,_inhouse_switch__WEBPACK_IMPORTED_MODULE_6__.isInHouseCallsEnabled)())
-        return false;
-    try {
-        const service = await (callManager ?? _telegram_client_access__WEBPACK_IMPORTED_MODULE_4__.TelegramManager.getInstance()?.callManager)?.getInHouse?.();
-        return service ? await service.isAvailable() : false;
-    }
-    catch (error) {
-        logger.warn('inHouseCallsActive check failed', error);
-        return false;
-    }
-}
+
 async function recallNowInHouse(chatId, manager) {
     const callManager = manager ?? _telegram_client_access__WEBPACK_IMPORTED_MODULE_4__.TelegramManager.getInstance()?.callManager;
-    if (!(await inHouseCallsActive(callManager)))
+    if (!(await (0,_inhouse_active__WEBPACK_IMPORTED_MODULE_6__.inHouseCallsActive)(callManager)))
         return false;
     if (!callManager)
         return false;
@@ -51751,7 +51801,7 @@ async function offerCallOrLink(chatId, sendLink, sendText) {
     // They are on the show right now: no "calling you" text, no link.
     if (_telegram_client_access__WEBPACK_IMPORTED_MODULE_4__.TelegramManager.instanceExist() && _telegram_client_access__WEBPACK_IMPORTED_MODULE_4__.TelegramManager.getInstance()?.callManager?.isOnInHouseCall?.(chatId))
         return 'on_call';
-    if (await inHouseCallsActive()) {
+    if (await (0,_inhouse_active__WEBPACK_IMPORTED_MODULE_6__.inHouseCallsActive)()) {
         try {
             const user = await _data_user_data_crud__WEBPACK_IMPORTED_MODULE_3__.UserDataDtoCrud.getInstance().read(chatId);
             const callManager = _telegram_client_access__WEBPACK_IMPORTED_MODULE_4__.TelegramManager.getInstance().callManager;
@@ -51760,6 +51810,16 @@ async function offerCallOrLink(chatId, sendLink, sendText) {
             const blocked = ((await callManager.getInHouse())?.isPrivacyBlocked?.(chatId) ?? false) || (callManager.isCallCapped?.(chatId, user) ?? false);
             // Service used up (showStillServable): the ring would be refused, so never "calling you on Telegram now".
             if (!blocked && user && (0,_payments_service_eligibility__WEBPACK_IMPORTED_MODULE_2__.canProceedWithService)(user) && (0,_payments_service_eligibility__WEBPACK_IMPORTED_MODULE_2__.showStillServable)(user) && (user.callTime ?? 0) < Date.now() - RECALL_GAP_MS) {
+                // The user paused calls ("busy hu, call after 10 min"): as in proceedWithCall, no "calling you" text and
+                // no ring now; one ring at the end of the pause (journey E7). A call request or complaint ends the pause
+                // before this runs (noteCallPauseFromText), so "call me" still rings.
+                const pausedMs = (0,_call_pause__WEBPACK_IMPORTED_MODULE_9__.callPauseLeftMs)(chatId);
+                if (pausedMs > 0) {
+                    const { holdCallsUntil } = await Promise.resolve(/*! import() */).then(__webpack_require__.bind(__webpack_require__, /*! ./event-ladder/event-executor */ "./src/calls/event-ladder/event-executor.ts"));
+                    await holdCallsUntil(chatId, Date.now() + pausedMs);
+                    logger.log(`[call-me] ${chatId}: calls paused (${Math.ceil(pausedMs / 60000)} min left); ring held until then`);
+                    return 'held';
+                }
                 // Every slot busy: queueing sends the "give me N mins" text instead; never promise "calling now".
                 // Nor when the attempt cap's backoff holds the ring for more than ~30 s (CS7).
                 if (!callManager.isInHouseBusy?.()) {
@@ -52292,7 +52352,7 @@ async function scheduleLadder(chatId, type = '1') {
     }
     // In-house calls ring with the real show, so their ladder asks the user to pick up instead of
     // claiming the call is broken; the VCUI link is only a late fallback.
-    const { inHouseCallsActive } = await Promise.resolve(/*! import() */).then(__webpack_require__.bind(__webpack_require__, /*! ../call-me */ "./src/calls/call-me.ts"));
+    const { inHouseCallsActive } = await Promise.resolve(/*! import() */).then(__webpack_require__.bind(__webpack_require__, /*! ../inhouse-active */ "./src/calls/inhouse-active.ts"));
     const inHouse = await inHouseCallsActive();
     const events = (inHouse ? _tg_events__WEBPACK_IMPORTED_MODULE_0__.buildInHouseEventLadder : _tg_events__WEBPACK_IMPORTED_MODULE_0__.buildPaidEventLadder)(chatId, clientId, type, Date.now());
     await s.createMultiple(events);
@@ -52585,6 +52645,43 @@ async function operatorCall(chatId) {
     logger.log(`[operator-call] ${chatId}: queued in-house call`);
     callManager.addToQueue(chatId, { noLegacyRing: true });
     return { called: true };
+}
+
+
+/***/ },
+
+/***/ "./src/calls/inhouse-active.ts"
+/*!*************************************!*\
+  !*** ./src/calls/inhouse-active.ts ***!
+  \*************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   inHouseCallsActive: () => (/* binding */ inHouseCallsActive)
+/* harmony export */ });
+/* harmony import */ var _telegram_client_access__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../telegram/client-access */ "./src/telegram/client-access.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _inhouse_switch__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./inhouse/switch */ "./src/calls/inhouse/switch.ts");
+// inHouseCallsActive lives here, not in call-me.ts, so event-executor can read it without importing call-me
+// (call-me holds paused rings through event-executor's holdCallsUntil; importing back would close a cycle).
+
+
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_1__.Logger('tg-aut:call-me');
+/** True when this account's calls go out as in-house Telegram video calls (switch on and host able). */
+async function inHouseCallsActive(callManager) {
+    if (!(0,_inhouse_switch__WEBPACK_IMPORTED_MODULE_2__.isInHouseCallsEnabled)())
+        return false;
+    try {
+        const service = await (callManager ?? _telegram_client_access__WEBPACK_IMPORTED_MODULE_0__.TelegramManager.getInstance()?.callManager)?.getInHouse?.();
+        return service ? await service.isAvailable() : false;
+    }
+    catch (error) {
+        logger.warn('inHouseCallsActive check failed', error);
+        return false;
+    }
 }
 
 
@@ -68889,7 +68986,7 @@ class UserDataDtoCrud {
     }
     /**
      * The @tg/db repositories bound to the current Mongo client, or null before connect. Reach this
-     * through `core/db` (getRepositories); never cache the result across an await.
+     * through `data/db` (getRepositories); never cache the result across an await.
      */
     getRepositories() {
         return this.repositories.get(this.client);
