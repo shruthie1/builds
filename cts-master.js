@@ -37430,7 +37430,7 @@ function toPaidChat(r) {
 function classifyHeartbeat(payload, now) {
     if (!payload)
         return { state: 'no-heartbeat', ageSec: null, clockSkew: false };
-    const at = Number(payload.at);
+    const at = Number(payload.ts ?? payload.at);
     if (!Number.isFinite(at) || at <= 0)
         return { state: 'stale', ageSec: null, clockSkew: false };
     const clockSkew = at > now + 5_000;
