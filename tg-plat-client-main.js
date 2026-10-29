@@ -7297,7 +7297,7 @@ class CallEngine extends events__WEBPACK_IMPORTED_MODULE_0__.EventEmitter {
             return;
         const inputCall = new telegram__WEBPACK_IMPORTED_MODULE_3__.Api.InputPhoneCall({ id: pc.id, accessHash: pc.accessHash });
         if (this.isBusy() || this.calls.has(pc.adminId.toString())) {
-            this.logger.log('[tg-calls] busy; declining incoming call', pc.id.toString());
+            this.logger.log(`[tg-calls] busy; declining incoming call ${pc.id.toString()} from ${pc.adminId.toString()} (calls=${this.calls.size}/${this.maxConcurrent})`);
             await this.discard(inputCall, new telegram__WEBPACK_IMPORTED_MODULE_3__.Api.PhoneCallDiscardReasonBusy(), 0);
             this.emit('busy-declined', { callId: pc.id.toString(), peerUserId: pc.adminId.toString(), peerUsername: null, video: !!pc.video });
             return;
@@ -7322,6 +7322,7 @@ class CallEngine extends events__WEBPACK_IMPORTED_MODULE_0__.EventEmitter {
         if (this.isBusy() || this.calls.has(pc.adminId.toString())) {
             // Another call won the race while the policy ran: decline busy and report it, so a
             // policy that already reserved state for this caller can release it.
+            this.logger.log(`[tg-calls] busy; declining incoming call ${info.callId} from ${info.peerUserId} (calls=${this.calls.size}/${this.maxConcurrent})`);
             await this.discard(inputCall, new telegram__WEBPACK_IMPORTED_MODULE_3__.Api.PhoneCallDiscardReasonBusy(), 0);
             this.emit('busy-declined', info);
             return;
@@ -7342,6 +7343,14 @@ class CallEngine extends events__WEBPACK_IMPORTED_MODULE_0__.EventEmitter {
             if (call.finished)
                 return;
             const gB = await this.prepareMedia(call, media, pc.gAHash);
+            // Ended while preparing (caller hung up): release the media instance created meanwhile, don't accept.
+            if (call.finished) {
+                try {
+                    await this.ntg.stop(call.userId);
+                }
+                catch { /* not created / already stopped */ }
+                return;
+            }
             await this.client.invoke(new telegram__WEBPACK_IMPORTED_MODULE_3__.Api.phone.AcceptCall({ peer: inputCall, gB: Buffer.from(gB), protocol: this.protocol() }));
             this.markAnswered(call);
             // The caller's confirmCall arrives as UpdatePhoneCall(PhoneCall) → onIncomingConfirmed.
@@ -7421,6 +7430,11 @@ class CallEngine extends events__WEBPACK_IMPORTED_MODULE_0__.EventEmitter {
                 const remoteAudio = { mediaSource: MediaSource.EXTERNAL, input: '', sampleRate: this.audio.sampleRate, channelCount: this.audio.channels, keepOpen: true };
                 await this.ntg.setStreamSources(call.userId, StreamMode.PLAYBACK, { microphone: remoteAudio, speaker: remoteAudio });
                 call.feeder = this.createFeeder(call, audioCommand);
+                // Ended while the echo was being set up: finish() has run and will not stop a feeder started after it.
+                if (call.finished) {
+                    call.feeder.stop();
+                    call.feeder = undefined;
+                }
             }
             catch (error) {
                 // Echo plumbing unavailable: play the show the plain way.
@@ -7701,6 +7715,36 @@ const MAX_REMOTE_SLACK_MS = 1000;
 /** After ffmpeg's stdout closes, how long to wait for its exit status before deciding without it. */
 const SOURCE_EXIT_WAIT_MS = 1000;
 /**
+ * Process groups of the audio sources this process started and has not stopped yet. Killed if the process exits
+ * mid-call (restart, shutdown): a source that is not writing at that moment would not notice its pipe closing.
+ */
+const liveSourceGroups = new Set();
+let exitHookInstalled = false;
+function killSourceGroup(pgid) {
+    try {
+        process.kill(-pgid, 'SIGKILL');
+    }
+    catch { /* already gone */ }
+}
+function trackSourceGroup(pgid) {
+    liveSourceGroups.add(pgid);
+    if (exitHookInstalled)
+        return;
+    exitHookInstalled = true;
+    process.once('exit', () => {
+        for (const group of liveSourceGroups)
+            killSourceGroup(group);
+        liveSourceGroups.clear();
+    });
+}
+/**
+ * `sh -c "ffmpeg ..."` in its own process group. dash (/bin/sh on the VMs) does not exec the command, so the shell
+ * stays between Node and ffmpeg: killing only the shell left ffmpeg reparented to init (VM1 2026-10-29, 21 orphans).
+ */
+function spawnSourceGroup(command) {
+    return (0,child_process__WEBPACK_IMPORTED_MODULE_0__.spawn)('/bin/sh', ['-c', command], { stdio: ['ignore', 'pipe', 'ignore'], detached: true });
+}
+/**
  * Feeds a call's microphone track itself (ntgcalls MediaSource.EXTERNAL) instead of letting
  * ntgcalls read ffmpeg: the show's PCM is paced out in 10 ms frames, and the caller's own voice
  * (ntgcalls onFrames, PLAYBACK) is mixed back in at `echo.gain`, `echo.delayMs` late.
@@ -7717,6 +7761,8 @@ class AudioFeeder {
     constructor(options) {
         this.stats = { framesSent: 0, remoteFrames: 0, remoteBytes: 0, underruns: 0, echoMixedFrames: 0 };
         this.proc = null;
+        /** Process group of the source (own spawn only): stop() kills the shell and ffmpeg together. */
+        this.sourceGroup = null;
         this.show = [];
         this.showBytes = 0;
         this.sourceDone = false;
@@ -7769,18 +7815,43 @@ class AudioFeeder {
             (this.o.clearInterval ?? ((h) => clearInterval(h)))(this.timer);
         this.timer = null;
         this.clearExitWait();
-        try {
-            this.proc?.kill('SIGKILL');
-        }
-        catch { /* already gone */ }
-        this.proc = null;
+        this.killSource();
         this.show = [];
         this.remote = [];
     }
+    /**
+     * Kill the whole source and close our end of its pipe. Closing matters on its own: once ntgcalls has taken SIGCHLD,
+     * Node never sees the source exit, so it never resumes or closes a stdout we paused, and an ffmpeg left behind would
+     * block writing into it forever. With the read end closed its next write fails and it exits.
+     */
+    killSource() {
+        const proc = this.proc;
+        this.proc = null;
+        if (this.sourceGroup != null) {
+            killSourceGroup(this.sourceGroup);
+            liveSourceGroups.delete(this.sourceGroup);
+            this.sourceGroup = null;
+        }
+        if (!proc)
+            return;
+        try {
+            proc.kill('SIGKILL');
+        }
+        catch { /* already gone */ }
+        try {
+            proc.stdout?.destroy?.();
+        }
+        catch { /* already closed */ }
+    }
     spawnSource() {
-        const spawn = this.o.spawn ?? ((command) => (0,child_process__WEBPACK_IMPORTED_MODULE_0__.spawn)('/bin/sh', ['-c', command], { stdio: ['ignore', 'pipe', 'ignore'] }));
-        const proc = spawn(this.o.command);
+        const proc = (this.o.spawn ?? spawnSourceGroup)(this.o.command);
         this.proc = proc;
+        // detached = its own process group, led by the shell (pgid = its pid).
+        const pid = proc.pid;
+        if (!this.o.spawn && typeof pid === 'number') {
+            this.sourceGroup = pid;
+            trackSourceGroup(pid);
+        }
         proc.stdout?.on('data', (chunk) => {
             if (this.stopped)
                 return;
@@ -7814,6 +7885,10 @@ class AudioFeeder {
         });
         proc.on('close', (code, signal) => {
             this.clearExitWait();
+            if (this.proc === proc && this.sourceGroup != null) {
+                liveSourceGroups.delete(this.sourceGroup);
+                this.sourceGroup = null;
+            }
             if (this.sourceDone)
                 return;
             this.sourceDone = true;
@@ -49637,8 +49712,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "bf2db009592e1d6855da29633f7fc3a529e2494a" : 0;
-    const builtAt =  true ? "2026-10-29T04:51:39.612Z" : 0;
+    const sha =  true ? "7c1dac4a9987502656e41a9c432f71117c0eb6ec" : 0;
+    const builtAt =  true ? "2026-10-29T05:33:09.876Z" : 0;
     return { sha, builtAt };
 }
 
@@ -53250,19 +53325,21 @@ class InHouseCallService {
          *  - anyone else / switch off / line busy / lookup failure → ignore (no answer, no decline).
          */
         this.incomingPolicy = async (info) => {
-            if (!this.isEnabled() || this.deps.isLineBusy?.())
-                return { action: 'ignore' };
             const chatId = info.peerUserId;
+            if (!this.isEnabled())
+                return this.refuseIncoming(chatId, 'ignore', 'in-house calls off');
+            if (this.deps.isLineBusy?.())
+                return this.refuseIncoming(chatId, 'ignore', 'legacy call line busy');
             // Already being called by us (slot reserved, not yet ringing): let the outgoing call win.
             if (this.isInCall(chatId))
-                return { action: 'ignore' };
+                return this.refuseIncoming(chatId, 'ignore', 'already on a call with us');
             // Every slot taken (incl. outgoing calls still being set up): busy, like a phone on a call.
             if (this.isBusy())
-                return { action: 'decline' };
+                return this.refuseIncoming(chatId, 'decline', 'busy');
             try {
                 const user = await this.deps.readUser(chatId);
                 if (!user)
-                    return { action: 'ignore' };
+                    return this.refuseIncoming(chatId, 'ignore', 'no user row');
                 // Blocked for calls (callBlock): never picked up (no show, no pitch clip, no pay prompt); it rings out.
                 if ((0,_video_policy__WEBPACK_IMPORTED_MODULE_1__.callBlock)(chatId, user, await this.blockedElsewhere(chatId, await this.deps.readOtherProfiles(chatId)))) {
                     this.logger.log(`[in-house-calls] incoming call from ${chatId} ignored: chat is blocked (canReply 0)`);
@@ -53271,9 +53348,9 @@ class InHouseCallService {
                 const { plan } = await this.planFor(chatId, user);
                 // Re-check after the awaits: another call may have taken the last slot meanwhile.
                 if (this.isInCall(chatId))
-                    return { action: 'ignore' };
+                    return this.refuseIncoming(chatId, 'ignore', 'already on a call with us');
                 if (this.isBusy())
-                    return { action: 'decline' };
+                    return this.refuseIncoming(chatId, 'decline', 'busy');
                 if (plan) {
                     // Paid shows always win: a proof call on the line is hung up for this show.
                     this.preemptVoiceProofs(`incoming show from ${chatId}`);
@@ -53284,10 +53361,10 @@ class InHouseCallService {
                     return { action: 'answer', media: { file: plan.url, video: true, videoOnVoiceCall: true, startSec: plan.startSec, size: plan.size, ...(plan.audio === false ? { audio: false } : {}) }, options: this.callOptions(plan) };
                 }
                 if ((Number(user.highestPayAmount) || 0) < PAID_THRESHOLD)
-                    return { action: 'ignore' };
+                    return this.refuseIncoming(chatId, 'ignore', 'not a paid caller');
                 // A pitch is not a show: it never preempts a proof call (the line is taken).
                 if (this.voiceProofCalls.size > 0)
-                    return { action: 'decline' };
+                    return this.refuseIncoming(chatId, 'decline', 'proof call on the line (no pitch)');
                 const clip = this.nextPitch(chatId);
                 if (clip) {
                     // Voice-only pitch; the text menu follows when the call ends (see the 'ended' listener).
@@ -53301,7 +53378,7 @@ class InHouseCallService {
                     };
                 }
                 this.promptToPayAgain(chatId, user, 'declined');
-                return { action: 'decline' };
+                return this.refuseIncoming(chatId, 'decline', 'no show pending (no pitch this time)');
             }
             catch (error) {
                 this.logger.error(`[in-house-calls] incoming planning failed for ${chatId}`, error);
@@ -54061,6 +54138,13 @@ class InHouseCallService {
         // Hold their ladder ("pick up, I'm calling") until a slot is expected to be free.
         if (this.deps.deferEvents)
             void this.deps.deferEvents(chatId, mins * 60000).catch((error) => { logger.warn(`deferEvents failed for ${chatId}`, error); });
+    }
+    /** An incoming call we do not answer: one log line with the caller and why (busy also shows the slot count). */
+    refuseIncoming(chatId, action, reason) {
+        const held = this.outgoing.size + this.incomingPlans.size + this.pitchCalls.size;
+        const slots = reason === 'busy' ? ` (calls=${held}/${this.maxCalls})` : '';
+        this.logger.log(`[in-house-calls] ${reason}; ${action === 'decline' ? 'declining' : 'ignoring'} incoming call from ${chatId}${slots}`);
+        return { action };
     }
     /** Decide pick-up vs decline for a paid caller with nothing pending; returns the clip to play, or null. */
     nextPitch(chatId) {
