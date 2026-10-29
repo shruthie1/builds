@@ -49637,8 +49637,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "71aedf2b2892030455e2575116769e5341bf8a63" : 0;
-    const builtAt =  true ? "2026-10-29T04:25:23.349Z" : 0;
+    const sha =  true ? "bf2db009592e1d6855da29633f7fc3a529e2494a" : 0;
+    const builtAt =  true ? "2026-10-29T04:51:39.612Z" : 0;
     return { sha, builtAt };
 }
 
@@ -50783,7 +50783,7 @@ class CallManager {
             logger.log(`[CallManager] ChatId ${chatId} already in queue, skipping`);
             return;
         }
-        if (this.inFlight.has(chatId) || this.inHouse?.isInCall?.(chatId)) {
+        if (this.inFlight.has(chatId) || this.isOnInHouseCall(chatId)) {
             logger.log(`[CallManager] ChatId ${chatId} is already on a call, skipping`);
             if (opts.noLegacyRing)
                 this.noLegacyRing.delete(chatId);
@@ -50829,9 +50829,16 @@ class CallManager {
     isInHouseBusy() {
         return this.inHouse?.isBusy?.() ?? false;
     }
-    /** True while chatId is on (or being set up for) an in-house call with this account. */
+    /**
+     * True while chatId is on (or being set up for) an in-house show or pitch call with this account. A chat whose only
+     * call is a voice-proof call is not: a show for it preempts that call (paid shows always win).
+     */
     isOnInHouseCall(chatId) {
         // The service covers planning → ringing → show; a chat only waiting on the legacy fallback ring is not on one.
+        return this.isOnAnyInHouseCall(chatId) && !(this.inHouse?.isOnlyOnProofCall?.(chatId) ?? false);
+    }
+    /** Like isOnInHouseCall, but a voice-proof call counts too (sends are held while any call rings or plays). */
+    isOnAnyInHouseCall(chatId) {
         return this.inHouse?.isInCall?.(chatId) ?? false;
     }
     /** When an in-house call with chatId last connected (undefined when none has since start). */
@@ -53349,6 +53356,10 @@ class InHouseCallService {
         return this.outgoing.has(chatId) || this.incomingPlans.has(chatId) || this.pitchCalls.has(chatId) || this.voiceProofCalls.has(chatId)
             || (this.engine?.isInCallWith?.(chatId) ?? false);
     }
+    /** True while chatId's only call is a voice-proof call: a show for chatId preempts it (no show is running). */
+    isOnlyOnProofCall(chatId) {
+        return this.voiceProofCalls.has(chatId) && !this.outgoing.has(chatId) && !this.incomingPlans.has(chatId) && !this.pitchCalls.has(chatId);
+    }
     /**
      * The pay amount chatId's running show was planned under, or undefined when no show is running
      * (or it is still being planned). A mid-show payment is judged against this, not against a
@@ -53448,7 +53459,8 @@ class InHouseCallService {
      */
     async play(chatId) {
         // Reserve the slot before any await, so a queue dispatching calls in parallel never overshoots.
-        if (this.isInCall(chatId))
+        // A proof call to this same chat is no show: the show below preempts it (paid shows always win).
+        if (this.isInCall(chatId) && !this.isOnlyOnProofCall(chatId))
             return { status: 'already_in_call' };
         // The account is call-limited (FLOOD_WAIT), or Telegram refused calls to this user (PEER_FLOOD):
         // do not touch Telegram, just stop this chat's ladder.
@@ -53545,6 +53557,14 @@ class InHouseCallService {
         this.saveVoiceProofState();
         // Only a flood from the call request itself is a call flood (resolving the peer is a different limit).
         let requesting = false;
+        // True once Telegram took the call request (record.callId): the phone rang, so the attempt counts.
+        let rang = false;
+        // Ended before it rang (preempted, unsupported, error, stopped): the user saw nothing, so no daily slot or spacing is used.
+        const unrung = (result) => {
+            if (!rang)
+                this.releaseVoiceProofSlot(chatId, now);
+            return result;
+        };
         try {
             const [user, others] = await Promise.all([this.deps.readUser(chatId), this.deps.readOtherProfiles(chatId)]);
             if ((0,_video_policy__WEBPACK_IMPORTED_MODULE_1__.callBlock)(chatId, user, await this.blockedElsewhere(chatId, others))) {
@@ -53552,7 +53572,7 @@ class InHouseCallService {
                 return { status: 'skipped', reason: 'blocked' };
             }
             if (!(await this.isAvailable()))
-                return { status: 'unsupported' };
+                return unrung({ status: 'unsupported' });
             await this.recoverFromCrash();
             if (this.deps.crashGuard?.isBarred(chatId)) {
                 this.releaseVoiceProofSlot(chatId, now);
@@ -53560,33 +53580,39 @@ class InHouseCallService {
             }
             const stepMs = this.deps.planTimeoutMs ?? PLAN_TIMEOUT_MS;
             const durationSec = await this.clipDurationSec(clipPath, stepMs);
-            // The short "calling you" line lands just before the ring (call-status text: urgent, past the reply cool-down).
-            // Sent while the slot is held, so no reply waits behind the ring; never holds the ring longer than the cap.
-            if (opts.announce)
-                await this.announceVoiceProof(chatId, opts.announce);
             const engine = this.getEngine();
             const peer = await withStepTimeout(this.deps.resolvePeer(chatId), stepMs, 'resolving the peer');
             if (this.stopped)
-                return { status: 'error' };
+                return unrung({ status: 'error' });
             // A paid show took the line while we prepared (or one is waiting for it): do not ring.
             if (this.voiceProofPreempted.has(chatId) || this.outgoing.size + this.incomingPlans.size > 0 || this.deps.hasQueuedCalls?.()) {
-                return { status: 'preempted' };
+                return unrung({ status: 'preempted' });
             }
             this.voiceProofPeers.set(chatId, String(peer?.id ?? chatId));
             requesting = true;
             await this.deps.crashGuard?.settingUp(chatId, this);
             if (this.stopped)
-                return { status: 'error' };
+                return unrung({ status: 'error' });
             if (this.voiceProofPreempted.has(chatId))
-                return { status: 'preempted' };
+                return unrung({ status: 'preempted' });
+            // The short "calling you" line lands just before the ring (call-status text: urgent, past the reply cool-down):
+            // only once the peer is resolved and nothing took the line. Never holds the ring longer than the cap.
+            if (opts.announce) {
+                await this.announceVoiceProof(chatId, opts.announce);
+                if (this.stopped)
+                    return unrung({ status: 'error' });
+                if (this.voiceProofPreempted.has(chatId))
+                    return unrung({ status: 'preempted' });
+            }
             const record = await engine.call(peer, { file: clipPath, video: false, ringAsVideo: true }, {
                 answerTimeoutMs: VOICE_PROOF_RING_MS,
                 maxDurationMs: Math.min((durationSec ?? VOICE_PROOF_DEFAULT_CLIP_SEC) * 1000 + VOICE_PROOF_CAP_SLACK_MS, VOICE_PROOF_MAX_MS),
                 hangupOnMediaEnd: true,
             });
+            rang = record.callId !== null;
             // Hung up by us for a paid show: whatever the record says, the user did not hear the clip through.
             if (this.voiceProofPreempted.has(chatId))
-                return { status: 'preempted' };
+                return unrung({ status: 'preempted' });
             if (record.endReason === 'privacy_restricted') {
                 this.voiceProofPrivacy.set(chatId, this.now());
                 this.saveVoiceProofState();
@@ -53602,7 +53628,8 @@ class InHouseCallService {
                 // Hung up while ringing = declined. Only proof calls back off (proof-moment decline store); service calls are not paused.
                 if (!record.answeredAt && record.endReason === 'hangup')
                     return { status: 'declined' };
-                return { status: 'unanswered', ...(record.endReason ? { reason: record.endReason } : {}) };
+                // No call id = the engine failed before the request (media setup): it never rang, nothing is used up.
+                return unrung({ status: 'unanswered', ...(record.endReason ? { reason: record.endReason } : {}) });
             }
             // Connected but the clip never played (audio source died): the user heard nothing, send the voice note.
             if (record.endReason === 'media_failed' || record.endReason === 'error')
@@ -53614,19 +53641,19 @@ class InHouseCallService {
         catch (error) {
             if (error instanceof StepTimeout) {
                 this.logger.warn(`[in-house-calls] voice-proof ${chatId}: ${error.message}; giving up (voice note instead)`);
-                return { status: 'error' };
+                return unrung({ status: 'error' });
             }
             if (this.voiceProofPreempted.has(chatId))
-                return { status: 'preempted' };
+                return unrung({ status: 'preempted' });
             if (/busy/i.test(error?.message ?? ''))
-                return { status: 'busy' };
+                return unrung({ status: 'busy' });
             const flood = requesting ? (0,_call_flood_cooldown__WEBPACK_IMPORTED_MODULE_4__.classifyCallFlood)(error) : null;
             if (flood) {
                 this.noteCallFlood(flood, chatId);
                 return { status: 'flood' };
             }
             this.logger.error(`[in-house-calls] voice-proof call to ${chatId} failed`, error);
-            return { status: 'error' };
+            return unrung({ status: 'error' });
         }
         finally {
             if (requesting)
@@ -53984,8 +54011,10 @@ class InHouseCallService {
             // clears the marker (setupEnded), so an aborted setup never bars the chat (review 2026-10-24).
             if (this.cancelled.has(chatId) || this.stopped)
                 return { status: 'cancelled' };
-            // A proof call this show preempted: its hang-up (DiscardCall) is quick; wait for it, bounded, so the engine has the slot.
-            await this.afterPreemption();
+            // A proof call this show preempted keeps its engine slot until its hang-up (DiscardCall) lands. The engine has a
+            // spare slot for it, so only wait (bounded) when the engine is still full or the proof call rings this same user.
+            if (engine.isBusy() || engine.isInCallWith?.(peerKey))
+                await this.afterPreemption();
             record = await engine.call(peer, { file: plan.url, video: true, startSec: plan.startSec, size: plan.size, ...(plan.audio === false ? { audio: false } : {}) }, this.callOptions(plan));
         }
         catch (error) {
@@ -54085,7 +54114,7 @@ class InHouseCallService {
     }
     getEngine() {
         if (!this.engine) {
-            const engine = this.deps.createEngine();
+            const engine = this.deps.createEngine(this.maxCalls + 1);
             engine.setIncomingPolicy(this.incomingPolicy);
             engine.on('connected', (record) => {
                 const plan = record.direction === 'outgoing' ? this.outgoingPlans.get(record.peerUserId) : this.incomingPlans.get(record.peerUserId);
@@ -54841,11 +54870,12 @@ function createInHouseCallService(client, hooks) {
         isEnabled: () => (0,_switch__WEBPACK_IMPORTED_MODULE_20__.isInHouseCallsEnabled)(),
         isSupported: () => _tg_calls__WEBPACK_IMPORTED_MODULE_10__.CallEngine.isSupported() && binaryRuns('ffmpeg') && binaryRuns('ffprobe'),
         maxConcurrentCalls: maxCalls,
-        createEngine: () => new _tg_calls__WEBPACK_IMPORTED_MODULE_10__.CallEngine(client, {
+        // slots = maxCalls + 1 (the proof call's slot; the service limits shows to maxCalls).
+        createEngine: (slots) => new _tg_calls__WEBPACK_IMPORTED_MODULE_10__.CallEngine(client, {
             logger: engineLogger,
             video: (0,_video_policy__WEBPACK_IMPORTED_MODULE_21__.callVideoParams)(),
             echo: (0,_video_policy__WEBPACK_IMPORTED_MODULE_21__.callEchoParams)(),
-            maxConcurrentCalls: maxCalls,
+            maxConcurrentCalls: slots,
         }),
         readUser: async (chatId) => (await db.read(chatId)),
         readOtherProfiles: (chatId) => db.readOtherPersonaRows(chatId),
@@ -55513,7 +55543,7 @@ const ON_CALL_MAX_RECHECKS = 100; // ~50 min (shows last 15-30 min), then the de
 const RECHECK_MS = ON_CALL_RECHECK_MS;
 const MAX_RECHECKS = ON_CALL_MAX_RECHECKS;
 /**
- * True while `chatId` is on (ringing, planning or connected) an in-house call with this account.
+ * True while `chatId` is on (ringing, planning or connected) an in-house call with this account, a voice-proof call included.
  * In-memory, per process. Never throws: any missing piece (no manager yet, no call manager) is "not on a call".
  */
 function isChatOnCall(chatId) {
@@ -55521,7 +55551,7 @@ function isChatOnCall(chatId) {
         const key = String(chatId ?? '');
         if (!key)
             return false;
-        return _telegram_client_access__WEBPACK_IMPORTED_MODULE_0__.TelegramManager.getInstance()?.callManager?.isOnInHouseCall?.(key) === true;
+        return _telegram_client_access__WEBPACK_IMPORTED_MODULE_0__.TelegramManager.getInstance()?.callManager?.isOnAnyInHouseCall?.(key) === true;
     }
     catch {
         return false;
@@ -55984,7 +56014,10 @@ async function deliverProof(ctx, slot, deps = liveDeps) {
             // logging never breaks the reply
         }
     };
+    let claimed = false;
     const notPlaced = (result, reason) => {
+        if (claimed)
+            (0,_voice_proof__WEBPACK_IMPORTED_MODULE_7__.releaseProofCall)(chatId);
         log(result, reason, fileName);
         return { placed: false };
     };
@@ -55992,8 +56025,16 @@ async function deliverProof(ctx, slot, deps = liveDeps) {
         const limits = deps.limits();
         if (!limits.enabled)
             return notPlaced('skipped', 'off');
+        // This chat's proof call is already on its way (delay, set-up, ring or clip): it answers this ask too. No new call,
+        // no voice note, and the ask is not counted (it would start a fresh count mid-call).
+        if ((0,_voice_proof__WEBPACK_IMPORTED_MODULE_7__.isProofCallPending)(chatId)) {
+            log('skipped', 'pending', 'none');
+            return { placed: true };
+        }
         if ((0,_voice_proof__WEBPACK_IMPORTED_MODULE_7__.recordProofRequest)(chatId, limits.windowMs, deps.now()) < limits.after)
             return notPlaced('skipped', 'first_ask');
+        // Claimed before any await, so a second quick ask sees it (released below when no call is placed).
+        claimed = (0,_voice_proof__WEBPACK_IMPORTED_MODULE_7__.claimProofCall)(chatId);
         if (!(await deps.active()))
             return notPlaced('skipped', 'inhouse_off');
         if (await deps.payerOrPending?.(chatId))
@@ -56035,12 +56076,15 @@ async function deliverProof(ctx, slot, deps = liveDeps) {
             if (result === 'declined')
                 deps.declines?.note(chatId);
             const reason = outcome.status === 'declined' ? 'hangup' : outcome.reason ?? (result === 'skipped' ? outcome.status : undefined);
-            log(result, reason, result === 'played' ? 'none' : await sendFallback());
+            // Preempted by their own paid show (they paid while it rang): no proof voice note on top of the show.
+            const ownShow = result === 'preempted' && (await deps.payerOrPending?.(chatId).catch(() => false));
+            log(result, reason, result === 'played' || ownShow ? 'none' : await sendFallback());
         })
             .catch(async (error) => {
             logger.warn(`[PROOF-CALL] chat=${chatId} call failed: ${error?.message ?? error}`);
             log('skipped', 'error', await sendFallback());
-        });
+        })
+            .finally(() => (0,_voice_proof__WEBPACK_IMPORTED_MODULE_7__.releaseProofCall)(chatId));
         return { placed: true };
     }
     catch (error) {
@@ -56336,30 +56380,35 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   PROOF_REAL_CLIP_PATTERN: () => (/* binding */ PROOF_REAL_CLIP_PATTERN),
 /* harmony export */   VOICE_PROOF_CLIPS: () => (/* binding */ VOICE_PROOF_CLIPS),
-/* harmony export */   VOICE_PROOF_CLIP_PATTERN: () => (/* binding */ VOICE_PROOF_CLIP_PATTERN),
+/* harmony export */   claimProofCall: () => (/* binding */ claimProofCall),
 /* harmony export */   forgetProofRequests: () => (/* binding */ forgetProofRequests),
+/* harmony export */   isProofCallPending: () => (/* binding */ isProofCallPending),
 /* harmony export */   pickVoiceProofClip: () => (/* binding */ pickVoiceProofClip),
 /* harmony export */   recordProofRequest: () => (/* binding */ recordProofRequest),
+/* harmony export */   releaseProofCall: () => (/* binding */ releaseProofCall),
 /* harmony export */   resetProofRequests: () => (/* binding */ resetProofRequests)
 /* harmony export */ });
 /* harmony import */ var fs__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! fs */ "fs");
 /* harmony import */ var fs__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(fs__WEBPACK_IMPORTED_MODULE_0__);
-/* harmony import */ var _media_voices__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../media/voices */ "./src/media/voices.ts");
+/* harmony import */ var path__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! path */ "path");
+/* harmony import */ var path__WEBPACK_IMPORTED_MODULE_1___default = /*#__PURE__*/__webpack_require__.n(path__WEBPACK_IMPORTED_MODULE_1__);
+/* harmony import */ var _media_voices__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../media/voices */ "./src/media/voices.ts");
+
 
 
 /**
  * The "pay first, then video" voice clips VCUI's payment page plays on its call screen
  * (payment-local/src/assets/audio, copied to apps/tg-aut/assets/voice-proof). They are not in the
- * bundle: every call-voice-*.mp3 in `<cwd>/assets/voices/<clientId>/` + `.../common/` (media/voices.ts),
+ * bundle: every call-voice-*.mp3 in `<cwd>/assets/voices/<clientId>/`, else `.../common/` (media/voices.ts),
  * else these fixed names in INHOUSE_VOICE_PROOF_DIR (default: the client's working directory, where the
  * other pitch clips live). No clip on the host = no call, the voice message goes out as before.
  * The call flow itself is calls/proof-moment.ts (deliverProof).
  */
 const VOICE_PROOF_CLIPS = ['call-voice-1.mp3', 'call-voice-2.mp3', 'call-voice-3.mp3'];
-/** Variant clips in the voices dirs: call-voice-<anything>.mp3. */
-const VOICE_PROOF_CLIP_PATTERN = /^call-voice-.+\.mp3$/i;
 /** "Hi, it's really me" proof clips in the voices dirs (call-real-<anything>.mp3): preferred over call-voice-*.mp3 when present. */
 const PROOF_REAL_CLIP_PATTERN = /^call-real-.+\.mp3$/i;
+/** Proof clips in the voices dirs, either kind (call-voice-<anything>.mp3 too), so one dir is chosen for both. */
+const PROOF_CLIP_PATTERN = /^call-(?:real|voice)-.+\.mp3$/i;
 const requests = new Map();
 let lastClip = null;
 /** Counts one voice/proof request from chatId; returns how many fall inside the window (this one included). */
@@ -56373,15 +56422,36 @@ function recordProofRequest(chatId, windowMs, now = Date.now()) {
 }
 function resetProofRequests() {
     requests.clear();
+    pending.clear();
     lastClip = null;
 }
+/** Chats with a proof call decided but not yet over (waiting out its delay, setting up, ringing or playing). */
+const pending = new Set();
+/** Marks chatId's proof call as pending; false when one already is (the caller then places nothing new). */
+function claimProofCall(chatId) {
+    if (pending.has(chatId))
+        return false;
+    pending.add(chatId);
+    if (pending.size > 1000)
+        pending.delete(pending.values().next().value);
+    return true;
+}
+function isProofCallPending(chatId) {
+    return pending.has(chatId);
+}
+function releaseProofCall(chatId) {
+    pending.delete(chatId);
+}
 /**
- * An existing clip, rotating so the same user never hears the same one twice running: every call-real-*.mp3 in the
- * voices dirs when there is one, else the call-voice-*.mp3 set exactly as before.
+ * An existing clip, rotating so the same user never hears the same one twice running: the per-client dir's proof clips
+ * (call-real-*.mp3 when it has one, else call-voice-*.mp3), else common's the same way, else the legacy call-voice set.
  */
 function pickVoiceProofClip(env = process.env, exists = (fs__WEBPACK_IMPORTED_MODULE_0___default().existsSync), random = Math.random, { cwd = process.cwd(), readdir } = {}) {
-    const real = (0,_media_voices__WEBPACK_IMPORTED_MODULE_1__.listVoiceVariants)('proof call-real clips', PROOF_REAL_CLIP_PATTERN, [], cwd, { env, cwd, exists, readdir });
-    const found = real.length > 0 ? real : (0,_media_voices__WEBPACK_IMPORTED_MODULE_1__.listVoiceVariants)('voice-proof clips', VOICE_PROOF_CLIP_PATTERN, VOICE_PROOF_CLIPS, env.INHOUSE_VOICE_PROOF_DIR || cwd, { env, cwd, exists, readdir });
+    // One slot, ordered fallback: the per-client dir's proof clips when it has any, else common's, else the legacy names.
+    // Within the chosen dir call-real-*.mp3 wins over call-voice-*.mp3.
+    const inDir = (0,_media_voices__WEBPACK_IMPORTED_MODULE_2__.listVoiceVariants)('proof call clips', PROOF_CLIP_PATTERN, VOICE_PROOF_CLIPS, env.INHOUSE_VOICE_PROOF_DIR || cwd, { env, cwd, exists, readdir });
+    const real = inDir.filter((file) => PROOF_REAL_CLIP_PATTERN.test(path__WEBPACK_IMPORTED_MODULE_1___default().basename(file)));
+    const found = real.length > 0 ? real : inDir;
     if (found.length === 0)
         return null;
     const options = found.length > 1 ? found.filter((file) => file !== lastClip) : found;
@@ -78989,9 +79059,9 @@ const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_2__.Logger('tg
  *   legacy location                   CMS-downloaded src/<dbcoll>/ (voice notes) or the cwd root (call
  *                                     clips): the last fallback, i.e. today's behaviour
  *
- * Variants: a slot `<name>.mp3` is every `<name>.mp3` / `<name>-<N>.mp3` across per-client + common
- * (deduped by file name, per-client wins on a clash), one picked at random. None there = legacy file.
- * The voice-proof set is every call-voice-*.mp3 the same way. No new files on the host = no change.
+ * Ordered fallback per slot: a slot `<name>.mp3` is every `<name>.mp3` / `<name>-<N>.mp3` in the per-client dir
+ * when it has any, else those in common, one picked at random; none in either = legacy file. The two dirs are
+ * never mixed. The proof-call set (call-real-* / call-voice-*) resolves the same way. No new files = no change.
  */
 const VOICES_SUBDIR = path__WEBPACK_IMPORTED_MODULE_1___default().join('assets', 'voices');
 const COMMON_VOICES = 'common';
@@ -79016,16 +79086,14 @@ function voicesDirs(env = process.env, cwd = process.cwd()) {
     const common = path__WEBPACK_IMPORTED_MODULE_1___default().resolve(cwd, VOICES_SUBDIR, COMMON_VOICES);
     return perClient ? [perClient, common] : [common];
 }
-/** Every file matching pattern across per-client + common, deduped by name (per-client wins). */
+/** Every file matching pattern in the first voices dir that has one: per-client, else common (never mixed). */
 function listVoices(pattern, { env = process.env, cwd = process.cwd(), readdir = safeReaddir }) {
-    const byName = new Map();
     for (const dir of voicesDirs(env, cwd)) {
-        for (const name of [...readdir(dir)].sort()) {
-            if (pattern.test(name) && !byName.has(name))
-                byName.set(name, path__WEBPACK_IMPORTED_MODULE_1___default().join(dir, name));
-        }
+        const found = [...readdir(dir)].sort().filter((name) => pattern.test(name)).map((name) => path__WEBPACK_IMPORTED_MODULE_1___default().join(dir, name));
+        if (found.length > 0)
+            return found;
     }
-    return [...byName.values()];
+    return [];
 }
 /** Matches `<slot>.<ext>` and `<slot>-<N>.<ext>` for a slot file name like `confirm.mp3`. */
 function voiceSlotPattern(fileName) {
@@ -79040,7 +79108,7 @@ function refuseCallOnlyClip(file) {
     if (isCallOnlyClip(file))
         throw new Error(`${path__WEBPACK_IMPORTED_MODULE_1___default().basename(file)} is a call-only clip; refused as a voice note`);
 }
-/** One random variant of slot `fileName` from per-client + common, else `legacyPath` unchanged. Never a call-*.mp3. */
+/** One random variant of slot `fileName` from per-client, else common, else `legacyPath` unchanged. Never a call-*.mp3. */
 function pickVoiceSlot(label, fileName, legacyPath, opts = {}) {
     refuseCallOnlyClip(fileName);
     refuseCallOnlyClip(legacyPath);
@@ -79052,7 +79120,7 @@ function pickVoiceSlot(label, fileName, legacyPath, opts = {}) {
     logOnce(label, `${dirsOf(found)} (${found.length} variants)`);
     return found[Math.floor((opts.random ?? Math.random)() * found.length)];
 }
-/** Every pattern match across per-client + common; when there are none, the existing legacyFiles in legacyDir. */
+/** Every pattern match in per-client, else common; when there are none, the existing legacyFiles in legacyDir. */
 function listVoiceVariants(label, pattern, legacyFiles, legacyDir, opts = {}) {
     const found = listVoices(pattern, opts);
     if (found.length > 0) {
