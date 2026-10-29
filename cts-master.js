@@ -36768,6 +36768,7 @@ exports.mobilesSql = mobilesSql;
 exports.channelDmsHistSql = channelDmsHistSql;
 exports.channelSendsHistSql = channelSendsHistSql;
 exports.channelSendsTodaySql = channelSendsTodaySql;
+exports.paidChatsSql = paidChatsSql;
 const IST = `(ts AT TIME ZONE 'Asia/Kolkata')`;
 const iso = (ms) => new Date(ms).toISOString();
 function q(name, sql, params) {
@@ -36886,6 +36887,15 @@ function channelSendsTodaySql(clientId, ids, today0) {
 FROM promotion_send
 WHERE channel_id = ANY($1::text[]) AND ts >= $2::timestamptz${client}
 GROUP BY 1`, params);
+}
+function paidChatsSql(dayStart, dayEnd) {
+    return q('paid_chats', `SELECT client_id, chat_id, min(persona_id) AS persona_id,
+  count(*)::int AS credits, sum(amount)::bigint AS amount, sum(owner_amount)::bigint AS owner_amount,
+  bool_or(cheat_flagged) AS cheat_flagged, min(ts) AS first_at, max(ts) AS last_at
+FROM payment_event_owner
+WHERE ts >= $1::timestamptz AND ts < $2::timestamptz AND amount > 0
+GROUP BY client_id, chat_id
+ORDER BY max(ts) DESC`, [iso(dayStart), iso(dayEnd)]);
 }
 
 
@@ -37090,9 +37100,12 @@ exports.MonitorController = void 0;
 exports.parsePeriod = parsePeriod;
 exports.parseDays = parseDays;
 exports.parseSvc = parseSvc;
+exports.parsePaidDate = parsePaidDate;
+exports.parseOptionalClientId = parseOptionalClientId;
 const common_1 = __webpack_require__(/*! @nestjs/common */ "@nestjs/common");
 const swagger_1 = __webpack_require__(/*! @nestjs/swagger */ "@nestjs/swagger");
 const monitor_time_1 = __webpack_require__(/*! ./monitor-time */ "./src/components/monitor/monitor-time.ts");
+const monitor_util_1 = __webpack_require__(/*! ./monitor-util */ "./src/components/monitor/monitor-util.ts");
 const monitor_service_1 = __webpack_require__(/*! ./monitor.service */ "./src/components/monitor/monitor.service.ts");
 const CLIENT_ID_RE = /^[A-Za-z0-9_-]{1,40}$/;
 function parsePeriod(period) {
@@ -37116,6 +37129,26 @@ function parseSvc(svc) {
         return svc;
     throw new common_1.BadRequestException(`svc must be one of ${monitor_service_1.LIVE_SVCS.join('|')}|all`);
 }
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+function parsePaidDate(date, now) {
+    if (!date || !DATE_RE.test(date))
+        throw new common_1.BadRequestException('date must be YYYY-MM-DD (IST)');
+    const t = Date.parse(`${date}T00:00:00.000Z`);
+    if (!Number.isFinite(t) || new Date(t).toISOString().slice(0, 10) !== date)
+        throw new common_1.BadRequestException('date is not a calendar date');
+    if (date < monitor_util_1.REVENUE_HISTORY_FROM)
+        throw new common_1.BadRequestException(`date must be on or after ${monitor_util_1.REVENUE_HISTORY_FROM} (payment data start)`);
+    if (date > (0, monitor_time_1.istDate)(now))
+        throw new common_1.BadRequestException('date is in the future (IST)');
+    return date;
+}
+function parseOptionalClientId(clientId) {
+    if (clientId === undefined || clientId === '')
+        return null;
+    if (!CLIENT_ID_RE.test(clientId))
+        throw new common_1.BadRequestException('invalid clientId');
+    return clientId;
+}
 let MonitorController = class MonitorController {
     constructor(service) {
         this.service = service;
@@ -37128,6 +37161,9 @@ let MonitorController = class MonitorController {
     }
     fleetDetail(days) {
         return this.service.fleetDetail(parseDays(days));
+    }
+    paidChats(date, clientId) {
+        return this.service.paidChats(parsePaidDate(date, Date.now()), parseOptionalClientId(clientId));
     }
     async client(clientId, days) {
         if (!CLIENT_ID_RE.test(clientId ?? ''))
@@ -37160,6 +37196,16 @@ __decorate([
     __metadata("design:paramtypes", [String]),
     __metadata("design:returntype", void 0)
 ], MonitorController.prototype, "fleetDetail", null);
+__decorate([
+    (0, common_1.Get)('paid-chats'),
+    (0, swagger_1.ApiQuery)({ name: 'date', required: true, description: 'IST date YYYY-MM-DD, 2026-10-04 to today' }),
+    (0, swagger_1.ApiQuery)({ name: 'clientId', required: false }),
+    __param(0, (0, common_1.Query)('date')),
+    __param(1, (0, common_1.Query)('clientId')),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [String, String]),
+    __metadata("design:returntype", void 0)
+], MonitorController.prototype, "paidChats", null);
 __decorate([
     (0, common_1.Get)('client/:clientId'),
     (0, swagger_1.ApiParam)({ name: 'clientId' }),
@@ -37245,9 +37291,10 @@ var __param = (this && this.__param) || function (paramIndex, decorator) {
 };
 var MonitorService_1;
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.MonitorService = exports.FLEET_DETAIL_ID = exports.LIVE_SVCS = exports.HEARTBEAT_INDEX_KEY = exports.CLIENT_TTL_MS = exports.FLEET_TTL_MS = exports.PREWARM_PAGES = exports.MIDNIGHT_PREWARM_AFTER_MS = exports.PREWARM_DELAY_MS = exports.SNAPSHOT_TTL_SEC = exports.SNAPSHOT_KEY_PREFIX = exports.SNAPSHOT_FRESH_MS = exports.LIVE_TTL_MS = exports.CHANNEL_CANDIDATES = exports.HISTORY_DAYS = exports.POOL_FRESH_MS = exports.HISTORY_FRESH_MS = exports.TODAY_MAX_STALE_MS = exports.TODAY_FRESH_MS = exports.LIVE_REDIS_DEADLINE_MS = exports.MONGO_TIMEOUT_MS = exports.PG_TIMEOUT_MS = exports.MONITOR_REDIS = void 0;
+exports.MonitorService = exports.FLEET_DETAIL_ID = exports.PAID_ENRICH_MAX = exports.PAID_HIST_KEYS = exports.LIVE_SVCS = exports.HEARTBEAT_INDEX_KEY = exports.CLIENT_TTL_MS = exports.FLEET_TTL_MS = exports.PREWARM_PAGES = exports.MIDNIGHT_PREWARM_AFTER_MS = exports.PREWARM_DELAY_MS = exports.SNAPSHOT_TTL_SEC = exports.SNAPSHOT_KEY_PREFIX = exports.SNAPSHOT_FRESH_MS = exports.LIVE_TTL_MS = exports.CHANNEL_CANDIDATES = exports.HISTORY_DAYS = exports.POOL_FRESH_MS = exports.HISTORY_FRESH_MS = exports.TODAY_MAX_STALE_MS = exports.TODAY_FRESH_MS = exports.LIVE_REDIS_DEADLINE_MS = exports.MONGO_TIMEOUT_MS = exports.PG_TIMEOUT_MS = exports.MONITOR_REDIS = void 0;
 exports.fleetSummaryRow = fleetSummaryRow;
 exports.withSnapshotCache = withSnapshotCache;
+exports.toPaidChat = toPaidChat;
 exports.classifyHeartbeat = classifyHeartbeat;
 const common_1 = __webpack_require__(/*! @nestjs/common */ "@nestjs/common");
 const mongoose_1 = __webpack_require__(/*! @nestjs/mongoose */ "@nestjs/mongoose");
@@ -37280,6 +37327,9 @@ exports.FLEET_TTL_MS = exports.TODAY_FRESH_MS;
 exports.CLIENT_TTL_MS = exports.TODAY_FRESH_MS;
 exports.HEARTBEAT_INDEX_KEY = 'heartbeat::index';
 exports.LIVE_SVCS = ['tg-aut', 'promote'];
+exports.PAID_HIST_KEYS = 30;
+exports.PAID_ENRICH_MAX = 1000;
+const isoOf = (v) => new Date(v).toISOString();
 exports.FLEET_DETAIL_ID = 'all';
 function fleetSummaryRow(f) {
     const pools = f.clients.map((c) => c.pool);
@@ -37362,6 +37412,21 @@ function withSnapshotCache(r, now) {
         },
     };
 }
+function toPaidChat(r) {
+    const clientId = String(r.client_id);
+    return {
+        clientId,
+        chatId: String(r.chat_id),
+        profile: r.persona_id ? String(r.persona_id) : clientId.replace(/\d+$/, ''),
+        username: null,
+        credits: (0, monitor_util_1.num)(r.credits),
+        amount: (0, monitor_util_1.num)(r.amount),
+        ownerAmount: (0, monitor_util_1.num)(r.owner_amount),
+        cheatFlagged: r.cheat_flagged === true,
+        firstCreditAt: isoOf(r.first_at),
+        lastCreditAt: isoOf(r.last_at),
+    };
+}
 function classifyHeartbeat(payload, now) {
     if (!payload)
         return { state: 'no-heartbeat', ageSec: null, clockSkew: false };
@@ -37414,6 +37479,17 @@ let MonitorService = MonitorService_1 = class MonitorService {
             onBackgroundError: (key, err) => this.logger.warn(`monitor clients refresh ${key} failed: ${String(err?.message ?? err).slice(0, 200)}`),
         });
         this.liveCache = new monitor_cache_1.TtlCache(exports.LIVE_TTL_MS, 2);
+        this.paidHistCache = new monitor_cache_1.SwrCache({
+            freshMs: exports.HISTORY_FRESH_MS,
+            maxKeys: exports.PAID_HIST_KEYS,
+            onBackgroundError: (key, err) => this.logger.warn(`monitor paid-chats refresh ${key} failed: ${String(err?.message ?? err).slice(0, 200)}`),
+        });
+        this.paidTodayCache = new monitor_cache_1.SwrCache({
+            freshMs: exports.TODAY_FRESH_MS,
+            maxStaleMs: exports.TODAY_MAX_STALE_MS,
+            maxKeys: 2,
+            onBackgroundError: (key, err) => this.logger.warn(`monitor paid-chats refresh ${key} failed: ${String(err?.message ?? err).slice(0, 200)}`),
+        });
         this.prewarmDelayMs = exports.PREWARM_DELAY_MS;
         this.prewarmTimer = null;
         this.prewarming = null;
@@ -38144,6 +38220,68 @@ let MonitorService = MonitorService_1 = class MonitorService {
             return [...out];
         });
         return new Map(loaded.value);
+    }
+    async paidChats(date, clientId) {
+        const now = Date.now();
+        const today = (0, monitor_time_1.istDate)(now);
+        const isToday = date === today;
+        const cache = isToday ? this.paidTodayCache : this.paidHistCache;
+        let loaded;
+        try {
+            const r = await cache.get(date, async (background) => {
+                const asOf = Date.now();
+                const timings = {};
+                const rows = await this.pgRows((0, monitor_sql_1.paidChatsSql)((0, monitor_time_1.istDayStart)(date), (0, monitor_time_1.istDayStart)((0, monitor_time_1.addDays)(date, 1))), timings, background);
+                return { value: rows.map(toPaidChat), asOf, timings };
+            }, isToday ? (0, monitor_time_1.istDayStart)((0, monitor_time_1.addDays)(today, 1)) : Number.POSITIVE_INFINITY);
+            loaded = r.value;
+        }
+        catch (err) {
+            const msg = String(err?.message ?? err).slice(0, 200);
+            this.logger.warn(`monitor paid-chats ${date} failed: ${msg}`);
+            throw new common_1.ServiceUnavailableException(`paid chats unavailable: ${msg}`);
+        }
+        const chats = loaded.value.filter((c) => clientId === null || c.clientId === clientId).map((c) => ({ ...c }));
+        const notes = [];
+        if (date === monitor_util_1.REVENUE_HISTORY_FROM)
+            notes.push('payment_event starts 2026-10-04 02:02 IST; earlier credits of that day are not recorded.');
+        await this.addUsernames(chats, notes);
+        const totals = { chats: chats.length, credits: 0, amount: 0, ownerAmount: 0 };
+        for (const c of chats) {
+            totals.credits += c.credits;
+            totals.amount += c.amount;
+            totals.ownerAmount += c.ownerAmount;
+        }
+        return { date, tz: 'Asia/Kolkata', clientId, asOf: loaded.asOf, source: 'payment_event', chats, totals, notes };
+    }
+    async addUsernames(chats, notes) {
+        if (!chats.length)
+            return;
+        const ids = [...new Set(chats.map((c) => c.chatId))].slice(0, exports.PAID_ENRICH_MAX);
+        let docs;
+        try {
+            docs = await this.mongoFind('userData', { chatId: { $in: ids } }, { _id: 0, chatId: 1, profile: 1, clientId: 1, username: 1 }, 'mongo.userData_paid_usernames', {});
+        }
+        catch (err) {
+            const msg = String(err?.message ?? err).slice(0, 200);
+            this.logger.warn(`monitor paid-chats usernames failed: ${msg}`);
+            notes.push(`usernames unavailable: ${msg}`);
+            return;
+        }
+        const byClient = new Map();
+        const byProfile = new Map();
+        for (const d of docs) {
+            const u = typeof d.username === 'string' ? d.username.trim() : '';
+            if (!u || !d.chatId)
+                continue;
+            if (d.clientId)
+                byClient.set(`${d.clientId}|${d.chatId}`, u);
+            if (d.profile)
+                byProfile.set(`${d.profile}|${d.chatId}`, u);
+        }
+        for (const c of chats) {
+            c.username = byClient.get(`${c.clientId}|${c.chatId}`) ?? byProfile.get(`${c.profile}|${c.chatId}`) ?? null;
+        }
     }
     async live(svc) {
         let redis = 'ok';
