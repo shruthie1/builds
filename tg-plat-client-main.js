@@ -49637,8 +49637,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "6b4df58d36ea6ec34caa9eb94839aed6a2502bd9" : 0;
-    const builtAt =  true ? "2026-10-28T21:06:52.848Z" : 0;
+    const sha =  true ? "8b298d343a1c4a0e197d49fb6d738c144bcab17b" : 0;
+    const builtAt =  true ? "2026-10-29T04:19:11.573Z" : 0;
     return { sha, builtAt };
 }
 
@@ -88376,11 +88376,16 @@ async function runAskToPayQr(client, chatId, args) {
         const paymentMessage = args.prefix ? `${args.prefix}\n\n${(0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_4__.pickOneMsg)(upsellMessage)}` : (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_4__.pickOneMsg)(upsellMessage);
         try {
             await (0,_telegram_typing__WEBPACK_IMPORTED_MODULE_5__.setTyping)(peer);
-            await sendMessageWithTimeout(client, peer, {
+            const sent = await sendMessageWithTimeout(client, peer, {
                 message: paymentMessage,
                 file: await _telegram_file_sender__WEBPACK_IMPORTED_MODULE_9__.fileSender.getFileHandle('./QR.jpg')
             }, { voice: force ? 'system' : 'pitch', queuedAt: decidedAt });
-            logger.log(`[askToPay] Payment request with QR sent to ${args.username || chatId}, payAmount: ${args.payAmount}`);
+            // The helper resolves undefined when the voice check or the queue dropped/held the ask, or the send failed
+            // (prod 2026-10-29 sneha1/nidhi1: "QR sent" logged for 9-18% of asks that were dropped by the pitch window).
+            if (sent)
+                logger.log(`[askToPay] Payment request with QR sent to ${args.username || chatId}, payAmount: ${args.payAmount}`);
+            else
+                logger.log(`[askToPay] Payment request with QR not sent to ${args.username || chatId} (dropped, held or failed), payAmount: ${args.payAmount}`);
         }
         catch (fileError) {
             logger.error(`[askToPay] Failed to send QR, sending text only:`, fileError);
