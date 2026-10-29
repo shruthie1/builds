@@ -14599,7 +14599,7 @@ function resolveProxyFromEnv() {
         };
     }
     catch {
-        logger.error("Failed to parse proxy URL from env", { proxyUrl });
+        logger.error("Failed to parse proxy URL from env", { length: String(proxyUrl ?? "").length });
         return null;
     }
 }
@@ -27313,9 +27313,11 @@ let ClientService = ClientService_1 = class ClientService {
     async isAlreadyRetired(mobile) {
         try {
             const users = (await this.usersService.findByMobileAnyStatus(mobile)) ?? [];
-            if (!users.length || !users.every((u) => u.expired === true))
+            if (users.some((u) => u.expired !== true))
                 return false;
             const buffer = await this.bufferClientService.findOne(mobile, false);
+            if (!users.length)
+                return buffer?.status === 'inactive';
             return !buffer || buffer.status === 'inactive';
         }
         catch {
@@ -27362,7 +27364,12 @@ let ClientService = ClientService_1 = class ClientService {
                 message: 'Returned to buffer pool; channel capacity will be verified',
             };
             const updatedBufferClient = await this.bufferClientService.createOrUpdate(existingMobile, bufferClientDto);
-            this.logger.log('Client returned to buffer pool:', updatedBufferClient);
+            this.logger.log('Client returned to buffer pool', {
+                mobile: existingMobile,
+                clientId: updatedBufferClient?.clientId ?? existingClient.clientId,
+                status: updatedBufferClient?.status,
+                availableDate,
+            });
             await this.notify({ title: 'Returned to pool', fields: [{ label: 'Mobile', value: existingMobile }, { label: 'Available date', value: availableDate, code: false }] });
         }
         catch (error) {
@@ -58414,6 +58421,7 @@ Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.Logger = void 0;
 const common_1 = __webpack_require__(/*! @nestjs/common */ "@nestjs/common");
 const chalk_1 = __importDefault(__webpack_require__(/*! chalk */ "chalk"));
+const redact_secrets_1 = __webpack_require__(/*! ./redact-secrets */ "./src/utils/redact-secrets.ts");
 const path_1 = __importDefault(__webpack_require__(/*! path */ "path"));
 class Logger extends common_1.Logger {
     constructor(contextFile) {
@@ -58443,6 +58451,8 @@ class Logger extends common_1.Logger {
     }
     error(message, data = "", trace) {
         const line = this.formatMessage("ERROR", message, this.getErrorColors(), data);
+        if (trace)
+            trace = (0, redact_secrets_1.redactSecretText)(typeof trace === "string" ? trace : String(trace));
         process.stderr.write(line + (trace ? "\n" + chalk_1.default.red.bold(trace) : "") + "\n");
         this.writeToFile(this.stripAnsi(line + (trace ? "\n" + trace : "")));
     }
@@ -58515,7 +58525,7 @@ class Logger extends common_1.Logger {
         if (extraCtx)
             extraCtx = " " + extraCtx;
         const levelFormatted = safeColors.level(`[${safeLevel}]`);
-        return `${levelFormatted} ${serviceCtx} ${formattedMessage}${extraCtx}`;
+        return (0, redact_secrets_1.redactSecretText)(`${levelFormatted} ${serviceCtx} ${formattedMessage}${extraCtx}`);
     }
     formatMultiColorMessage(message, levelColor) {
         if (typeof message === "object" && message !== null) {
@@ -58551,7 +58561,9 @@ class Logger extends common_1.Logger {
         }
         const entries = Object.entries(obj).map(([key, value]) => {
             const coloredKey = chalk_1.default.cyan(`"${key}"`) + chalk_1.default.white(": ");
-            const formattedValue = this.formatObjectMessage(value, indent + 2, seen);
+            const formattedValue = (0, redact_secrets_1.isSecretKey)(key) && typeof value === "string" && value !== ""
+                ? chalk_1.default.gray(`"${redact_secrets_1.REDACTED}"`)
+                : this.formatObjectMessage(value, indent + 2, seen);
             return " ".repeat(indent) + coloredKey + formattedValue;
         });
         return "{\n" + entries.join(",\n") + "\n" + " ".repeat(indent - 2) + "}";
@@ -59447,6 +59459,7 @@ exports.parseError = parseError;
 exports.isAxiosError = isAxiosError;
 exports.createError = createError;
 const bot_notice_1 = __webpack_require__(/*! ./bot-notice */ "./src/utils/bot-notice.ts");
+const redact_secrets_1 = __webpack_require__(/*! ./redact-secrets */ "./src/utils/redact-secrets.ts");
 const axios_1 = __importDefault(__webpack_require__(/*! axios */ "axios"));
 const DEFAULT_ERROR_CONFIG = {
     maxMessageLength: 200,
@@ -59628,17 +59641,18 @@ function parseError(err, prefix, sendErr = true, config = {}) {
         const error = extractErrorType(err, fullConfig.defaultError);
         let extractedMessage;
         try {
-            extractedMessage = typeof rawMessage === 'string' ? rawMessage : extractMessage(rawMessage);
+            extractedMessage = (0, redact_secrets_1.redactSecretText)(typeof rawMessage === 'string' ? rawMessage : extractMessage(rawMessage));
         }
         catch (e) {
             extractedMessage = safeStringify(rawMessage) || 'Error extracting message';
         }
-        const fullMessage = `${prefixStr} :: ${extractedMessage}`;
+        const fullMessage = (0, redact_secrets_1.redactSecretText)(`${prefixStr} :: ${extractedMessage}`);
+        const errMessage = (0, redact_secrets_1.redactSecretText)(err.errorMessage);
         if (shouldLogDiagnostics())
             console.error("parsedErr: ", fullMessage);
         const response = {
             status,
-            message: err.errorMessage ? err.errorMessage : String(fullMessage).slice(0, fullConfig.maxMessageLength),
+            message: errMessage ? errMessage : String(fullMessage).slice(0, fullConfig.maxMessageLength),
             error,
             raw: err
         };
@@ -59646,7 +59660,7 @@ function parseError(err, prefix, sendErr = true, config = {}) {
             try {
                 const ignoreError = shouldIgnoreError(fullMessage, status, fullConfig.ignorePatterns);
                 if (!ignoreError) {
-                    const notificationMessage = (err.errorMessage ? err.errorMessage : extractedMessage)?.slice(0, 500);
+                    const notificationMessage = (errMessage ? errMessage : extractedMessage)?.slice(0, 500);
                     (0, bot_notice_1.sendBotNotice)('notif', {
                         severity: 'error',
                         title: 'App error',
@@ -59817,6 +59831,37 @@ function getReadableTimeDifference(ms1, ms2 = Date.now()) {
     if (secs > 0 || result.length === 0)
         result.push(`${secs}s`);
     return result.join(" ");
+}
+
+
+/***/ },
+
+/***/ "./src/utils/redact-secrets.ts"
+/*!*************************************!*\
+  !*** ./src/utils/redact-secrets.ts ***!
+  \*************************************/
+(__unused_webpack_module, exports) {
+
+
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.REDACTED = void 0;
+exports.isSecretKey = isSecretKey;
+exports.redactSecretText = redactSecretText;
+const SECRET_KEYS = new Set([
+    'session', 'stringsession', 'sessionstring', 'activesession', 'backupsession',
+    'password', 'passwd', 'twofa', 'apikey', 'api_key', 'x-api-key',
+    'token', 'bottoken', 'accesstoken', 'refreshtoken', 'secret', 'authkey',
+]);
+const SESSION_LIKE = /\b1[A-Za-z0-9+/_-]{200,}={0,2}/g;
+const BOT_TOKEN_LIKE = /(?<!\d)\d{6,12}:[A-Za-z0-9_-]{30,}/g;
+exports.REDACTED = '[redacted]';
+function isSecretKey(key) {
+    return SECRET_KEYS.has(String(key).toLowerCase());
+}
+function redactSecretText(text) {
+    if (typeof text !== 'string')
+        return text;
+    return text.replace(SESSION_LIKE, '[redacted-session]').replace(BOT_TOKEN_LIKE, '[redacted-token]');
 }
 
 
