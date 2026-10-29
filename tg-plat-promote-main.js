@@ -2028,6 +2028,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   shutdownAnalytics: () => (/* binding */ shutdownAnalytics)
 /* harmony export */ });
 /* harmony import */ var _analytics_sink__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./analytics-sink */ "../../packages/tg-analytics/src/analytics-sink.ts");
+/* harmony import */ var _loss_notifier__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./loss-notifier */ "../../packages/tg-analytics/src/loss-notifier.ts");
+
 
 /**
  * The process-wide analytics handle.
@@ -2212,6 +2214,9 @@ async function shutdownAnalytics() {
     const sink = instance;
     if (sink)
         await sink.stop();
+    // Last: stop() can itself report a loss/stall. Sends the alert a notifier's quiet-window timer still holds
+    // (10d gap 2), waiting at most 2 s so a dead notification channel never holds up exit.
+    await (0,_loss_notifier__WEBPACK_IMPORTED_MODULE_1__.flushAnalyticsNotifiers)(2000);
 }
 /** Test seam. `null` also resets the pre-init buffer. */
 function __setAnalyticsForTests(sink) {
@@ -2257,6 +2262,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   createAlertNotifier: () => (/* reexport safe */ _loss_notifier__WEBPACK_IMPORTED_MODULE_1__.createAlertNotifier),
 /* harmony export */   createLossNotifier: () => (/* reexport safe */ _loss_notifier__WEBPACK_IMPORTED_MODULE_1__.createLossNotifier),
 /* harmony export */   defaultSpoolDir: () => (/* reexport safe */ _analytics_sink__WEBPACK_IMPORTED_MODULE_0__.defaultSpoolDir),
+/* harmony export */   flushAnalyticsNotifiers: () => (/* reexport safe */ _loss_notifier__WEBPACK_IMPORTED_MODULE_1__.flushAnalyticsNotifiers),
 /* harmony export */   getAnalytics: () => (/* reexport safe */ _analytics__WEBPACK_IMPORTED_MODULE_2__.getAnalytics),
 /* harmony export */   initAnalytics: () => (/* reexport safe */ _analytics__WEBPACK_IMPORTED_MODULE_2__.initAnalytics),
 /* harmony export */   sanitizeInstanceKey: () => (/* reexport safe */ _analytics_sink__WEBPACK_IMPORTED_MODULE_0__.sanitizeInstanceKey),
@@ -2281,8 +2287,41 @@ __webpack_require__.r(__webpack_exports__);
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   createAlertNotifier: () => (/* binding */ createAlertNotifier),
-/* harmony export */   createLossNotifier: () => (/* binding */ createLossNotifier)
+/* harmony export */   createLossNotifier: () => (/* binding */ createLossNotifier),
+/* harmony export */   flushAnalyticsNotifiers: () => (/* binding */ flushAnalyticsNotifiers)
 /* harmony export */ });
+/** Flushers of every notifier in this process (one pair per app, created at module load). */
+const flushers = new Set();
+/**
+ * Shutdown: send every notifier's pending (trailing-window) message now. Waits at most `timeoutMs` for the sends;
+ * a slow or dead notification channel never holds up exit. Never throws.
+ */
+async function flushAnalyticsNotifiers(timeoutMs = 2000) {
+    const sends = [];
+    for (const flush of flushers) {
+        try {
+            const result = flush();
+            if (result && typeof result.then === "function") {
+                sends.push(Promise.resolve(result).catch(() => { }));
+            }
+        }
+        catch { /* never */ }
+    }
+    if (sends.length === 0)
+        return;
+    let timer = null;
+    const timeout = new Promise((resolve) => {
+        timer = setTimeout(resolve, timeoutMs);
+        timer?.unref?.();
+    });
+    try {
+        await Promise.race([Promise.all(sends), timeout]);
+    }
+    finally {
+        if (timer)
+            clearTimeout(timer);
+    }
+}
 function createRateLimited(send, format, options) {
     const minIntervalMs = options.minIntervalMs ?? 30 * 60000;
     const now = options.now ?? (() => Date.now());
@@ -2294,7 +2333,7 @@ function createRateLimited(send, format, options) {
     const emit = () => {
         try {
             if (pendingCount === 0)
-                return;
+                return undefined;
             lastSentAt = now();
             const text = format(pendingRows, [...pendingReasons]);
             pendingRows = 0;
@@ -2304,9 +2343,18 @@ function createRateLimited(send, format, options) {
             if (result && typeof result.catch === "function") {
                 result.catch(() => { });
             }
+            return result;
         }
         catch { /* a notifier must never break the sink */ }
+        return undefined;
     };
+    flushers.add(() => {
+        if (trailing) {
+            clearTimeout(trailing);
+            trailing = null;
+        }
+        return emit();
+    });
     return (reason, rows) => {
         try {
             pendingRows += rows;
@@ -39400,8 +39448,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "c07383c16c7b090592eca57377fb3c04a319ab71" : 0;
-    const builtAt =  true ? "2026-10-29T06:08:41.255Z" : 0;
+    const sha =  true ? "6b3f617d80b085471862f9c62b21d32d27f4788e" : 0;
+    const builtAt =  true ? "2026-10-29T06:24:17.441Z" : 0;
     return { sha, builtAt };
 }
 
@@ -42788,6 +42836,11 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_17__.Ba
         this.daysLeft = -1;
         this.messageCount = 0;
         this.converted = 0;
+        /**
+         * True after a SpamBot harsh verdict: promotion stays stopped (every start path refuses) until a later
+         * healthy or dated-limit verdict. Restored across restarts from tg::acct spamStatus 'harsh'.
+         */
+        this.harshStandDown = false;
         this.previousSuccessfulMessages = [];
         this.MAX_SUCCESS_MESSAGES = 30;
         this.defaultAvailableMsgs = _default_messages__WEBPACK_IMPORTED_MODULE_3__.defaultMessages;
@@ -42845,6 +42898,13 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_17__.Ba
     // =================================================================
     //  START / RESTART
     // =================================================================
+    async startPromotion(options = {}) {
+        if (this.harshStandDown) {
+            this.logRunnerMessage('warn', `⛔ Promotion not started: SpamBot harsh verdict (stood down until a healthy or dated verdict)`);
+            return;
+        }
+        await super.startPromotion(options);
+    }
     async restartPromotion() {
         logger.log(`[${this.mobile}] Restarting promotion...`);
         await this.stopPromotions();
@@ -43247,18 +43307,23 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_17__.Ba
         if (!state)
             return;
         this.daysLeft = state.daysLeft;
+        this.harshStandDown = state.spamStatus === 'harsh';
         logger.log(`[${this.mobile}] SpamBot verdict restored after restart: status=${state.spamStatus ?? '-'} daysLeft=${state.daysLeft}`);
     }
-    setDaysLeft(daysLeft) {
+    /** `harsh`: the SpamBot harsh verdict (indefinite, no release date). Stands promotion down; any other verdict lifts it. */
+    setDaysLeft(daysLeft, options = {}) {
+        const harsh = options.harsh === true;
         this.daysLeft = daysLeft;
+        this.harshStandDown = harsh;
         (0,_telegram_check_tg_health__WEBPACK_IMPORTED_MODULE_11__.setDaysLeft)(this.mobile, daysLeft);
         const now = Date.now();
         // Restart restore (tg::acct::{mobile}). A limited daysLeft is stored sanitized (release days + 1), so
-        // the release day is now + (daysLeft - 1) days; boot recomputes daysLeft from it.
-        const limited = (0,_tg_core_utils_spam_limit__WEBPACK_IMPORTED_MODULE_12__.isSpamLimited)(daysLeft) && daysLeft > 0;
+        // the release day is now + (daysLeft - 1) days; boot recomputes daysLeft from it. Harsh has no release
+        // date: stored like tg-aut (spamStatus 'harsh', limitedUntil null), boot keeps the stored daysLeft.
+        const limited = !harsh && (0,_tg_core_utils_spam_limit__WEBPACK_IMPORTED_MODULE_12__.isSpamLimited)(daysLeft) && daysLeft > 0;
         void (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_13__.saveAccountRestartState)(this.mobile, {
             daysLeft,
-            spamStatus: (0,_tg_core_utils_spam_limit__WEBPACK_IMPORTED_MODULE_12__.isSpamLimited)(daysLeft) ? 'limited' : 'free',
+            spamStatus: harsh ? 'harsh' : (0,_tg_core_utils_spam_limit__WEBPACK_IMPORTED_MODULE_12__.isSpamLimited)(daysLeft) ? 'limited' : 'free',
             limitedUntil: limited ? now + Math.max(0, daysLeft - 1) * 24 * 60 * 60 * 1000 : null,
             spamCheckedAt: now,
             source: 'promote',
@@ -47866,7 +47931,16 @@ class TelegramManager {
                             }
                             else if (spamBotKind === 'harsh-warning') {
                                 // this.promoterInstance.setChannels(openChannels)
-                                // this.promoterInstance.setDaysLeft(99);
+                                // Harsh = indefinite limit: stand promotion down (the engine refuses every restart until a
+                                // healthy/dated verdict) and hand the mobile off below via setupNewMobile, resting it 30 days
+                                // like tg-aut's HARSH_SWAP_DAYS. Was only a notification (setDaysLeft(99) commented out 2025-10-08).
+                                this.promoterInstance.setDaysLeft(30, { harsh: true });
+                                try {
+                                    await this.promoterInstance.stopPromotions();
+                                }
+                                catch (error) {
+                                    (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, `TelegramManager.harshStandDown.${this.clientDetails.mobile}`);
+                                }
                                 if (shouldNotify)
                                     await sendTelegramManagerNotification(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_24__.ChannelCategory.ACCOUNT_NOTIFICATIONS, {
                                         title: "Harsh limit",
