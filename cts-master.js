@@ -36350,6 +36350,169 @@ exports.SnapshotCache = SnapshotCache;
 
 /***/ },
 
+/***/ "./src/components/monitor/monitor-family.ts"
+/*!**************************************************!*\
+  !*** ./src/components/monitor/monitor-family.ts ***!
+  \**************************************************/
+(__unused_webpack_module, exports, __webpack_require__) {
+
+
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.FAMILIES = void 0;
+exports.familyOf = familyOf;
+exports.sendsByFamily = sendsByFamily;
+exports.sendsByFamilyDate = sendsByFamilyDate;
+exports.dmsFamilyDays = dmsFamilyDays;
+exports.dmsFamilyByDate = dmsFamilyByDate;
+exports.dmsFamilyRows = dmsFamilyRows;
+exports.byFamily = byFamily;
+exports.byFamilyOfDate = byFamilyOfDate;
+const monitor_util_1 = __webpack_require__(/*! ./monitor-util */ "./src/components/monitor/monitor-util.ts");
+exports.FAMILIES = ['tg-aut', 'promote'];
+function familyOf(v) {
+    const s = v === null || v === undefined ? '' : String(v);
+    if (s === 'tg-aut' || s === 't')
+        return 'tg-aut';
+    if (s === 'promote-clients' || s === 'promote' || s === 'p')
+        return 'promote';
+    return null;
+}
+const zero = () => ({ sent: 0, delivered: 0, banned: 0, failed: 0 });
+const perFam = (f) => ({ 'tg-aut': f(), promote: f() });
+function sendsByFamily(rows, field, keep = () => true) {
+    const total = perFam(zero);
+    const byClient = new Map();
+    const unattributed = zero();
+    const add = (a, r) => {
+        a.sent += (0, monitor_util_1.num)(r.sent);
+        a.delivered += (0, monitor_util_1.num)(r.delivered);
+        a.banned += (0, monitor_util_1.num)(r.banned);
+        a.failed += (0, monitor_util_1.num)(r.failed);
+    };
+    for (const r of rows) {
+        if (!keep(r))
+            continue;
+        const fam = familyOf(r[field]);
+        if (!fam) {
+            add(unattributed, r);
+            continue;
+        }
+        add(total[fam], r);
+        if (!r.client_id)
+            continue;
+        const e = byClient.get(r.client_id) ?? perFam(zero);
+        add(e[fam], r);
+        byClient.set(r.client_id, e);
+    }
+    return { total, byClient, unattributed };
+}
+function sendsByFamilyDate(rows, scope) {
+    const out = new Map();
+    for (const r of rows) {
+        if (scope !== null && r.client_id !== scope)
+            continue;
+        const fam = familyOf(r.namespace);
+        if (!fam)
+            continue;
+        const e = out.get(r.d) ?? perFam(zero);
+        e[fam].sent += (0, monitor_util_1.num)(r.sent);
+        e[fam].delivered += (0, monitor_util_1.num)(r.delivered);
+        e[fam].banned += (0, monitor_util_1.num)(r.banned);
+        e[fam].failed += (0, monitor_util_1.num)(r.failed);
+        out.set(r.d, e);
+    }
+    return out;
+}
+const isServiceRow = (r) => r.g !== undefined && r.g !== null && (0, monitor_util_1.num)(r.g) === 0;
+function dmsFamilyDays(rows, from, to) {
+    const total = perFam(() => 0);
+    const byClient = new Map();
+    let unattributed = 0;
+    for (const r of rows) {
+        if (!isServiceRow(r) || r.d < from || r.d > to)
+            continue;
+        const fam = familyOf(r.service);
+        const n = (0, monitor_util_1.num)(r.dms);
+        if (!fam) {
+            unattributed += n;
+            continue;
+        }
+        total[fam] += n;
+        if (!r.client_id)
+            continue;
+        const e = byClient.get(r.client_id) ?? perFam(() => 0);
+        e[fam] += n;
+        byClient.set(r.client_id, e);
+    }
+    return { total, byClient, unattributed };
+}
+function dmsFamilyByDate(rows, scope) {
+    const out = new Map();
+    for (const r of rows) {
+        if (!isServiceRow(r) || (scope !== null && r.client_id !== scope))
+            continue;
+        const fam = familyOf(r.service);
+        if (!fam)
+            continue;
+        const e = out.get(r.d) ?? perFam(() => 0);
+        e[fam] += (0, monitor_util_1.num)(r.dms);
+        out.set(r.d, e);
+    }
+    return out;
+}
+function dmsFamilyRows(rows, before = Number.POSITIVE_INFINITY, keep = () => true) {
+    const all = perFam(() => new Set());
+    const per = new Map();
+    const un = new Set();
+    for (const r of rows) {
+        if (new Date(r.ts).getTime() >= before || !keep(r))
+            continue;
+        const fam = familyOf(r.service);
+        if (!fam) {
+            un.add(r.conversion_id);
+            continue;
+        }
+        all[fam].add(r.conversion_id);
+        if (!r.client_id)
+            continue;
+        const e = per.get(r.client_id) ?? perFam(() => new Set());
+        e[fam].add(r.conversion_id);
+        per.set(r.client_id, e);
+    }
+    const byClient = new Map();
+    for (const [k, v] of per)
+        byClient.set(k, { 'tg-aut': v['tg-aut'].size, promote: v.promote.size });
+    return { total: { 'tg-aut': all['tg-aut'].size, promote: all.promote.size }, byClient, unattributed: un.size };
+}
+function byFamily(sends, dms, id) {
+    const pick = (s) => s ? (id === undefined ? s.total : s.byClient.get(id)) : null;
+    const s = pick(sends);
+    const d = pick(dms);
+    const one = (f) => ({
+        sends: sends ? (s?.[f].sent ?? 0) : null,
+        sendSuccess: sends ? (s?.[f].delivered ?? 0) : null,
+        banned: sends ? (s?.[f].banned ?? 0) : null,
+        failed: sends ? (s?.[f].failed ?? 0) : null,
+        dms: dms ? (d?.[f] ?? 0) : null,
+    });
+    return { 'tg-aut': one('tg-aut'), promote: one('promote') };
+}
+function byFamilyOfDate(sends, dms, date) {
+    const s = sends?.get(date);
+    const d = dms?.get(date);
+    const one = (f) => ({
+        sends: sends ? (s?.[f].sent ?? 0) : null,
+        sendSuccess: sends ? (s?.[f].delivered ?? 0) : null,
+        banned: sends ? (s?.[f].banned ?? 0) : null,
+        failed: sends ? (s?.[f].failed ?? 0) : null,
+        dms: dms ? (d?.[f] ?? 0) : null,
+    });
+    return { 'tg-aut': one('tg-aut'), promote: one('promote') };
+}
+
+
+/***/ },
+
 /***/ "./src/components/monitor/monitor-merge.ts"
 /*!*************************************************!*\
   !*** ./src/components/monitor/monitor-merge.ts ***!
@@ -36363,6 +36526,7 @@ exports.revenueBy = revenueBy;
 exports.revenueByClientDay = revenueByClientDay;
 exports.sumDailyClient = sumDailyClient;
 exports.dailyClientByDate = dailyClientByDate;
+exports.isMergedDmsRow = isMergedDmsRow;
 exports.sumDmsDays = sumDmsDays;
 exports.dmsByDate = dmsByDate;
 exports.distinctDms = distinctDms;
@@ -36371,6 +36535,7 @@ exports.rankChannels = rankChannels;
 exports.mergeMobiles = mergeMobiles;
 exports.addBuckets = addBuckets;
 const monitor_time_1 = __webpack_require__(/*! ./monitor-time */ "./src/components/monitor/monitor-time.ts");
+const monitor_family_1 = __webpack_require__(/*! ./monitor-family */ "./src/components/monitor/monitor-family.ts");
 const monitor_util_1 = __webpack_require__(/*! ./monitor-util */ "./src/components/monitor/monitor-util.ts");
 function toCredit(r) {
     const amount = (0, monitor_util_1.num)(r.amount);
@@ -36455,11 +36620,14 @@ function dailyClientByDate(rows, scope) {
     }
     return out;
 }
+function isMergedDmsRow(r) {
+    return r.g === undefined || r.g === null || (0, monitor_util_1.num)(r.g) !== 0;
+}
 function sumDmsDays(rows, from, to) {
     const byClient = new Map();
     let total = 0;
     for (const r of rows) {
-        if (r.d < from || r.d > to)
+        if (r.d < from || r.d > to || !isMergedDmsRow(r))
             continue;
         total += (0, monitor_util_1.num)(r.dms);
         if (r.client_id)
@@ -36470,7 +36638,7 @@ function sumDmsDays(rows, from, to) {
 function dmsByDate(rows, scope) {
     const out = new Map();
     for (const r of rows) {
-        if (scope !== null && r.client_id !== scope)
+        if ((scope !== null && r.client_id !== scope) || !isMergedDmsRow(r))
             continue;
         out.set(r.d, (out.get(r.d) ?? 0) + (0, monitor_util_1.num)(r.dms));
     }
@@ -36519,9 +36687,16 @@ function rankChannels(hist, today, limit) {
 }
 function mergeMobiles(rows, scope, limit = 20) {
     const by = new Map();
+    const famSends = new Map();
     for (const r of rows) {
         if (scope !== null && r.client_id !== scope)
             continue;
+        const fam = (0, monitor_family_1.familyOf)(r.namespace);
+        if (fam) {
+            const f = famSends.get(r.mobile) ?? new Map();
+            f.set(fam, (f.get(fam) ?? 0) + (0, monitor_util_1.num)(r.sent));
+            famSends.set(r.mobile, f);
+        }
         const e = by.get(r.mobile);
         if (!e) {
             by.set(r.mobile, {
@@ -36534,6 +36709,7 @@ function mergeMobiles(rows, scope, limit = 20) {
                 banned: (0, monitor_util_1.num)(r.banned),
                 first_day: r.first_day,
                 last_day: r.last_day,
+                family: null,
                 lastByClient: r.last_day,
             });
             continue;
@@ -36552,7 +36728,12 @@ function mergeMobiles(rows, scope, limit = 20) {
             e.client_id = r.client_id;
         }
     }
-    const out = [...by.values()].map(({ lastByClient: _l, ...m }) => m);
+    const out = [...by.values()].map(({ lastByClient: _l, ...m }) => {
+        const f = famSends.get(m.mobile);
+        if (f)
+            m.family = (f.get('promote') ?? -1) > (f.get('tg-aut') ?? -1) ? 'promote' : 'tg-aut';
+        return m;
+    });
     if (scope !== null)
         return out.sort((a, b) => b.sent - a.sent || (a.mobile < b.mobile ? -1 : 1));
     return out
@@ -36750,6 +36931,401 @@ function mapTtfp(rows) {
 
 /***/ },
 
+/***/ "./src/components/monitor/monitor-promotions.ts"
+/*!******************************************************!*\
+  !*** ./src/components/monitor/monitor-promotions.ts ***!
+  \******************************************************/
+(__unused_webpack_module, exports, __webpack_require__) {
+
+
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.PROMO_LIMITS = exports.PROMO_WINDOWS = void 0;
+exports.promoWindows = promoWindows;
+exports.rowsFromSends = rowsFromSends;
+exports.rowsFromHist = rowsFromHist;
+exports.extrasFromToday = extrasFromToday;
+exports.parseSpam = parseSpam;
+exports.heartbeatJoins = heartbeatJoins;
+exports.looksLimited = looksLimited;
+exports.buildPromotions = buildPromotions;
+exports.redisBatch = redisBatch;
+exports.readBatch = readBatch;
+exports.histBounds = histBounds;
+exports.funnelOrigins = funnelOrigins;
+const monitor_family_1 = __webpack_require__(/*! ./monitor-family */ "./src/components/monitor/monitor-family.ts");
+const monitor_time_1 = __webpack_require__(/*! ./monitor-time */ "./src/components/monitor/monitor-time.ts");
+const monitor_util_1 = __webpack_require__(/*! ./monitor-util */ "./src/components/monitor/monitor-util.ts");
+exports.PROMO_WINDOWS = ['today', '24h', '7d', '30d'];
+exports.PROMO_LIMITS = {
+    LIMITED_MIN_SENDS_TODAY: 50,
+    LIMITED_MIN_SENDS_WINDOW: 200,
+    LIMITED_MAX_DELIVERED: 0.05,
+    IDLE_ASSIGNED_SENDS: 0,
+};
+const LIMITED_SPAM = new Set(['limited', 'harsh']);
+function promoWindows(window, now) {
+    if (window === '24h') {
+        const start = now - monitor_time_1.DAY_MS;
+        return {
+            window,
+            today: (0, monitor_time_1.istDate)(now),
+            range: { from: (0, monitor_time_1.istDate)(start), to: (0, monitor_time_1.istDate)(now) },
+            previousRange: { from: (0, monitor_time_1.istDate)(start - monitor_time_1.DAY_MS), to: (0, monitor_time_1.istDate)(start) },
+            cur: { start, end: now },
+            prev: { start: start - monitor_time_1.DAY_MS, end: start },
+            intraday: true,
+        };
+    }
+    const w = (0, monitor_time_1.resolvePeriod)(window, now);
+    return { window, today: w.today, range: w.range, previousRange: w.prevRange, cur: w.cur, prev: w.prev, intraday: !w.wholeDays };
+}
+const isTrue = (v) => v === true || v === 't' || v === 'true';
+function rowsFromSends(rows) {
+    return rows.map((r) => ({
+        cur: isTrue(r.cur),
+        family: (0, monitor_family_1.familyOf)(r.service),
+        clientId: r.client_id ?? null,
+        mobile: r.mobile ? String(r.mobile) : null,
+        sent: (0, monitor_util_1.num)(r.sent),
+        delivered: (0, monitor_util_1.num)(r.delivered),
+        banned: (0, monitor_util_1.num)(r.banned),
+        failed: (0, monitor_util_1.num)(r.failed),
+        errorType: r.error_type ? String(r.error_type) : null,
+        lastAt: r.last_ts ? new Date(r.last_ts).getTime() : null,
+        lastDay: null,
+        profile: null,
+        newDms: 0,
+        routed: {},
+    }));
+}
+function rowsFromHist(rows, routedCols) {
+    return rows.map((r) => ({
+        cur: isTrue(r.cur),
+        family: (0, monitor_family_1.familyOf)(r.namespace),
+        clientId: r.client_id ?? null,
+        mobile: r.mobile ? String(r.mobile) : null,
+        sent: (0, monitor_util_1.num)(r.sent),
+        delivered: (0, monitor_util_1.num)(r.delivered),
+        banned: (0, monitor_util_1.num)(r.banned),
+        failed: (0, monitor_util_1.num)(r.failed),
+        errorType: null,
+        lastAt: null,
+        lastDay: r.last_day ? String(r.last_day) : null,
+        profile: r.profile ? String(r.profile) : null,
+        newDms: (0, monitor_util_1.num)(r.new_users),
+        routed: Object.fromEntries(routedCols.map((c) => [c, (0, monitor_util_1.num)(r[c])])),
+    }));
+}
+function extrasFromToday(rows, routedCols) {
+    const out = new Map();
+    for (const r of rows) {
+        const fam = (0, monitor_family_1.familyOf)(r.namespace);
+        if (!fam || !r.mobile)
+            continue;
+        out.set(key(fam, r.client_id ?? null, String(r.mobile)), {
+            profile: r.profile ? String(r.profile) : null,
+            newDms: (0, monitor_util_1.num)(r.new_users),
+            routed: Object.fromEntries(routedCols.map((c) => [c, (0, monitor_util_1.num)(r[c])])),
+        });
+    }
+    return out;
+}
+const nullish = (v) => v === undefined || v === null || v === '' || v === 'null' || v === 'undefined';
+const isoOrRaw = (v) => {
+    if (nullish(v))
+        return null;
+    const n = Number(v);
+    if (Number.isFinite(n) && n > 1e11)
+        return new Date(n).toISOString();
+    return String(v);
+};
+function parseSpam(h) {
+    if (!h || !Object.keys(h).length)
+        return null;
+    const days = nullish(h.daysLeft) ? null : Number(h.daysLeft);
+    return {
+        status: nullish(h.spamStatus) ? null : String(h.spamStatus),
+        daysLeft: days !== null && Number.isFinite(days) ? days : null,
+        limitedUntil: isoOrRaw(h.limitedUntil),
+        checkedAt: isoOrRaw(h.spamCheckedAt),
+    };
+}
+function heartbeatJoins(entries) {
+    const mobiles = new Map();
+    const engines = new Map();
+    const put = (k, v) => mobiles.set(k, mobiles.has(k) ? null : v);
+    for (const e of entries) {
+        const p = e.payload;
+        if (!p || (e.state !== 'live' && e.state !== 'stopping'))
+            continue;
+        if (e.svc === 'promote' && Array.isArray(p.mobiles)) {
+            for (const m of p.mobiles) {
+                const id = m?.mobile ?? m?.m;
+                if (!id)
+                    continue;
+                put(`${e.clientId}|${String(id).slice(-4)}`, {
+                    connected: typeof m.connected === 'boolean' ? m.connected : null,
+                    health: m.health === undefined || m.health === null ? null : String(m.health),
+                });
+            }
+        }
+        if (e.svc === 'tg-aut') {
+            if (p.mobile)
+                put(`${e.clientId}|${String(p.mobile).slice(-4)}`, { connected: typeof p.telegramReady === 'boolean' ? p.telegramReady : null, health: e.state });
+            const pr = p.promotions;
+            if (pr && typeof pr === 'object') {
+                engines.set(e.clientId, {
+                    state: e.state,
+                    runnerStatus: pr.runnerStatus === undefined || pr.runnerStatus === null ? null : String(pr.runnerStatus),
+                    failStreak: Number.isFinite(Number(pr.failStreak)) ? Number(pr.failStreak) : null,
+                    lastAnyAgeSec: Number.isFinite(Number(pr.lastAnyAgeSec)) ? Number(pr.lastAnyAgeSec) : null,
+                });
+            }
+        }
+    }
+    return { mobiles, engines };
+}
+const key = (f, c, m) => `${f}|${c ?? ''}|${m ?? ''}`;
+function aggregate(rows) {
+    const out = new Map();
+    for (const r of rows) {
+        if (!r.family)
+            continue;
+        const k = key(r.family, r.clientId, r.mobile);
+        const a = out.get(k) ??
+            { family: r.family, clientId: r.clientId, mobile: r.mobile, sent: 0, delivered: 0, banned: 0, failed: 0, errors: new Map(), lastAt: null, lastDay: null, profile: null, newDms: 0, routed: {} };
+        a.sent += r.sent;
+        a.delivered += r.delivered;
+        a.banned += r.banned;
+        a.failed += r.failed;
+        if (r.errorType && r.failed > 0)
+            a.errors.set(r.errorType, (a.errors.get(r.errorType) ?? 0) + r.failed);
+        if (r.lastAt !== null && (a.lastAt === null || r.lastAt > a.lastAt))
+            a.lastAt = r.lastAt;
+        if (r.lastDay !== null && (a.lastDay === null || r.lastDay > a.lastDay))
+            a.lastDay = r.lastDay;
+        if (r.profile)
+            a.profile = r.profile;
+        a.newDms += r.newDms;
+        for (const [c, v] of Object.entries(r.routed))
+            a.routed[c] = (a.routed[c] ?? 0) + v;
+        out.set(k, a);
+    }
+    return out;
+}
+function looksLimited(window, sent, delivered, spamStatus) {
+    const min = window === 'today' ? exports.PROMO_LIMITS.LIMITED_MIN_SENDS_TODAY : exports.PROMO_LIMITS.LIMITED_MIN_SENDS_WINDOW;
+    const byRate = sent >= min && delivered / sent < exports.PROMO_LIMITS.LIMITED_MAX_DELIVERED;
+    return byRate || (!!spamStatus && LIMITED_SPAM.has(spamStatus));
+}
+function promo(aggs, dms, window, limited) {
+    const s = aggs.reduce((t, a) => ({ sent: t.sent + a.sent, delivered: t.delivered + a.delivered, banned: t.banned + a.banned, failed: t.failed + a.failed }), { sent: 0, delivered: 0, banned: 0, failed: 0 });
+    return {
+        ...s,
+        deliveryRate: (0, monitor_util_1.ratio)(s.delivered, s.sent),
+        banRate: (0, monitor_util_1.ratio)(s.banned, s.sent),
+        dms,
+        dmsPer100Delivered: dms === null || !s.delivered ? null : Math.round((dms / s.delivered) * 10000) / 100,
+        mobilesSending: aggs.filter((a) => a.mobile && a.sent > 0).length,
+        mobilesLimited: aggs.filter((a) => a.mobile && limited(a)).length,
+    };
+}
+const dmsOf = (split, f, id) => split ? (id === undefined ? split.total[f] : (split.byClient.get(id)?.[f] ?? 0)) : null;
+const scopedDms = (split, f, client) => dmsOf(split, f, client ?? undefined);
+function buildPromotions(i) {
+    const { w, client } = i;
+    const inScope = (r) => client === null || r.clientId === client;
+    const rows = i.rows.filter(inScope);
+    const cur = aggregate(rows.filter((r) => r.cur));
+    const prev = aggregate(rows.filter((r) => !r.cur));
+    const notes = [];
+    if (w.intraday && i.extra) {
+        for (const [k, x] of i.extra) {
+            const a = cur.get(k);
+            if (a) {
+                a.profile = x.profile ?? a.profile;
+                a.newDms = x.newDms;
+                a.routed = x.routed;
+            }
+            else {
+                const [fam, c, m] = k.split('|');
+                if (client !== null && c !== client)
+                    continue;
+                if (!x.newDms && !Object.values(x.routed).some(Boolean))
+                    continue;
+                cur.set(k, { family: fam, clientId: c || null, mobile: m || null, sent: 0, delivered: 0, banned: 0, failed: 0, errors: new Map(), lastAt: null, lastDay: null, profile: x.profile, newDms: x.newDms, routed: x.routed });
+            }
+        }
+    }
+    const assigned = (i.assigned ?? []).filter((a) => client === null || a.clientId === client);
+    const assignedSet = new Set(assigned.map((a) => key('promote', a.clientId, a.mobile)));
+    for (const a of assigned) {
+        const k = key('promote', a.clientId, a.mobile);
+        if (!cur.has(k))
+            cur.set(k, { family: 'promote', clientId: a.clientId, mobile: a.mobile, sent: 0, delivered: 0, banned: 0, failed: 0, errors: new Map(), lastAt: null, lastDay: null, profile: null, newDms: 0, routed: {} });
+    }
+    const spamOf = (m) => (m && i.spam ? (i.spam.get(m) ?? null) : null);
+    const limitedCur = (a) => looksLimited(w.window, a.sent, a.delivered, spamOf(a.mobile)?.status);
+    const limitedPrev = (a) => looksLimited(w.window, a.sent, a.delivered, null);
+    const hasRouted = (c) => i.routedCols.includes(c);
+    const families = {};
+    for (const f of monitor_family_1.FAMILIES) {
+        const fc = [...cur.values()].filter((a) => a.family === f);
+        const fp = [...prev.values()].filter((a) => a.family === f);
+        const mobiles = fc
+            .filter((a) => a.mobile)
+            .map((a) => {
+            const spam = spamOf(a.mobile);
+            const top = [...a.errors].sort((x, y) => y[1] - x[1] || (x[0] < y[0] ? -1 : 1))[0];
+            const hb = i.heartbeats && a.clientId && a.mobile ? (i.heartbeats.mobiles.get(`${a.clientId}|${a.mobile.slice(-4)}`) ?? null) : null;
+            return {
+                mobile: (0, monitor_util_1.maskMobile)(a.mobile),
+                clientId: a.clientId,
+                profile: a.profile,
+                sent: a.sent,
+                delivered: a.delivered,
+                banned: a.banned,
+                failed: a.failed,
+                deliveryRate: (0, monitor_util_1.ratio)(a.delivered, a.sent),
+                banRate: (0, monitor_util_1.ratio)(a.banned, a.sent),
+                newDms: w.intraday && !i.extra ? null : a.newDms,
+                topError: top ? { type: top[0], count: top[1] } : null,
+                lastSendAt: a.lastAt !== null ? new Date(a.lastAt).toISOString() : null,
+                lastDay: a.lastDay,
+                spam,
+                looksLimited: limitedCur(a),
+                idle: f === 'promote' && assignedSet.has(key('promote', a.clientId, a.mobile)) && a.sent <= exports.PROMO_LIMITS.IDLE_ASSIGNED_SENDS,
+                heartbeat: hb,
+                route24h: f === 'promote' && i.route && a.mobile ? (i.route.get(a.mobile) ?? null) : null,
+            };
+        })
+            .sort((x, y) => y.sent - x.sent || String(x.clientId).localeCompare(String(y.clientId)) || String(x.mobile).localeCompare(String(y.mobile)));
+        const promoteExtras = (aggs) => f === 'promote'
+            ? {
+                incomingDms: w.intraday && !i.extra ? null : aggs.reduce((s, a) => s + a.newDms, 0),
+                routesSent: hasRouted('routes_sent') ? aggs.reduce((s, a) => s + (a.routed.routes_sent ?? 0), 0) : null,
+                routedReached: hasRouted('routed_reached') ? aggs.reduce((s, a) => s + (a.routed.routed_reached ?? 0), 0) : null,
+            }
+            : {};
+        const totals = { ...promo(fc, scopedDms(i.dms.cur, f, client), w.window, limitedCur), ...promoteExtras(fc) };
+        const previous = { ...promo(fp, scopedDms(i.dms.prev, f, client), w.window, limitedPrev), ...(f === 'promote' && !w.intraday ? promoteExtras(fp) : {}) };
+        const ids = new Set();
+        for (const a of fc)
+            if (a.clientId)
+                ids.add(a.clientId);
+        if (f === 'promote')
+            for (const a of assigned)
+                if (a.clientId)
+                    ids.add(a.clientId);
+        if (f === 'tg-aut' && i.heartbeats)
+            for (const id of i.heartbeats.engines.keys())
+                if (client === null || id === client)
+                    ids.add(id);
+        const clients = [...ids].map((id) => {
+            const mine = fc.filter((a) => a.clientId === id);
+            const last = mine.reduce((m, a) => (a.lastAt !== null && (m === null || a.lastAt > m) ? a.lastAt : m), null);
+            const row = {
+                clientId: id,
+                name: i.names.get(id) ?? null,
+                ...promo(mine, dmsOf(i.dms.cur, f, id), w.window, limitedCur),
+                ...promoteExtras(mine),
+                mobilesAssigned: f === 'promote' && i.assigned ? assigned.filter((a) => a.clientId === id).length : null,
+                lastSendAt: last !== null ? new Date(last).toISOString() : null,
+            };
+            if (f === 'tg-aut')
+                row.engine = i.heartbeats?.engines.get(id) ?? null;
+            return row;
+        });
+        clients.sort((a, b) => b.sent - a.sent || a.clientId.localeCompare(b.clientId));
+        families[f] = { totals, previous, clients, mobiles };
+    }
+    const sum = (k) => families['tg-aut'].totals[k] + families.promote.totals[k];
+    const bothDms = families['tg-aut'].totals.dms === null || families.promote.totals.dms === null ? null : families['tg-aut'].totals.dms + families.promote.totals.dms;
+    const both = {
+        sent: sum('sent'),
+        delivered: sum('delivered'),
+        banned: sum('banned'),
+        failed: sum('failed'),
+        deliveryRate: (0, monitor_util_1.ratio)(sum('delivered'), sum('sent')),
+        banRate: (0, monitor_util_1.ratio)(sum('banned'), sum('sent')),
+        dms: bothDms,
+        dmsPer100Delivered: bothDms === null || !sum('delivered') ? null : Math.round((bothDms / sum('delivered')) * 10000) / 100,
+        mobilesSending: sum('mobilesSending'),
+        mobilesLimited: sum('mobilesLimited'),
+    };
+    const unSends = rows.filter((r) => r.cur && !r.family).reduce((s, r) => s + r.sent, 0);
+    const unDms = client === null ? (i.dms.cur?.unattributed ?? null) : null;
+    const unattributed = unSends || unDms ? { sends: unSends, dms: unDms } : null;
+    if (w.window === '24h')
+        notes.push('24h: previous.dms is null (DMs are kept per IST day); mobiles[].newDms / incomingDms = today since IST midnight.');
+    if (w.intraday)
+        notes.push('today/24h sends come from promotion_send (per send); 7d/30d from daily_mobile (closed IST days).');
+    else
+        notes.push('7d/30d: topError is null (daily_mobile keeps no error types); lastDay = last IST day with a daily_mobile row.');
+    if (w.range.from < '2026-10-25' || w.previousRange.from < '2026-10-25') {
+        notes.push('Per-family DMs (conversion_event.service) start 2026-10-25; earlier DMs count only in unattributed.');
+    }
+    if (!i.routedCols.includes('routes_sent'))
+        notes.push('routesSent/routedReached: history starts when counters ship (daily_mobile route columns not present yet).');
+    notes.push(`looksLimited = sent >= ${exports.PROMO_LIMITS.LIMITED_MIN_SENDS_TODAY} today (>= ${exports.PROMO_LIMITS.LIMITED_MIN_SENDS_WINDOW} for 24h/7d/30d) with < ${exports.PROMO_LIMITS.LIMITED_MAX_DELIVERED * 100}% delivered, or Redis spam state limited/harsh; previous.mobilesLimited uses the rate rule only.`);
+    notes.push('idle = an active promoteClients mobile with no sends in the window.');
+    return { window: w.window, clientId: client, range: w.range, previousRange: w.previousRange, families, both, unattributed, notes };
+}
+function redisBatch(mobiles, promoteMobiles) {
+    const out = [];
+    for (const m of mobiles) {
+        out.push(['hgetall', `tg::acct::${m}`]);
+        if (promoteMobiles.has(m)) {
+            out.push(['hlen', `promote::route::${m}`]);
+            out.push(['zcard', `promote::routebacklog::${m}`]);
+            out.push(['zcard', `promote::mainreply::${m}`]);
+        }
+    }
+    return out;
+}
+function readBatch(mobiles, promoteMobiles, results) {
+    const spam = new Map();
+    const route = new Map();
+    let i = 0;
+    for (const m of mobiles) {
+        spam.set(m, parseSpam(results[i++]));
+        if (promoteMobiles.has(m)) {
+            route.set(m, { pending: (0, monitor_util_1.num)(results[i++]), backlog: (0, monitor_util_1.num)(results[i++]), mainReplies: (0, monitor_util_1.num)(results[i++]) });
+        }
+    }
+    return { spam, route };
+}
+function histBounds(w) {
+    return { prevFrom: w.previousRange.from, curFrom: w.range.from, to: (0, monitor_time_1.addDays)(w.today, -1) };
+}
+function funnelOrigins(credits, dms, newUsers, origin, id) {
+    const direct = dms ? (id === null ? dms.total['tg-aut'] : (dms.byClient.get(id)?.['tg-aut'] ?? 0)) : null;
+    const routed = dms ? (id === null ? dms.total.promote : (dms.byClient.get(id)?.promote ?? 0)) : null;
+    const rest = newUsers === null || direct === null || routed === null ? null : Math.max(0, newUsers - direct - routed);
+    const money = { direct: { chats: new Set(), revenue: 0 }, routed: { chats: new Set(), revenue: 0 }, unattributed: { chats: new Set(), revenue: 0 } };
+    const ok = !!credits && !!origin;
+    if (ok) {
+        for (const c of credits) {
+            if (id !== null && c.client !== id)
+                continue;
+            const o = c.client ? origin.get(`${c.chat}|${c.client}`) : undefined;
+            const k = o === 't' ? 'direct' : o === 'p' ? 'routed' : 'unattributed';
+            money[k].revenue += c.revenue;
+            if (c.clean)
+                money[k].chats.add(c.chat);
+        }
+    }
+    const out = (k, n) => ({
+        newUsers: n,
+        payers: ok ? money[k].chats.size : null,
+        revenue: ok ? money[k].revenue : null,
+    });
+    return { direct: out('direct', direct), routed: out('routed', routed), unattributed: out('unattributed', rest) };
+}
+
+
+/***/ },
+
 /***/ "./src/components/monitor/monitor-sql.ts"
 /*!***********************************************!*\
   !*** ./src/components/monitor/monitor-sql.ts ***!
@@ -36758,8 +37334,11 @@ function mapTtfp(rows) {
 
 
 Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.ROUTED_COLUMNS = void 0;
 exports.paymentRowsSql = paymentRowsSql;
 exports.dailyClientSql = dailyClientSql;
+exports.routedDailySql = routedDailySql;
+exports.routedColumnsSql = routedColumnsSql;
 exports.dmsByDaySql = dmsByDaySql;
 exports.dmRowsSql = dmRowsSql;
 exports.sendsLiveSql = sendsLiveSql;
@@ -36769,6 +37348,10 @@ exports.channelDmsHistSql = channelDmsHistSql;
 exports.channelSendsHistSql = channelSendsHistSql;
 exports.channelSendsTodaySql = channelSendsTodaySql;
 exports.paidChatsSql = paidChatsSql;
+exports.promoSendsSql = promoSendsSql;
+exports.promoMobilesHistSql = promoMobilesHistSql;
+exports.promoMobilesTodaySql = promoMobilesTodaySql;
+exports.paidOriginSql = paidOriginSql;
 const IST = `(ts AT TIME ZONE 'Asia/Kolkata')`;
 const iso = (ms) => new Date(ms).toISOString();
 function q(name, sql, params) {
@@ -36786,18 +37369,36 @@ FROM payment_event_owner
 WHERE ${range} AND amount > 0`, params);
 }
 function dailyClientSql(name, from, to) {
-    return q(name, `SELECT day::text AS d, client_id,
+    return q(name, `SELECT day::text AS d, client_id, namespace,
   coalesce(sum(sent), 0) AS sent, coalesce(sum(delivered), 0) AS delivered, coalesce(sum(banned), 0) AS banned,
-  coalesce(sum(new_users) FILTER (WHERE namespace = 'tg-aut'), 0) AS new_users
+  coalesce(sum(failed), 0) AS failed,
+  coalesce(sum(new_users) FILTER (WHERE namespace = 'tg-aut'), 0) AS new_users,
+  coalesce(sum(new_users), 0) AS ns_new_users
 FROM daily_client
 WHERE day BETWEEN $1::date AND $2::date
+GROUP BY day, client_id, namespace`, [from, to]);
+}
+exports.ROUTED_COLUMNS = ['routes_sent', 'routed_reached', 'route_calls_ok', 'route_calls_failed'];
+function routedSums(cols) {
+    const ok = cols.filter((c) => exports.ROUTED_COLUMNS.includes(c));
+    return ok.map((c) => `, coalesce(sum(${c}), 0) AS ${c}`).join('');
+}
+function routedDailySql(name, from, to, cols) {
+    return q(name, `SELECT day::text AS d, client_id${routedSums(cols)}
+FROM daily_client
+WHERE day BETWEEN $1::date AND $2::date AND namespace = 'promote-clients'
 GROUP BY day, client_id`, [from, to]);
 }
+function routedColumnsSql() {
+    return q('routed_columns', `SELECT table_name::text AS t, column_name::text AS c
+FROM information_schema.columns
+WHERE table_schema = current_schema() AND table_name IN ('daily_client', 'daily_mobile') AND column_name = ANY($1::text[])`, [[...exports.ROUTED_COLUMNS]]);
+}
 function dmsByDaySql(start, end) {
-    return q('dms_hist', `SELECT ${IST}::date::text AS d, client_id, count(DISTINCT conversion_id) AS dms
+    return q('dms_hist', `SELECT ${IST}::date::text AS d, client_id, service, GROUPING(service) AS g, count(DISTINCT conversion_id) AS dms
 FROM conversion_event
 WHERE kind = 'dm' AND ts >= $1::timestamptz AND ts < $2::timestamptz
-GROUP BY 1, 2`, [iso(start), iso(end)]);
+GROUP BY GROUPING SETS ((1, 2), (1, 2, 3))`, [iso(start), iso(end)]);
 }
 function dmRowsSql(name, start, end) {
     const params = [iso(start)];
@@ -36806,18 +37407,19 @@ function dmRowsSql(name, start, end) {
         params.push(iso(end));
         range += ' AND ts < $2::timestamptz';
     }
-    return q(name, `SELECT client_id, channel_id, conversion_id, ts
+    return q(name, `SELECT client_id, channel_id, conversion_id, ts, service
 FROM conversion_event
 WHERE kind = 'dm' AND ${range}`, params);
 }
 function sendsLiveSql(today, cut) {
-    return q('sends_live', `SELECT client_id, ts >= $1::timestamptz AS today, extract(hour FROM ${IST})::int AS h,
+    return q('sends_live', `SELECT client_id, ts >= $1::timestamptz AS today, extract(hour FROM ${IST})::int AS h, service,
   count(*) FILTER (WHERE outcome <> 'deleted') AS sent,
   count(*) FILTER (WHERE outcome = 'delivered') AS delivered,
-  count(*) FILTER (WHERE outcome = 'banned') AS banned
+  count(*) FILTER (WHERE outcome = 'banned') AS banned,
+  count(*) FILTER (WHERE outcome = 'failed') AS failed
 FROM promotion_send
 WHERE ts >= $2::timestamptz AND ts < $3::timestamptz AND (ts >= $1::timestamptz OR ts < $4::timestamptz)
-GROUP BY 1, 2, 3`, [iso(today.start), iso(today.start - 86_400_000), iso(today.end), iso(cut)]);
+GROUP BY 1, 2, 3, 4`, [iso(today.start), iso(today.start - 86_400_000), iso(today.end), iso(cut)]);
 }
 function sendsHourlySql(day) {
     return q('sends_yday_hourly', `SELECT client_id, extract(hour FROM ${IST})::int AS h, count(*) FILTER (WHERE outcome <> 'deleted') AS sent
@@ -36826,14 +37428,14 @@ WHERE ts >= $1::timestamptz AND ts < $2::timestamptz
 GROUP BY 1, 2`, [iso(day.start), iso(day.end)]);
 }
 function mobilesSql(name, from, to) {
-    return q(name, `SELECT mobile, client_id,
+    return q(name, `SELECT mobile, client_id, namespace,
   coalesce(sum(new_users) FILTER (WHERE namespace = 'tg-aut'), 0) AS new_users,
   coalesce(sum(new_users) FILTER (WHERE namespace = 'promote-clients'), 0) AS dms,
   coalesce(sum(sent), 0) AS sent, coalesce(sum(delivered), 0) AS delivered, coalesce(sum(banned), 0) AS banned,
   min(day)::text AS first_day, max(day)::text AS last_day
 FROM daily_mobile
 WHERE day BETWEEN $1::date AND $2::date
-GROUP BY mobile, client_id`, [from, to]);
+GROUP BY mobile, client_id, namespace`, [from, to]);
 }
 const ROLLED = `rolled AS (SELECT coalesce(max(day), DATE '1970-01-01') AS d FROM daily_channel WHERE day < $2::date)`;
 const RAW_FROM = `greatest($3::timestamptz, (((SELECT d FROM rolled) + 1)::timestamp AT TIME ZONE 'Asia/Kolkata'))`;
@@ -36896,6 +37498,38 @@ FROM payment_event_owner
 WHERE ts >= $1::timestamptz AND ts < $2::timestamptz AND amount > 0
 GROUP BY client_id, chat_id
 ORDER BY max(ts) DESC`, [iso(dayStart), iso(dayEnd)]);
+}
+function promoSendsSql(cur, prev) {
+    return q('promo_sends', `SELECT ts >= $1::timestamptz AS cur, service, client_id, mobile, error_type,
+  count(*) FILTER (WHERE outcome <> 'deleted') AS sent,
+  count(*) FILTER (WHERE outcome = 'delivered') AS delivered,
+  count(*) FILTER (WHERE outcome = 'banned') AS banned,
+  count(*) FILTER (WHERE outcome = 'failed') AS failed,
+  max(ts) FILTER (WHERE outcome <> 'deleted') AS last_ts
+FROM promotion_send
+WHERE ts >= $2::timestamptz AND ts < $3::timestamptz AND (ts >= $1::timestamptz OR ts < $4::timestamptz)
+GROUP BY 1, 2, 3, 4, 5`, [iso(cur.start), iso(prev.start), iso(cur.end), iso(prev.end)]);
+}
+function promoMobilesHistSql(prevFrom, curFrom, to, routed = []) {
+    return q('promo_mobiles_hist', `SELECT day >= $2::date AS cur, namespace, client_id, mobile, max(profile) AS profile,
+  coalesce(sum(sent), 0) AS sent, coalesce(sum(delivered), 0) AS delivered, coalesce(sum(banned), 0) AS banned,
+  coalesce(sum(failed), 0) AS failed, coalesce(sum(new_users), 0) AS new_users, max(day)::text AS last_day${routedSums(routed)}
+FROM daily_mobile
+WHERE day BETWEEN $1::date AND $3::date
+GROUP BY 1, 2, 3, 4`, [prevFrom, curFrom, to]);
+}
+function promoMobilesTodaySql(today, routed = []) {
+    return q('promo_mobiles_today', `SELECT namespace, client_id, mobile, max(profile) AS profile, coalesce(sum(new_users), 0) AS new_users${routedSums(routed)}
+FROM daily_mobile
+WHERE day = $1::date
+GROUP BY 1, 2, 3`, [today]);
+}
+function paidOriginSql(dmFrom, payFrom) {
+    return q('paid_origin', `SELECT DISTINCT ON (c.chat_id, c.client_id) c.chat_id, c.client_id, c.service
+FROM conversion_event c
+WHERE c.kind = 'dm' AND c.ts >= $1::timestamptz AND c.client_id IS NOT NULL
+  AND (c.chat_id, c.client_id) IN (SELECT chat_id, client_id FROM payment_event WHERE ts >= $2::timestamptz AND amount > 0)
+ORDER BY c.chat_id, c.client_id, c.ts`, [iso(dmFrom), iso(payFrom)]);
 }
 
 
@@ -36988,7 +37622,7 @@ function clientDaysRange(days, now) {
 
 
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.DAILY_MOBILE_FROM = exports.REVENUE_HISTORY_FROM = exports.DMS_ATTRIBUTION_FROM = void 0;
+exports.DAILY_MOBILE_FROM = exports.FAMILY_DMS_FROM = exports.REVENUE_HISTORY_FROM = exports.DMS_ATTRIBUTION_FROM = void 0;
 exports.maskMobile = maskMobile;
 exports.num = num;
 exports.round = round;
@@ -37037,6 +37671,7 @@ function withTimeout(p, ms, label) {
 }
 exports.DMS_ATTRIBUTION_FROM = '2026-10-26';
 exports.REVENUE_HISTORY_FROM = '2026-10-04';
+exports.FAMILY_DMS_FROM = '2026-10-25';
 exports.DAILY_MOBILE_FROM = '2026-10-10';
 function historyNotes(ranges, opts = {}) {
     const notes = [];
@@ -37098,6 +37733,7 @@ var __param = (this && this.__param) || function (paramIndex, decorator) {
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.MonitorController = void 0;
 exports.parsePeriod = parsePeriod;
+exports.parseWindow = parseWindow;
 exports.parseDays = parseDays;
 exports.parseSvc = parseSvc;
 exports.parsePaidDate = parsePaidDate;
@@ -37105,6 +37741,7 @@ exports.parseOptionalClientId = parseOptionalClientId;
 const common_1 = __webpack_require__(/*! @nestjs/common */ "@nestjs/common");
 const swagger_1 = __webpack_require__(/*! @nestjs/swagger */ "@nestjs/swagger");
 const monitor_time_1 = __webpack_require__(/*! ./monitor-time */ "./src/components/monitor/monitor-time.ts");
+const monitor_promotions_1 = __webpack_require__(/*! ./monitor-promotions */ "./src/components/monitor/monitor-promotions.ts");
 const monitor_util_1 = __webpack_require__(/*! ./monitor-util */ "./src/components/monitor/monitor-util.ts");
 const monitor_service_1 = __webpack_require__(/*! ./monitor.service */ "./src/components/monitor/monitor.service.ts");
 const CLIENT_ID_RE = /^[A-Za-z0-9_-]{1,40}$/;
@@ -37114,6 +37751,13 @@ function parsePeriod(period) {
     if (monitor_time_1.MONITOR_PERIODS.includes(period))
         return period;
     throw new common_1.BadRequestException(`period must be one of ${monitor_time_1.MONITOR_PERIODS.join('|')}`);
+}
+function parseWindow(window) {
+    if (window === undefined || window === '')
+        return 'today';
+    if (monitor_promotions_1.PROMO_WINDOWS.includes(window))
+        return window;
+    throw new common_1.BadRequestException(`window must be one of ${monitor_promotions_1.PROMO_WINDOWS.join('|')}`);
 }
 function parseDays(days) {
     if (days === undefined || days === '' || days === '7')
@@ -37165,6 +37809,12 @@ let MonitorController = class MonitorController {
     paidChats(date, clientId) {
         return this.service.paidChats(parsePaidDate(date, Date.now()), parseOptionalClientId(clientId));
     }
+    promotions(window, client) {
+        return this.service.promotions(parseWindow(window), parseOptionalClientId(client));
+    }
+    funnel(period, client) {
+        return this.service.funnel(parsePeriod(period), parseOptionalClientId(client));
+    }
     async client(clientId, days) {
         if (!CLIENT_ID_RE.test(clientId ?? ''))
             throw new common_1.BadRequestException('invalid clientId');
@@ -37206,6 +37856,26 @@ __decorate([
     __metadata("design:paramtypes", [String, String]),
     __metadata("design:returntype", void 0)
 ], MonitorController.prototype, "paidChats", null);
+__decorate([
+    (0, common_1.Get)('promotions'),
+    (0, swagger_1.ApiQuery)({ name: 'window', required: false, enum: monitor_promotions_1.PROMO_WINDOWS }),
+    (0, swagger_1.ApiQuery)({ name: 'client', required: false }),
+    __param(0, (0, common_1.Query)('window')),
+    __param(1, (0, common_1.Query)('client')),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [String, String]),
+    __metadata("design:returntype", void 0)
+], MonitorController.prototype, "promotions", null);
+__decorate([
+    (0, common_1.Get)('funnel'),
+    (0, swagger_1.ApiQuery)({ name: 'period', required: false, enum: monitor_time_1.MONITOR_PERIODS }),
+    (0, swagger_1.ApiQuery)({ name: 'client', required: false }),
+    __param(0, (0, common_1.Query)('period')),
+    __param(1, (0, common_1.Query)('client')),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [String, String]),
+    __metadata("design:returntype", void 0)
+], MonitorController.prototype, "funnel", null);
 __decorate([
     (0, common_1.Get)('client/:clientId'),
     (0, swagger_1.ApiParam)({ name: 'clientId' }),
@@ -37261,6 +37931,12 @@ exports.MonitorModule = MonitorModule = __decorate([
                     mget: (keys) => redisClient_1.RedisClient.getClient().mget(keys),
                     get: (key) => redisClient_1.RedisClient.getClient().get(key),
                     set: (key, value, mode, ttlSec) => redisClient_1.RedisClient.getClient().set(key, value, mode, ttlSec),
+                    readPipeline: async (cmds) => {
+                        const results = await redisClient_1.RedisClient.getClient()
+                            .pipeline(cmds.map(([cmd, key]) => [cmd, key]))
+                            .exec();
+                        return (results ?? []).map(([err, value]) => (err ? null : value));
+                    },
                 }),
             },
         ],
@@ -37302,6 +37978,8 @@ const mongoose_2 = __webpack_require__(/*! mongoose */ "mongoose");
 const analytics_pg_reader_1 = __webpack_require__(/*! ../daily-analytics/analytics-pg.reader */ "./src/components/daily-analytics/analytics-pg.reader.ts");
 const monitor_cache_1 = __webpack_require__(/*! ./monitor-cache */ "./src/components/monitor/monitor-cache.ts");
 const monitor_merge_1 = __webpack_require__(/*! ./monitor-merge */ "./src/components/monitor/monitor-merge.ts");
+const monitor_family_1 = __webpack_require__(/*! ./monitor-family */ "./src/components/monitor/monitor-family.ts");
+const monitor_promotions_1 = __webpack_require__(/*! ./monitor-promotions */ "./src/components/monitor/monitor-promotions.ts");
 const monitor_mongo_1 = __webpack_require__(/*! ./monitor-mongo */ "./src/components/monitor/monitor-mongo.ts");
 const monitor_sql_1 = __webpack_require__(/*! ./monitor-sql */ "./src/components/monitor/monitor-sql.ts");
 const monitor_time_1 = __webpack_require__(/*! ./monitor-time */ "./src/components/monitor/monitor-time.ts");
@@ -37359,6 +38037,7 @@ function fleetSummaryRow(f) {
         sendSuccess: m.sendSuccess,
         banned: m.banned,
         dms: m.dms,
+        ...(m.byFamily ? { byFamily: m.byFamily } : {}),
         pool,
         spark,
         previous: { revenue: f.previous.revenue, payers: f.previous.payers, newUsers: f.previous.newUsers, conversion: f.previous.conversion },
@@ -37569,6 +38248,10 @@ let MonitorService = MonitorService_1 = class MonitorService {
             return this.buildFleet(a, now, background);
         if (kind === 'detail')
             return this.buildDetail(null, Number(b), now, background);
+        if (kind === 'promotions')
+            return this.buildPromotions(a, b === '*' ? null : b, now, background);
+        if (kind === 'funnel')
+            return this.buildFunnel(a, b === '*' ? null : b, now, background);
         return this.buildDetail(a, Number(b), now, background);
     }
     async snap(page) {
@@ -37668,6 +38351,15 @@ let MonitorService = MonitorService_1 = class MonitorService {
         return this.part(ctx, 'today', 'dc_today', (now, t, bg) => {
             const today = (0, monitor_time_1.istDate)(now);
             return this.pgRows((0, monitor_sql_1.dailyClientSql)('dc_today', today, today), t, bg);
+        }).then((l) => l.value);
+    }
+    routedColumns(ctx) {
+        return this.part(ctx, 'history', 'routed_columns', async (_now, t, bg) => {
+            const rows = await this.pgRows((0, monitor_sql_1.routedColumnsSql)(), t, bg);
+            return {
+                client: rows.filter((r) => r.t === 'daily_client').map((r) => r.c).sort(),
+                mobile: rows.filter((r) => r.t === 'daily_mobile').map((r) => r.c).sort(),
+            };
         }).then((l) => l.value);
     }
     dmsHist(ctx) {
@@ -37791,11 +38483,18 @@ let MonitorService = MonitorService_1 = class MonitorService {
         }
         let sends = null;
         let sendsPrev = null;
+        let famSends = null;
+        let famSendsPrev = null;
         if (dcH) {
             sends = (0, monitor_merge_1.sumDailyClient)(dcH, w.range.from, w.range.to);
             sendsPrev = (0, monitor_merge_1.sumDailyClient)(dcH, w.prevRange.from, w.prevRange.to);
+            famSends = (0, monitor_family_1.sendsByFamily)(dcH, 'namespace', (r) => r.d >= w.range.from && r.d <= w.range.to);
+            famSendsPrev = (0, monitor_family_1.sendsByFamily)(dcH, 'namespace', (r) => r.d >= w.prevRange.from && r.d <= w.prevRange.to);
         }
         else if (live) {
+            const isToday = (r) => r.today === true || r.today === 't';
+            famSends = (0, monitor_family_1.sendsByFamily)(live.rows, 'service', isToday);
+            famSendsPrev = (0, monitor_family_1.sendsByFamily)(live.rows, 'service', (r) => !isToday(r));
             const cur = new Map();
             const prev = new Map();
             for (const r of live.rows) {
@@ -37813,15 +38512,23 @@ let MonitorService = MonitorService_1 = class MonitorService {
         }
         let dms = null;
         let dmsPrev = null;
+        let famDms = null;
+        let famDmsPrev = null;
         if (dmsH) {
             dms = (0, monitor_merge_1.sumDmsDays)(dmsH, w.range.from, w.range.to);
             dmsPrev = (0, monitor_merge_1.sumDmsDays)(dmsH, w.prevRange.from, w.prevRange.to);
+            famDms = (0, monitor_family_1.dmsFamilyDays)(dmsH, w.range.from, w.range.to);
+            famDmsPrev = (0, monitor_family_1.dmsFamilyDays)(dmsH, w.prevRange.from, w.prevRange.to);
         }
         else {
-            if (dmT)
+            if (dmT) {
                 dms = (0, monitor_merge_1.distinctDms)(dmT.rows);
-            if (dmY)
+                famDms = (0, monitor_family_1.dmsFamilyRows)(dmT.rows);
+            }
+            if (dmY) {
                 dmsPrev = (0, monitor_merge_1.distinctDms)(dmY, (dmT?.asOf ?? now) - monitor_time_1.DAY_MS);
+                famDmsPrev = (0, monitor_family_1.dmsFamilyRows)(dmY, (dmT?.asOf ?? now) - monitor_time_1.DAY_MS);
+            }
         }
         let cohortCur = null;
         let cohortPrev = null;
@@ -37883,10 +38590,11 @@ let MonitorService = MonitorService_1 = class MonitorService {
                     newUsers: nuPrev(id),
                     conversion: conv(prevCohorts, id),
                 },
+                byFamily: (0, monitor_family_1.byFamily)(famSends, famDms, id),
             };
         });
         clients.sort((a, b) => (b.revenue ?? -1) - (a.revenue ?? -1) || a.clientId.localeCompare(b.clientId));
-        const totals = (r, s, d, cohorts, nu) => {
+        const totals = (r, s, d, cohorts, nu, fam) => {
             const revenue = r ? r.total.revenue : null;
             const gross = r ? r.total.gross : null;
             const payers = r ? r.total.payers : null;
@@ -37902,6 +38610,7 @@ let MonitorService = MonitorService_1 = class MonitorService {
                 sendSuccess: s ? s.total.delivered : null,
                 banned: s ? s.total.banned : null,
                 dms: d ? d.total : null,
+                byFamily: fam,
             };
         };
         const notes = [...(0, monitor_util_1.historyNotes)([w.range, w.prevRange]), ...ctx.notes];
@@ -37909,6 +38618,7 @@ let MonitorService = MonitorService_1 = class MonitorService {
             const cutAt = (live?.asOf ?? payT?.asOf ?? now) - monitor_time_1.DAY_MS;
             notes.push(`previous = yesterday 00:00 to ${new Date(cutAt + 19_800_000).toISOString().slice(11, 16)} IST; today's sends come from promotion_send and new users/conversion from Mongo userData.`);
         }
+        notes.push(`byFamily splits sends/DMs into tg-aut and promote; rows without a family (promotion_send/conversion_event before 2026-10-25) count only in the merged numbers.`);
         if (prevSwept) {
             notes.push('previous.conversion is null: the previous window is older than ~30 days and userData docs are swept after 30 days idle. Current-window days older than ~30 days may also undercount.');
         }
@@ -37917,8 +38627,8 @@ let MonitorService = MonitorService_1 = class MonitorService {
             period,
             range: w.range,
             previousRange: w.prevRange,
-            fleet: totals(rev, sends, dms, cohortCur, nuCur()),
-            previous: totals(revPrev, sendsPrev, dmsPrev, prevCohorts, nuPrev()),
+            fleet: totals(rev, sends, dms, cohortCur, nuCur(), (0, monitor_family_1.byFamily)(famSends, famDms)),
+            previous: totals(revPrev, sendsPrev, dmsPrev, prevCohorts, nuPrev(), (0, monitor_family_1.byFamily)(famSendsPrev, famDmsPrev)),
             clients,
             notes,
             timingsMs: ctx.timings,
@@ -37978,6 +38688,9 @@ let MonitorService = MonitorService_1 = class MonitorService {
         const dcBy = new Map([...(dcH ? (0, monitor_merge_1.dailyClientByDate)(dcH, scope) : []), ...(dcT ? (0, monitor_merge_1.dailyClientByDate)(dcT, scope) : [])]);
         const dmsBy = dmsH ? (0, monitor_merge_1.dmsByDate)(dmsH, scope) : new Map();
         const dmsToday = dmT ? (0, monitor_merge_1.distinctDms)(dmT.rows.filter((x) => inScope(x.client_id))).total : null;
+        const famDcBy = new Map([...(dcH ? (0, monitor_family_1.sendsByFamilyDate)(dcH, scope) : []), ...(dcT ? (0, monitor_family_1.sendsByFamilyDate)(dcT, scope) : [])]);
+        const famDmsBy = dmsH ? (0, monitor_family_1.dmsFamilyByDate)(dmsH, scope) : null;
+        const famDmsToday = dmT ? (0, monitor_family_1.dmsFamilyRows)(dmT.rows, Number.POSITIVE_INFINITY, (x) => inScope(x.client_id)).total : null;
         const cohortBy = new Map();
         for (const x of [...(cohH ?? []), ...(cohT ?? [])]) {
             if (!inScope(x.c))
@@ -38005,6 +38718,7 @@ let MonitorService = MonitorService_1 = class MonitorService {
                 sendSuccess: dcOk ? (dc?.delivered ?? 0) : null,
                 banned: dcOk ? (dc?.banned ?? 0) : null,
                 dms: isToday ? dmsToday : dmsH ? (dmsBy.get(date) ?? 0) : null,
+                byFamily: (0, monitor_family_1.byFamilyOfDate)(dcOk ? famDcBy : null, isToday ? (famDmsToday ? new Map([[date, famDmsToday]]) : null) : famDmsBy, date),
             };
         });
         const sendsHourBy = new Map();
@@ -38094,6 +38808,7 @@ let MonitorService = MonitorService_1 = class MonitorService {
                 dms: m.dms,
                 firstDay: m.first_day,
                 lastDay: m.last_day,
+                family: m.family,
             }))
             : null;
         let channels = null;
@@ -38283,6 +38998,281 @@ let MonitorService = MonitorService_1 = class MonitorService {
             c.username = byClient.get(`${c.clientId}|${c.chatId}`) ?? byProfile.get(`${c.profile}|${c.chatId}`) ?? null;
         }
     }
+    async promotions(window, client) {
+        try {
+            return await this.snap(`promotions:${window}:${client ?? '*'}`);
+        }
+        catch (err) {
+            if (err instanceof common_1.ServiceUnavailableException)
+                throw err;
+            const msg = String(err?.message ?? err).slice(0, 200);
+            this.logger.warn(`monitor promotions ${window} failed: ${msg}`);
+            throw new common_1.ServiceUnavailableException(`promotions unavailable: ${msg}`);
+        }
+    }
+    promoSends(ctx, window) {
+        return this.part(ctx, 'today', `promo_sends:${window}`, (now, t, bg) => {
+            const w = (0, monitor_promotions_1.promoWindows)(window, now);
+            return this.pgRows((0, monitor_sql_1.promoSendsSql)(w.cur, w.prev), t, bg);
+        }).then((l) => l.value);
+    }
+    promoHist(ctx, window, routed) {
+        return this.part(ctx, 'history', `promo_mobiles_hist:${window}:${routed.join(',')}`, (now, t, bg) => {
+            const b = (0, monitor_promotions_1.histBounds)((0, monitor_promotions_1.promoWindows)(window, now));
+            return this.pgRows((0, monitor_sql_1.promoMobilesHistSql)(b.prevFrom, b.curFrom, b.to, routed), t, bg);
+        }).then((l) => l.value);
+    }
+    promoMobilesToday(ctx, routed) {
+        return this.part(ctx, 'today', `promo_mobiles_today:${routed.join(',')}`, (now, t, bg) => this.pgRows((0, monitor_sql_1.promoMobilesTodaySql)((0, monitor_time_1.istDate)(now), routed), t, bg)).then((l) => l.value);
+    }
+    promoteAssigned(ctx) {
+        return this.part(ctx, 'history', 'promote_assigned', async (_now, t) => {
+            const rows = await this.mongoFind('promoteClients', { status: 'active' }, { _id: 0, mobile: 1, clientId: 1 }, 'mongo.promoteClients_assigned', t);
+            return rows.filter((r) => r.mobile).map((r) => ({ mobile: String(r.mobile), clientId: r.clientId ? String(r.clientId) : null }));
+        }, this.poolCache).then((l) => l.value);
+    }
+    async redisAccountState(mobiles, promote, ctx) {
+        if (typeof this.redis?.readPipeline !== 'function') {
+            ctx.notes.push('spam/route state not read: Redis pipeline not configured.');
+            return null;
+        }
+        if (!mobiles.length)
+            return { spam: new Map(), route: new Map() };
+        const cmds = (0, monitor_promotions_1.redisBatch)(mobiles, promote);
+        const t = Date.now();
+        try {
+            const results = await (0, monitor_util_1.withTimeout)(this.redis.readPipeline(cmds), exports.LIVE_REDIS_DEADLINE_MS, 'redis account state');
+            return (0, monitor_promotions_1.readBatch)(mobiles, promote, results);
+        }
+        finally {
+            ctx.timings['redis.account_state'] = Date.now() - t;
+        }
+    }
+    async buildPromotions(window, client, now, background = false) {
+        const ctx = new Ctx(background);
+        const w = (0, monitor_promotions_1.promoWindows)(window, now);
+        const routed = await this.section('routed_columns', ctx, () => this.routedColumns(ctx));
+        const routedCols = routed?.mobile ?? [];
+        const intraday = w.intraday;
+        const sendsP = intraday ? this.promoSends(ctx, window) : this.promoHist(ctx, window, routedCols);
+        const [sendRows, extraRows, meta, dmsH, dmY, dmT, assigned, live] = await Promise.all([
+            sendsP.catch((err) => {
+                const msg = String(err?.message ?? err).slice(0, 200);
+                throw new common_1.ServiceUnavailableException(`promotion sends unavailable: ${msg}`);
+            }),
+            intraday ? this.section('mobiles_today', ctx, () => this.promoMobilesToday(ctx, routedCols)) : null,
+            this.section('clients', ctx, () => this.clientMeta(ctx)),
+            intraday ? null : this.section('dms', ctx, () => this.dmsHist(ctx)),
+            intraday ? this.section('dms', ctx, () => this.dmRowsYday(ctx)) : null,
+            intraday ? this.section('dms_today', ctx, () => this.dmRowsToday(ctx)) : null,
+            this.section('assigned', ctx, () => this.promoteAssigned(ctx)),
+            this.section('heartbeats', ctx, async () => (await this.liveCache.get('all', () => this.loadLive())).value),
+        ]);
+        const rows = intraday ? (0, monitor_promotions_1.rowsFromSends)(sendRows) : (0, monitor_promotions_1.rowsFromHist)(sendRows, routedCols);
+        let dmsCur = null;
+        let dmsPrev = null;
+        if (!intraday) {
+            if (dmsH) {
+                dmsCur = (0, monitor_family_1.dmsFamilyDays)(dmsH, w.range.from, w.range.to);
+                dmsPrev = (0, monitor_family_1.dmsFamilyDays)(dmsH, w.previousRange.from, w.previousRange.to);
+            }
+        }
+        else if (window === 'today') {
+            if (dmT)
+                dmsCur = (0, monitor_family_1.dmsFamilyRows)(dmT.rows);
+            if (dmY)
+                dmsPrev = (0, monitor_family_1.dmsFamilyRows)(dmY, (dmT?.asOf ?? now) - monitor_time_1.DAY_MS);
+        }
+        else if (dmT && dmY) {
+            const from = dmT.asOf - monitor_time_1.DAY_MS;
+            dmsCur = (0, monitor_family_1.dmsFamilyRows)([...dmY.filter((r) => new Date(r.ts).getTime() >= from), ...dmT.rows]);
+        }
+        const inScope = (c) => client === null || c === client;
+        const mobiles = new Set();
+        const promote = new Set();
+        for (const r of rows) {
+            if (!r.cur || !r.mobile || !r.family || !inScope(r.clientId))
+                continue;
+            mobiles.add(r.mobile);
+            if (r.family === 'promote')
+                promote.add(r.mobile);
+        }
+        for (const a of assigned ?? []) {
+            if (!inScope(a.clientId))
+                continue;
+            mobiles.add(a.mobile);
+            promote.add(a.mobile);
+        }
+        const acct = await this.section('redis_state', ctx, () => this.redisAccountState([...mobiles].sort(), promote, ctx));
+        const entries = (live?.entries ?? []).map((e) => ({ svc: e.svc, clientId: e.clientId, payload: e.payload, state: classifyHeartbeat(e.payload, now).state }));
+        const body = (0, monitor_promotions_1.buildPromotions)({
+            w,
+            rows,
+            extra: extraRows ? (0, monitor_promotions_1.extrasFromToday)(extraRows, routedCols) : null,
+            dms: { cur: dmsCur, prev: dmsPrev },
+            spam: acct?.spam ?? null,
+            route: acct?.route ?? null,
+            heartbeats: live ? (0, monitor_promotions_1.heartbeatJoins)(entries) : null,
+            assigned: assigned ?? null,
+            names: new Map((meta ?? []).map((m) => [m.clientId, m.name])),
+            routedCols,
+            client,
+        });
+        if (client !== null && meta && !meta.some((m) => m.clientId === client))
+            ctx.notes.push(`clientId ${client} is not in the clients collection.`);
+        return {
+            generatedAt: new Date(now).toISOString(),
+            ...body,
+            notes: [...body.notes, ...ctx.notes],
+            timingsMs: ctx.timings,
+            cache: ctx.cache(Date.now()),
+        };
+    }
+    async funnel(period, client) {
+        return this.snap(`funnel:${period}:${client ?? '*'}`);
+    }
+    paidOrigin(ctx) {
+        return this.part(ctx, 'history', 'paid_origin', async (now, t, bg) => {
+            const from = this.historyStart((0, monitor_time_1.istDate)(now));
+            const dmFrom = Math.max(from, (0, monitor_time_1.istDayStart)(monitor_util_1.FAMILY_DMS_FROM));
+            const rows = await this.pgRows((0, monitor_sql_1.paidOriginSql)(dmFrom, from), t, bg);
+            return rows.map((r) => [`${r.chat_id}|${r.client_id}`, r.service ?? null]);
+        }).then((l) => new Map(l.value));
+    }
+    routedDaily(ctx, kind, cols) {
+        if (kind === 'hist') {
+            return this.part(ctx, 'history', `routed_hist:${cols.join(',')}`, (now, t, bg) => {
+                const today = (0, monitor_time_1.istDate)(now);
+                return this.pgRows((0, monitor_sql_1.routedDailySql)('routed_hist', (0, monitor_time_1.addDays)(today, -exports.HISTORY_DAYS), (0, monitor_time_1.addDays)(today, -1), cols), t, bg);
+            }).then((l) => l.value);
+        }
+        return this.part(ctx, 'today', `routed_today:${cols.join(',')}`, (now, t, bg) => {
+            const today = (0, monitor_time_1.istDate)(now);
+            return this.pgRows((0, monitor_sql_1.routedDailySql)('routed_today', today, today, cols), t, bg);
+        }).then((l) => l.value);
+    }
+    async buildFunnel(period, client, now, background = false) {
+        const ctx = new Ctx(background);
+        const w = (0, monitor_time_1.resolvePeriod)(period, now);
+        const intraday = !w.wholeDays;
+        const days = period === '30d' ? 30 : 7;
+        const routed = await this.section('routed_columns', ctx, () => this.routedColumns(ctx));
+        const routedCols = routed?.client ?? [];
+        const [fleet, payH, payT, origin, dmsH, dmY, dmT, dcH, dcT, routedRows, detail] = await Promise.all([
+            this.section('summary', ctx, () => this.snap(`fleet:${period}`)),
+            this.section('revenue', ctx, () => this.payHist(ctx)),
+            intraday ? this.section('revenue_today', ctx, () => this.payToday(ctx)) : null,
+            this.section('paid_origin', ctx, () => this.paidOrigin(ctx)),
+            w.wholeDays ? this.section('dms', ctx, () => this.dmsHist(ctx)) : null,
+            intraday ? this.section('dms', ctx, () => this.dmRowsYday(ctx)) : null,
+            intraday ? this.section('dms_today', ctx, () => this.dmRowsToday(ctx)) : null,
+            w.wholeDays ? this.section('daily_client', ctx, () => this.dcHist(ctx)) : null,
+            intraday ? this.section('daily_client_today', ctx, () => this.dcToday(ctx)) : null,
+            routedCols.length ? this.section('routed', ctx, () => this.routedDaily(ctx, intraday ? 'today' : 'hist', routedCols)) : null,
+            w.wholeDays ? this.section('detail', ctx, () => this.snap(client ? `client:${client}:${days}` : `detail:all:${days}`)) : null,
+        ]);
+        if (fleet)
+            ctx.merge(fleet.cache, Date.now());
+        if (detail)
+            ctx.merge(detail.cache, Date.now());
+        const inScope = (c) => client === null || c === client;
+        let dmsCur = null;
+        let dmsPrev = null;
+        if (dmsH) {
+            dmsCur = (0, monitor_family_1.dmsFamilyDays)(dmsH, w.range.from, w.range.to);
+            dmsPrev = (0, monitor_family_1.dmsFamilyDays)(dmsH, w.prevRange.from, w.prevRange.to);
+        }
+        else {
+            if (dmT)
+                dmsCur = (0, monitor_family_1.dmsFamilyRows)(dmT.rows);
+            if (dmY)
+                dmsPrev = (0, monitor_family_1.dmsFamilyRows)(dmY, (dmT?.asOf ?? now) - monitor_time_1.DAY_MS);
+        }
+        const curCredits = intraday ? (payT ? payT.rows.filter((c) => c.ms >= w.cur.start && c.ms < payT.asOf) : null) : payH ? payH.filter((c) => c.ms >= w.cur.start && c.ms < w.cur.end) : null;
+        const prevEnd = intraday ? (payT?.asOf ?? now) - monitor_time_1.DAY_MS : w.prev.end;
+        const prevCredits = payH ? payH.filter((c) => c.ms >= w.prev.start && c.ms < prevEnd) : null;
+        const fleetRow = (f) => !f ? null : client === null ? { cur: f.fleet, prev: f.previous } : (() => {
+            const r = f.clients.find((c) => c.clientId === client);
+            return r ? { cur: r, prev: r.previous } : { cur: null, prev: null };
+        })();
+        const fr = fleetRow(fleet);
+        const origins = (credits, split, newUsers, id) => (0, monitor_promotions_1.funnelOrigins)(credits, split, newUsers, origin, id);
+        const totals = fr?.cur
+            ? { newUsers: fr.cur.newUsers, payers: fr.cur.payers, revenue: fr.cur.revenue, conversion: fr.cur.conversion }
+            : { newUsers: null, payers: null, revenue: null, conversion: null };
+        const previous = fr?.prev
+            ? { newUsers: fr.prev.newUsers, payers: fr.prev.payers, revenue: fr.prev.revenue, conversion: fr.prev.conversion }
+            : null;
+        const dcRows = (dcH ?? dcT ?? []).filter((r) => r.d >= w.range.from && r.d <= w.range.to && inScope(r.client_id));
+        const incoming = dcH || dcT ? dcRows.filter((r) => r.namespace === 'promote-clients').reduce((s, r) => s + (0, monitor_util_1.num)(r.ns_new_users), 0) : null;
+        let routedOut = null;
+        if (routedRows) {
+            const sel = routedRows.filter((r) => r.d >= w.range.from && r.d <= w.range.to && inScope(r.client_id));
+            const sumOf = (c) => (routedCols.includes(c) ? sel.reduce((s, r) => s + (0, monitor_util_1.num)(r[c]), 0) : null);
+            const sent = sumOf('routes_sent');
+            const reached = sumOf('routed_reached');
+            routedOut = {
+                routesSent: sent,
+                routedReached: reached,
+                routeCallsOk: sumOf('route_calls_ok'),
+                routeCallsFailed: sumOf('route_calls_failed'),
+                reachRate: sent === null || reached === null ? null : (0, monitor_util_1.ratio)(reached, sent),
+            };
+        }
+        const ids = fleet ? fleet.clients.map((c) => c.clientId).filter((id) => inScope(id)) : [];
+        const clients = (fleet?.clients ?? [])
+            .filter((c) => ids.includes(c.clientId))
+            .map((c) => ({
+            clientId: c.clientId,
+            name: c.name,
+            newUsers: c.newUsers,
+            payers: c.payers,
+            revenue: c.revenue,
+            conversion: c.conversion,
+            previous: c.previous,
+            byOrigin: origins(curCredits, dmsCur, c.newUsers, c.clientId),
+        }));
+        const daily = detail
+            ? detail.daily.map((d) => ({
+                date: d.date,
+                newUsers: d.newUsers,
+                payers: d.payers,
+                revenue: d.revenue,
+                conversion: d.conversion,
+                dms: d.dms,
+                dmsByFamily: d.byFamily ? { 'tg-aut': d.byFamily['tg-aut'].dms, promote: d.byFamily.promote.dms } : null,
+            }))
+            : null;
+        const notes = [...(0, monitor_util_1.historyNotes)([w.range, w.prevRange]), ...ctx.notes];
+        notes.push('byOrigin: direct = first attributed DM from a tg-aut promotion (service t), routed = from a promote account (service p); payers/revenue by origin are attributed only (chats with an attributed DM since 2026-10-25), the rest is unattributed.');
+        notes.push('byOrigin newUsers: direct/routed = attributed DMs of that origin; unattributed = newUsers minus both (floored at 0).');
+        if (!routedCols.includes('routes_sent'))
+            notes.push('routed: history starts when counters ship (daily_client route columns not present yet).');
+        if (intraday)
+            notes.push('timeToFirstPay / repeat are 7d/30d only (null for today); payer origins refresh every 10 min.');
+        if (client !== null && fleet && !fleet.clients.some((c) => c.clientId === client))
+            notes.push(`clientId ${client} has no row in /monitor/fleet for ${period}.`);
+        return {
+            generatedAt: new Date(now).toISOString(),
+            period,
+            clientId: client,
+            range: w.range,
+            previousRange: w.prevRange,
+            totals,
+            previous,
+            byOrigin: origins(curCredits, dmsCur, totals.newUsers, client),
+            previousByOrigin: origins(prevCredits, dmsPrev, previous?.newUsers ?? null, client),
+            incomingPromoteDms: incoming,
+            routed: routedOut,
+            clients,
+            daily,
+            ttfp: detail?.distributions?.timeToFirstPay ?? null,
+            repeat: detail?.distributions?.repeat ?? null,
+            notes,
+            timingsMs: ctx.timings,
+            cache: ctx.cache(Date.now()),
+        };
+    }
     async live(svc) {
         let redis = 'ok';
         let stale = false;
@@ -38303,7 +39293,7 @@ let MonitorService = MonitorService_1 = class MonitorService {
             .map((e) => {
             const c = classifyHeartbeat(e.payload, now);
             const masked = (e.payload ? (0, monitor_util_1.maskPayload)(e.payload) : {});
-            const item = { ...masked, svc: e.svc, clientId: e.clientId, state: c.state, ageSec: c.ageSec };
+            const item = { ...masked, svc: e.svc, clientId: e.clientId, state: c.state, ageSec: c.ageSec, indexed: e.indexed };
             if (c.clockSkew)
                 item.clockSkew = true;
             if (e.parseError)
@@ -38324,6 +39314,7 @@ let MonitorService = MonitorService_1 = class MonitorService {
         const meta = await this.section('clients', ctx, () => this.clientMeta(ctx));
         const redisPart = async () => {
             const members = await this.redis.smembers(exports.HEARTBEAT_INDEX_KEY);
+            const indexed = new Set(members ?? []);
             const keys = new Map();
             const add = (svc, clientId) => {
                 if (!exports.LIVE_SVCS.includes(svc) || !clientId)
@@ -38342,20 +39333,23 @@ let MonitorService = MonitorService_1 = class MonitorService {
             }
             const keyList = [...keys.keys()];
             const values = keyList.length ? await this.redis.mget(keyList) : [];
-            return keyList.map((k, i) => ({ ...keys.get(k), raw: values[i] ?? null }));
+            return keyList.map((k, i) => {
+                const e = keys.get(k);
+                return { ...e, indexed: indexed.has(`${e.svc}::${e.clientId}`), raw: values[i] ?? null };
+            });
         };
         const rows = await (0, monitor_util_1.withTimeout)(redisPart(), exports.LIVE_REDIS_DEADLINE_MS, 'redis heartbeat read');
         const entries = rows.map((r) => {
             if (r.raw === null)
-                return { svc: r.svc, clientId: r.clientId, payload: null };
+                return { svc: r.svc, clientId: r.clientId, payload: null, indexed: r.indexed };
             try {
                 const parsed = JSON.parse(r.raw);
                 if (parsed && typeof parsed === 'object' && !Array.isArray(parsed))
-                    return { svc: r.svc, clientId: r.clientId, payload: parsed };
+                    return { svc: r.svc, clientId: r.clientId, payload: parsed, indexed: r.indexed };
             }
             catch {
             }
-            return { svc: r.svc, clientId: r.clientId, payload: { at: null }, parseError: true };
+            return { svc: r.svc, clientId: r.clientId, payload: { at: null }, parseError: true, indexed: r.indexed };
         });
         entries.sort((a, b) => a.svc.localeCompare(b.svc) || a.clientId.localeCompare(b.clientId));
         return { entries, notes: ctx.notes };
