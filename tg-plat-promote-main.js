@@ -39273,8 +39273,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "85ea3c8b9982f16fac4857978ec88780e0b1732e" : 0;
-    const builtAt =  true ? "2026-10-28T18:46:05.450Z" : 0;
+    const sha =  true ? "bf2db009592e1d6855da29633f7fc3a529e2494a" : 0;
+    const builtAt =  true ? "2026-10-29T04:51:38.733Z" : 0;
     return { sha, builtAt };
 }
 
@@ -39528,6 +39528,9 @@ class RouteCallService {
         }
         if (!peer)
             return this.skip(chatId, "unresolved");
+        // dispose() during the awaits above: an engine created now would never be stopped (a leaked native engine).
+        if (this.disposed)
+            return this.skip(chatId, "engine");
         let engine;
         try {
             engine = this.engine ?? (this.engine = (this.deps.createEngine ?? (() => this.defaultEngine()))());
