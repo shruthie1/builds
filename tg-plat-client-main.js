@@ -10104,6 +10104,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   normalizeAvailableMessageIds: () => (/* binding */ normalizeAvailableMessageIds),
 /* harmony export */   normalizeChannel: () => (/* binding */ normalizeChannel),
 /* harmony export */   normalizeChannels: () => (/* binding */ normalizeChannels),
+/* harmony export */   normalizeDaysLeft: () => (/* binding */ normalizeDaysLeft),
 /* harmony export */   normalizeMessageCheckResult: () => (/* binding */ normalizeMessageCheckResult),
 /* harmony export */   normalizeMessageSource: () => (/* binding */ normalizeMessageSource),
 /* harmony export */   normalizeMessageStrategy: () => (/* binding */ normalizeMessageStrategy),
@@ -10132,7 +10133,9 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _pool_pool_types__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../../pool/pool-types */ "../../packages/tg-channel-state/src/channel-message-promotions/pool/pool-types.ts");
 /* harmony import */ var _utils_channel_id__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../../utils/channel-id */ "../../packages/tg-channel-state/src/channel-message-promotions/utils/channel-id.ts");
 /* harmony import */ var _utils_guards__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../../../utils/guards */ "../../packages/tg-channel-state/src/utils/guards.ts");
+/* harmony import */ var _tg_core_utils_spam_limit__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! @tg/core/utils/spam-limit */ "../../packages/tg-core/src/utils/spam-limit.ts");
 // PromotionFlowRunner: pure normalisers and guards for adapter/hook results.
+
 
 
 
@@ -10165,8 +10168,21 @@ function normalizeStats(value) {
         successCount: safeNonNegativeInt(asNumber(stats['successCount'])),
         failedCount: safeNonNegativeInt(asNumber(stats['failedCount'])),
         failStreak: safeNonNegativeInt(asNumber(stats['failStreak'])),
-        daysLeft: safeNonNegativeInt(asNumber(stats['daysLeft'])),
+        daysLeft: normalizeDaysLeft(asNumber(stats['daysLeft'])),
     };
+}
+/**
+ * daysLeft keeps the healthy sentinel (-1, `HEALTHY_DAYS_LEFT`). It must NOT go through
+ * safeNonNegativeInt: that clamped -1 to 0 and `isSpamLimited(0)` put every healthy account on the
+ * limited pace and cap (docs/design/2026-10-30-unified-account-health.md C1/C2).
+ * Finite values >= 0 are floored (0 = released today stays limited, deliberately); -1 stays -1;
+ * anything else (missing, non-finite, other negatives) is -1 = healthy, matching the healthy default
+ * of resolveAccountDailyCap / calculatePromotionBatchLimit / calculateHealthBasedPromotionDelay.
+ */
+function normalizeDaysLeft(value) {
+    if (!Number.isFinite(value) || value < 0)
+        return _tg_core_utils_spam_limit__WEBPACK_IMPORTED_MODULE_5__.HEALTHY_DAYS_LEFT;
+    return Math.floor(value);
 }
 function normalizeMessageCheckResult(value) {
     if (!(0,_utils_guards__WEBPACK_IMPORTED_MODULE_4__.isRecord)(value) || !(value['status'] === 'exists'
@@ -19598,6 +19614,570 @@ function shouldReplace(options) {
 
 /***/ },
 
+/***/ "../../packages/tg-core/src/account-health/classify.ts"
+/*!*************************************************************!*\
+  !*** ../../packages/tg-core/src/account-health/classify.ts ***!
+  \*************************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   classifyVerdict: () => (/* binding */ classifyVerdict),
+/* harmony export */   endOfUtcDay: () => (/* binding */ endOfUtcDay),
+/* harmony export */   releaseInstant: () => (/* binding */ releaseInstant)
+/* harmony export */ });
+/* harmony import */ var _telegram_utils_spam_bot_probe__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../telegram-utils/spam-bot-probe */ "../../packages/tg-core/src/telegram-utils/spam-bot-probe.ts");
+/* harmony import */ var _probe__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./probe */ "../../packages/tg-core/src/account-health/probe.ts");
+/* harmony import */ var _types__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./types */ "../../packages/tg-core/src/account-health/types.ts");
+
+
+
+/**
+ * Reads one SpamBot reply into the next AccountHealth (§2.1). Wraps the shared classifier (C5) and
+ * `parseSpamBotReleaseDate`.
+ * - "good news" → healthy.
+ * - a readable release date in the future → limited until it.
+ * - a release date today or in the past, or a release notice with no readable date → limited until
+ *   the end of the current UTC day (never healthy: only "good news" is healthy, C4).
+ * - "can trigger a harsh" → harsh; `statusSince` keeps the first harsh verdict.
+ * - anything else ("other") → the previous status is kept; only `checkedAt` moves.
+ * The handoff series re-arms only when the status changes (§2.4); a repeated verdict keeps it.
+ */
+function classifyVerdict(text, now, source, previous = null, probeOptions = {}) {
+    const prev = previous ?? (0,_types__WEBPACK_IMPORTED_MODULE_2__.unknownHealth)(source);
+    const kind = (0,_telegram_utils_spam_bot_probe__WEBPACK_IMPORTED_MODULE_0__.classifySpamBotMessage)(text);
+    let next;
+    if (kind === 'healthy') {
+        next = withStatus(prev, 'healthy', null, now, source);
+    }
+    else if (kind === 'harsh-warning') {
+        next = withStatus(prev, 'harsh', null, now, source);
+    }
+    else if (kind === 'released') {
+        next = withStatus(prev, 'limited', releaseInstant(text, now), now, source);
+    }
+    else {
+        next = { ...prev, checkedAt: now, source };
+    }
+    return { ...next, nextProbeAt: (0,_probe__WEBPACK_IMPORTED_MODULE_1__.nextProbeAt)(next, now, probeOptions) };
+}
+/** Release instant from the reply; today/past/unreadable → end of the current UTC day. */
+function releaseInstant(text, now) {
+    const raw = (0,_telegram_utils_spam_bot_probe__WEBPACK_IMPORTED_MODULE_0__.extractSpamBotReleaseDate)(text);
+    const parsed = raw ? (0,_telegram_utils_spam_bot_probe__WEBPACK_IMPORTED_MODULE_0__.parseSpamBotReleaseDate)(raw, new Date(now)) : null;
+    const endOfToday = endOfUtcDay(now);
+    if (!parsed)
+        return endOfToday;
+    return parsed.getTime() > endOfToday ? parsed.getTime() : endOfToday;
+}
+function endOfUtcDay(now) {
+    const d = new Date(now);
+    return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), 23, 59, 59, 999);
+}
+function withStatus(prev, state, limitedUntil, now, source) {
+    const changed = prev.state !== state;
+    return {
+        ...prev,
+        state,
+        limitedUntil,
+        checkedAt: now,
+        statusSince: changed || prev.statusSince === null ? now : prev.statusSince,
+        handoff: changed ? (0,_types__WEBPACK_IMPORTED_MODULE_2__.emptyHandoff)(`verdict:${state}`) : prev.handoff,
+        source,
+    };
+}
+
+
+/***/ },
+
+/***/ "../../packages/tg-core/src/account-health/handoff.ts"
+/*!************************************************************!*\
+  !*** ../../packages/tg-core/src/account-health/handoff.ts ***!
+  \************************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   HANDOFF_FAILURE_BACKOFF_MS: () => (/* binding */ HANDOFF_FAILURE_BACKOFF_MS),
+/* harmony export */   HANDOFF_LIMITED_MIN_DAYS: () => (/* binding */ HANDOFF_LIMITED_MIN_DAYS),
+/* harmony export */   HANDOFF_MAX_ATTEMPTS: () => (/* binding */ HANDOFF_MAX_ATTEMPTS),
+/* harmony export */   HANDOFF_NO_CANDIDATE_BACKOFF_MS: () => (/* binding */ HANDOFF_NO_CANDIDATE_BACKOFF_MS),
+/* harmony export */   HANDOFF_PENDING_BACKOFF_MS: () => (/* binding */ HANDOFF_PENDING_BACKOFF_MS),
+/* harmony export */   HANDOFF_SWAP_COOLDOWN_MS: () => (/* binding */ HANDOFF_SWAP_COOLDOWN_MS),
+/* harmony export */   applyHandoffResult: () => (/* binding */ applyHandoffResult),
+/* harmony export */   handoffDecision: () => (/* binding */ handoffDecision)
+/* harmony export */ });
+/* harmony import */ var _types__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./types */ "../../packages/tg-core/src/account-health/types.ts");
+/* harmony import */ var _legacy__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./legacy */ "../../packages/tg-core/src/account-health/legacy.ts");
+
+
+/** A dated limit with at least this many days left hands off (tg-aut `>=3` today; promote `>3` unifies). */
+const HANDOFF_LIMITED_MIN_DAYS = 3;
+/** No non-dead swap within this long of the last swap (CMS cooldown is only 4 min). */
+const HANDOFF_SWAP_COOLDOWN_MS = _types__WEBPACK_IMPORTED_MODULE_0__.DAY_MS;
+/** Owner rule (C10): back-off bases and the hard stop. */
+const HANDOFF_FAILURE_BACKOFF_MS = 15 * 60 * 1000;
+const HANDOFF_NO_CANDIDATE_BACKOFF_MS = 2 * 60 * 60 * 1000;
+const HANDOFF_PENDING_BACKOFF_MS = 15 * 60 * 1000;
+const HANDOFF_MAX_ATTEMPTS = 5;
+/**
+ * Whether to ask for a replacement now (§2.4). `dead` always swaps (and ignores back-off, like
+ * today's dead-account bypass). Everything else respects the degraded pick, the 24 h swap cooldown and
+ * the persisted back-off / hard stop in `h.handoff`.
+ */
+function handoffDecision(h, client, now) {
+    if (h.state === 'dead')
+        return 'swap';
+    if (!wantsSwap(h, client, now))
+        return 'none';
+    if (client.degraded)
+        return 'none';
+    if (client.swappedAt !== null && now - client.swappedAt < HANDOFF_SWAP_COOLDOWN_MS)
+        return 'none';
+    if (h.handoff.stopped !== null)
+        return 'none';
+    if (h.handoff.nextAttemptAt !== null && h.handoff.nextAttemptAt > now)
+        return 'none';
+    return 'swap';
+}
+function wantsSwap(h, client, now) {
+    if (h.state === 'limited')
+        return (0,_legacy__WEBPACK_IMPORTED_MODULE_1__.daysUntil)(h.limitedUntil, now) >= HANDOFF_LIMITED_MIN_DAYS;
+    // promote harsh keeps promoting at the harsh tier; replacement at the next natural restart (§3.3).
+    if (h.state === 'harsh')
+        return client.app === 'tg-aut';
+    return false;
+}
+/**
+ * Records one swap-request result (owner rule, C10): failures back off 15/30/60/120 min,
+ * no_candidate 2/4/8/16 h (15-120 min while CMS has unprobed candidates), hard stop after 5 in a
+ * row; a `degraded:true` no_candidate stops at once. No time-based re-arm; `classifyVerdict` re-arms
+ * on a status change and a restart re-arms by starting from `emptyHandoff()`.
+ */
+function applyHandoffResult(handoff, result, now) {
+    if (result.kind === 'swapped')
+        return (0,_types__WEBPACK_IMPORTED_MODULE_0__.emptyHandoff)(handoff.armedBy);
+    if (result.kind === 'no_candidate' && result.degraded === true) {
+        return { ...handoff, nextAttemptAt: null, stopped: 'degraded: the CMS upgrade job owns this client' };
+    }
+    const attempts = handoff.attempts + 1;
+    if (attempts >= HANDOFF_MAX_ATTEMPTS) {
+        return { ...handoff, attempts, nextAttemptAt: null, stopped: `${result.kind} ${attempts} times in a row` };
+    }
+    const base = result.kind === 'failed'
+        ? HANDOFF_FAILURE_BACKOFF_MS
+        : result.moreCandidatesPending === true ? HANDOFF_PENDING_BACKOFF_MS : HANDOFF_NO_CANDIDATE_BACKOFF_MS;
+    return { ...handoff, attempts, nextAttemptAt: now + base * 2 ** (attempts - 1), stopped: null };
+}
+
+
+/***/ },
+
+/***/ "../../packages/tg-core/src/account-health/index.ts"
+/*!**********************************************************!*\
+  !*** ../../packages/tg-core/src/account-health/index.ts ***!
+  \**********************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   DAY_MS: () => (/* reexport safe */ _types__WEBPACK_IMPORTED_MODULE_0__.DAY_MS),
+/* harmony export */   HANDOFF_FAILURE_BACKOFF_MS: () => (/* reexport safe */ _handoff__WEBPACK_IMPORTED_MODULE_6__.HANDOFF_FAILURE_BACKOFF_MS),
+/* harmony export */   HANDOFF_LIMITED_MIN_DAYS: () => (/* reexport safe */ _handoff__WEBPACK_IMPORTED_MODULE_6__.HANDOFF_LIMITED_MIN_DAYS),
+/* harmony export */   HANDOFF_MAX_ATTEMPTS: () => (/* reexport safe */ _handoff__WEBPACK_IMPORTED_MODULE_6__.HANDOFF_MAX_ATTEMPTS),
+/* harmony export */   HANDOFF_NO_CANDIDATE_BACKOFF_MS: () => (/* reexport safe */ _handoff__WEBPACK_IMPORTED_MODULE_6__.HANDOFF_NO_CANDIDATE_BACKOFF_MS),
+/* harmony export */   HANDOFF_PENDING_BACKOFF_MS: () => (/* reexport safe */ _handoff__WEBPACK_IMPORTED_MODULE_6__.HANDOFF_PENDING_BACKOFF_MS),
+/* harmony export */   HANDOFF_SWAP_COOLDOWN_MS: () => (/* reexport safe */ _handoff__WEBPACK_IMPORTED_MODULE_6__.HANDOFF_SWAP_COOLDOWN_MS),
+/* harmony export */   HARSH_DAILY_ATTEMPT_CAP: () => (/* reexport safe */ _pace__WEBPACK_IMPORTED_MODULE_2__.HARSH_DAILY_ATTEMPT_CAP),
+/* harmony export */   HARSH_DELAY_MAX_MS: () => (/* reexport safe */ _pace__WEBPACK_IMPORTED_MODULE_2__.HARSH_DELAY_MAX_MS),
+/* harmony export */   HARSH_DELAY_MIN_MS: () => (/* reexport safe */ _pace__WEBPACK_IMPORTED_MODULE_2__.HARSH_DELAY_MIN_MS),
+/* harmony export */   HARSH_PROBE_GAPS_MS: () => (/* reexport safe */ _probe__WEBPACK_IMPORTED_MODULE_3__.HARSH_PROBE_GAPS_MS),
+/* harmony export */   HARSH_PROBE_REPEAT_MS: () => (/* reexport safe */ _probe__WEBPACK_IMPORTED_MODULE_3__.HARSH_PROBE_REPEAT_MS),
+/* harmony export */   HEALTHY_DAILY_CAP: () => (/* reexport safe */ _pace__WEBPACK_IMPORTED_MODULE_2__.HEALTHY_DAILY_CAP),
+/* harmony export */   HEALTHY_DELAY_MAX_MS: () => (/* reexport safe */ _pace__WEBPACK_IMPORTED_MODULE_2__.HEALTHY_DELAY_MAX_MS),
+/* harmony export */   HEALTHY_DELAY_MIN_MS: () => (/* reexport safe */ _pace__WEBPACK_IMPORTED_MODULE_2__.HEALTHY_DELAY_MIN_MS),
+/* harmony export */   HOUR_MS: () => (/* reexport safe */ _types__WEBPACK_IMPORTED_MODULE_0__.HOUR_MS),
+/* harmony export */   LIMITED_DAILY_CAP: () => (/* reexport safe */ _pace__WEBPACK_IMPORTED_MODULE_2__.LIMITED_DAILY_CAP),
+/* harmony export */   LIMITED_DELAY_MAX_MS: () => (/* reexport safe */ _pace__WEBPACK_IMPORTED_MODULE_2__.LIMITED_DELAY_MAX_MS),
+/* harmony export */   LIMITED_DELAY_MIN_MS: () => (/* reexport safe */ _pace__WEBPACK_IMPORTED_MODULE_2__.LIMITED_DELAY_MIN_MS),
+/* harmony export */   LIMITED_REPROBE_AFTER_MS: () => (/* reexport safe */ _probe__WEBPACK_IMPORTED_MODULE_3__.LIMITED_REPROBE_AFTER_MS),
+/* harmony export */   LIMITED_REPROBE_JITTER_MS: () => (/* reexport safe */ _probe__WEBPACK_IMPORTED_MODULE_3__.LIMITED_REPROBE_JITTER_MS),
+/* harmony export */   MAX_FLOOD_PAUSE_MS: () => (/* reexport safe */ _outcome__WEBPACK_IMPORTED_MODULE_5__.MAX_FLOOD_PAUSE_MS),
+/* harmony export */   PROBE_FLOOR_MS: () => (/* reexport safe */ _probe__WEBPACK_IMPORTED_MODULE_3__.PROBE_FLOOR_MS),
+/* harmony export */   TG_AUT_HARSH_DAYS_LEFT: () => (/* reexport safe */ _legacy__WEBPACK_IMPORTED_MODULE_4__.TG_AUT_HARSH_DAYS_LEFT),
+/* harmony export */   applyHandoffResult: () => (/* reexport safe */ _handoff__WEBPACK_IMPORTED_MODULE_6__.applyHandoffResult),
+/* harmony export */   classifyVerdict: () => (/* reexport safe */ _classify__WEBPACK_IMPORTED_MODULE_1__.classifyVerdict),
+/* harmony export */   daysUntil: () => (/* reexport safe */ _legacy__WEBPACK_IMPORTED_MODULE_4__.daysUntil),
+/* harmony export */   effectiveState: () => (/* reexport safe */ _types__WEBPACK_IMPORTED_MODULE_0__.effectiveState),
+/* harmony export */   emptyHandoff: () => (/* reexport safe */ _types__WEBPACK_IMPORTED_MODULE_0__.emptyHandoff),
+/* harmony export */   endOfUtcDay: () => (/* reexport safe */ _classify__WEBPACK_IMPORTED_MODULE_1__.endOfUtcDay),
+/* harmony export */   handoffDecision: () => (/* reexport safe */ _handoff__WEBPACK_IMPORTED_MODULE_6__.handoffDecision),
+/* harmony export */   legacyDaysLeft: () => (/* reexport safe */ _legacy__WEBPACK_IMPORTED_MODULE_4__.legacyDaysLeft),
+/* harmony export */   nextProbeAt: () => (/* reexport safe */ _probe__WEBPACK_IMPORTED_MODULE_3__.nextProbeAt),
+/* harmony export */   noteSendOutcome: () => (/* reexport safe */ _outcome__WEBPACK_IMPORTED_MODULE_5__.noteSendOutcome),
+/* harmony export */   paceTier: () => (/* reexport safe */ _pace__WEBPACK_IMPORTED_MODULE_2__.paceTier),
+/* harmony export */   probeDue: () => (/* reexport safe */ _probe__WEBPACK_IMPORTED_MODULE_3__.probeDue),
+/* harmony export */   probeFloorAt: () => (/* reexport safe */ _probe__WEBPACK_IMPORTED_MODULE_3__.probeFloorAt),
+/* harmony export */   releaseInstant: () => (/* reexport safe */ _classify__WEBPACK_IMPORTED_MODULE_1__.releaseInstant),
+/* harmony export */   tierDelayMs: () => (/* reexport safe */ _pace__WEBPACK_IMPORTED_MODULE_2__.tierDelayMs),
+/* harmony export */   unknownHealth: () => (/* reexport safe */ _types__WEBPACK_IMPORTED_MODULE_0__.unknownHealth)
+/* harmony export */ });
+/* harmony import */ var _types__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./types */ "../../packages/tg-core/src/account-health/types.ts");
+/* harmony import */ var _classify__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./classify */ "../../packages/tg-core/src/account-health/classify.ts");
+/* harmony import */ var _pace__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./pace */ "../../packages/tg-core/src/account-health/pace.ts");
+/* harmony import */ var _probe__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ./probe */ "../../packages/tg-core/src/account-health/probe.ts");
+/* harmony import */ var _legacy__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ./legacy */ "../../packages/tg-core/src/account-health/legacy.ts");
+/* harmony import */ var _outcome__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ./outcome */ "../../packages/tg-core/src/account-health/outcome.ts");
+/* harmony import */ var _handoff__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ./handoff */ "../../packages/tg-core/src/account-health/handoff.ts");
+// Unified account health (docs/design/2026-10-30-unified-account-health.md §2). Pure functions;
+// Phase 2 ships them without callers.
+
+
+
+
+
+
+
+
+
+/***/ },
+
+/***/ "../../packages/tg-core/src/account-health/legacy.ts"
+/*!***********************************************************!*\
+  !*** ../../packages/tg-core/src/account-health/legacy.ts ***!
+  \***********************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   TG_AUT_HARSH_DAYS_LEFT: () => (/* binding */ TG_AUT_HARSH_DAYS_LEFT),
+/* harmony export */   daysUntil: () => (/* binding */ daysUntil),
+/* harmony export */   legacyDaysLeft: () => (/* binding */ legacyDaysLeft)
+/* harmony export */ });
+/* harmony import */ var _utils_spam_limit__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../utils/spam-limit */ "../../packages/tg-core/src/utils/spam-limit.ts");
+/* harmony import */ var _types__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./types */ "../../packages/tg-core/src/account-health/types.ts");
+
+
+/** tg-aut writes this for harsh today (C8, `spam-state.ts`): limited pace while CMS swaps. */
+const TG_AUT_HARSH_DAYS_LEFT = 5;
+/**
+ * Whole days (rounded up) until `limitedUntil`, as the apps' `getdaysLeft` computes it; -1 when
+ * missing or past.
+ */
+function daysUntil(limitedUntil, now) {
+    if (limitedUntil === null || !Number.isFinite(limitedUntil))
+        return -1;
+    const days = Math.ceil((limitedUntil - now) / _types__WEBPACK_IMPORTED_MODULE_1__.DAY_MS);
+    return days < 0 ? -1 : days;
+}
+/**
+ * The `daysLeft` number each app writes today, derived from AccountHealth (§2.1), so a rollback reads
+ * the same values: healthy/unknown → -1; limited → max(days,0)+1 (C4); harsh → 5 in tg-aut (C8) and
+ * the unchanged previous value in promote (C6); dead → the previous value (nothing writes on death).
+ */
+function legacyDaysLeft(h, now, app, previousDaysLeft = _utils_spam_limit__WEBPACK_IMPORTED_MODULE_0__.HEALTHY_DAYS_LEFT) {
+    switch (h.state) {
+        case 'limited':
+            return (0,_utils_spam_limit__WEBPACK_IMPORTED_MODULE_0__.sanitizeLimitedDaysLeft)(daysUntil(h.limitedUntil, now));
+        case 'harsh':
+            return app === 'tg-aut' ? TG_AUT_HARSH_DAYS_LEFT : previousDaysLeft;
+        case 'dead':
+            return previousDaysLeft;
+        default:
+            return _utils_spam_limit__WEBPACK_IMPORTED_MODULE_0__.HEALTHY_DAYS_LEFT;
+    }
+}
+
+
+/***/ },
+
+/***/ "../../packages/tg-core/src/account-health/outcome.ts"
+/*!************************************************************!*\
+  !*** ../../packages/tg-core/src/account-health/outcome.ts ***!
+  \************************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   MAX_FLOOD_PAUSE_MS: () => (/* binding */ MAX_FLOOD_PAUSE_MS),
+/* harmony export */   noteSendOutcome: () => (/* binding */ noteSendOutcome)
+/* harmony export */ });
+/** Same ceiling as tg-aut `FloodGate.maxFloodWaitPauseMs` (C22). */
+const MAX_FLOOD_PAUSE_MS = 15 * 60 * 1000;
+/** Applies one send outcome (§2.1): FLOOD_WAIT pauses for the stated seconds, capped at 15 min. */
+function noteSendOutcome(h, outcome, now) {
+    if (h.state === 'dead')
+        return h;
+    if (outcome.kind === 'permanent') {
+        return { ...h, state: 'dead', statusSince: now, floodUntil: null, limitedUntil: null, nextProbeAt: null };
+    }
+    if (outcome.kind === 'flood_wait') {
+        const seconds = Number.isFinite(outcome.seconds) && outcome.seconds > 0 ? outcome.seconds : 0;
+        if (seconds === 0)
+            return h;
+        const until = now + Math.min(Math.ceil(seconds * 1000), MAX_FLOOD_PAUSE_MS);
+        return h.floodUntil !== null && h.floodUntil >= until ? h : { ...h, floodUntil: until };
+    }
+    return h;
+}
+
+
+/***/ },
+
+/***/ "../../packages/tg-core/src/account-health/pace.ts"
+/*!*********************************************************!*\
+  !*** ../../packages/tg-core/src/account-health/pace.ts ***!
+  \*********************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   HARSH_DAILY_ATTEMPT_CAP: () => (/* binding */ HARSH_DAILY_ATTEMPT_CAP),
+/* harmony export */   HARSH_DELAY_MAX_MS: () => (/* binding */ HARSH_DELAY_MAX_MS),
+/* harmony export */   HARSH_DELAY_MIN_MS: () => (/* binding */ HARSH_DELAY_MIN_MS),
+/* harmony export */   HEALTHY_DAILY_CAP: () => (/* binding */ HEALTHY_DAILY_CAP),
+/* harmony export */   HEALTHY_DELAY_MAX_MS: () => (/* binding */ HEALTHY_DELAY_MAX_MS),
+/* harmony export */   HEALTHY_DELAY_MIN_MS: () => (/* binding */ HEALTHY_DELAY_MIN_MS),
+/* harmony export */   LIMITED_DAILY_CAP: () => (/* binding */ LIMITED_DAILY_CAP),
+/* harmony export */   LIMITED_DELAY_MAX_MS: () => (/* binding */ LIMITED_DELAY_MAX_MS),
+/* harmony export */   LIMITED_DELAY_MIN_MS: () => (/* binding */ LIMITED_DELAY_MIN_MS),
+/* harmony export */   paceTier: () => (/* binding */ paceTier),
+/* harmony export */   tierDelayMs: () => (/* binding */ tierDelayMs)
+/* harmony export */ });
+/* harmony import */ var _types__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./types */ "../../packages/tg-core/src/account-health/types.ts");
+
+/**
+ * Pace and cap tiers, one table for both apps (§2.2). Owner decisions 2026-10-30:
+ * - healthy / unknown: 6-8 min, healthy cap (the designed values, no remote-config override set).
+ * - limited: KEEP the faster 3-4 min pace and the higher 4,200 cap (2026-08-15 decision).
+ * - harsh: ~10 min after EVERY attempt (8-12 min jittered), cap 100 attempts/day (cap value is an
+ *   assumption by the implementer, not an owner number). Promotion never stops on harsh.
+ * - flood: no sends until `floodUntil` (declared as the runner's sleepUntil).
+ * - dead: no sends; hand off now.
+ * Caps mirror @tg/channel-state `ACCOUNT_CAP_MAX` (3,500) and `ACCOUNT_CAP_LIMITED` (4,200); tg-core
+ * cannot import that package, so a unit test pins them equal.
+ */
+const HEALTHY_DELAY_MIN_MS = 6 * 60 * 1000;
+const HEALTHY_DELAY_MAX_MS = 8 * 60 * 1000;
+const LIMITED_DELAY_MIN_MS = 3 * 60 * 1000;
+const LIMITED_DELAY_MAX_MS = 4 * 60 * 1000;
+const HARSH_DELAY_MIN_MS = 8 * 60 * 1000;
+const HARSH_DELAY_MAX_MS = 12 * 60 * 1000;
+const HEALTHY_DAILY_CAP = 3500;
+const LIMITED_DAILY_CAP = 4200;
+const HARSH_DAILY_ATTEMPT_CAP = 100;
+function paceTier(h, now, env = {}) {
+    const state = (0,_types__WEBPACK_IMPORTED_MODULE_0__.effectiveState)(h, now);
+    switch (state) {
+        case 'flood':
+            return { delayMinMs: 0, delayMaxMs: 0, dailyCap: 0, paceAllOutcomes: true, sendAllowed: false, sleepUntil: h.floodUntil };
+        case 'dead':
+            return { delayMinMs: 0, delayMaxMs: 0, dailyCap: 0, paceAllOutcomes: true, sendAllowed: false, sleepUntil: null };
+        case 'harsh':
+            return {
+                ...window(env, 'PROMO_HARSH_DELAY', HARSH_DELAY_MIN_MS, HARSH_DELAY_MAX_MS),
+                dailyCap: HARSH_DAILY_ATTEMPT_CAP,
+                paceAllOutcomes: true,
+                sendAllowed: true,
+                sleepUntil: null,
+            };
+        case 'limited':
+            return {
+                ...window(env, 'PROMO_UNHEALTHY_DELAY', LIMITED_DELAY_MIN_MS, LIMITED_DELAY_MAX_MS),
+                dailyCap: LIMITED_DAILY_CAP,
+                paceAllOutcomes: false,
+                sendAllowed: true,
+                sleepUntil: null,
+            };
+        default:
+            return {
+                ...window(env, 'PROMO_HEALTHY_DELAY', HEALTHY_DELAY_MIN_MS, HEALTHY_DELAY_MAX_MS),
+                dailyCap: HEALTHY_DAILY_CAP,
+                paceAllOutcomes: false,
+                sendAllowed: true,
+                sleepUntil: null,
+            };
+    }
+}
+/** A delay inside the tier window; `random` in [0,1). */
+function tierDelayMs(tier, random = Math.random) {
+    const r = random();
+    const u = Number.isFinite(r) ? Math.max(0, Math.min(0.999999, r)) : 0.5;
+    return tier.delayMinMs + Math.floor(u * Math.max(0, tier.delayMaxMs - tier.delayMinMs));
+}
+function window(env, prefix, minDefault, maxDefault) {
+    const delayMinMs = readMs(env[`${prefix}_MIN_MS`], minDefault);
+    const delayMaxMs = Math.max(delayMinMs, readMs(env[`${prefix}_MAX_MS`], maxDefault));
+    return { delayMinMs, delayMaxMs };
+}
+function readMs(raw, fallback) {
+    const text = (raw ?? '').trim();
+    if (!text)
+        return fallback;
+    const n = Number(text);
+    return Number.isFinite(n) && n >= 0 ? Math.floor(n) : fallback;
+}
+
+
+/***/ },
+
+/***/ "../../packages/tg-core/src/account-health/probe.ts"
+/*!**********************************************************!*\
+  !*** ../../packages/tg-core/src/account-health/probe.ts ***!
+  \**********************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   HARSH_PROBE_GAPS_MS: () => (/* binding */ HARSH_PROBE_GAPS_MS),
+/* harmony export */   HARSH_PROBE_REPEAT_MS: () => (/* binding */ HARSH_PROBE_REPEAT_MS),
+/* harmony export */   LIMITED_REPROBE_AFTER_MS: () => (/* binding */ LIMITED_REPROBE_AFTER_MS),
+/* harmony export */   LIMITED_REPROBE_JITTER_MS: () => (/* binding */ LIMITED_REPROBE_JITTER_MS),
+/* harmony export */   PROBE_FLOOR_MS: () => (/* binding */ PROBE_FLOOR_MS),
+/* harmony export */   nextProbeAt: () => (/* binding */ nextProbeAt),
+/* harmony export */   probeDue: () => (/* binding */ probeDue),
+/* harmony export */   probeFloorAt: () => (/* binding */ probeFloorAt)
+/* harmony export */ });
+/* harmony import */ var _types__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./types */ "../../packages/tg-core/src/account-health/types.ts");
+
+/** SpamBot is never probed more often than this, `force` included (§2.3; today force bypasses it, C24). */
+const PROBE_FLOOR_MS = 6 * _types__WEBPACK_IMPORTED_MODULE_0__.HOUR_MS;
+/** A dated limit is re-probed this long after it lifts, plus jitter. */
+const LIMITED_REPROBE_AFTER_MS = _types__WEBPACK_IMPORTED_MODULE_0__.HOUR_MS;
+/** Jitter added to the limited re-probe (assumption: 0-30 min; the design says "plus jitter"). */
+const LIMITED_REPROBE_JITTER_MS = 30 * 60 * 1000;
+/**
+ * Harsh re-probe points, cumulative from the first harsh verdict (`statusSince`): the gaps are
+ * 24 h, 48 h, 96 h, then every 7 d (§2.3). Today promote re-probes harsh every ~6 h for no new
+ * information (§1.3).
+ */
+const HARSH_PROBE_GAPS_MS = [_types__WEBPACK_IMPORTED_MODULE_0__.DAY_MS, 2 * _types__WEBPACK_IMPORTED_MODULE_0__.DAY_MS, 4 * _types__WEBPACK_IMPORTED_MODULE_0__.DAY_MS];
+const HARSH_PROBE_REPEAT_MS = 7 * _types__WEBPACK_IMPORTED_MODULE_0__.DAY_MS;
+/** Earliest instant the 6 h floor allows the next probe. */
+function probeFloorAt(h, now) {
+    return h.checkedAt === null ? now : Math.max(now, h.checkedAt + PROBE_FLOOR_MS);
+}
+/**
+ * Next scheduled SpamBot probe (epoch ms), or null for none. Never sooner than 6 h after the last
+ * probe; never during a flood pause; never for a dead account.
+ */
+function nextProbeAt(h, now, options = {}) {
+    const floor = probeFloorAt(h, now);
+    const notBeforeFlood = (at) => (h.floodUntil !== null && h.floodUntil > at ? h.floodUntil : at);
+    switch (h.state) {
+        case 'dead':
+            return null;
+        case 'healthy':
+            return options.massBanSignal === true ? notBeforeFlood(floor) : null;
+        case 'unknown':
+            return notBeforeFlood(floor);
+        case 'limited': {
+            if (h.limitedUntil === null)
+                return notBeforeFlood(floor);
+            const random = options.random ?? Math.random;
+            const jitter = Math.floor(unit(random()) * LIMITED_REPROBE_JITTER_MS);
+            return notBeforeFlood(Math.max(floor, h.limitedUntil + LIMITED_REPROBE_AFTER_MS + jitter));
+        }
+        case 'harsh': {
+            const since = h.statusSince ?? h.checkedAt ?? now;
+            const last = h.checkedAt ?? since;
+            return notBeforeFlood(Math.max(floor, nextHarshPoint(since, last)));
+        }
+        default:
+            return null;
+    }
+}
+/** True when a probe may be sent now. `force` skips the schedule but never the 6 h floor. */
+function probeDue(h, now, force = false, options = {}) {
+    if ((0,_types__WEBPACK_IMPORTED_MODULE_0__.effectiveState)(h, now) === 'flood' || h.state === 'dead')
+        return false;
+    if (now < probeFloorAt(h, now))
+        return false;
+    if (force)
+        return true;
+    const at = h.nextProbeAt ?? nextProbeAt(h, now, options);
+    return at !== null && at <= now;
+}
+/** First harsh schedule point strictly after the last probe. */
+function nextHarshPoint(since, last) {
+    let at = since;
+    for (const gap of HARSH_PROBE_GAPS_MS) {
+        at += gap;
+        if (at > last)
+            return at;
+    }
+    const behind = last - at;
+    const steps = Math.floor(behind / HARSH_PROBE_REPEAT_MS) + 1;
+    return at + steps * HARSH_PROBE_REPEAT_MS;
+}
+function unit(value) {
+    if (!Number.isFinite(value))
+        return 0;
+    return Math.max(0, Math.min(0.999999, value));
+}
+
+
+/***/ },
+
+/***/ "../../packages/tg-core/src/account-health/types.ts"
+/*!**********************************************************!*\
+  !*** ../../packages/tg-core/src/account-health/types.ts ***!
+  \**********************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   DAY_MS: () => (/* binding */ DAY_MS),
+/* harmony export */   HOUR_MS: () => (/* binding */ HOUR_MS),
+/* harmony export */   effectiveState: () => (/* binding */ effectiveState),
+/* harmony export */   emptyHandoff: () => (/* binding */ emptyHandoff),
+/* harmony export */   unknownHealth: () => (/* binding */ unknownHealth)
+/* harmony export */ });
+/**
+ * Unified account health (docs/design/2026-10-30-unified-account-health.md §2.1).
+ *
+ * One state object replaces the bare `daysLeft` number in both apps, so -1/0 can no longer be
+ * confused (C1/C2). Everything in this folder is pure: no I/O, no clock, no env; callers pass `now`
+ * (epoch ms), `random` and `env` explicitly. Phase 2 adds the functions only; no caller uses them yet.
+ */
+const HOUR_MS = 60 * 60 * 1000;
+const DAY_MS = 24 * HOUR_MS;
+function emptyHandoff(armedBy = null) {
+    return { attempts: 0, nextAttemptAt: null, stopped: null, armedBy };
+}
+/** Health of an account nothing is known about yet (boot, Redis miss). Probes at the first slot. */
+function unknownHealth(source) {
+    return {
+        state: 'unknown',
+        limitedUntil: null,
+        floodUntil: null,
+        checkedAt: null,
+        statusSince: null,
+        nextProbeAt: null,
+        handoff: emptyHandoff(),
+        source,
+    };
+}
+/** The state that drives pace and probes right now: `flood` while a FLOOD_WAIT pause runs. */
+function effectiveState(h, now) {
+    if (h.state === 'dead')
+        return 'dead';
+    if (h.floodUntil !== null && h.floodUntil > now)
+        return 'flood';
+    return h.state;
+}
+
+
+/***/ },
+
 /***/ "../../packages/tg-core/src/cache/EntityCacheManager.ts"
 /*!**************************************************************!*\
   !*** ../../packages/tg-core/src/cache/EntityCacheManager.ts ***!
@@ -20294,13 +20874,36 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   ACTIVE_CHANNEL_WRITABLE_KEYS: () => (/* reexport safe */ _types_activeChannel__WEBPACK_IMPORTED_MODULE_25__.ACTIVE_CHANNEL_WRITABLE_KEYS),
 /* harmony export */   BotConfig: () => (/* reexport safe */ _utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_6__.BotConfig),
 /* harmony export */   ChannelCategory: () => (/* reexport safe */ _utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_6__.ChannelCategory),
+/* harmony export */   DAY_MS: () => (/* reexport safe */ _account_health__WEBPACK_IMPORTED_MODULE_41__.DAY_MS),
 /* harmony export */   EntityCacheManager: () => (/* reexport safe */ _cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_16__.EntityCacheManager),
 /* harmony export */   EntityNotFoundError: () => (/* reexport safe */ _telegram_utils_getSafeEntity__WEBPACK_IMPORTED_MODULE_17__.EntityNotFoundError),
 /* harmony export */   ErrorUtils: () => (/* reexport safe */ _utils_parseError__WEBPACK_IMPORTED_MODULE_1__.ErrorUtils),
+/* harmony export */   HANDOFF_FAILURE_BACKOFF_MS: () => (/* reexport safe */ _account_health__WEBPACK_IMPORTED_MODULE_41__.HANDOFF_FAILURE_BACKOFF_MS),
+/* harmony export */   HANDOFF_LIMITED_MIN_DAYS: () => (/* reexport safe */ _account_health__WEBPACK_IMPORTED_MODULE_41__.HANDOFF_LIMITED_MIN_DAYS),
+/* harmony export */   HANDOFF_MAX_ATTEMPTS: () => (/* reexport safe */ _account_health__WEBPACK_IMPORTED_MODULE_41__.HANDOFF_MAX_ATTEMPTS),
+/* harmony export */   HANDOFF_NO_CANDIDATE_BACKOFF_MS: () => (/* reexport safe */ _account_health__WEBPACK_IMPORTED_MODULE_41__.HANDOFF_NO_CANDIDATE_BACKOFF_MS),
+/* harmony export */   HANDOFF_PENDING_BACKOFF_MS: () => (/* reexport safe */ _account_health__WEBPACK_IMPORTED_MODULE_41__.HANDOFF_PENDING_BACKOFF_MS),
+/* harmony export */   HANDOFF_SWAP_COOLDOWN_MS: () => (/* reexport safe */ _account_health__WEBPACK_IMPORTED_MODULE_41__.HANDOFF_SWAP_COOLDOWN_MS),
+/* harmony export */   HARSH_DAILY_ATTEMPT_CAP: () => (/* reexport safe */ _account_health__WEBPACK_IMPORTED_MODULE_41__.HARSH_DAILY_ATTEMPT_CAP),
+/* harmony export */   HARSH_DELAY_MAX_MS: () => (/* reexport safe */ _account_health__WEBPACK_IMPORTED_MODULE_41__.HARSH_DELAY_MAX_MS),
+/* harmony export */   HARSH_DELAY_MIN_MS: () => (/* reexport safe */ _account_health__WEBPACK_IMPORTED_MODULE_41__.HARSH_DELAY_MIN_MS),
+/* harmony export */   HARSH_PROBE_GAPS_MS: () => (/* reexport safe */ _account_health__WEBPACK_IMPORTED_MODULE_41__.HARSH_PROBE_GAPS_MS),
+/* harmony export */   HARSH_PROBE_REPEAT_MS: () => (/* reexport safe */ _account_health__WEBPACK_IMPORTED_MODULE_41__.HARSH_PROBE_REPEAT_MS),
+/* harmony export */   HEALTHY_DAILY_CAP: () => (/* reexport safe */ _account_health__WEBPACK_IMPORTED_MODULE_41__.HEALTHY_DAILY_CAP),
 /* harmony export */   HEALTHY_DAYS_LEFT: () => (/* reexport safe */ _utils_spam_limit__WEBPACK_IMPORTED_MODULE_34__.HEALTHY_DAYS_LEFT),
+/* harmony export */   HEALTHY_DELAY_MAX_MS: () => (/* reexport safe */ _account_health__WEBPACK_IMPORTED_MODULE_41__.HEALTHY_DELAY_MAX_MS),
+/* harmony export */   HEALTHY_DELAY_MIN_MS: () => (/* reexport safe */ _account_health__WEBPACK_IMPORTED_MODULE_41__.HEALTHY_DELAY_MIN_MS),
+/* harmony export */   HOUR_MS: () => (/* reexport safe */ _account_health__WEBPACK_IMPORTED_MODULE_41__.HOUR_MS),
 /* harmony export */   InvalidClientError: () => (/* reexport safe */ _telegram_utils_getSafeEntity__WEBPACK_IMPORTED_MODULE_17__.InvalidClientError),
+/* harmony export */   LIMITED_DAILY_CAP: () => (/* reexport safe */ _account_health__WEBPACK_IMPORTED_MODULE_41__.LIMITED_DAILY_CAP),
+/* harmony export */   LIMITED_DELAY_MAX_MS: () => (/* reexport safe */ _account_health__WEBPACK_IMPORTED_MODULE_41__.LIMITED_DELAY_MAX_MS),
+/* harmony export */   LIMITED_DELAY_MIN_MS: () => (/* reexport safe */ _account_health__WEBPACK_IMPORTED_MODULE_41__.LIMITED_DELAY_MIN_MS),
+/* harmony export */   LIMITED_REPROBE_AFTER_MS: () => (/* reexport safe */ _account_health__WEBPACK_IMPORTED_MODULE_41__.LIMITED_REPROBE_AFTER_MS),
+/* harmony export */   LIMITED_REPROBE_JITTER_MS: () => (/* reexport safe */ _account_health__WEBPACK_IMPORTED_MODULE_41__.LIMITED_REPROBE_JITTER_MS),
 /* harmony export */   Logger: () => (/* reexport safe */ _utils_logger__WEBPACK_IMPORTED_MODULE_0__.Logger),
+/* harmony export */   MAX_FLOOD_PAUSE_MS: () => (/* reexport safe */ _account_health__WEBPACK_IMPORTED_MODULE_41__.MAX_FLOOD_PAUSE_MS),
 /* harmony export */   NotificationSeverity: () => (/* reexport safe */ _utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_6__.NotificationSeverity),
+/* harmony export */   PROBE_FLOOR_MS: () => (/* reexport safe */ _account_health__WEBPACK_IMPORTED_MODULE_41__.PROBE_FLOOR_MS),
 /* harmony export */   PROMOTION_PLAIN_PARSE_MODE: () => (/* reexport safe */ _utils_stylePromotionText__WEBPACK_IMPORTED_MODULE_31__.PROMOTION_PLAIN_PARSE_MODE),
 /* harmony export */   PROMOTION_STYLED_PARSE_MODE: () => (/* reexport safe */ _utils_stylePromotionText__WEBPACK_IMPORTED_MODULE_31__.PROMOTION_STYLED_PARSE_MODE),
 /* harmony export */   PROMO_OBFUSCATION_ENV_KEY: () => (/* reexport safe */ _utils_stylePromotionText__WEBPACK_IMPORTED_MODULE_31__.PROMO_OBFUSCATION_ENV_KEY),
@@ -20308,6 +20911,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   SPAMBOT_PROBE_MIN_INTERVAL_MS: () => (/* reexport safe */ _telegram_utils_checkTgHealth__WEBPACK_IMPORTED_MODULE_38__.SPAMBOT_PROBE_MIN_INTERVAL_MS),
 /* harmony export */   SPAM_BOT_USERNAME: () => (/* reexport safe */ _telegram_utils_spam_bot_probe__WEBPACK_IMPORTED_MODULE_35__.SPAM_BOT_USERNAME),
 /* harmony export */   SeededRandom: () => (/* reexport safe */ _utils_obfuscateText__WEBPACK_IMPORTED_MODULE_27__.SeededRandom),
+/* harmony export */   TG_AUT_HARSH_DAYS_LEFT: () => (/* reexport safe */ _account_health__WEBPACK_IMPORTED_MODULE_41__.TG_AUT_HARSH_DAYS_LEFT),
 /* harmony export */   __resetTGConfigForTests: () => (/* reexport safe */ _utils_generateTGConfig__WEBPACK_IMPORTED_MODULE_14__.__resetTGConfigForTests),
 /* harmony export */   acceptPhoneCall: () => (/* reexport safe */ _telegram_utils_phonestate__WEBPACK_IMPORTED_MODULE_26__.acceptPhoneCall),
 /* harmony export */   activeChannelCanSendUpdateExpression: () => (/* reexport safe */ _types_activeChannel__WEBPACK_IMPORTED_MODULE_25__.activeChannelCanSendUpdateExpression),
@@ -20316,6 +20920,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   aggregateHealthStatus: () => (/* reexport safe */ _health__WEBPACK_IMPORTED_MODULE_40__.aggregateHealthStatus),
 /* harmony export */   analyzeText: () => (/* reexport safe */ _utils_obfuscateText__WEBPACK_IMPORTED_MODULE_27__.analyzeText),
 /* harmony export */   applyChannelFlagClearRules: () => (/* reexport safe */ _types_activeChannel__WEBPACK_IMPORTED_MODULE_25__.applyChannelFlagClearRules),
+/* harmony export */   applyHandoffResult: () => (/* reexport safe */ _account_health__WEBPACK_IMPORTED_MODULE_41__.applyHandoffResult),
 /* harmony export */   attemptReverse: () => (/* reexport safe */ _utils_obfuscateText__WEBPACK_IMPORTED_MODULE_27__.attemptReverse),
 /* harmony export */   attemptReverseFuzzy: () => (/* reexport safe */ _utils_obfuscateText__WEBPACK_IMPORTED_MODULE_27__.attemptReverseFuzzy),
 /* harmony export */   batchGetEntities: () => (/* reexport safe */ _telegram_utils_getSafeEntity__WEBPACK_IMPORTED_MODULE_17__.batchGetEntities),
@@ -20324,6 +20929,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   checktghealth: () => (/* reexport safe */ _telegram_utils_checkTgHealth__WEBPACK_IMPORTED_MODULE_38__.checktghealth),
 /* harmony export */   claimSpamBotNotification: () => (/* reexport safe */ _telegram_utils_spam_bot_probe__WEBPACK_IMPORTED_MODULE_35__.claimSpamBotNotification),
 /* harmony export */   classifySpamBotMessage: () => (/* reexport safe */ _telegram_utils_spam_bot_probe__WEBPACK_IMPORTED_MODULE_35__.classifySpamBotMessage),
+/* harmony export */   classifyVerdict: () => (/* reexport safe */ _account_health__WEBPACK_IMPORTED_MODULE_41__.classifyVerdict),
 /* harmony export */   cleanupMessageCache: () => (/* reexport safe */ _telegram_utils_getMessages__WEBPACK_IMPORTED_MODULE_18__.cleanupMessageCache),
 /* harmony export */   clearNegativeEntityCache: () => (/* reexport safe */ _telegram_utils_getSafeEntity__WEBPACK_IMPORTED_MODULE_17__.clearNegativeEntityCache),
 /* harmony export */   clearUsernameResolutionState: () => (/* reexport safe */ _telegram_utils_resolveEntity__WEBPACK_IMPORTED_MODULE_22__.clearUsernameResolutionState),
@@ -20338,11 +20944,15 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   createHealthSnapshot: () => (/* reexport safe */ _health__WEBPACK_IMPORTED_MODULE_40__.createHealthSnapshot),
 /* harmony export */   createPhoneCallState: () => (/* reexport safe */ _telegram_utils_phonestate__WEBPACK_IMPORTED_MODULE_26__.createPhoneCallState),
 /* harmony export */   currentScopeIdentity: () => (/* reexport safe */ _utils_user_scope__WEBPACK_IMPORTED_MODULE_28__.currentScopeIdentity),
+/* harmony export */   daysUntil: () => (/* reexport safe */ _account_health__WEBPACK_IMPORTED_MODULE_41__.daysUntil),
 /* harmony export */   decodePhoneCallData: () => (/* reexport safe */ _telegram_utils_phonestate__WEBPACK_IMPORTED_MODULE_26__.decodePhoneCallData),
 /* harmony export */   defaultSafeBlocks: () => (/* reexport safe */ _utils_obfuscateText__WEBPACK_IMPORTED_MODULE_27__.defaultSafeBlocks),
 /* harmony export */   describeSpamBotReply: () => (/* reexport safe */ _telegram_utils_spam_bot_probe__WEBPACK_IMPORTED_MODULE_35__.describeSpamBotReply),
 /* harmony export */   destroyPhoneCallState: () => (/* reexport safe */ _telegram_utils_phonestate__WEBPACK_IMPORTED_MODULE_26__.destroyPhoneCallState),
+/* harmony export */   effectiveState: () => (/* reexport safe */ _account_health__WEBPACK_IMPORTED_MODULE_41__.effectiveState),
+/* harmony export */   emptyHandoff: () => (/* reexport safe */ _account_health__WEBPACK_IMPORTED_MODULE_41__.emptyHandoff),
 /* harmony export */   encodePhoneCallData: () => (/* reexport safe */ _telegram_utils_phonestate__WEBPACK_IMPORTED_MODULE_26__.encodePhoneCallData),
+/* harmony export */   endOfUtcDay: () => (/* reexport safe */ _account_health__WEBPACK_IMPORTED_MODULE_41__.endOfUtcDay),
 /* harmony export */   escapePromotionMarkdown: () => (/* reexport safe */ _utils_stylePromotionText__WEBPACK_IMPORTED_MODULE_31__.escapePromotionMarkdown),
 /* harmony export */   escapeTelegramHtml: () => (/* reexport safe */ _utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_6__.escapeTelegramHtml),
 /* harmony export */   extractMessage: () => (/* reexport safe */ _utils_parseError__WEBPACK_IMPORTED_MODULE_1__.extractMessage),
@@ -20377,6 +20987,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   getTelegramCredentialPool: () => (/* reexport safe */ _utils_tg_config__WEBPACK_IMPORTED_MODULE_12__.getTelegramCredentialPool),
 /* harmony export */   getTelegramCredentialsForMobile: () => (/* reexport safe */ _utils_tg_config__WEBPACK_IMPORTED_MODULE_12__.getTelegramCredentialsForMobile),
 /* harmony export */   handleMobileProxyFailure: () => (/* reexport safe */ _utils_generateTGConfig__WEBPACK_IMPORTED_MODULE_14__.handleMobileProxyFailure),
+/* harmony export */   handoffDecision: () => (/* reexport safe */ _account_health__WEBPACK_IMPORTED_MODULE_41__.handoffDecision),
 /* harmony export */   healthCheckHttpStatus: () => (/* reexport safe */ _health__WEBPACK_IMPORTED_MODULE_40__.healthCheckHttpStatus),
 /* harmony export */   healthErrorMessage: () => (/* reexport safe */ _health__WEBPACK_IMPORTED_MODULE_40__.healthErrorMessage),
 /* harmony export */   healthHttpStatus: () => (/* reexport safe */ _health__WEBPACK_IMPORTED_MODULE_40__.healthHttpStatus),
@@ -20412,28 +21023,35 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   isTelegramTransportUnavailable: () => (/* reexport safe */ _telegram_utils_isTelegramRuntimeFailure__WEBPACK_IMPORTED_MODULE_39__.isTelegramTransportUnavailable),
 /* harmony export */   isTransient: () => (/* reexport safe */ _types_telegram_errors__WEBPACK_IMPORTED_MODULE_24__.isTransient),
 /* harmony export */   isUsableActiveChannelId: () => (/* reexport safe */ _types_activeChannel__WEBPACK_IMPORTED_MODULE_25__.isUsableActiveChannelId),
+/* harmony export */   legacyDaysLeft: () => (/* reexport safe */ _account_health__WEBPACK_IMPORTED_MODULE_41__.legacyDaysLeft),
 /* harmony export */   loadGeminiKeys: () => (/* reexport safe */ _utils_gemini_keys__WEBPACK_IMPORTED_MODULE_5__.loadGeminiKeys),
 /* harmony export */   logUnsentNotification: () => (/* reexport safe */ _utils_parseError__WEBPACK_IMPORTED_MODULE_1__.logUnsentNotification),
 /* harmony export */   millisecondsSince: () => (/* reexport safe */ _health__WEBPACK_IMPORTED_MODULE_40__.millisecondsSince),
 /* harmony export */   mineFilter: () => (/* reexport safe */ _utils_user_scope__WEBPACK_IMPORTED_MODULE_28__.mineFilter),
 /* harmony export */   naturalizeText: () => (/* reexport safe */ _utils_naturalizeText__WEBPACK_IMPORTED_MODULE_30__.naturalizeText),
 /* harmony export */   needsPlainTextFallback: () => (/* reexport safe */ _utils_stylePromotionText__WEBPACK_IMPORTED_MODULE_31__.needsPlainTextFallback),
+/* harmony export */   nextProbeAt: () => (/* reexport safe */ _account_health__WEBPACK_IMPORTED_MODULE_41__.nextProbeAt),
 /* harmony export */   normalizeActiveChannelBoolean: () => (/* reexport safe */ _types_activeChannel__WEBPACK_IMPORTED_MODULE_25__.normalizeActiveChannelBoolean),
+/* harmony export */   noteSendOutcome: () => (/* reexport safe */ _account_health__WEBPACK_IMPORTED_MODULE_41__.noteSendOutcome),
 /* harmony export */   numberMap: () => (/* reexport safe */ _utils_obfuscateText__WEBPACK_IMPORTED_MODULE_27__.numberMap),
 /* harmony export */   obfuscateText: () => (/* reexport safe */ _utils_obfuscateText__WEBPACK_IMPORTED_MODULE_27__.obfuscateText),
 /* harmony export */   othersFilter: () => (/* reexport safe */ _utils_user_scope__WEBPACK_IMPORTED_MODULE_28__.othersFilter),
 /* harmony export */   ownFilter: () => (/* reexport safe */ _utils_user_scope__WEBPACK_IMPORTED_MODULE_28__.ownFilter),
 /* harmony export */   ownershipOnInsert: () => (/* reexport safe */ _utils_user_scope__WEBPACK_IMPORTED_MODULE_28__.ownershipOnInsert),
+/* harmony export */   paceTier: () => (/* reexport safe */ _account_health__WEBPACK_IMPORTED_MODULE_41__.paceTier),
 /* harmony export */   parseError: () => (/* reexport safe */ _utils_parseError__WEBPACK_IMPORTED_MODULE_1__.parseError),
 /* harmony export */   parseSpamBotReleaseDate: () => (/* reexport safe */ _telegram_utils_spam_bot_probe__WEBPACK_IMPORTED_MODULE_35__.parseSpamBotReleaseDate),
 /* harmony export */   parseTelegramError: () => (/* reexport safe */ _utils_telegram_error_parser__WEBPACK_IMPORTED_MODULE_2__.parseTelegramError),
 /* harmony export */   percent: () => (/* reexport safe */ _health__WEBPACK_IMPORTED_MODULE_40__.percent),
 /* harmony export */   personaFilter: () => (/* reexport safe */ _utils_user_scope__WEBPACK_IMPORTED_MODULE_28__.personaFilter),
 /* harmony export */   pickActiveChannelWrite: () => (/* reexport safe */ _types_activeChannel__WEBPACK_IMPORTED_MODULE_25__.pickActiveChannelWrite),
+/* harmony export */   probeDue: () => (/* reexport safe */ _account_health__WEBPACK_IMPORTED_MODULE_41__.probeDue),
+/* harmony export */   probeFloorAt: () => (/* reexport safe */ _account_health__WEBPACK_IMPORTED_MODULE_41__.probeFloorAt),
 /* harmony export */   quickGetEntity: () => (/* reexport safe */ _telegram_utils_getSafeEntity__WEBPACK_IMPORTED_MODULE_17__.quickGetEntity),
 /* harmony export */   readFilter: () => (/* reexport safe */ _utils_user_scope__WEBPACK_IMPORTED_MODULE_28__.readFilter),
 /* harmony export */   readLatestSpamBotReply: () => (/* reexport safe */ _telegram_utils_spam_bot_probe__WEBPACK_IMPORTED_MODULE_35__.readLatestSpamBotReply),
 /* harmony export */   reconcilePromotionParseMode: () => (/* reexport safe */ _utils_stylePromotionText__WEBPACK_IMPORTED_MODULE_31__.reconcilePromotionParseMode),
+/* harmony export */   releaseInstant: () => (/* reexport safe */ _account_health__WEBPACK_IMPORTED_MODULE_41__.releaseInstant),
 /* harmony export */   removeProxyMapping: () => (/* reexport safe */ _utils_generateTGConfig__WEBPACK_IMPORTED_MODULE_14__.removeProxyMapping),
 /* harmony export */   reportManualSpamBotProbe: () => (/* reexport safe */ _telegram_utils_spam_bot_probe__WEBPACK_IMPORTED_MODULE_35__.reportManualSpamBotProbe),
 /* harmony export */   requestPhoneCall: () => (/* reexport safe */ _telegram_utils_phonestate__WEBPACK_IMPORTED_MODULE_26__.requestPhoneCall),
@@ -20463,7 +21081,9 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   stylePromotionMessage: () => (/* reexport safe */ _utils_stylePromotionText__WEBPACK_IMPORTED_MODULE_31__.stylePromotionMessage),
 /* harmony export */   stylePromotionText: () => (/* reexport safe */ _utils_stylePromotionText__WEBPACK_IMPORTED_MODULE_31__.stylePromotionText),
 /* harmony export */   testReverseCoverage: () => (/* reexport safe */ _utils_obfuscateText__WEBPACK_IMPORTED_MODULE_27__.testReverseCoverage),
+/* harmony export */   tierDelayMs: () => (/* reexport safe */ _account_health__WEBPACK_IMPORTED_MODULE_41__.tierDelayMs),
 /* harmony export */   tryGetEntity: () => (/* reexport safe */ _telegram_utils_getSafeEntity__WEBPACK_IMPORTED_MODULE_17__.tryGetEntity),
+/* harmony export */   unknownHealth: () => (/* reexport safe */ _account_health__WEBPACK_IMPORTED_MODULE_41__.unknownHealth),
 /* harmony export */   unrefTimer: () => (/* reexport safe */ _utils_timers__WEBPACK_IMPORTED_MODULE_9__.unrefTimer),
 /* harmony export */   validateConfig: () => (/* reexport safe */ _utils_obfuscateText__WEBPACK_IMPORTED_MODULE_27__.validateConfig),
 /* harmony export */   withBackoff: () => (/* reexport safe */ _utils_exponential_backoff__WEBPACK_IMPORTED_MODULE_8__.withBackoff),
@@ -20510,9 +21130,11 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _telegram_utils_checkTgHealth__WEBPACK_IMPORTED_MODULE_38__ = __webpack_require__(/*! ./telegram-utils/checkTgHealth */ "../../packages/tg-core/src/telegram-utils/checkTgHealth.ts");
 /* harmony import */ var _telegram_utils_isTelegramRuntimeFailure__WEBPACK_IMPORTED_MODULE_39__ = __webpack_require__(/*! ./telegram-utils/isTelegramRuntimeFailure */ "../../packages/tg-core/src/telegram-utils/isTelegramRuntimeFailure.ts");
 /* harmony import */ var _health__WEBPACK_IMPORTED_MODULE_40__ = __webpack_require__(/*! ./health */ "../../packages/tg-core/src/health.ts");
+/* harmony import */ var _account_health__WEBPACK_IMPORTED_MODULE_41__ = __webpack_require__(/*! ./account-health */ "../../packages/tg-core/src/account-health/index.ts");
 // @tg/core — shared leaf infrastructure barrel.
 // NOTE: tg-apps.ts and tg-config.ts BOTH export `ITelegramCredentials`. tg-config is the canonical
 // source; we re-export tg-apps without its (duplicate) ITelegramCredentials to avoid a name clash.
+
 
 
 
@@ -49856,8 +50478,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "6000601132746225c02c521fc9c197b0bc1b21f4" : 0;
-    const builtAt =  true ? "2026-10-30T11:09:25.947Z" : 0;
+    const sha =  true ? "68797a046706be7135664617629f6ede54d85aa0" : 0;
+    const builtAt =  true ? "2026-10-30T14:10:14.366Z" : 0;
     return { sha, builtAt };
 }
 
