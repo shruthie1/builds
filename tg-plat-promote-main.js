@@ -96,13 +96,21 @@ const BASE_COUNTER_COLUMNS = [
  * retried with the same batch id, spooled, onStall) until the columns exist.
  */
 const ROUTE_COUNTER_COLUMNS = ["routes_sent", "routed_reached", "route_calls_ok", "route_calls_failed"];
-const COUNTER_COLUMNS = [...BASE_COUNTER_COLUMNS, ...ROUTE_COUNTER_COLUMNS];
+/**
+ * routed_users, added 2026-10-30 (analytics/upgrade-2026-10-30-routed-users.sql): distinct users who got
+ * their first route message of the IST day from a promote mobile. Same deploy-order safety one tier up:
+ * a statement names it only when a row carries a non-zero routed_users, so route counters keep writing
+ * on a database that has the 10-29 columns but not this one.
+ */
+const ROUTED_USERS_COLUMNS = ["routed_users"];
+const COUNTER_COLUMNS = [...BASE_COUNTER_COLUMNS, ...ROUTE_COUNTER_COLUMNS, ...ROUTED_USERS_COLUMNS];
 const COUNTER_COLUMN_SET = new Set(COUNTER_COLUMNS);
 const COUNTER_FIELDS = [
     "sent", "delivered", "banned", "failed",
     "newUsers", "activeUsers", "payers",
     "reactionsSuccess", "reactionsRestricted", "reactionsFailed", "reactionsFloods",
     "routesSent", "routedReached", "routeCallsOk", "routeCallsFailed",
+    "routedUsers",
 ];
 const accumulate = (t, cols = COUNTER_COLUMNS) => cols.map((c) => `${c} = ${t}.${c} + EXCLUDED.${c}`).join(", ");
 const DAILY_CLIENT_KEY = ["day", "client_id", "namespace"];
@@ -147,45 +155,69 @@ const TABLES = {
         columns: [...DAILY_CLIENT_KEY, ...COUNTER_COLUMNS],
         keyCount: 3,
         conflict: DAILY_CLIENT_CONFLICT + accumulate("daily_client"),
-        legacyColumns: [[...DAILY_CLIENT_KEY, ...BASE_COUNTER_COLUMNS]],
-        compact: {
-            columns: [...DAILY_CLIENT_KEY, ...BASE_COUNTER_COLUMNS],
-            conflict: DAILY_CLIENT_CONFLICT + accumulate("daily_client", BASE_COUNTER_COLUMNS),
-        },
+        legacyColumns: [
+            [...DAILY_CLIENT_KEY, ...BASE_COUNTER_COLUMNS],
+            [...DAILY_CLIENT_KEY, ...BASE_COUNTER_COLUMNS, ...ROUTE_COUNTER_COLUMNS],
+        ],
+        tiers: [
+            {
+                columns: [...DAILY_CLIENT_KEY, ...BASE_COUNTER_COLUMNS],
+                conflict: DAILY_CLIENT_CONFLICT + accumulate("daily_client", BASE_COUNTER_COLUMNS),
+            },
+            {
+                columns: [...DAILY_CLIENT_KEY, ...BASE_COUNTER_COLUMNS, ...ROUTE_COUNTER_COLUMNS],
+                conflict: DAILY_CLIENT_CONFLICT + accumulate("daily_client", [...BASE_COUNTER_COLUMNS, ...ROUTE_COUNTER_COLUMNS]),
+            },
+        ],
     },
     daily_mobile: {
         columns: [...DAILY_MOBILE_KEY, ...COUNTER_COLUMNS],
         keyCount: 4,
         conflict: DAILY_MOBILE_CONFLICT + accumulate("daily_mobile"),
-        legacyColumns: [[...DAILY_MOBILE_KEY, ...BASE_COUNTER_COLUMNS]],
-        compact: {
-            columns: [...DAILY_MOBILE_KEY, ...BASE_COUNTER_COLUMNS],
-            conflict: DAILY_MOBILE_CONFLICT + accumulate("daily_mobile", BASE_COUNTER_COLUMNS),
-        },
+        legacyColumns: [
+            [...DAILY_MOBILE_KEY, ...BASE_COUNTER_COLUMNS],
+            [...DAILY_MOBILE_KEY, ...BASE_COUNTER_COLUMNS, ...ROUTE_COUNTER_COLUMNS],
+        ],
+        tiers: [
+            {
+                columns: [...DAILY_MOBILE_KEY, ...BASE_COUNTER_COLUMNS],
+                conflict: DAILY_MOBILE_CONFLICT + accumulate("daily_mobile", BASE_COUNTER_COLUMNS),
+            },
+            {
+                columns: [...DAILY_MOBILE_KEY, ...BASE_COUNTER_COLUMNS, ...ROUTE_COUNTER_COLUMNS],
+                conflict: DAILY_MOBILE_CONFLICT + accumulate("daily_mobile", [...BASE_COUNTER_COLUMNS, ...ROUTE_COUNTER_COLUMNS]),
+            },
+        ],
     },
 };
 /**
- * The (columns, values, conflict) a daily_* INSERT actually uses: the compact pre-2026-10-29 list
- * when no row carries a non-zero route counter, else the full list. Deterministic on a fixed row
- * set, so a retried batch builds the same statement.
+ * The (columns, values, conflict) a daily_* INSERT actually uses: the smallest tier (pre-2026-10-29,
+ * then pre-2026-10-30) that holds every non-zero counter of the rows, else the full list.
+ * Deterministic on a fixed row set, so a retried batch builds the same statement.
  */
 function counterStatementShape(table, rows) {
     const spec = TABLES[table];
     const conflict = spec?.conflict ? ` ${spec.conflict}` : "";
-    if (!spec?.compact || rows.length === 0)
+    if (!spec?.tiers || rows.length === 0)
         return { rows, conflict };
     const cols = rows[0].columns;
-    const routeIdx = ROUTE_COUNTER_COLUMNS.map((c) => cols.indexOf(c)).filter((i) => i >= 0);
-    const hasRoute = rows.some((r) => routeIdx.some((i) => typeof r.values[i] === "number" && r.values[i] !== 0));
-    if (hasRoute)
-        return { rows, conflict };
-    const keep = spec.compact.columns.map((c) => cols.indexOf(c));
-    if (keep.some((i) => i < 0))
-        return { rows, conflict };
-    return {
-        rows: rows.map((r) => ({ table: r.table, columns: spec.compact.columns, values: keep.map((i) => r.values[i]) })),
-        conflict: ` ${spec.compact.conflict}`,
-    };
+    const used = new Set();
+    cols.forEach((c, i) => {
+        if (COUNTER_COLUMN_SET.has(c) && rows.some((r) => typeof r.values[i] === "number" && r.values[i] !== 0))
+            used.add(c);
+    });
+    for (const tier of spec.tiers) {
+        if (![...used].every((c) => tier.columns.includes(c)))
+            continue;
+        const keep = tier.columns.map((c) => cols.indexOf(c));
+        if (keep.some((i) => i < 0))
+            continue;
+        return {
+            rows: rows.map((r) => ({ table: r.table, columns: tier.columns, values: keep.map((i) => r.values[i]) })),
+            conflict: ` ${tier.conflict}`,
+        };
+    }
+    return { rows, conflict };
 }
 function sanitizeInstanceKey(raw) {
     const cleaned = String(raw ?? "").replace(/[^A-Za-z0-9_-]/g, "_");
@@ -38918,12 +38950,25 @@ __webpack_require__.r(__webpack_exports__);
  *   promote::route::{mobile}         HASH  chatId -> {"stage","lastSentAt","callAttempts","firstStageUseUrl"}  TTL 24 h
  *   promote::routebacklog::{mobile}  ZSET  chatId -> routedAt ms (confirmed route sends awaiting conversion)  TTL 24 h
  *   promote::mainreply::{mobile}     ZSET  chatId -> sentAt ms (main-account reply to a user who already has userData)  TTL 24 h
+ *   promote::routesends::{mobile}    ZSET  "chatId:sentAt:seq" -> sentAt ms (every confirmed route message; the per-user
+ *                                          24 h cap and the IST-day routed_users count read it)  TTL 24 h
  *
  * Without it a restart re-sent stage 1 (and re-rang) users already mid-escalation, and dropped the 24 h
  * conversion backlog. Writes are fire-and-forget (replayed per chat after a Redis outage); load() runs once at boot.
  */
 
 const PROMOTE_ROUTE_STATE_TTL_MS = 24 * 60 * 60 * 1000;
+let sendSeq = 0;
+/** `chatId:sentAt:seq` members of promote::routesends -> [chatId, sentAt (the score)]. */
+function parseSends(flat) {
+    const entries = [];
+    for (const [member, at] of parseScored(flat)) {
+        const chatId = member.split(":")[0];
+        if (chatId)
+            entries.push([chatId, at]);
+    }
+    return entries.sort((a, b) => a[1] - b[1]);
+}
 function parseRoute(raw) {
     try {
         const v = JSON.parse(raw);
@@ -38960,6 +39005,23 @@ class PromoteRouteStore {
         this.backlog = new _tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_0__.RedisWrites(() => this.backlogKey, "promote.routebacklog");
         this.mainReplyKey = (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_0__.stateKey)("promote::mainreply", mobile);
         this.mainReplies = new _tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_0__.RedisWrites(() => this.mainReplyKey, "promote.mainreply");
+        this.sendsKey = (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_0__.stateKey)("promote::routesends", mobile);
+        this.sends = new _tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_0__.RedisWrites(() => this.sendsKey, "promote.routesends");
+    }
+    /** Records one confirmed route message to `chatId` (entries older than 24 h are trimmed). */
+    addRouteSend(chatId, sentAt) {
+        if (!chatId)
+            return Promise.resolve(false);
+        sendSeq = (sendSeq + 1) % 1000000;
+        const member = `${chatId}:${sentAt}:${process.pid}.${sendSeq}`; // unique: two sends in one ms both count
+        const build = (m, key, elapsed) => {
+            if (elapsed >= PROMOTE_ROUTE_STATE_TTL_MS)
+                return; // replayed after it left the window
+            m.zadd(key, sentAt, member);
+            m.zremrangebyscore(key, "-inf", sentAt - PROMOTE_ROUTE_STATE_TTL_MS);
+            m.pexpire(key, PROMOTE_ROUTE_STATE_TTL_MS);
+        };
+        return this.sends.send(build, [[member, build]]);
     }
     saveRoute(chatId, state) {
         const value = JSON.stringify({
@@ -39008,14 +39070,16 @@ class PromoteRouteStore {
         const routeKey = this.routeKey;
         const backlogKey = this.backlogKey;
         const mainReplyKey = this.mainReplyKey;
-        if (!routeKey || !backlogKey || !mainReplyKey)
+        const sendsKey = this.sendsKey;
+        if (!routeKey || !backlogKey || !mainReplyKey || !sendsKey)
             return null;
-        const [hash, backlog, mainReplies] = await Promise.all([
+        const [hash, backlog, mainReplies, sends] = await Promise.all([
             (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_0__.readState)("promote.route", (r) => r.hgetall(routeKey)),
             (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_0__.readState)("promote.routebacklog", (r) => r.zrangebyscore(backlogKey, now - PROMOTE_ROUTE_STATE_TTL_MS, "+inf", "WITHSCORES")),
             (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_0__.readState)("promote.mainreply", (r) => r.zrangebyscore(mainReplyKey, now - PROMOTE_ROUTE_STATE_TTL_MS, "+inf", "WITHSCORES")),
+            (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_0__.readState)("promote.routesends", (r) => r.zrangebyscore(sendsKey, now - PROMOTE_ROUTE_STATE_TTL_MS + 1, "+inf", "WITHSCORES")),
         ]);
-        if (hash === null && backlog === null && mainReplies === null)
+        if (hash === null && backlog === null && mainReplies === null && sends === null)
             return null;
         const routes = [];
         for (const [chatId, raw] of Object.entries(hash ?? {})) {
@@ -39023,7 +39087,7 @@ class PromoteRouteStore {
             if (state && now - state.lastSentAt <= maxRouteAgeMs)
                 routes.push([chatId, state]);
         }
-        return { routes, backlog: parseScored(backlog), mainReplies: parseScored(mainReplies) };
+        return { routes, backlog: parseScored(backlog), mainReplies: parseScored(mainReplies), sends: parseSends(sends) };
     }
 }
 
@@ -39448,8 +39512,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "d5df28c6176d8bedc649b7bd3bdb63e6eaad678b" : 0;
-    const builtAt =  true ? "2026-10-30T09:49:21.629Z" : 0;
+    const sha =  true ? "6000601132746225c02c521fc9c197b0bc1b21f4" : 0;
+    const builtAt =  true ? "2026-10-30T11:09:22.646Z" : 0;
     return { sha, builtAt };
 }
 
@@ -40376,6 +40440,8 @@ class UserDataDtoCrud {
      *   sent        TelegramManager.sendPromoteRouteStageMessage, after a confirmed route message
      *   reached     TelegramManager.reconcileRoutedUsers, after the acknowledged routedUserCount $inc
      *   callsOk/Failed  RouteCallService (onCallResult), once per CLAIMED call (a claimed call is never retried)
+     *   users       TelegramManager.sendPromoteRouteStageMessage, with `sent`, on the user's first confirmed
+     *               route message of the IST day from this mobile (routed_users, 2026-10-30)
      * Never throws; zero / non-finite / negative fields are dropped; an all-empty call is a no-op.
      */
     recordDailyRoute(mobile, fields) {
@@ -40389,6 +40455,7 @@ class UserDataDtoCrud {
                 routedReached: pick(fields.reached),
                 routeCallsOk: pick(fields.callsOk),
                 routeCallsFailed: pick(fields.callsFailed),
+                routedUsers: pick(fields.users),
             };
             if (!Object.values(counters).some((v) => v > 0))
                 return;
@@ -46211,8 +46278,13 @@ function scheduleExit(mobile, message, daysLeft, saveOld, deleteOld) {
 
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   ROUTE_HANDLE_AB_SALT: () => (/* binding */ ROUTE_HANDLE_AB_SALT),
 /* harmony export */   ROUTE_TME_PROBABILITY: () => (/* binding */ ROUTE_TME_PROBABILITY),
-/* harmony export */   "default": () => (__WEBPACK_DEFAULT_EXPORT__)
+/* harmony export */   ROUTE_USER_MAX_PER_24H: () => (/* binding */ ROUTE_USER_MAX_PER_24H),
+/* harmony export */   "default": () => (__WEBPACK_DEFAULT_EXPORT__),
+/* harmony export */   istDayStart: () => (/* binding */ istDayStart),
+/* harmony export */   routeHandleAbMode: () => (/* binding */ routeHandleAbMode),
+/* harmony export */   routeHandleArm: () => (/* binding */ routeHandleArm)
 /* harmony export */ });
 /* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! telegram */ "telegram");
 /* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(telegram__WEBPACK_IMPORTED_MODULE_0__);
@@ -46244,21 +46316,23 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _tg_core_telegram_utils_declinePasswordReset__WEBPACK_IMPORTED_MODULE_22__ = __webpack_require__(/*! @tg/core/telegram-utils/declinePasswordReset */ "../../packages/tg-core/src/telegram-utils/declinePasswordReset.ts");
 /* harmony import */ var telegram_Helpers__WEBPACK_IMPORTED_MODULE_23__ = __webpack_require__(/*! telegram/Helpers */ "telegram/Helpers");
 /* harmony import */ var telegram_Helpers__WEBPACK_IMPORTED_MODULE_23___default = /*#__PURE__*/__webpack_require__.n(telegram_Helpers__WEBPACK_IMPORTED_MODULE_23__);
-/* harmony import */ var _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_24__ = __webpack_require__(/*! @tg/core/utils/TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
-/* harmony import */ var _tg_core_utils_generateTGConfig__WEBPACK_IMPORTED_MODULE_25__ = __webpack_require__(/*! @tg/core/utils/generateTGConfig */ "../../packages/tg-core/src/utils/generateTGConfig.ts");
-/* harmony import */ var _tg_core_utils_tg_config__WEBPACK_IMPORTED_MODULE_26__ = __webpack_require__(/*! @tg/core/utils/tg-config */ "../../packages/tg-core/src/utils/tg-config.ts");
-/* harmony import */ var _tg_dialogs__WEBPACK_IMPORTED_MODULE_27__ = __webpack_require__(/*! @tg/dialogs */ "../../packages/tg-dialogs/src/index.ts");
-/* harmony import */ var _tg_persona_persona_verifier__WEBPACK_IMPORTED_MODULE_28__ = __webpack_require__(/*! @tg/persona/persona-verifier */ "../../packages/tg-persona/src/persona-verifier.ts");
-/* harmony import */ var _tg_persona_persona_timestamps__WEBPACK_IMPORTED_MODULE_29__ = __webpack_require__(/*! @tg/persona/persona-timestamps */ "../../packages/tg-persona/src/persona-timestamps.ts");
-/* harmony import */ var _calls_route_call__WEBPACK_IMPORTED_MODULE_30__ = __webpack_require__(/*! ../calls/route-call */ "./src/calls/route-call.ts");
-/* harmony import */ var _setup_new_mobile__WEBPACK_IMPORTED_MODULE_31__ = __webpack_require__(/*! ./setup-new-mobile */ "./src/telegram/setup-new-mobile.ts");
-/* harmony import */ var _promotion_send_message_queue__WEBPACK_IMPORTED_MODULE_32__ = __webpack_require__(/*! ../promotion/send-message-queue */ "./src/promotion/send-message-queue.ts");
-/* harmony import */ var _accounts_route_state_store__WEBPACK_IMPORTED_MODULE_33__ = __webpack_require__(/*! ../accounts/route-state-store */ "./src/accounts/route-state-store.ts");
-/* harmony import */ var _check_tg_health__WEBPACK_IMPORTED_MODULE_34__ = __webpack_require__(/*! ./check-tg-health */ "./src/telegram/check-tg-health.ts");
-/* harmony import */ var _promotion_runtime_messages__WEBPACK_IMPORTED_MODULE_35__ = __webpack_require__(/*! ../promotion/runtime-messages */ "./src/promotion/runtime-messages.ts");
-/* harmony import */ var _jobs_promote_delayed__WEBPACK_IMPORTED_MODULE_36__ = __webpack_require__(/*! ../jobs/promote-delayed */ "./src/jobs/promote-delayed.ts");
-/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_37__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
-/* harmony import */ var _tg_core_utils_apiKey__WEBPACK_IMPORTED_MODULE_38__ = __webpack_require__(/*! @tg/core/utils/apiKey */ "../../packages/tg-core/src/utils/apiKey.ts");
+/* harmony import */ var crypto__WEBPACK_IMPORTED_MODULE_24__ = __webpack_require__(/*! crypto */ "crypto");
+/* harmony import */ var crypto__WEBPACK_IMPORTED_MODULE_24___default = /*#__PURE__*/__webpack_require__.n(crypto__WEBPACK_IMPORTED_MODULE_24__);
+/* harmony import */ var _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_25__ = __webpack_require__(/*! @tg/core/utils/TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
+/* harmony import */ var _tg_core_utils_generateTGConfig__WEBPACK_IMPORTED_MODULE_26__ = __webpack_require__(/*! @tg/core/utils/generateTGConfig */ "../../packages/tg-core/src/utils/generateTGConfig.ts");
+/* harmony import */ var _tg_core_utils_tg_config__WEBPACK_IMPORTED_MODULE_27__ = __webpack_require__(/*! @tg/core/utils/tg-config */ "../../packages/tg-core/src/utils/tg-config.ts");
+/* harmony import */ var _tg_dialogs__WEBPACK_IMPORTED_MODULE_28__ = __webpack_require__(/*! @tg/dialogs */ "../../packages/tg-dialogs/src/index.ts");
+/* harmony import */ var _tg_persona_persona_verifier__WEBPACK_IMPORTED_MODULE_29__ = __webpack_require__(/*! @tg/persona/persona-verifier */ "../../packages/tg-persona/src/persona-verifier.ts");
+/* harmony import */ var _tg_persona_persona_timestamps__WEBPACK_IMPORTED_MODULE_30__ = __webpack_require__(/*! @tg/persona/persona-timestamps */ "../../packages/tg-persona/src/persona-timestamps.ts");
+/* harmony import */ var _calls_route_call__WEBPACK_IMPORTED_MODULE_31__ = __webpack_require__(/*! ../calls/route-call */ "./src/calls/route-call.ts");
+/* harmony import */ var _setup_new_mobile__WEBPACK_IMPORTED_MODULE_32__ = __webpack_require__(/*! ./setup-new-mobile */ "./src/telegram/setup-new-mobile.ts");
+/* harmony import */ var _promotion_send_message_queue__WEBPACK_IMPORTED_MODULE_33__ = __webpack_require__(/*! ../promotion/send-message-queue */ "./src/promotion/send-message-queue.ts");
+/* harmony import */ var _accounts_route_state_store__WEBPACK_IMPORTED_MODULE_34__ = __webpack_require__(/*! ../accounts/route-state-store */ "./src/accounts/route-state-store.ts");
+/* harmony import */ var _check_tg_health__WEBPACK_IMPORTED_MODULE_35__ = __webpack_require__(/*! ./check-tg-health */ "./src/telegram/check-tg-health.ts");
+/* harmony import */ var _promotion_runtime_messages__WEBPACK_IMPORTED_MODULE_36__ = __webpack_require__(/*! ../promotion/runtime-messages */ "./src/promotion/runtime-messages.ts");
+/* harmony import */ var _jobs_promote_delayed__WEBPACK_IMPORTED_MODULE_37__ = __webpack_require__(/*! ../jobs/promote-delayed */ "./src/jobs/promote-delayed.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_38__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _tg_core_utils_apiKey__WEBPACK_IMPORTED_MODULE_39__ = __webpack_require__(/*! @tg/core/utils/apiKey */ "../../packages/tg-core/src/utils/apiKey.ts");
 var _a;
 
 
@@ -46299,7 +46373,8 @@ var _a;
 
 
 
-const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_37__.Logger("TelegramManager");
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_38__.Logger("TelegramManager");
 /** Delayed password-reset decline after a login code (a delayed record per mobile; survives a restart). */
 const PASSWORD_RESET_DECLINE_DELAY_MS = 5 * 60 * 1000;
 /** The promote app's kind switch for one mobile's delayed records. */
@@ -46325,7 +46400,7 @@ function promoteRecordRunner(mobile) {
 }
 async function sendTelegramManagerNotification(category, notification, context) {
     try {
-        const sent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_24__.BotConfig.getInstance().sendMessage(category, notification);
+        const sent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_25__.BotConfig.getInstance().sendMessage(category, notification);
         if (sent === false) {
             (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(new Error("TelegramManager notification returned false"), context, false);
             return false;
@@ -46357,7 +46432,7 @@ async function fetchOldestSessionFallback(mobile) {
         method: 'POST',
         headers: {
             'Content-Type': 'application/json',
-            'x-api-key': (0,_tg_core_utils_apiKey__WEBPACK_IMPORTED_MODULE_38__.getApiKey)(),
+            'x-api-key': (0,_tg_core_utils_apiKey__WEBPACK_IMPORTED_MODULE_39__.getApiKey)(),
         },
         data: {
             mobile,
@@ -46392,7 +46467,7 @@ async function triggerPromoteProfilePhotoRefresh(client, mobile, clientId, profi
         logger.debug(`[Persona] Skipping CMS profile pic refresh for ${mobile}: assigned profile pic URLs are missing or too small`);
         return;
     }
-    const profilePicTimestampDetails = (0,_tg_persona_persona_timestamps__WEBPACK_IMPORTED_MODULE_29__.describePersonaTimestamp)(profilePicsUpdatedAt);
+    const profilePicTimestampDetails = (0,_tg_persona_persona_timestamps__WEBPACK_IMPORTED_MODULE_30__.describePersonaTimestamp)(profilePicsUpdatedAt);
     logger.debug(`[Persona] Evaluated profile photo refresh gate for ${mobile}`, {
         ...profilePicTimestampDetails,
         note: "profilePicsUpdatedAt is informational only; photo refresh depends on assigned photos and current Telegram photo count",
@@ -46418,7 +46493,7 @@ async function triggerPromoteProfilePhotoRefresh(client, mobile, clientId, profi
         method: 'POST',
         headers: {
             'Content-Type': 'application/json',
-            'x-api-key': (0,_tg_core_utils_apiKey__WEBPACK_IMPORTED_MODULE_38__.getApiKey)(),
+            'x-api-key': (0,_tg_core_utils_apiKey__WEBPACK_IMPORTED_MODULE_39__.getApiKey)(),
         },
         data: {},
         timeout: 15000,
@@ -46470,6 +46545,29 @@ function isOwnPromoteUsername(handle) {
  * carries the website URL (process.env.link) instead.
  */
 const ROUTE_TME_PROBABILITY = 0.8;
+/**
+ * Route messages one user may get from one promote mobile in any rolling 24 h (owner 2026-10-30). Measured
+ * 10-27..10-29: message 5+ produced 0 payers (one user got 172 in 10 h); a cap of 3 cost up to Rs 200 in the
+ * sample, 4 cost nothing. After the cap the user gets silence until the oldest of the 4 leaves the window.
+ */
+const ROUTE_USER_MAX_PER_24H = 4;
+const ROUTE_SEND_WINDOW_MS = 24 * 60 * 60 * 1000;
+const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+const DAY_MS = 24 * 60 * 60 * 1000;
+/** Start (epoch ms) of the IST calendar day holding `at`: the day key of daily_* rows. */
+function istDayStart(at) {
+    return Math.floor((at + IST_OFFSET_MS) / DAY_MS) * DAY_MS - IST_OFFSET_MS;
+}
+function routeHandleAbMode(env = process.env) {
+    return env.ROUTE_HANDLE_AB?.trim().toLowerCase() === 'split' ? 'split' : 'off';
+}
+/** Changing the salt reshuffles every user into new arms: only do it to start a new experiment. */
+const ROUTE_HANDLE_AB_SALT = 'route-handle-ab-2026-10-30';
+/** Deterministic 50/50 arm per user id. */
+function routeHandleArm(chatId) {
+    const digest = (0,crypto__WEBPACK_IMPORTED_MODULE_24__.createHash)('sha256').update(`${ROUTE_HANDLE_AB_SALT}:${String(chatId).trim()}`).digest();
+    return (digest.readUInt32BE(0) & 1) === 0 ? 'tme' : 'at';
+}
 /**
  * The website URL for route messages (process.env.link), or '' when unset or when it (misconfigured) links one
  * of this process's promote accounts: the never-self-link invariant covers the website line too.
@@ -46628,6 +46726,17 @@ class TelegramManager {
         this.mainAccountReplies = new Map();
         this.MAIN_ACCOUNT_REPLY_WINDOW_MS = 24 * 60 * 60 * 1000;
         this.MAIN_ACCOUNT_REPLY_MAX_SIZE = 5000;
+        /**
+         * chatId -> confirmed route message times of the last 24 h (ascending), for the per-user cap
+         * (ROUTE_USER_MAX_PER_24H), the nth in the [ROUTE] sent line and routed_users. Mirrored to Redis
+         * (promote::routesends) and restored at boot; deliberately NOT cleared on reconnect.
+         */
+        this.routeSends = new Map();
+        this.ROUTE_SENDS_MAX_USERS = 5000;
+        /** chatId -> oldest send of the window it was capped in: one [ROUTE] capped line per user per window. */
+        this.routeCapLogged = new Map();
+        /** Boot restore of route state; the inbound handler waits for it (bounded by the Redis read deadline). */
+        this.routeRestore = null;
         // Array limits
         this.MAX_EVENT_HANDLERS = 10;
         // Reusable filter instance - same reference used for add and remove
@@ -46715,14 +46824,14 @@ class TelegramManager {
         // happened after this process loaded its config is picked up before the first health check.
         void this.refreshRouteUsername();
         this.startRouteConversionReconciler();
-        void this.restoreRouteState();
+        this.routeRestore = this.restoreRouteState();
     }
     get routeStore() {
         const mobile = this.clientDetails?.mobile;
         if (!mobile)
             return null;
         if (!this.routeStoreInstance)
-            this.routeStoreInstance = new _accounts_route_state_store__WEBPACK_IMPORTED_MODULE_33__.PromoteRouteStore(mobile);
+            this.routeStoreInstance = new _accounts_route_state_store__WEBPACK_IMPORTED_MODULE_34__.PromoteRouteStore(mobile);
         return this.routeStoreInstance;
     }
     setRouteState(chatId, state) {
@@ -46771,6 +46880,17 @@ class TelegramManager {
                 if (known === undefined || known < sentAt)
                     this.mainAccountReplies.set(chatId, sentAt);
             }
+            // Memory stays authoritative: a chat already seen by this process keeps its own list.
+            const restoredSends = new Map();
+            for (const [chatId, sentAt] of snapshot.sends ?? []) {
+                if (this.routeSends.has(chatId))
+                    continue;
+                const list = restoredSends.get(chatId) ?? [];
+                list.push(sentAt);
+                restoredSends.set(chatId, list);
+            }
+            for (const [chatId, list] of restoredSends)
+                this.routeSends.set(chatId, list.sort((a, b) => a - b));
             if (routes || backlog) {
                 logger.info(`[PromoteRoute] ${this.clientDetails?.mobile} restored ${routes} route state(s) and ${backlog} pending route(s) from Redis`);
             }
@@ -46820,7 +46940,7 @@ class TelegramManager {
                 this.stringSession = new telegram_sessions__WEBPACK_IMPORTED_MODULE_3__.StringSession(this.sessionString);
             }
             // Single source of truth: credentials + client params from one cached config
-            const config = await (0,_tg_core_utils_generateTGConfig__WEBPACK_IMPORTED_MODULE_25__.generateTGConfig)(this.clientDetails.mobile);
+            const config = await (0,_tg_core_utils_generateTGConfig__WEBPACK_IMPORTED_MODULE_26__.generateTGConfig)(this.clientDetails.mobile);
             this.apiId = config.apiId;
             this.apiHash = config.apiHash;
             // Create new client with reused session
@@ -46843,7 +46963,7 @@ class TelegramManager {
             }
             logger.info("Connected : ", this.clientDetails.mobile);
             // Use getOrCreate to prevent duplicate DialogManager instances
-            this.dialogManager = _tg_dialogs__WEBPACK_IMPORTED_MODULE_27__.DialogManager.getOrCreate(this.client, {
+            this.dialogManager = _tg_dialogs__WEBPACK_IMPORTED_MODULE_28__.DialogManager.getOrCreate(this.client, {
                 instanceName: this.clientDetails.clientId,
                 instanceId: this.clientDetails.mobile,
                 callbacks: {
@@ -46852,7 +46972,7 @@ class TelegramManager {
                 },
             });
             void this.routeCalls?.dispose();
-            this.routeCalls = new _calls_route_call__WEBPACK_IMPORTED_MODULE_30__.RouteCallService({
+            this.routeCalls = new _calls_route_call__WEBPACK_IMPORTED_MODULE_31__.RouteCallService({
                 mobile: this.clientDetails.mobile,
                 client: this.client,
                 isSpamLimited: () => (0,_tg_core_utils_spam_limit__WEBPACK_IMPORTED_MODULE_8__.isSpamLimited)(this.promoterInstance?.daysLeft ?? -1),
@@ -46871,7 +46991,7 @@ class TelegramManager {
                 this.client.addEventHandler(newMessageHandler, this.newMessageFilter);
                 // This mobile's delayed records (e.g. a password-reset decline scheduled before a restart) can run now.
                 const mobile = this.clientDetails.mobile;
-                void (0,_jobs_promote_delayed__WEBPACK_IMPORTED_MODULE_36__.startPromoteDelayed)(mobile, promoteRecordRunner(mobile));
+                void (0,_jobs_promote_delayed__WEBPACK_IMPORTED_MODULE_37__.startPromoteDelayed)(mobile, promoteRecordRunner(mobile));
                 // Limit eventHandlers array size
                 if (this.eventHandlers.length >= this.MAX_EVENT_HANDLERS) {
                     const [oldestBuilder, oldestHandler] = this.eventHandlers.shift();
@@ -46897,7 +47017,7 @@ class TelegramManager {
             if (!this.ensureReactionService()) {
                 throw new Error(`[${this.clientDetails.mobile}] Failed to initialize ReactionService`);
             }
-            this.messageQueue = new _promotion_send_message_queue__WEBPACK_IMPORTED_MODULE_32__.MessageQueue(this.client, { instanceName: this.clientDetails.clientId, instanceId: this.clientDetails.mobile });
+            this.messageQueue = new _promotion_send_message_queue__WEBPACK_IMPORTED_MODULE_33__.MessageQueue(this.client, { instanceName: this.clientDetails.clientId, instanceId: this.clientDetails.mobile });
             void this.messageQueue.restore().catch((error) => logger.warn(`${this.clientDetails.mobile}: restoring queued sends failed`, error));
             await this.joinChannel(`mypromcls${(0,_shared_numbers__WEBPACK_IMPORTED_MODULE_12__.fetchNumbersFromString)(process.env.clientId)}`);
             // this.promoterInstance.PromoteToGrp()
@@ -46922,11 +47042,11 @@ class TelegramManager {
                                 hasAssignedLastName: !!promoteDoc.assignedLastName,
                                 hasAssignedBio: !!promoteDoc.assignedBio,
                                 assignedPhotoCount: promoteDoc.assignedProfilePics?.length || 0,
-                                nameBioTimestamp: (0,_tg_persona_persona_timestamps__WEBPACK_IMPORTED_MODULE_29__.describePersonaTimestamp)(promoteDoc.nameBioUpdatedAt),
-                                privacyTimestamp: (0,_tg_persona_persona_timestamps__WEBPACK_IMPORTED_MODULE_29__.describePersonaTimestamp)(promoteDoc.privacyUpdatedAt),
-                                profilePicsTimestamp: (0,_tg_persona_persona_timestamps__WEBPACK_IMPORTED_MODULE_29__.describePersonaTimestamp)(promoteDoc.profilePicsUpdatedAt),
+                                nameBioTimestamp: (0,_tg_persona_persona_timestamps__WEBPACK_IMPORTED_MODULE_30__.describePersonaTimestamp)(promoteDoc.nameBioUpdatedAt),
+                                privacyTimestamp: (0,_tg_persona_persona_timestamps__WEBPACK_IMPORTED_MODULE_30__.describePersonaTimestamp)(promoteDoc.privacyUpdatedAt),
+                                profilePicsTimestamp: (0,_tg_persona_persona_timestamps__WEBPACK_IMPORTED_MODULE_30__.describePersonaTimestamp)(promoteDoc.profilePicsUpdatedAt),
                             });
-                            const verifyResult = await (0,_tg_persona_persona_verifier__WEBPACK_IMPORTED_MODULE_28__.verifyAndCorrectPersona)(this.client, this.clientDetails.mobile, pool, {
+                            const verifyResult = await (0,_tg_persona_persona_verifier__WEBPACK_IMPORTED_MODULE_29__.verifyAndCorrectPersona)(this.client, this.clientDetails.mobile, pool, {
                                 mobile: promoteDoc.mobile,
                                 assignedFirstName: promoteDoc.assignedFirstName || null,
                                 assignedLastName: promoteDoc.assignedLastName || null,
@@ -46945,7 +47065,7 @@ class TelegramManager {
                             if (verifyResult.workingName) {
                                 this.clientDetails.name = verifyResult.workingName;
                                 process.env.name = verifyResult.workingName;
-                                (0,_promotion_runtime_messages__WEBPACK_IMPORTED_MODULE_35__.refreshRuntimeMessages)();
+                                (0,_promotion_runtime_messages__WEBPACK_IMPORTED_MODULE_36__.refreshRuntimeMessages)();
                             }
                             logger.info(`[Persona] Verification completed for ${this.clientDetails.mobile}`, {
                                 workingName: verifyResult.workingName || null,
@@ -47136,7 +47256,7 @@ class TelegramManager {
         if (this.dialogManager) {
             try {
                 const instanceId = this.dialogManager.instanceId;
-                if (_tg_dialogs__WEBPACK_IMPORTED_MODULE_27__.DialogManager.getInstance(instanceId)) {
+                if (_tg_dialogs__WEBPACK_IMPORTED_MODULE_28__.DialogManager.getInstance(instanceId)) {
                     this.dialogManager.cleanup();
                 }
             }
@@ -47199,7 +47319,7 @@ class TelegramManager {
                         logger.warn(`Failed to dispose MessageQueue:`, disposeError);
                         // Ensure static map cleanup even if dispose throws
                         if (mqMobile) {
-                            _promotion_send_message_queue__WEBPACK_IMPORTED_MODULE_32__.MessageQueue.activeInstances.delete(mqMobile);
+                            _promotion_send_message_queue__WEBPACK_IMPORTED_MODULE_33__.MessageQueue.activeInstances.delete(mqMobile);
                         }
                     }
                     this.messageQueue = null;
@@ -47267,6 +47387,7 @@ class TelegramManager {
                 logger.info(`${this.clientDetails?.mobile}: Cleaned up ${removed} expired liveMap entries. Current size: ${this.liveMap.size}`);
             }
             this.pruneMainAccountReplies(now);
+            this.pruneRouteSends(now);
             // Also clean GramJS internal caches on the same interval
             this.cleanupSessionEntityCache();
         }, this.LIVE_MAP_CLEANUP_INTERVAL);
@@ -47334,7 +47455,7 @@ class TelegramManager {
             logger.info(`${mobile}: Disposing TelegramManager instance...`);
             // Stop this mobile's delayed timers (its records stay in Redis for the next owner of the mobile).
             if (mobile)
-                await (0,_jobs_promote_delayed__WEBPACK_IMPORTED_MODULE_36__.stopPromoteDelayed)(mobile).catch((error) => logger.warn(`${mobile}: stopping delayed records failed`, error));
+                await (0,_jobs_promote_delayed__WEBPACK_IMPORTED_MODULE_37__.stopPromoteDelayed)(mobile).catch((error) => logger.warn(`${mobile}: stopping delayed records failed`, error));
             // Stop all client-bound workers before releasing the Telegram transport.
             await this.detachClientBoundServices();
             await this.cleanupClient();
@@ -47345,7 +47466,7 @@ class TelegramManager {
             this.apiHash = null;
             // Remove from daysLeftMap to prevent unbounded growth
             if (mobile) {
-                (0,_check_tg_health__WEBPACK_IMPORTED_MODULE_34__.removeDaysLeft)(mobile);
+                (0,_check_tg_health__WEBPACK_IMPORTED_MODULE_35__.removeDaysLeft)(mobile);
             }
             // Remove from static instances map
             if (mobile) {
@@ -47474,7 +47595,7 @@ class TelegramManager {
             (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, `${this.clientDetails.mobile}: main-account reply to ${chatId} failed`, false);
         }
     }
-    getPromoteRouteMessage(stage, useUrlOverride) {
+    getPromoteRouteMessage(stage, useUrlOverride, chatId) {
         // Mix two renderings of the SAME main account handle (owner 2026-10-28):
         //  - t.me link  -> Telegram previews the main profile; sent alone (no website URL), preview ON
         //  - @username  -> plain mention, no preview of its own; the website URL is appended and previewed
@@ -47482,9 +47603,14 @@ class TelegramManager {
         // Stage 1 picks t.me with ROUTE_TME_PROBABILITY. Route state then forces
         // stage 2 to use the opposite rendering and stage 3 to switch back,
         // preventing random streaks for the same user.
+        // ROUTE_HANDLE_AB=split replaces the stage-1 coin with the user's fixed arm; off = the coin, unchanged.
+        const ab = routeHandleAbMode();
+        const arm = ab === 'split' && chatId ? routeHandleArm(chatId) : null;
         const handle = this.resolveRouteHandle();
         const useUrl = Boolean(handle)
-            && (typeof useUrlOverride === 'boolean' ? useUrlOverride : Math.random() < ROUTE_TME_PROBABILITY);
+            && (typeof useUrlOverride === 'boolean'
+                ? useUrlOverride
+                : arm ? arm === 'tme' : Math.random() < ROUTE_TME_PROBABILITY);
         const target = handle
             ? (useUrl ? `https://t.me/${handle}` : `@${handle}`)
             : "my main account";
@@ -47532,14 +47658,71 @@ class TelegramManager {
             `Hey Dear... 😊\n\nI'm **Active there**\n${target}`,
         ];
         const catalog = stage === 1 ? stageOne : stage === 2 ? stageTwo : stageThree;
+        const templateIndex = Math.floor(Math.random() * catalog.length);
         return {
-            message: withWebsite(catalog[Math.floor(Math.random() * catalog.length)], website),
+            message: withWebsite(catalog[templateIndex], website),
             linkPreview,
             useUrl,
+            handleForm: handle ? (useUrl ? 'tme' : 'at') : 'none',
+            templateIndex,
+            ab,
+            arm,
         };
     }
+    /** This chat's confirmed route messages inside the rolling 24 h window (ascending); drops older ones. */
+    recentRouteSends(chatId, now) {
+        const list = this.routeSends.get(chatId);
+        if (!list)
+            return [];
+        const fresh = list.filter((at) => now - at < ROUTE_SEND_WINDOW_MS);
+        if (fresh.length === list.length)
+            return fresh;
+        if (fresh.length)
+            this.routeSends.set(chatId, fresh);
+        else
+            this.routeSends.delete(chatId);
+        return fresh;
+    }
+    /** Records a confirmed route message: returns its nth in the 24 h window and whether it is the first of the IST day. */
+    noteRouteSend(chatId, at) {
+        const prior = this.recentRouteSends(chatId, at);
+        const dayStart = istDayStart(at);
+        const firstToday = !prior.some((t) => t >= dayStart);
+        const next = [...prior, at];
+        this.routeSends.delete(chatId); // re-insert: Map order = recency, oldest evicted first
+        this.routeSends.set(chatId, next);
+        while (this.routeSends.size > this.ROUTE_SENDS_MAX_USERS) {
+            const oldest = this.routeSends.keys().next().value;
+            if (oldest === undefined)
+                break;
+            this.routeSends.delete(oldest);
+        }
+        void this.routeStore?.addRouteSend(chatId, at);
+        return { nth: next.length, firstToday };
+    }
+    pruneRouteSends(now) {
+        for (const chatId of Array.from(this.routeSends.keys()))
+            this.recentRouteSends(chatId, now);
+        for (const [chatId, windowStart] of this.routeCapLogged) {
+            if (now - windowStart >= ROUTE_SEND_WINDOW_MS)
+                this.routeCapLogged.delete(chatId);
+        }
+    }
+    /** True (and logs once per window) when this chat already got ROUTE_USER_MAX_PER_24H route messages in 24 h. */
+    isRouteCapped(chatId, now) {
+        const sends = this.recentRouteSends(chatId, now);
+        if (sends.length < ROUTE_USER_MAX_PER_24H)
+            return false;
+        const windowStart = sends[0];
+        if (this.routeCapLogged.get(chatId) !== windowStart) {
+            this.routeCapLogged.set(chatId, windowStart);
+            logger.info(`[ROUTE] capped client=${this.clientDetails.clientId} mobile=${this.clientDetails.mobile} chat=${chatId}`
+                + ` sent24h=${sends.length} max=${ROUTE_USER_MAX_PER_24H} until=${new Date(windowStart + ROUTE_SEND_WINDOW_MS).toISOString()}`);
+        }
+        return true;
+    }
     async sendPromoteRouteStageMessage(chatId, stage, useUrlOverride) {
-        const payload = this.getPromoteRouteMessage(stage, useUrlOverride);
+        const payload = this.getPromoteRouteMessage(stage, useUrlOverride, chatId);
         const conversionId = this.getAttributionConversionId(chatId);
         let routeMarkerCreated = false;
         let routeMarkerAlreadyPending = false;
@@ -47580,8 +47763,13 @@ class TelegramManager {
         const routedAt = Date.now();
         this.pendingRouteChats.set(chatId, routedAt);
         void this.routeStore?.addBacklog(chatId, routedAt);
+        const { nth, firstToday } = this.noteRouteSend(chatId, routedAt);
         // Daily routes_sent: one per confirmed route message (any stage), same event as messageCount below.
-        _data_user_data_crud__WEBPACK_IMPORTED_MODULE_17__.UserDataDtoCrud.getInstance().recordDailyRoute(this.clientDetails.mobile, { sent: 1 });
+        // routed_users: the user's first confirmed route message of the IST day from this mobile.
+        _data_user_data_crud__WEBPACK_IMPORTED_MODULE_17__.UserDataDtoCrud.getInstance().recordDailyRoute(this.clientDetails.mobile, firstToday ? { sent: 1, users: 1 } : { sent: 1 });
+        logger.info(`[ROUTE] sent stage=${stage} nth=${nth} handle=${payload.handleForm} template=${payload.templateIndex}`
+            + ` client=${this.clientDetails.clientId} mobile=${this.clientDetails.mobile} chat=${chatId}`
+            + ` ab=${payload.ab}${payload.arm ? ` arm=${payload.arm}` : ''}`);
         const appService = _bootstrap_app_service__WEBPACK_IMPORTED_MODULE_11__.AppService.getInstance();
         await appService.updateMsgCount(this.clientDetails.clientId);
         if (this.promoterInstance) {
@@ -47765,6 +47953,9 @@ class TelegramManager {
         }
     }
     async handlePromoteInboundRoute(chatId) {
+        // Wait for the boot restore so a restart neither re-sends stage 1 nor forgets the 24 h cap.
+        if (this.routeRestore)
+            await this.routeRestore;
         const db = _data_user_data_crud__WEBPACK_IMPORTED_MODULE_17__.UserDataDtoCrud.getInstance();
         const existingState = this.routeStateMap.get(chatId);
         const userData = await db.getUserData(chatId);
@@ -47792,6 +47983,9 @@ class TelegramManager {
             });
             return;
         }
+        // Per-user cap (any stage): after ROUTE_USER_MAX_PER_24H route messages in 24 h, silence.
+        if (this.isRouteCapped(chatId, now))
+            return;
         if (!existingState) {
             // First inbound contact from this user to this promote account = a channel->DM open reaching
             // the promote side. Count it as a promote-namespace new user (was previously UNWIRED — promote
@@ -47877,9 +48071,9 @@ class TelegramManager {
                                 // healthy sentinel. Replaces the ad-hoc `days + 1`; now identical to tg-aut.
                                 this.promoterInstance.setDaysLeft((0,_tg_core_utils_spam_limit__WEBPACK_IMPORTED_MODULE_8__.sanitizeLimitedDaysLeft)(days));
                                 if (shouldNotify)
-                                    await sendTelegramManagerNotification(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_24__.ChannelCategory.ACCOUNT_NOTIFICATIONS, {
+                                    await sendTelegramManagerNotification(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_25__.ChannelCategory.ACCOUNT_NOTIFICATIONS, {
                                         title: "Limited",
-                                        severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_24__.NotificationSeverity.WARNING,
+                                        severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_25__.NotificationSeverity.WARNING,
                                         fields: [{ label: "Mobile", value: this.clientDetails.mobile }, { label: "Days left", value: this.promoterInstance.daysLeft }],
                                         quote: event.message.text?.slice(0, 500),
                                         quoteLabel: "",
@@ -47893,9 +48087,9 @@ class TelegramManager {
                             else if (spamBotKind === 'healthy') {
                                 this.promoterInstance.setDaysLeft(-1);
                                 if (shouldNotify)
-                                    await sendTelegramManagerNotification(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_24__.ChannelCategory.ACCOUNT_NOTIFICATIONS, {
+                                    await sendTelegramManagerNotification(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_25__.ChannelCategory.ACCOUNT_NOTIFICATIONS, {
                                         title: "SpamBot: healthy",
-                                        severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_24__.NotificationSeverity.SUCCESS,
+                                        severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_25__.NotificationSeverity.SUCCESS,
                                         fields: [{ label: "Mobile", value: this.clientDetails.mobile }],
                                         quote: event.message.text?.slice(0, 500),
                                         quoteLabel: "",
@@ -47916,9 +48110,9 @@ class TelegramManager {
                                 // this.promoterInstance.setChannels(openChannels)
                                 // this.promoterInstance.setDaysLeft(99);
                                 if (shouldNotify)
-                                    await sendTelegramManagerNotification(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_24__.ChannelCategory.ACCOUNT_NOTIFICATIONS, {
+                                    await sendTelegramManagerNotification(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_25__.ChannelCategory.ACCOUNT_NOTIFICATIONS, {
                                         title: "Harsh limit",
-                                        severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_24__.NotificationSeverity.WARNING,
+                                        severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_25__.NotificationSeverity.WARNING,
                                         fields: [{ label: "Mobile", value: this.clientDetails.mobile }],
                                         quote: event.message.text?.slice(0, 500),
                                         quoteLabel: "",
@@ -47933,7 +48127,7 @@ class TelegramManager {
                             if (this.promoterInstance.daysLeft > 3 && (this.lastResetTime < Date.now() - 30 * 60 * 1000)) {
                                 this.lastResetTime = Date.now();
                                 try {
-                                    await (0,_setup_new_mobile__WEBPACK_IMPORTED_MODULE_31__.setupNewMobile)(this.clientDetails.mobile, true, this.promoterInstance.daysLeft, false, `Limited for ${this.promoterInstance.daysLeft} Days`);
+                                    await (0,_setup_new_mobile__WEBPACK_IMPORTED_MODULE_32__.setupNewMobile)(this.clientDetails.mobile, true, this.promoterInstance.daysLeft, false, `Limited for ${this.promoterInstance.daysLeft} Days`);
                                 }
                                 catch (error) {
                                     (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, "Error Handling Message Event");
@@ -47942,11 +48136,11 @@ class TelegramManager {
                             }
                         }
                         if (event.message.chatId.toString() == "777000") {
-                            await sendTelegramManagerNotification(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_24__.ChannelCategory.ACCOUNT_LOGINS, {
+                            await sendTelegramManagerNotification(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_25__.ChannelCategory.ACCOUNT_LOGINS, {
                                 title: event.message.text.toLowerCase().includes('login code') ? "Login code" : "Telegram service message",
                                 severity: event.message.text.toLowerCase().includes('login code')
-                                    ? _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_24__.NotificationSeverity.WARNING
-                                    : _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_24__.NotificationSeverity.INFO,
+                                    ? _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_25__.NotificationSeverity.WARNING
+                                    : _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_25__.NotificationSeverity.INFO,
                                 fields: [{ label: "Mobile", value: this.clientDetails.mobile }],
                                 quote: event.message.text?.slice(0, 500),
                                 quoteLabel: "",
@@ -47957,7 +48151,7 @@ class TelegramManager {
                                 await this.removeExternalLoginSessions();
                                 // One pending decline per mobile: the latest login code replaces the previous record.
                                 const mobile = this.clientDetails.mobile;
-                                (0,_jobs_promote_delayed__WEBPACK_IMPORTED_MODULE_36__.promoteDelayedFor)(mobile, promoteRecordRunner(mobile)).schedule({
+                                (0,_jobs_promote_delayed__WEBPACK_IMPORTED_MODULE_37__.promoteDelayedFor)(mobile, promoteRecordRunner(mobile)).schedule({
                                     id: `pwdecline::${mobile}`,
                                     chatId: "777000",
                                     kind: "declinePasswordReset",
@@ -47991,9 +48185,9 @@ class TelegramManager {
     }
     async notifySpamBotMessage(text) {
         const status = (0,_tg_core_telegram_utils_spam_bot_probe__WEBPACK_IMPORTED_MODULE_9__.describeSpamBotReply)(text);
-        await sendTelegramManagerNotification(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_24__.ChannelCategory.ACCOUNT_NOTIFICATIONS, {
+        await sendTelegramManagerNotification(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_25__.ChannelCategory.ACCOUNT_NOTIFICATIONS, {
             title: "SpamBot",
-            severity: status.healthy ? _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_24__.NotificationSeverity.SUCCESS : _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_24__.NotificationSeverity.WARNING,
+            severity: status.healthy ? _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_25__.NotificationSeverity.SUCCESS : _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_25__.NotificationSeverity.WARNING,
             fields: [
                 { label: 'Mobile', value: this.clientDetails.mobile },
                 { label: 'Status', value: status.label, code: false },
@@ -48010,9 +48204,9 @@ class TelegramManager {
             return;
         }
         this.checkingAuths = true;
-        await sendTelegramManagerNotification(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_24__.ChannelCategory.ACCOUNT_LOGINS, {
+        await sendTelegramManagerNotification(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_25__.ChannelCategory.ACCOUNT_LOGINS, {
             title: "External login cleanup",
-            severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_24__.NotificationSeverity.INFO,
+            severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_25__.NotificationSeverity.INFO,
             fields: [
                 { label: "Mobile", value: this.clientDetails.mobile },
             ],
@@ -48037,9 +48231,9 @@ class TelegramManager {
                     }
                 }
                 if (firstRemovedAuth) {
-                    await sendTelegramManagerNotification(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_24__.ChannelCategory.ACCOUNT_LOGINS, {
+                    await sendTelegramManagerNotification(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_25__.ChannelCategory.ACCOUNT_LOGINS, {
                         title: "External logins removed",
-                        severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_24__.NotificationSeverity.WARNING,
+                        severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_25__.NotificationSeverity.WARNING,
                         fields: [{ label: "Mobile", value: this.clientDetails.mobile }, { label: "Count", value: removedCount }],
                         tags: ["promote", "telegram", "auth"],
                     }, `TelegramManager.authRemovedNotification.${this.clientDetails.mobile}`);
@@ -48265,7 +48459,7 @@ class TelegramManager {
         }
     }
     isAuthMine(auth) {
-        return (0,_tg_core_utils_tg_config__WEBPACK_IMPORTED_MODULE_26__.isAuthFingerprintMatch)(this.clientDetails.mobile, auth);
+        return (0,_tg_core_utils_tg_config__WEBPACK_IMPORTED_MODULE_27__.isAuthFingerprintMatch)(this.clientDetails.mobile, auth);
     }
     getRandomEmoji() {
         const emojiCategories = {
@@ -48287,7 +48481,7 @@ TelegramManager.activeInstances = new Map();
 // Wire up proxy rotation callbacks so affected instances are logged and
 // app resources are cleaned before the proxy restart exit.
 TelegramManager._proxyCallbackRegistered = (() => {
-    (0,_tg_core_utils_generateTGConfig__WEBPACK_IMPORTED_MODULE_25__.setProxyRotatedCallback)((mobile, oldProxy, newProxy, source) => {
+    (0,_tg_core_utils_generateTGConfig__WEBPACK_IMPORTED_MODULE_26__.setProxyRotatedCallback)((mobile, oldProxy, newProxy, source) => {
         const instance = _a.activeInstances.get(mobile);
         if (instance) {
             logger.info(`Proxy rotated for ${mobile}: ${oldProxy.ip}:${oldProxy.port} → ${newProxy.ip}:${newProxy.port} (${source})`);
@@ -48296,7 +48490,7 @@ TelegramManager._proxyCallbackRegistered = (() => {
     return true;
 })();
 TelegramManager._proxyRestartCleanupRegistered = (() => {
-    (0,_tg_core_utils_generateTGConfig__WEBPACK_IMPORTED_MODULE_25__.setBeforeProxyRestartCallback)(async (event) => {
+    (0,_tg_core_utils_generateTGConfig__WEBPACK_IMPORTED_MODULE_26__.setBeforeProxyRestartCallback)(async (event) => {
         const reason = `Proxy ${event.deadProxy.ip}:${event.deadProxy.port} restart requested for ${event.affectedMobiles.join(", ")}`;
         try {
             await _bootstrap_app_service__WEBPACK_IMPORTED_MODULE_11__.AppService.getInstance().gracefulShutdown(reason);
