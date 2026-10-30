@@ -49389,59 +49389,59 @@ var __metadata = (this && this.__metadata) || function (k, v) {
     if (typeof Reflect === "object" && typeof Reflect.metadata === "function") return Reflect.metadata(k, v);
 };
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.CreateStatDto = void 0;
+exports.CreateStat2Dto = void 0;
 const swagger_1 = __webpack_require__(/*! @nestjs/swagger */ "@nestjs/swagger");
-class CreateStatDto {
+class CreateStat2Dto {
 }
-exports.CreateStatDto = CreateStatDto;
+exports.CreateStat2Dto = CreateStat2Dto;
 __decorate([
     (0, swagger_1.ApiProperty)({ description: 'Chat ID' }),
     __metadata("design:type", String)
-], CreateStatDto.prototype, "chatId", void 0);
+], CreateStat2Dto.prototype, "chatId", void 0);
 __decorate([
     (0, swagger_1.ApiProperty)({ description: 'Count' }),
     __metadata("design:type", Number)
-], CreateStatDto.prototype, "count", void 0);
+], CreateStat2Dto.prototype, "count", void 0);
 __decorate([
     (0, swagger_1.ApiProperty)({ description: 'Pay Amount' }),
     __metadata("design:type", Number)
-], CreateStatDto.prototype, "payAmount", void 0);
+], CreateStat2Dto.prototype, "payAmount", void 0);
 __decorate([
     (0, swagger_1.ApiProperty)({ description: 'Demo Given' }),
     __metadata("design:type", Boolean)
-], CreateStatDto.prototype, "demoGiven", void 0);
+], CreateStat2Dto.prototype, "demoGiven", void 0);
 __decorate([
     (0, swagger_1.ApiProperty)({ description: 'Demo Given Today' }),
     __metadata("design:type", Boolean)
-], CreateStatDto.prototype, "demoGivenToday", void 0);
+], CreateStat2Dto.prototype, "demoGivenToday", void 0);
 __decorate([
     (0, swagger_1.ApiProperty)({ description: 'New User' }),
     __metadata("design:type", Boolean)
-], CreateStatDto.prototype, "newUser", void 0);
+], CreateStat2Dto.prototype, "newUser", void 0);
 __decorate([
     (0, swagger_1.ApiProperty)({ description: 'Paid Reply' }),
     __metadata("design:type", Boolean)
-], CreateStatDto.prototype, "paidReply", void 0);
+], CreateStat2Dto.prototype, "paidReply", void 0);
 __decorate([
     (0, swagger_1.ApiProperty)({ description: 'Name' }),
     __metadata("design:type", String)
-], CreateStatDto.prototype, "name", void 0);
+], CreateStat2Dto.prototype, "name", void 0);
 __decorate([
     (0, swagger_1.ApiProperty)({ description: 'Second Show' }),
     __metadata("design:type", Boolean)
-], CreateStatDto.prototype, "secondShow", void 0);
+], CreateStat2Dto.prototype, "secondShow", void 0);
 __decorate([
     (0, swagger_1.ApiProperty)({ description: 'Client' }),
     __metadata("design:type", String)
-], CreateStatDto.prototype, "client", void 0);
+], CreateStat2Dto.prototype, "client", void 0);
 __decorate([
     (0, swagger_1.ApiProperty)({ description: 'Profile' }),
     __metadata("design:type", String)
-], CreateStatDto.prototype, "profile", void 0);
+], CreateStat2Dto.prototype, "profile", void 0);
 __decorate([
     (0, swagger_1.ApiProperty)({ description: 'Paid channel-attribution credit timestamp', required: false }),
     __metadata("design:type", Number)
-], CreateStatDto.prototype, "paymentAttributionCreditedAt", void 0);
+], CreateStat2Dto.prototype, "paymentAttributionCreditedAt", void 0);
 
 
 /***/ },
@@ -49456,7 +49456,7 @@ __decorate([
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.Stat2UpdateDto = exports.Stat2Schema = exports.Stat2 = exports.Stat2Service = exports.Stat2Module = exports.Stat2Controller = exports.Stat2CreateDto = void 0;
 var create_stat2_dto_1 = __webpack_require__(/*! ./create-stat2.dto */ "./src/components/stats2/create-stat2.dto.ts");
-Object.defineProperty(exports, "Stat2CreateDto", ({ enumerable: true, get: function () { return create_stat2_dto_1.CreateStatDto; } }));
+Object.defineProperty(exports, "Stat2CreateDto", ({ enumerable: true, get: function () { return create_stat2_dto_1.CreateStat2Dto; } }));
 var stat2_controller_1 = __webpack_require__(/*! ./stat2.controller */ "./src/components/stats2/stat2.controller.ts");
 Object.defineProperty(exports, "Stat2Controller", ({ enumerable: true, get: function () { return stat2_controller_1.Stat2Controller; } }));
 var stat2_module_1 = __webpack_require__(/*! ./stat2.module */ "./src/components/stats2/stat2.module.ts");
@@ -49467,7 +49467,7 @@ var stat2_schema_1 = __webpack_require__(/*! ./stat2.schema */ "./src/components
 Object.defineProperty(exports, "Stat2", ({ enumerable: true, get: function () { return stat2_schema_1.Stat2; } }));
 Object.defineProperty(exports, "Stat2Schema", ({ enumerable: true, get: function () { return stat2_schema_1.StatSchema; } }));
 var update_stat2_dto_1 = __webpack_require__(/*! ./update-stat2.dto */ "./src/components/stats2/update-stat2.dto.ts");
-Object.defineProperty(exports, "Stat2UpdateDto", ({ enumerable: true, get: function () { return update_stat2_dto_1.UpdateStatDto; } }));
+Object.defineProperty(exports, "Stat2UpdateDto", ({ enumerable: true, get: function () { return update_stat2_dto_1.UpdateStat2Dto; } }));
 
 
 /***/ },
@@ -49523,7 +49523,7 @@ __decorate([
     (0, common_1.Post)(),
     __param(0, (0, common_1.Body)()),
     __metadata("design:type", Function),
-    __metadata("design:paramtypes", [create_stat2_dto_1.CreateStatDto]),
+    __metadata("design:paramtypes", [create_stat2_dto_1.CreateStat2Dto]),
     __metadata("design:returntype", Promise)
 ], Stat2Controller.prototype, "create", null);
 __decorate([
@@ -49540,7 +49540,7 @@ __decorate([
     __param(1, (0, common_1.Param)('profile')),
     __param(2, (0, common_1.Body)()),
     __metadata("design:type", Function),
-    __metadata("design:paramtypes", [String, String, update_stat2_dto_1.UpdateStatDto]),
+    __metadata("design:paramtypes", [String, String, update_stat2_dto_1.UpdateStat2Dto]),
     __metadata("design:returntype", Promise)
 ], Stat2Controller.prototype, "update", null);
 __decorate([
@@ -49775,12 +49775,12 @@ exports.Stat2Service = Stat2Service = __decorate([
 
 
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.UpdateStatDto = void 0;
+exports.UpdateStat2Dto = void 0;
 const swagger_1 = __webpack_require__(/*! @nestjs/swagger */ "@nestjs/swagger");
 const create_stat2_dto_1 = __webpack_require__(/*! ./create-stat2.dto */ "./src/components/stats2/create-stat2.dto.ts");
-class UpdateStatDto extends (0, swagger_1.PartialType)(create_stat2_dto_1.CreateStatDto) {
+class UpdateStat2Dto extends (0, swagger_1.PartialType)(create_stat2_dto_1.CreateStat2Dto) {
 }
-exports.UpdateStatDto = UpdateStatDto;
+exports.UpdateStat2Dto = UpdateStat2Dto;
 
 
 /***/ },
