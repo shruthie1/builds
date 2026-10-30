@@ -50656,8 +50656,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "2ad39ddda835fc2aafc97287f13b13def80b1d37" : 0;
-    const builtAt =  true ? "2026-10-30T17:48:22.573Z" : 0;
+    const sha =  true ? "92bb15b290eafb713da41095bd54537057837feb" : 0;
+    const builtAt =  true ? "2026-10-30T18:49:43.900Z" : 0;
     return { sha, builtAt };
 }
 
@@ -57253,7 +57253,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _conversation_state_state_reset__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../conversation/state/state-reset */ "./src/conversation/state/state-reset.ts");
 /* harmony import */ var _payments_ask_to_pay_by_event__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../payments/ask-to-pay-by-event */ "./src/payments/ask-to-pay-by-event.ts");
 /* harmony import */ var _conversation_state_upsell_quiet__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ../conversation/state/upsell-quiet */ "./src/conversation/state/upsell-quiet.ts");
-/* harmony import */ var _inhouse_video_policy__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ./inhouse/video-policy */ "./src/calls/inhouse/video-policy.ts");
+/* harmony import */ var _payments_ladder__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ../payments/ladder */ "./src/payments/ladder.ts");
 /* harmony import */ var _jobs_delayed__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ../jobs/delayed */ "./src/jobs/delayed.ts");
 /* harmony import */ var _telegram_client_access__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ../telegram/client-access */ "./src/telegram/client-access.ts");
 /* harmony import */ var _telegram_typing__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ../telegram/typing */ "./src/telegram/typing.ts");
@@ -57443,7 +57443,7 @@ async function executehsl(client, chatId, data) {
     const updatedData = {
         // The show settles accusations made while it was owed (failed calls); the cheat ban counts only later ones.
         cheatCount: 0,
-        fullShow: Math.max((userDetails.fullShow || 0) + 1, (0,_inhouse_video_policy__WEBPACK_IMPORTED_MODULE_6__.cycleVideos)(userDetails) - 3),
+        fullShow: Math.max((userDetails.fullShow || 0) + 1, (0,_payments_ladder__WEBPACK_IMPORTED_MODULE_6__.cycleVideos)(userDetails) - 3),
         paidReply: true,
         limitTime: userDetails.payAmount > 200 ? Date.now() + (3 * 60 * 1000) : Date.now(),
         demoGiven: true,
@@ -57452,7 +57452,7 @@ async function executehsl(client, chatId, data) {
         windowCount: 1, // D3 — see the demo path above.
         secondShow: isSecondShow
     };
-    if ((0,_inhouse_video_policy__WEBPACK_IMPORTED_MODULE_6__.cycleVideos)(userDetails) > 7) {
+    if ((0,_payments_ladder__WEBPACK_IMPORTED_MODULE_6__.cycleVideos)(userDetails) > _payments_ladder__WEBPACK_IMPORTED_MODULE_6__.CYCLE_END_AFTER_VIDEOS) {
         // highestPayAmount drops to 50 here; keep the cycle's real paid level for the next-rung price ask.
         updatedData['cyclePaid'] = Math.max(Number(userDetails.cyclePaid) || 0, Number(userDetails.highestPayAmount) || 0);
         updatedData['highestPayAmount'] = 50;
@@ -77255,28 +77255,21 @@ async function handleRepeatPayment(event, chatId, imageDetails, userDetails, amo
     if (isWithinPastTenMinutesImage.result &&
         amount >= _payments_ladder__WEBPACK_IMPORTED_MODULE_4__.PAID_MIN &&
         userDetails.callTime < Date.now() - 3 * 60 * 1000) {
-        if (amount < _payments_ladder__WEBPACK_IMPORTED_MODULE_4__.DEMO_BALANCE) {
-            userDetails.demoGiven = false;
-            await initiateCallKeepingClaim(userDetails.payAmount, userDetails, `Re-initiated Call for Demo`);
-        }
-        else {
-            let updatedAmount = userDetails.payAmount;
-            if (!(0,_payments_service_eligibility__WEBPACK_IMPORTED_MODULE_3__.canProceedWithService)(userDetails)) {
-                updatedAmount = (0,_payments_ladder__WEBPACK_IMPORTED_MODULE_4__.repeatBumpAmount)(userDetails.payAmount);
-                // The +100 alone can leave nothing owed (keerthi1 2026-10-22: second show done, ₹70 -> 170; kavya2 2026-10-23:
-                // the ₹150 tier's three shows done, 150 -> 250), so initiateCall held the call ("nothing owed") and the credited
-                // payment got silence. Re-owe ONE show at the same tier, as the demo branch above does (demoGiven = false); every
-                // case the +100 already serves is unchanged. The one decision point: reOweOneShow (payments/ladder).
-                const reOwed = (0,_payments_ladder__WEBPACK_IMPORTED_MODULE_4__.reOweOneShow)({ ...userDetails, payAmount: updatedAmount });
-                if (reOwed) {
-                    Object.assign(userDetails, reOwed);
-                    // initiateCall persists secondShow but not fullShow (and re-reads the row): store the re-owe first.
-                    await _data_user_data_crud__WEBPACK_IMPORTED_MODULE_0__.UserDataDtoCrud.getInstance().update(chatId, reOwed);
-                    logger.log(`[repeat-payment] ${chatId}: show re-owed (${JSON.stringify(reOwed)}); ₹${amount} paid, payAmount ${userDetails.payAmount} -> ${updatedAmount}, highest ${userDetails.highestPayAmount}`);
-                }
+        let updatedAmount = userDetails.payAmount;
+        if (!(0,_payments_service_eligibility__WEBPACK_IMPORTED_MODULE_3__.canProceedWithService)(userDetails)) {
+            updatedAmount = (0,_payments_ladder__WEBPACK_IMPORTED_MODULE_4__.repeatBumpAmount)(userDetails.payAmount);
+            // Nothing owed: the +100 alone owes nothing (keerthi1 2026-10-22, kavya2 2026-10-23: the call was held and the
+            // credited payment got silence). What the payment buys is the ladder's decision (paymentShowsUpdate): one more show,
+            // or a fresh cycle at its tier.
+            const bought = (0,_payments_ladder__WEBPACK_IMPORTED_MODULE_4__.paymentShowsUpdate)(userDetails, amount);
+            if (bought) {
+                Object.assign(userDetails, bought);
+                // initiateCall persists secondShow but not fullShow (and re-reads the row): store the update first.
+                await _data_user_data_crud__WEBPACK_IMPORTED_MODULE_0__.UserDataDtoCrud.getInstance().update(chatId, bought);
+                logger.log(`[repeat-payment] ${chatId}: ₹${amount} bought ${JSON.stringify(bought)}; payAmount ${userDetails.payAmount} -> ${updatedAmount}`);
             }
-            await initiateCallKeepingClaim(updatedAmount, userDetails, "Re-initiated Call for Full Show");
         }
+        await initiateCallKeepingClaim(updatedAmount, userDetails, "Re-initiated Call for Full Show");
         (0,_telegram_delete_messages__WEBPACK_IMPORTED_MODULE_6__.deleteMessagesBeforeId)(userDetails.chatId, event.message.id);
     }
     else {
@@ -77645,6 +77638,9 @@ async function processImage(event) {
                                         if (tierAmount > oldPayAmount && oldPayAmount > 0) {
                                             (0,_conversation_state_state_reset__WEBPACK_IMPORTED_MODULE_34__.resetStatesOnUpgrade)(chatId, userDetails, oldPayAmount, tierAmount);
                                         }
+                                        // What this payment buys on top of the tier (paymentShowsUpdate), read before the credit raises
+                                        // highestPayAmount.
+                                        const bought = (0,_payments_ladder__WEBPACK_IMPORTED_MODULE_4__.paymentShowsUpdate)(userDetails, tierAmount);
                                         if (tierAmount > userDetails.highestPayAmount) {
                                             userDetails = await db.updateSingleKey(chatId, _data_user_data_crud__WEBPACK_IMPORTED_MODULE_0__.user.highestPayAmount, tierAmount);
                                         }
@@ -77657,6 +77653,12 @@ async function processImage(event) {
                                             if (usedUpBeforeCredit) {
                                                 logger.log(`[used-up-credit] ${chatId}: new service cycle at ₹${tierAmount}`);
                                                 userDetails = await (0,_payments_service_cycle__WEBPACK_IMPORTED_MODULE_5__.startServiceCycle)(chatId, tierAmount);
+                                            }
+                                            else if (bought && (0,_payments_ladder__WEBPACK_IMPORTED_MODULE_4__.canStartService)(userDetails, tierAmount)) {
+                                                // It rings a show without the repeat-payment handling (one still owed, or the high tier): what it
+                                                // bought is stored here; otherwise handleRepeatPayment stores it.
+                                                logger.log(`[payment-shows] ${chatId}: ₹${tierAmount} bought ${JSON.stringify(bought)}`);
+                                                userDetails = await db.update(chatId, bought);
                                             }
                                             await handlePaidServiceAmount(event, chatId, db, imageDetails, userDetails, tierAmount, payAmount, text, isWithinPastTenMinutesImage, userChatState, initiateCallKeepingClaim, serviceStarted);
                                         }
@@ -89782,6 +89784,7 @@ function imageFingerprint(image) {
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   CYCLE_END_AFTER_VIDEOS: () => (/* binding */ CYCLE_END_AFTER_VIDEOS),
 /* harmony export */   CYCLE_FULL_SHOW_CAP: () => (/* binding */ CYCLE_FULL_SHOW_CAP),
 /* harmony export */   CYCLE_VIDEO_CAP: () => (/* binding */ CYCLE_VIDEO_CAP),
 /* harmony export */   DEMO_BALANCE: () => (/* binding */ DEMO_BALANCE),
@@ -89809,6 +89812,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   nextOwedRung: () => (/* binding */ nextOwedRung),
 /* harmony export */   owedShowCap: () => (/* binding */ owedShowCap),
 /* harmony export */   paidForFullShow: () => (/* binding */ paidForFullShow),
+/* harmony export */   paymentShowsUpdate: () => (/* binding */ paymentShowsUpdate),
 /* harmony export */   postCallWaitMs: () => (/* binding */ postCallWaitMs),
 /* harmony export */   reOweOneShow: () => (/* binding */ reOweOneShow),
 /* harmony export */   reengagesAfterShow: () => (/* binding */ reengagesAfterShow),
@@ -89832,9 +89836,14 @@ __webpack_require__.r(__webpack_exports__);
  *   - highest below SECOND_SHOW_MIN (100): the demo only;
  *   - SECOND_SHOW_MIN..FULL_SHOW_MIN-1 (100-199): the demo, then one second show;
  *   - FULL_SHOW_MIN (200) and above: the demo, then the second show, then full shows, as many as FULL_SHOW_ROWS
- *     (the payment-based counts) allow.
+ *     allow (owner 2026-10-30): 200-249 two, 250-349 four, 350-599 six, 600+ eight ("full shows" = shows after the
+ *     second show), so 4 / 6 / 8 / 10 videos per cycle.
  * Never a free tier: a demo-band payer is never owed a second show, a second-band payer never a full show.
  * The first payment still plays the demo first (bookedCallAmount: booked as DEMO_BALANCE).
+ *
+ * Payments after the delivered demo that do not raise the tier (owner 2026-10-30, paymentShowsUpdate): under ₹100, or
+ * while a show is still owed, one more show each (showsPaidTo); ₹100 or more with nothing owed, a fresh cycle at that
+ * payment's tier (second show + full shows, no demo).
  *
  * Pure and deterministic: no I/O, no clock (callers pass `now` / `calledBefore`). Every numeric field is read through
  * `amountOf` / `countOf`, so missing, NaN, negative or string values read as 0 and never throw.
@@ -89862,18 +89871,21 @@ const SHOW_BALANCE_CAP = 150;
 const REPEAT_PAYMENT_BUMP = 100;
 /** Over this balance a delivered show holds replies 3 min (limitTime). */
 const SHOW_HOLD_REPLIES_ABOVE = 200;
-/** Cycle caps: videos per service cycle; full shows per cycle; a show that starts with more cycle videos ends it. */
+/**
+ * Cycle caps: videos per service cycle (demo + second + 8 full shows at ₹600+); the fullShow counter's cap (it counts
+ * every show after the demo: second + 8 full = 9); a show that starts with more cycle videos than CYCLE_END_AFTER_VIDEOS
+ * ends the cycle (only the ₹600+ tenth video does).
+ */
 const CYCLE_VIDEO_CAP = 10;
-const CYCLE_FULL_SHOW_CAP = 8;
-const CYCLE_END_AFTER_VIDEOS = 7;
+const CYCLE_FULL_SHOW_CAP = 9;
+const CYCLE_END_AFTER_VIDEOS = 8;
 /** Show completion: fullShow catches up with the cycle's videos minus this (demo + slack). */
 const FULL_SHOW_VIDEO_LAG = 3;
 const FULL_SHOW_ROWS = Object.freeze([
-    { minHighest: 50, owedBelow: 2, noWaitFullBelow: 2, noWaitVideosBelow: 4, spaced: false },
-    { minHighest: 150, owedBelow: 3, noWaitFullBelow: 3, noWaitVideosBelow: 6, spaced: false },
-    { minHighest: HIGH_TIER_PAY, owedBelow: 4, noWaitFullBelow: 3, noWaitVideosBelow: 7, spaced: true },
-    { minHighest: 350, owedBelow: 6, noWaitFullBelow: 3, noWaitVideosBelow: 8, spaced: true },
-    { minHighest: 350, above: true, owedBelow: 8, noWaitFullBelow: 3, noWaitVideosBelow: 9, spaced: true },
+    { minHighest: FULL_SHOW_MIN, owedBelow: 3, noWaitFullBelow: 3, noWaitVideosBelow: 6 },
+    { minHighest: HIGH_TIER_PAY, owedBelow: 5, noWaitFullBelow: 3, noWaitVideosBelow: 7 },
+    { minHighest: 350, owedBelow: 7, noWaitFullBelow: 3, noWaitVideosBelow: 8 },
+    { minHighest: 600, owedBelow: 9, noWaitFullBelow: 3, noWaitVideosBelow: 9 },
 ].map((row) => Object.freeze(row)));
 /** A money field: a finite number >= 0 (strings parsed), else 0. */
 function amountOf(value) {
@@ -89904,6 +89916,7 @@ function ladderState(user) {
         demoGiven: flagOf(user?.demoGiven),
         secondShow: flagOf(user?.secondShow),
         fullShow: countOf(user?.fullShow),
+        showsPaidTo: countOf(user?.showsPaidTo),
         cycleVideos: cycleVideos(user),
     };
 }
@@ -89919,7 +89932,7 @@ function tierFor(highest) {
     return null;
 }
 function rowApplies(row, highest) {
-    return row.above ? highest > row.minHighest : highest >= row.minHighest;
+    return highest >= row.minHighest;
 }
 /** Shows after the demo a full-tier highest is owed in one cycle (fullShow below this); 0 below FULL_SHOW_MIN. */
 function owedShowCap(highest) {
@@ -89928,13 +89941,17 @@ function owedShowCap(highest) {
         return 0;
     return FULL_SHOW_ROWS.reduce((cap, row) => (rowApplies(row, h) ? Math.max(cap, row.owedBelow) : cap), 0);
 }
+/** The fullShow level shows are owed up to: the tier's own (owedShowCap) or the one paid for (showsPaidTo). */
+function showsOwedTo(s) {
+    return Math.min(CYCLE_FULL_SHOW_CAP, Math.max(owedShowCap(s.highest), s.showsPaidTo));
+}
 /**
  * The next show this user is owed, or null. Reads only this row (other personas never add shows).
  * - demoGiven false: the demo (also with secondShow true: demoGiven false is how a demo is re-owed);
- * - demo band: nothing after the demo;
  * - second band: the second show while secondShow is false (a re-owed second show is secondShow false, whatever
  *   fullShow says);
- * - full band: while fullShow < owedShowCap, the second show first (secondShow false), then full shows.
+ * - then, in every band, while fullShow < showsOwedTo (full band: owedShowCap; any band: showsPaidTo): the second show
+ *   first (secondShow false), then full shows. The demo band is owed nothing after the demo unless a payment bought it.
  * Nothing once the cycle has CYCLE_VIDEO_CAP videos.
  */
 function nextOwedRung(user) {
@@ -89944,13 +89961,23 @@ function nextOwedRung(user) {
         return null;
     if (!s.demoGiven)
         return 'demo';
-    if (tier === 'demo')
-        return null;
-    if (tier === 'second')
-        return s.secondShow ? null : 'second';
-    if (s.fullShow >= owedShowCap(s.highest))
+    if (tier === 'second' && !s.secondShow)
+        return 'second';
+    if (s.fullShow >= showsOwedTo(s))
         return null;
     return s.secondShow ? 'full' : 'second';
+}
+/** Shows after the demo still owed this cycle (0 before the demo is delivered). */
+function owedShowCount(s) {
+    if (!s.demoGiven || s.cycleVideos >= CYCLE_VIDEO_CAP)
+        return 0;
+    const secondOwed = tierFor(s.highest) === 'second' && !s.secondShow ? 1 : 0;
+    return Math.max(secondOwed, showsOwedTo(s) - s.fullShow);
+}
+/** Shows after the demo a highest payment buys in one cycle: none in the demo band, the second show, or owedShowCap. */
+function tierShowCount(highest) {
+    const tier = tierFor(highest);
+    return tier === 'full' ? owedShowCap(highest) : tier === 'second' ? 1 : 0;
 }
 /**
  * A show is owed (cooldowns ignored; the scheduler uses this so a rate-limited pending show is not read as delivered). Blocked (canReply 0) or a balance under PAID_MIN owes
@@ -89968,19 +89995,23 @@ function hasPendingPaidService(user) {
 }
 /**
  * Full-tier show allowed now (canCallUser's full branch). `calledBefore`: the spacing after the last call has passed
- * (or a payment was credited since it).
- * PRECEDENCE (follow-up, owner keeps these counts): a spaced row's bound applies WITHOUT its highest gate, so any
- * full-tier user may have a spaced show while fullShow < 8. Gating each row would give ₹250 4 and ₹350 6 shows per cycle.
+ * (or a payment was credited since it): then a show is allowed while fullShow < showsOwedTo (the tier's own owedShowCap, owner
+ * 2026-10-30; the old `a && b || c` precedence let any full-tier user have one while fullShow < 8, and kept ₹200-249
+ * off the spaced path, so a re-owed ₹200 show past 6 cycle videos was owed but never servable; or showsPaidTo). A show
+ * bought on top of the row (fullShow < showsPaidTo) needs no spacing.
  */
 function fullTierShowAllowed(user, calledBefore) {
     const s = ladderState(user);
     if (tierFor(s.highest) !== 'full')
         return false;
+    // A show a payment bought on top of the row (showsPaidTo) is paid for: no spacing.
+    if (s.fullShow < Math.min(CYCLE_FULL_SHOW_CAP, s.showsPaidTo))
+        return true;
     for (const row of FULL_SHOW_ROWS) {
         if (rowApplies(row, s.highest) && s.fullShow < row.noWaitFullBelow && s.cycleVideos < row.noWaitVideosBelow)
             return true;
     }
-    return calledBefore && FULL_SHOW_ROWS.some((row) => row.spaced && s.fullShow < row.owedBelow);
+    return calledBefore && s.fullShow < showsOwedTo(s);
 }
 /**
  * The show canCallUser would serve now, or null (blocks and other personas are the caller's). A full-tier user past
@@ -89993,12 +90024,9 @@ function servableRung(user, calledBefore) {
     const rung = nextOwedRung(user);
     if (rung === 'demo')
         return 'demo';
-    const tier = tierFor(s.highest);
-    if (tier === 'second')
-        return rung;
-    if (tier === 'full')
+    if (tierFor(s.highest) === 'full')
         return fullTierShowAllowed(user, calledBefore) ? (rung ?? 'full') : null;
-    return null;
+    return rung;
 }
 /** The cycle is used up at any pay: CYCLE_VIDEO_CAP videos or CYCLE_FULL_SHOW_CAP full shows. Blocked users never. */
 function serviceExhausted(user) {
@@ -90096,7 +90124,30 @@ function reengagesAfterShow(highestPayAmount) {
  * the cycle's paid level. `extra` adds the transition's own fields (period reset, used-up reset).
  */
 function cycleStartUpdate(user, paid, extra = {}) {
-    return { cycleVideoBase: lengthOf(user?.videos), fullShow: 0, secondShow: false, cyclePaid: amountOf(paid), ...extra };
+    return { cycleVideoBase: lengthOf(user?.videos), fullShow: 0, secondShow: false, cyclePaid: amountOf(paid), showsPaidTo: 0, ...extra };
+}
+/**
+ * What a credited payment of `paid` buys after the delivered demo when it does not raise the tier's shows (owner
+ * 2026-10-30). `user` is the row before the credit raises highestPayAmount.
+ * - nothing owed and paid >= SECOND_SHOW_MIN: a fresh cycle at the payment's tier: its second show and full shows, no
+ *   demo (highestPayAmount drops to paid when paid buys fewer shows, else the higher of the two);
+ * - otherwise (paid under SECOND_SHOW_MIN, or a show still owed): ONE more show on top of those owed (showsPaidTo); in
+ *   the demo band that is a second-show-tier show, and after it nothing is owed until the next payment.
+ * Null (no change): under PAID_MIN; before the demo is delivered (payments add up, the first plays the demo); a payment
+ * that raises the tier's shows (the tier serves them); a used-up cycle (the used-up credit starts a new one).
+ */
+function paymentShowsUpdate(user, paid) {
+    const p = amountOf(paid);
+    const s = ladderState(user);
+    if (p < PAID_MIN || !s.demoGiven || serviceExhausted(user))
+        return null;
+    if (tierShowCount(Math.max(s.highest, p)) > tierShowCount(s.highest))
+        return null;
+    const owed = owedShowCount(s);
+    if (owed === 0 && p >= SECOND_SHOW_MIN) {
+        return cycleStartUpdate(user, p, { highestPayAmount: tierShowCount(p) < tierShowCount(s.highest) ? p : Math.max(s.highest, p) });
+    }
+    return { showsPaidTo: s.fullShow + owed + 1 };
 }
 /** canReply 0 (number or string): blocked, nothing is owed. */
 function isBlocked(user) {
@@ -90150,8 +90201,8 @@ function tooHighDropUpdate(user) {
     return { payAmount: tier, secondShow: false, highestPayAmount: tier };
 }
 /**
- * Re-owe exactly ONE more show at the user's tier, never raising the tier or the price: the repeat payment
- * (processImage handleRepeatPayment, after its +100 bump), a complaint / plea grace and a blank screen after a call.
+ * Re-owe exactly ONE more show at the user's tier, never raising the tier or the price: the post-show resell (after its
+ * +100 bump), a complaint / plea grace and a blank screen after a call (a repeat payment: paymentShowsUpdate).
  * Tried in order: the second show (keerthi1 2026-10-22: secondShow false), the full-show counter one below the cap
  * (kavya2 2026-10-23, owner "do a"; completion sets it back, so each payment buys one show), the demo (demo band,
  * owner 2026-10-30: never a free tier). Null when a show is already owed, the cycle is exhausted, or nothing can be
