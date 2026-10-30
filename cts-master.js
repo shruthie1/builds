@@ -36956,7 +36956,9 @@ function mapTtfp(rows) {
 
 
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.PROMO_LIMITS = exports.PROMO_WINDOWS = void 0;
+exports.REACH_ALERT = exports.PROMO_LIMITS = exports.PROMO_WINDOWS = void 0;
+exports.reachRateOf = reachRateOf;
+exports.reachAlertOf = reachAlertOf;
 exports.promoWindows = promoWindows;
 exports.rowsFromSends = rowsFromSends;
 exports.rowsFromHist = rowsFromHist;
@@ -36979,6 +36981,19 @@ exports.PROMO_LIMITS = {
     LIMITED_MAX_DELIVERED: 0.05,
     IDLE_ASSIGNED_SENDS: 0,
 };
+exports.REACH_ALERT = {
+    MIN_USERS: 50,
+    MAX_RATE: 0.5,
+};
+function reachRateOf(reached, users) {
+    return typeof reached === 'number' && typeof users === 'number' && users > 0 ? (0, monitor_util_1.ratio)(reached, users) : null;
+}
+function reachAlertOf(reached, users) {
+    if (typeof users !== 'number')
+        return null;
+    const rate = reachRateOf(reached, users);
+    return users >= exports.REACH_ALERT.MIN_USERS && rate !== null && rate < exports.REACH_ALERT.MAX_RATE;
+}
 const LIMITED_SPAM = new Set(['limited', 'harsh']);
 function promoWindows(window, now) {
     if (window === '24h') {
@@ -37217,13 +37232,20 @@ function buildPromotions(i) {
             };
         })
             .sort((x, y) => y.sent - x.sent || String(x.clientId).localeCompare(String(y.clientId)) || String(x.mobile).localeCompare(String(y.mobile)));
-        const promoteExtras = (aggs) => f === 'promote'
-            ? {
+        const routedSum = (aggs, c) => (hasRouted(c) ? aggs.reduce((s, a) => s + (a.routed[c] ?? 0), 0) : null);
+        const promoteExtras = (aggs) => {
+            if (f !== 'promote')
+                return {};
+            const routedReached = routedSum(aggs, 'routed_reached');
+            const routedUsers = routedSum(aggs, 'routed_users');
+            return {
                 incomingDms: w.intraday && !i.extra ? null : aggs.reduce((s, a) => s + a.newDms, 0),
-                routesSent: hasRouted('routes_sent') ? aggs.reduce((s, a) => s + (a.routed.routes_sent ?? 0), 0) : null,
-                routedReached: hasRouted('routed_reached') ? aggs.reduce((s, a) => s + (a.routed.routed_reached ?? 0), 0) : null,
-            }
-            : {};
+                routesSent: routedSum(aggs, 'routes_sent'),
+                routedReached,
+                routedUsers,
+                reachRate: reachRateOf(routedReached, routedUsers),
+            };
+        };
         const totals = { ...promo(fc, scopedDms(i.dms.cur, f, client), w.window, limitedCur), ...promoteExtras(fc) };
         const previous = { ...promo(fp, scopedDms(i.dms.prev, f, client), w.window, limitedPrev), ...(f === 'promote' && !w.intraday ? promoteExtras(fp) : {}) };
         const ids = new Set();
@@ -37246,6 +37268,7 @@ function buildPromotions(i) {
                 name: i.names.get(id) ?? null,
                 ...promo(mine, dmsOf(i.dms.cur, f, id), w.window, limitedCur),
                 ...promoteExtras(mine),
+                ...(f === 'promote' ? { reachAlert: reachAlertOf(routedSum(mine, 'routed_reached'), routedSum(mine, 'routed_users')) } : {}),
                 mobilesAssigned: f === 'promote' && i.assigned ? assigned.filter((a) => a.clientId === id).length : null,
                 lastSendAt: last !== null ? new Date(last).toISOString() : null,
             };
@@ -37284,6 +37307,10 @@ function buildPromotions(i) {
     }
     if (!i.routedCols.includes('routes_sent'))
         notes.push('routesSent/routedReached: history starts when counters ship (daily_mobile route columns not present yet).');
+    if (i.routedCols.includes('routes_sent') && !i.routedCols.includes('routed_users'))
+        notes.push('routedUsers/reachRate/reachAlert: null until daily_mobile has the routed_users column (analytics upgrade 2026-10-30).');
+    else if (i.routedCols.includes('routed_users'))
+        notes.push(`routedUsers = users first routed per IST day per promote mobile, summed over days and mobiles; reachRate = routedReached / routedUsers; reachAlert = routedUsers >= ${exports.REACH_ALERT.MIN_USERS} and reachRate < ${exports.REACH_ALERT.MAX_RATE}.`);
     notes.push(`looksLimited = sent >= ${exports.PROMO_LIMITS.LIMITED_MIN_SENDS_TODAY} today (>= ${exports.PROMO_LIMITS.LIMITED_MIN_SENDS_WINDOW} for 24h/7d/30d) with < ${exports.PROMO_LIMITS.LIMITED_MAX_DELIVERED * 100}% delivered, or Redis spam state limited/harsh; previous.mobilesLimited uses the rate rule only.`);
     notes.push('idle = an active promoteClients mobile with no sends in the window.');
     return { window: w.window, clientId: client, range: w.range, previousRange: w.previousRange, families, both, unattributed, notes };
@@ -37736,7 +37763,7 @@ FROM daily_client
 WHERE day BETWEEN $1::date AND $2::date
 GROUP BY day, client_id, namespace`, [from, to]);
 }
-exports.ROUTED_COLUMNS = ['routes_sent', 'routed_reached', 'route_calls_ok', 'route_calls_failed'];
+exports.ROUTED_COLUMNS = ['routes_sent', 'routed_reached', 'route_calls_ok', 'route_calls_failed', 'routed_users'];
 function routedSums(cols) {
     const ok = cols.filter((c) => exports.ROUTED_COLUMNS.includes(c));
     return ok.map((c) => `, coalesce(sum(${c}), 0) AS ${c}`).join('');
@@ -39697,12 +39724,16 @@ let MonitorService = MonitorService_1 = class MonitorService {
             const sumOf = (c) => (routedCols.includes(c) ? sel.reduce((s, r) => s + (0, monitor_util_1.num)(r[c]), 0) : null);
             const sent = sumOf('routes_sent');
             const reached = sumOf('routed_reached');
+            const users = sumOf('routed_users');
             routedOut = {
                 routesSent: sent,
                 routedReached: reached,
                 routeCallsOk: sumOf('route_calls_ok'),
                 routeCallsFailed: sumOf('route_calls_failed'),
-                reachRate: sent === null || reached === null ? null : (0, monitor_util_1.ratio)(reached, sent),
+                routedUsers: users,
+                reachRate: (0, monitor_promotions_1.reachRateOf)(reached, users),
+                reachPerRouteMessage: sent === null || reached === null ? null : (0, monitor_util_1.ratio)(reached, sent),
+                reachAlert: (0, monitor_promotions_1.reachAlertOf)(reached, users),
             };
         }
         const ids = fleet ? fleet.clients.map((c) => c.clientId).filter((id) => inScope(id)) : [];
@@ -39740,6 +39771,10 @@ let MonitorService = MonitorService_1 = class MonitorService {
         notes.push('byOrigin newUsers: direct/routed = attributed DMs of that origin; unattributed = newUsers minus both (floored at 0).');
         if (!routedCols.includes('routes_sent'))
             notes.push('routed: history starts when counters ship (daily_client route columns not present yet).');
+        if (routedCols.includes('routes_sent') && !routedCols.includes('routed_users'))
+            notes.push('routed.routedUsers/reachRate/reachAlert: null until daily_client has the routed_users column (analytics upgrade 2026-10-30).');
+        if (routedCols.includes('routed_users'))
+            notes.push(`routed.reachRate = routedReached / routedUsers (users first routed per IST day per promote mobile); reachPerRouteMessage = routedReached / routesSent; reachAlert = routedUsers >= ${monitor_promotions_1.REACH_ALERT.MIN_USERS} and reachRate < ${monitor_promotions_1.REACH_ALERT.MAX_RATE}.`);
         if (intraday)
             notes.push('timeToFirstPay / repeat are 7d/30d only (null for today); payer origins refresh every 10 min.');
         if (client !== null && fleet && !fleet.clients.some((c) => c.clientId === client))
