@@ -29186,6 +29186,16 @@ class UserDataRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_2__.B
         const result = await this.collection.updateOne((0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.personaFilter)(chatId, { profile }), update, { upsert: false });
         return result.acknowledged && result.matchedCount === 1;
     }
+    /**
+     * $set `fields` on chatId's row of `profile`, another persona than this identity's (upsert:false, never creates,
+     * lastMsgTimeStamp only when given). True when exactly one row matched. Throws, also for this identity's own persona.
+     */
+    async updateOtherPersona(chatId, identity, profile, fields) {
+        if (!profile || profile === identity.profile)
+            throw new Error(`updateOtherPersona(${chatId}): "${profile}" is not another persona`);
+        const result = await this.collection.updateOne((0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.personaFilter)(chatId, { profile }), { $set: fields }, { upsert: false });
+        return result.acknowledged && result.matchedCount === 1;
+    }
     /** Delete the persona row(s) of chatId. Throws. */
     async deleteForPersona(chatId, identity) {
         return this.collection.deleteMany((0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.personaFilter)(chatId, identity));
@@ -39716,8 +39726,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "8d60a7105c027b7d7dcca0c8029f9e697781452b" : 0;
-    const builtAt =  true ? "2026-10-30T14:52:30.459Z" : 0;
+    const sha =  true ? "2ad39ddda835fc2aafc97287f13b13def80b1d37" : 0;
+    const builtAt =  true ? "2026-10-30T17:48:22.307Z" : 0;
     return { sha, builtAt };
 }
 
