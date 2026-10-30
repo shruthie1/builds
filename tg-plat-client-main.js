@@ -4841,13 +4841,21 @@ const BASE_COUNTER_COLUMNS = [
  * retried with the same batch id, spooled, onStall) until the columns exist.
  */
 const ROUTE_COUNTER_COLUMNS = ["routes_sent", "routed_reached", "route_calls_ok", "route_calls_failed"];
-const COUNTER_COLUMNS = [...BASE_COUNTER_COLUMNS, ...ROUTE_COUNTER_COLUMNS];
+/**
+ * routed_users, added 2026-10-30 (analytics/upgrade-2026-10-30-routed-users.sql): distinct users who got
+ * their first route message of the IST day from a promote mobile. Same deploy-order safety one tier up:
+ * a statement names it only when a row carries a non-zero routed_users, so route counters keep writing
+ * on a database that has the 10-29 columns but not this one.
+ */
+const ROUTED_USERS_COLUMNS = ["routed_users"];
+const COUNTER_COLUMNS = [...BASE_COUNTER_COLUMNS, ...ROUTE_COUNTER_COLUMNS, ...ROUTED_USERS_COLUMNS];
 const COUNTER_COLUMN_SET = new Set(COUNTER_COLUMNS);
 const COUNTER_FIELDS = [
     "sent", "delivered", "banned", "failed",
     "newUsers", "activeUsers", "payers",
     "reactionsSuccess", "reactionsRestricted", "reactionsFailed", "reactionsFloods",
     "routesSent", "routedReached", "routeCallsOk", "routeCallsFailed",
+    "routedUsers",
 ];
 const accumulate = (t, cols = COUNTER_COLUMNS) => cols.map((c) => `${c} = ${t}.${c} + EXCLUDED.${c}`).join(", ");
 const DAILY_CLIENT_KEY = ["day", "client_id", "namespace"];
@@ -4892,45 +4900,69 @@ const TABLES = {
         columns: [...DAILY_CLIENT_KEY, ...COUNTER_COLUMNS],
         keyCount: 3,
         conflict: DAILY_CLIENT_CONFLICT + accumulate("daily_client"),
-        legacyColumns: [[...DAILY_CLIENT_KEY, ...BASE_COUNTER_COLUMNS]],
-        compact: {
-            columns: [...DAILY_CLIENT_KEY, ...BASE_COUNTER_COLUMNS],
-            conflict: DAILY_CLIENT_CONFLICT + accumulate("daily_client", BASE_COUNTER_COLUMNS),
-        },
+        legacyColumns: [
+            [...DAILY_CLIENT_KEY, ...BASE_COUNTER_COLUMNS],
+            [...DAILY_CLIENT_KEY, ...BASE_COUNTER_COLUMNS, ...ROUTE_COUNTER_COLUMNS],
+        ],
+        tiers: [
+            {
+                columns: [...DAILY_CLIENT_KEY, ...BASE_COUNTER_COLUMNS],
+                conflict: DAILY_CLIENT_CONFLICT + accumulate("daily_client", BASE_COUNTER_COLUMNS),
+            },
+            {
+                columns: [...DAILY_CLIENT_KEY, ...BASE_COUNTER_COLUMNS, ...ROUTE_COUNTER_COLUMNS],
+                conflict: DAILY_CLIENT_CONFLICT + accumulate("daily_client", [...BASE_COUNTER_COLUMNS, ...ROUTE_COUNTER_COLUMNS]),
+            },
+        ],
     },
     daily_mobile: {
         columns: [...DAILY_MOBILE_KEY, ...COUNTER_COLUMNS],
         keyCount: 4,
         conflict: DAILY_MOBILE_CONFLICT + accumulate("daily_mobile"),
-        legacyColumns: [[...DAILY_MOBILE_KEY, ...BASE_COUNTER_COLUMNS]],
-        compact: {
-            columns: [...DAILY_MOBILE_KEY, ...BASE_COUNTER_COLUMNS],
-            conflict: DAILY_MOBILE_CONFLICT + accumulate("daily_mobile", BASE_COUNTER_COLUMNS),
-        },
+        legacyColumns: [
+            [...DAILY_MOBILE_KEY, ...BASE_COUNTER_COLUMNS],
+            [...DAILY_MOBILE_KEY, ...BASE_COUNTER_COLUMNS, ...ROUTE_COUNTER_COLUMNS],
+        ],
+        tiers: [
+            {
+                columns: [...DAILY_MOBILE_KEY, ...BASE_COUNTER_COLUMNS],
+                conflict: DAILY_MOBILE_CONFLICT + accumulate("daily_mobile", BASE_COUNTER_COLUMNS),
+            },
+            {
+                columns: [...DAILY_MOBILE_KEY, ...BASE_COUNTER_COLUMNS, ...ROUTE_COUNTER_COLUMNS],
+                conflict: DAILY_MOBILE_CONFLICT + accumulate("daily_mobile", [...BASE_COUNTER_COLUMNS, ...ROUTE_COUNTER_COLUMNS]),
+            },
+        ],
     },
 };
 /**
- * The (columns, values, conflict) a daily_* INSERT actually uses: the compact pre-2026-10-29 list
- * when no row carries a non-zero route counter, else the full list. Deterministic on a fixed row
- * set, so a retried batch builds the same statement.
+ * The (columns, values, conflict) a daily_* INSERT actually uses: the smallest tier (pre-2026-10-29,
+ * then pre-2026-10-30) that holds every non-zero counter of the rows, else the full list.
+ * Deterministic on a fixed row set, so a retried batch builds the same statement.
  */
 function counterStatementShape(table, rows) {
     const spec = TABLES[table];
     const conflict = spec?.conflict ? ` ${spec.conflict}` : "";
-    if (!spec?.compact || rows.length === 0)
+    if (!spec?.tiers || rows.length === 0)
         return { rows, conflict };
     const cols = rows[0].columns;
-    const routeIdx = ROUTE_COUNTER_COLUMNS.map((c) => cols.indexOf(c)).filter((i) => i >= 0);
-    const hasRoute = rows.some((r) => routeIdx.some((i) => typeof r.values[i] === "number" && r.values[i] !== 0));
-    if (hasRoute)
-        return { rows, conflict };
-    const keep = spec.compact.columns.map((c) => cols.indexOf(c));
-    if (keep.some((i) => i < 0))
-        return { rows, conflict };
-    return {
-        rows: rows.map((r) => ({ table: r.table, columns: spec.compact.columns, values: keep.map((i) => r.values[i]) })),
-        conflict: ` ${spec.compact.conflict}`,
-    };
+    const used = new Set();
+    cols.forEach((c, i) => {
+        if (COUNTER_COLUMN_SET.has(c) && rows.some((r) => typeof r.values[i] === "number" && r.values[i] !== 0))
+            used.add(c);
+    });
+    for (const tier of spec.tiers) {
+        if (![...used].every((c) => tier.columns.includes(c)))
+            continue;
+        const keep = tier.columns.map((c) => cols.indexOf(c));
+        if (keep.some((i) => i < 0))
+            continue;
+        return {
+            rows: rows.map((r) => ({ table: r.table, columns: tier.columns, values: keep.map((i) => r.values[i]) })),
+            conflict: ` ${tier.conflict}`,
+        };
+    }
+    return { rows, conflict };
 }
 function sanitizeInstanceKey(raw) {
     const cleaned = String(raw ?? "").replace(/[^A-Za-z0-9_-]/g, "_");
@@ -49824,8 +49856,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "6b3f617d80b085471862f9c62b21d32d27f4788e" : 0;
-    const builtAt =  true ? "2026-10-29T06:24:24.561Z" : 0;
+    const sha =  true ? "6000601132746225c02c521fc9c197b0bc1b21f4" : 0;
+    const builtAt =  true ? "2026-10-30T11:09:25.947Z" : 0;
     return { sha, builtAt };
 }
 
