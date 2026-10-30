@@ -5335,6 +5335,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   normalizeAvailableMessageIds: () => (/* binding */ normalizeAvailableMessageIds),
 /* harmony export */   normalizeChannel: () => (/* binding */ normalizeChannel),
 /* harmony export */   normalizeChannels: () => (/* binding */ normalizeChannels),
+/* harmony export */   normalizeDaysLeft: () => (/* binding */ normalizeDaysLeft),
 /* harmony export */   normalizeMessageCheckResult: () => (/* binding */ normalizeMessageCheckResult),
 /* harmony export */   normalizeMessageSource: () => (/* binding */ normalizeMessageSource),
 /* harmony export */   normalizeMessageStrategy: () => (/* binding */ normalizeMessageStrategy),
@@ -5363,7 +5364,9 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _pool_pool_types__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../../pool/pool-types */ "../../packages/tg-channel-state/src/channel-message-promotions/pool/pool-types.ts");
 /* harmony import */ var _utils_channel_id__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../../utils/channel-id */ "../../packages/tg-channel-state/src/channel-message-promotions/utils/channel-id.ts");
 /* harmony import */ var _utils_guards__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../../../utils/guards */ "../../packages/tg-channel-state/src/utils/guards.ts");
+/* harmony import */ var _tg_core_utils_spam_limit__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! @tg/core/utils/spam-limit */ "../../packages/tg-core/src/utils/spam-limit.ts");
 // PromotionFlowRunner: pure normalisers and guards for adapter/hook results.
+
 
 
 
@@ -5396,8 +5399,21 @@ function normalizeStats(value) {
         successCount: safeNonNegativeInt(asNumber(stats['successCount'])),
         failedCount: safeNonNegativeInt(asNumber(stats['failedCount'])),
         failStreak: safeNonNegativeInt(asNumber(stats['failStreak'])),
-        daysLeft: safeNonNegativeInt(asNumber(stats['daysLeft'])),
+        daysLeft: normalizeDaysLeft(asNumber(stats['daysLeft'])),
     };
+}
+/**
+ * daysLeft keeps the healthy sentinel (-1, `HEALTHY_DAYS_LEFT`). It must NOT go through
+ * safeNonNegativeInt: that clamped -1 to 0 and `isSpamLimited(0)` put every healthy account on the
+ * limited pace and cap (docs/design/2026-10-30-unified-account-health.md C1/C2).
+ * Finite values >= 0 are floored (0 = released today stays limited, deliberately); -1 stays -1;
+ * anything else (missing, non-finite, other negatives) is -1 = healthy, matching the healthy default
+ * of resolveAccountDailyCap / calculatePromotionBatchLimit / calculateHealthBasedPromotionDelay.
+ */
+function normalizeDaysLeft(value) {
+    if (!Number.isFinite(value) || value < 0)
+        return _tg_core_utils_spam_limit__WEBPACK_IMPORTED_MODULE_5__.HEALTHY_DAYS_LEFT;
+    return Math.floor(value);
 }
 function normalizeMessageCheckResult(value) {
     if (!(0,_utils_guards__WEBPACK_IMPORTED_MODULE_4__.isRecord)(value) || !(value['status'] === 'exists'
@@ -39512,8 +39528,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "6000601132746225c02c521fc9c197b0bc1b21f4" : 0;
-    const builtAt =  true ? "2026-10-30T11:09:22.646Z" : 0;
+    const sha =  true ? "68797a046706be7135664617629f6ede54d85aa0" : 0;
+    const builtAt =  true ? "2026-10-30T14:10:23.570Z" : 0;
     return { sha, builtAt };
 }
 
