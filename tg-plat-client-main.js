@@ -6596,6 +6596,28 @@ class AnalyticsSink {
         }
     }
     /**
+     * Shutdown pre-flush: writes the coalesced counters NOW (not at the next counterFlushIntervalMs)
+     * plus whatever is buffered, while the process is still healthy and before slower teardown steps
+     * run. The sink keeps running: rows recorded afterwards go out with stop() or the 'exit' spill.
+     * Unbounded by itself (each INSERT is bounded by queryTimeoutMs); the caller bounds it. Never throws.
+     */
+    async flushNow() {
+        if (!this.enabled || !this.pool || this.finalSpilled)
+            return;
+        try {
+            // A flush already running may have skipped the counters: let it finish, then drain them.
+            if (this.inFlight)
+                await this.inFlight;
+            // Stays set: the process is shutting down, so every later flush (and stop()) drains counters too.
+            this.drainCountersNow = true;
+            this.backoffUntil = 0;
+            await this.flush();
+            if (this.counters.size > 0 || this.buffer.length > 0)
+                await this.flush();
+        }
+        catch { /* rule 3 */ }
+    }
+    /**
      * Bounded drain, then a synchronous spill of whatever is left, then close. Never throws.
      * Drain budget = min(stopTimeoutMs, killWindowMs - 1 s), so the spill always runs before pm2's
      * kill (server.js exits after SHUTDOWN_TIMEOUT; the 'exit' hook covers that too).
@@ -6801,6 +6823,7 @@ function describe(err) {
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   __setAnalyticsForTests: () => (/* binding */ __setAnalyticsForTests),
+/* harmony export */   flushAnalytics: () => (/* binding */ flushAnalytics),
 /* harmony export */   getAnalytics: () => (/* binding */ getAnalytics),
 /* harmony export */   initAnalytics: () => (/* binding */ initAnalytics),
 /* harmony export */   shutdownAnalytics: () => (/* binding */ shutdownAnalytics)
@@ -6996,6 +7019,20 @@ async function shutdownAnalytics() {
     // (10d gap 2), waiting at most 2 s so a dead notification channel never holds up exit.
     await (0,_loss_notifier__WEBPACK_IMPORTED_MODULE_1__.flushAnalyticsNotifiers)(2000);
 }
+/**
+ * Shutdown pre-flush (sink stays running): writes pending counters and buffered rows now, so a
+ * slow later shutdown step cannot cost them. No-op while init is in flight or analytics is off.
+ * Never throws; the caller bounds how long it waits. shutdownAnalytics() still runs afterwards.
+ */
+async function flushAnalytics() {
+    const sink = instance;
+    if (!sink || typeof sink.flushNow !== "function")
+        return;
+    try {
+        await sink.flushNow();
+    }
+    catch { /* total */ }
+}
 /** Test seam. `null` also resets the pre-init buffer. */
 function __setAnalyticsForTests(sink) {
     instance = sink;
@@ -7041,6 +7078,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   createAlertNotifier: () => (/* reexport safe */ _loss_notifier__WEBPACK_IMPORTED_MODULE_1__.createAlertNotifier),
 /* harmony export */   createLossNotifier: () => (/* reexport safe */ _loss_notifier__WEBPACK_IMPORTED_MODULE_1__.createLossNotifier),
 /* harmony export */   defaultSpoolDir: () => (/* reexport safe */ _analytics_sink__WEBPACK_IMPORTED_MODULE_0__.defaultSpoolDir),
+/* harmony export */   flushAnalytics: () => (/* reexport safe */ _analytics__WEBPACK_IMPORTED_MODULE_2__.flushAnalytics),
 /* harmony export */   flushAnalyticsNotifiers: () => (/* reexport safe */ _loss_notifier__WEBPACK_IMPORTED_MODULE_1__.flushAnalyticsNotifiers),
 /* harmony export */   getAnalytics: () => (/* reexport safe */ _analytics__WEBPACK_IMPORTED_MODULE_2__.getAnalytics),
 /* harmony export */   initAnalytics: () => (/* reexport safe */ _analytics__WEBPACK_IMPORTED_MODULE_2__.initAnalytics),
@@ -50275,6 +50313,7 @@ const shutdown = (...args) => {
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   resolveShutdownForceExitMs: () => (/* binding */ resolveShutdownForceExitMs),
 /* harmony export */   shutdown: () => (/* binding */ shutdown)
 /* harmony export */ });
 /* harmony import */ var _data_user_data_crud__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../data/user-data-crud */ "./src/data/user-data-crud.ts");
@@ -50339,7 +50378,24 @@ const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_22__.Logger("t
 let isShuttingDown = false;
 let mongoReconnectTimeout = null;
 let shutdownForceExitTimeout = null;
-const SHUTDOWN_FORCE_EXIT_MS = 15000;
+/** Upper bound on our own shutdown, whatever the loader allows. */
+const SHUTDOWN_FORCE_EXIT_CAP_MS = 15000;
+/** Exit this long before the loader's own force-exit (server.js SHUTDOWN_TIMEOUT). */
+const SHUTDOWN_LOADER_MARGIN_MS = 1000;
+/** SHUTDOWN_TIMEOUT used by the fleet ecosystem files (and the analytics sink's default kill window). */
+const DEFAULT_LOADER_SHUTDOWN_TIMEOUT_MS = 8000;
+const SHUTDOWN_FORCE_EXIT_MIN_MS = 250;
+/**
+ * Our force-exit deadline. server.js (the pm2 loader) force-exits SHUTDOWN_TIMEOUT ms after the
+ * signal and pm2 SIGKILLs at kill_timeout (12 s); ours must fire first so the exit is ours (with the
+ * analytics 'exit' spill) and not a kill: min(15 s, SHUTDOWN_TIMEOUT - 1 s), SHUTDOWN_TIMEOUT
+ * defaulting to 8 s when unset/invalid.
+ */
+function resolveShutdownForceExitMs(env = process.env) {
+    const raw = Number(env.SHUTDOWN_TIMEOUT);
+    const loaderMs = Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_LOADER_SHUTDOWN_TIMEOUT_MS;
+    return Math.max(SHUTDOWN_FORCE_EXIT_MIN_MS, Math.min(SHUTDOWN_FORCE_EXIT_CAP_MS, loaderMs - SHUTDOWN_LOADER_MARGIN_MS));
+}
 /**
  * Main shutdown handler
  */
@@ -50349,14 +50405,16 @@ const shutdown = async (signal, exitCode = 0) => {
         return;
     }
     isShuttingDown = true;
-    logger.log(`[SHUTDOWN] Received ${signal}, starting cleanup...`);
+    const forceExitMs = resolveShutdownForceExitMs();
+    const deadlineAt = Date.now() + forceExitMs;
+    logger.log(`[SHUTDOWN] Received ${signal}, starting cleanup (force exit in ${forceExitMs}ms)...`);
     shutdownForceExitTimeout = setTimeout(() => {
-        logger.error(`[SHUTDOWN] Force-exit timeout reached after ${SHUTDOWN_FORCE_EXIT_MS}ms for signal: ${signal}`);
+        logger.error(`[SHUTDOWN] Force-exit timeout reached after ${forceExitMs}ms for signal: ${signal}`);
         process.exit(1);
-    }, SHUTDOWN_FORCE_EXIT_MS);
+    }, forceExitMs);
     shutdownForceExitTimeout.unref();
     try {
-        await cleanupResources(signal);
+        await cleanupResources(signal, deadlineAt);
     }
     catch (err) {
         logger.error("[SHUTDOWN] Error during cleanup:", err);
@@ -50525,21 +50583,64 @@ async function handleError(err, context) {
     }
 }
 /**
- * Cleanup routine for graceful shutdown
+ * Runs one shutdown step, waiting at most min(capMs, time left before deadlineAt - reserveMs) so the
+ * steps after it keep their share of the budget. A step that runs out is left running in the
+ * background (logged); a step with no budget left is still started but not awaited. Never throws.
  */
-async function cleanupResources(signal) {
+async function runStep(name, task, deadlineAt, capMs, reserveMs = 0) {
+    const budgetMs = Math.min(capMs, deadlineAt - reserveMs - Date.now());
+    let result;
+    try {
+        result = task();
+    }
+    catch (error) {
+        logger.error(`[CLEANUP] ${name} failed:`, error);
+        return;
+    }
+    if (!result || typeof result.then !== "function")
+        return;
+    const work = Promise.resolve(result).then(() => true, (error) => { logger.error(`[CLEANUP] ${name} failed:`, error); return true; });
+    if (budgetMs <= 0) {
+        logger.warn(`[SHUTDOWN] ${name}: no budget left, not waiting for it`);
+        return;
+    }
+    let timer = null;
+    const timedOut = new Promise((resolve) => {
+        timer = setTimeout(() => resolve(false), budgetMs);
+        timer.unref?.();
+    });
+    const finished = await Promise.race([work, timedOut]);
+    if (timer)
+        clearTimeout(timer);
+    if (!finished)
+        logger.warn(`[SHUTDOWN] ${name} still running after ${budgetMs}ms; continuing shutdown`);
+}
+/** min(capMs, half of the time left before deadlineAt): a reserve that still leaves room under a short budget. */
+function halfOfRemaining(deadlineAt, capMs) {
+    return Math.max(0, Math.min(capMs, Math.floor((deadlineAt - Date.now()) / 2)));
+}
+/**
+ * Cleanup routine for graceful shutdown. Everything is bounded by deadlineAt (our force-exit, which
+ * fires before the loader's), and state-preserving work runs first, while the process is healthy:
+ *   1. stop sending, then in parallel: durable-queue flush, analytics pre-flush (pending counters +
+ *      buffered rows), final heartbeat. The 'Process closed' bot notification runs alongside and is
+ *      only awaited (briefly) at the very end: a slow or dead bot channel cannot delay the flushes.
+ *   2. Telegram teardown (promotions stop, calls hang up, disconnect), bounded.
+ *   3. Mongo close and in-memory cleanups; the user-state and respondTo saves run after Telegram is
+ *      gone so no new event changes state behind the final sync.
+ *   4. Analytics stop (drains rows recorded since step 1, spills the rest to disk), Redis disconnect.
+ */
+async function cleanupResources(signal, deadlineAt) {
     logger.log("[CLEANUP] Starting cleanup...");
     try {
-        await (0,_app_notifications__WEBPACK_IMPORTED_MODULE_25__.sendAppOperatorNotification)({
+        const notification = (0,_app_notifications__WEBPACK_IMPORTED_MODULE_25__.sendAppOperatorNotification)({
             title: "Process closed",
             severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_20__.NotificationSeverity.INFO,
             summary: `closed :: ${signal}`,
             tags: ["shutdown"],
-        }, "Failed to send shutdown notification");
+        }, "Failed to send shutdown notification").catch(() => false);
         // Clear server startup interval
         (0,_server_startup__WEBPACK_IMPORTED_MODULE_26__.cleanupServerStartupInterval)();
-        // Final 'stopping' heartbeat while Redis is still connected (bounded 1 s, never throws).
-        await (0,_monitoring_heartbeat__WEBPACK_IMPORTED_MODULE_28__.stopTgAutHeartbeat)();
         // Clear MongoDB reconnect timeout if any
         if (mongoReconnectTimeout) {
             clearTimeout(mongoReconnectTimeout);
@@ -50548,17 +50649,26 @@ async function cleanupResources(signal) {
         // Stop sending and the queue timers, then flush the backups (3 s bound) before the client goes: the next process
         // resumes them, and nothing is sent after the flush (it would be sent again).
         _outbound_outbound_queue__WEBPACK_IMPORTED_MODULE_7__.outboundQueue.stop();
-        await (0,_tg_core_state_durable_queue__WEBPACK_IMPORTED_MODULE_6__.shutdownDurableQueues)(3000);
-        await _telegram_telegram_manager__WEBPACK_IMPORTED_MODULE_1__.TelegramManager.deleteInstance();
-        await _data_user_data_crud__WEBPACK_IMPORTED_MODULE_0__.UserDataDtoCrud.getInstance()?.closeConnection();
-        await _tg_dialogs__WEBPACK_IMPORTED_MODULE_3__.DialogManager.cleanupAllInstances?.();
-        await (0,_greetings_send_greetings__WEBPACK_IMPORTED_MODULE_5__.cleanup)?.();
-        await (0,_http_middlewares_rate_limiter__WEBPACK_IMPORTED_MODULE_15__.destroyAllRateLimiters)?.();
-        await (0,_jobs_job_manager__WEBPACK_IMPORTED_MODULE_14__.stopJobs)?.();
+        // Keep up to 3 s (at most half of what is left) for the steps after the flushes.
+        const flushReserveMs = halfOfRemaining(deadlineAt, 3000);
+        const queueFlushMs = Math.max(0, Math.min(3000, deadlineAt - flushReserveMs - Date.now()));
+        await Promise.all([
+            runStep("durable queue flush", () => (0,_tg_core_state_durable_queue__WEBPACK_IMPORTED_MODULE_6__.shutdownDurableQueues)(queueFlushMs), deadlineAt, 3000, flushReserveMs),
+            runStep("analytics pre-flush", () => (0,_tg_analytics__WEBPACK_IMPORTED_MODULE_24__.flushAnalytics)(), deadlineAt, 3000, flushReserveMs),
+            // Final 'stopping' heartbeat while Redis is still connected (bounded 1 s, never throws).
+            runStep("heartbeat stop", () => (0,_monitoring_heartbeat__WEBPACK_IMPORTED_MODULE_28__.stopTgAutHeartbeat)(), deadlineAt, 1000, flushReserveMs),
+        ]);
+        logger.log("[SHUTDOWN] State flushed (durable queues, analytics); tearing down Telegram");
+        await runStep("Telegram teardown", () => _telegram_telegram_manager__WEBPACK_IMPORTED_MODULE_1__.TelegramManager.deleteInstance(), deadlineAt, 2500, halfOfRemaining(deadlineAt, 2000));
+        await runStep("Mongo close", () => _data_user_data_crud__WEBPACK_IMPORTED_MODULE_0__.UserDataDtoCrud.getInstance()?.closeConnection(), deadlineAt, 1000, 1500);
+        await runStep("dialog cleanup", () => _tg_dialogs__WEBPACK_IMPORTED_MODULE_3__.DialogManager.cleanupAllInstances?.(), deadlineAt, 500, 1500);
+        await runStep("greetings cleanup", () => (0,_greetings_send_greetings__WEBPACK_IMPORTED_MODULE_5__.cleanup)?.(), deadlineAt, 500, 1500);
+        await runStep("rate limiters", () => (0,_http_middlewares_rate_limiter__WEBPACK_IMPORTED_MODULE_15__.destroyAllRateLimiters)?.(), deadlineAt, 500, 1500);
+        await runStep("stop jobs", () => (0,_jobs_job_manager__WEBPACK_IMPORTED_MODULE_14__.stopJobs)?.(), deadlineAt, 500, 1500);
         (0,_global_cleanup__WEBPACK_IMPORTED_MODULE_4__.cleanupGlobalResources)();
         _telegram_file_sender__WEBPACK_IMPORTED_MODULE_8__.fileSender.cleanup();
-        await _conversation_state_user_state__WEBPACK_IMPORTED_MODULE_13__.stateManager.cleanup();
-        await (0,_conversation_respond_to_msgs__WEBPACK_IMPORTED_MODULE_16__.cleanupRespondToMsgs)(); // Now async - saves state before shutdown
+        await runStep("user state sync", () => _conversation_state_user_state__WEBPACK_IMPORTED_MODULE_13__.stateManager.cleanup(), deadlineAt, 1500, 1000);
+        await runStep("respondTo save", () => (0,_conversation_respond_to_msgs__WEBPACK_IMPORTED_MODULE_16__.cleanupRespondToMsgs)(), deadlineAt, 1000, 1000); // saves state before shutdown
         (0,_outbound_forward_unwanted__WEBPACK_IMPORTED_MODULE_17__.cleanupForwardUtils)();
         (0,_payments_ask_to_pay_by_event__WEBPACK_IMPORTED_MODULE_9__.cleanupAskToPayMap)();
         (0,_tg_core_telegram_utils_getMessages__WEBPACK_IMPORTED_MODULE_10__.cleanupMessageCache)();
@@ -50569,21 +50679,16 @@ async function cleanupResources(signal) {
         if (cloudinaryService) {
             cloudinaryService.cleanup();
         }
-        // Drain whatever analytics rows are still buffered, then send any loss/stall alert still held by the
-        // notifiers' 30-min quiet window (bounded to 2 s). Best-effort and never throws; a slow or
-        // dead sink must not hold up shutdown.
-        try {
-            await (0,_tg_analytics__WEBPACK_IMPORTED_MODULE_24__.shutdownAnalytics)();
-        }
-        catch { /* analytics is optional */ }
+        // Drain rows recorded since the pre-flush, then send any loss/stall alert still held by the
+        // notifiers' quiet window. If our force-exit cuts this short, the sink's 'exit' hook spills
+        // whatever is still in memory to disk synchronously.
+        await runStep("analytics stop", () => (0,_tg_analytics__WEBPACK_IMPORTED_MODULE_24__.shutdownAnalytics)(), deadlineAt, 3000, 300);
         // Cleanup Redis connection to prevent memory leaks
-        try {
+        await runStep("Redis disconnect", async () => {
             const { RedisClient } = await Promise.resolve(/*! import() */).then(__webpack_require__.bind(__webpack_require__, /*! @tg/core/utils/Redis/Redis.Client */ "../../packages/tg-core/src/utils/Redis/Redis.Client.ts"));
             await RedisClient.disconnect();
-        }
-        catch (error) {
-            logger.error("[CLEANUP] Error disconnecting Redis:", error);
-        }
+        }, deadlineAt, 500, 150);
+        await runStep("shutdown notification", () => notification, deadlineAt, 1000, 50);
         logger.log(`[CLEANUP] ${signal} received, cleanup completed`);
     }
     catch (error) {
@@ -50656,8 +50761,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "fc70abf6bc97cfd34b1273ef10495954cfab4f41" : 0;
-    const builtAt =  true ? "2026-10-30T20:01:00.123Z" : 0;
+    const sha =  true ? "ec2424de18e23523f8296ac07aab657ab2e9b4e3" : 0;
+    const builtAt =  true ? "2026-10-31T07:36:58.427Z" : 0;
     return { sha, builtAt };
 }
 
