@@ -50913,8 +50913,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "39915ffb755c81b42c175d45867b0625ae90555f" : 0;
-    const builtAt =  true ? "2026-10-31T11:09:45.470Z" : 0;
+    const sha =  true ? "b095624713f53cefe77b1b9e28567ed1a34b86c2" : 0;
+    const builtAt =  true ? "2026-10-31T11:47:01.862Z" : 0;
     return { sha, builtAt };
 }
 
@@ -66519,9 +66519,11 @@ const unpaidPatterns = [
             if (isUrgencyRequest(text)) {
                 // Respond with sultry Indian accent message asking for payment
                 await (0,_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, `${(0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)(_messages_sexual_replies__WEBPACK_IMPORTED_MODULE_4__.urgencyRequestUnpaid)}\n\n\n${(0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)((0,_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_14__.getUpsellMessage)(userDetails.payAmount))}`);
-                // Follow up with payment links after delay
+                // Follow up with payment links after delay. The links are HTML, so the markdown pay ask
+                // is converted to <b> (markdown is not parsed in an HTML send) and its trailing newline trimmed.
+                const payAsk = (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)(_messages_standard_messages__WEBPACK_IMPORTED_MODULE_5__.PayMsgArray).trim().replace(/\*\*(.+?)\*\*/gs, '<b>$1</b>');
                 (0,_pattern_followup__WEBPACK_IMPORTED_MODULE_13__.schedulePatternFollowup)(event, context, 20000, {
-                    kind: 'send', message: `${(0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)(_messages_standard_messages__WEBPACK_IMPORTED_MODULE_5__.PayMsgArray)}\n\n${_messages_standard_messages__WEBPACK_IMPORTED_MODULE_5__.getPynw()}`, parseMode: 'html',
+                    kind: 'send', message: `${payAsk}\n\n${_messages_standard_messages__WEBPACK_IMPORTED_MODULE_5__.getPynw()}`, parseMode: 'html',
                 }, { label: 'unpaid.urgency.payLinks' });
                 return true;
             }
