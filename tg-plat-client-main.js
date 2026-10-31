@@ -50913,8 +50913,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "0919f753beb2fe9acfe9029b6c37fad45ca4e4aa" : 0;
-    const builtAt =  true ? "2026-10-31T09:29:19.314Z" : 0;
+    const sha =  true ? "39915ffb755c81b42c175d45867b0625ae90555f" : 0;
+    const builtAt =  true ? "2026-10-31T11:09:45.470Z" : 0;
     return { sha, builtAt };
 }
 
@@ -56983,23 +56983,24 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _data_user_data_crud__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../data/user-data-crud */ "./src/data/user-data-crud.ts");
 /* harmony import */ var _conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../conversation/messages/pick-one */ "./src/conversation/messages/pick-one.ts");
 /* harmony import */ var _conversation_messages_conversational_replies__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../conversation/messages/conversational-replies */ "./src/conversation/messages/conversational-replies.ts");
-/* harmony import */ var _call_initiation__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ./call-initiation */ "./src/calls/call-initiation.ts");
-/* harmony import */ var _payments_ladder__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ../payments/ladder */ "./src/payments/ladder.ts");
-/* harmony import */ var _inhouse_video_policy__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ./inhouse/video-policy */ "./src/calls/inhouse/video-policy.ts");
-/* harmony import */ var telegram_Helpers__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! telegram/Helpers */ "telegram/Helpers");
-/* harmony import */ var telegram_Helpers__WEBPACK_IMPORTED_MODULE_7___default = /*#__PURE__*/__webpack_require__.n(telegram_Helpers__WEBPACK_IMPORTED_MODULE_7__);
-/* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
-/* harmony import */ var _telegram_send_message__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ../telegram/send-message */ "./src/telegram/send-message.ts");
-/* harmony import */ var _telegram_unreachable_report__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ../telegram/unreachable-report */ "./src/telegram/unreachable-report.ts");
-/* harmony import */ var _telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ../telegram/flood-safe-send */ "./src/telegram/flood-safe-send.ts");
-/* harmony import */ var _outbound_outbound_queue__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! ../outbound/outbound-queue */ "./src/outbound/outbound-queue.ts");
-/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
-/* harmony import */ var _conversation_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! ../conversation/messages/upsell-messages */ "./src/conversation/messages/upsell-messages.ts");
-/* harmony import */ var _conversation_state_upsell_quiet__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! ../conversation/state/upsell-quiet */ "./src/conversation/state/upsell-quiet.ts");
-/* harmony import */ var _on_call_guard__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! ./on-call-guard */ "./src/calls/on-call-guard.ts");
-/* harmony import */ var _conversation_state_chat_moments__WEBPACK_IMPORTED_MODULE_17__ = __webpack_require__(/*! ../conversation/state/chat-moments */ "./src/conversation/state/chat-moments.ts");
-/* harmony import */ var _shared_schedule_task__WEBPACK_IMPORTED_MODULE_18__ = __webpack_require__(/*! ../shared/schedule-task */ "./src/shared/schedule-task.ts");
-/* harmony import */ var _service_completion__WEBPACK_IMPORTED_MODULE_19__ = __webpack_require__(/*! ./service-completion */ "./src/calls/service-completion.ts");
+/* harmony import */ var _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../conversation/messages/standard-messages */ "./src/conversation/messages/standard-messages.ts");
+/* harmony import */ var _call_initiation__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ./call-initiation */ "./src/calls/call-initiation.ts");
+/* harmony import */ var _payments_ladder__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ../payments/ladder */ "./src/payments/ladder.ts");
+/* harmony import */ var _inhouse_video_policy__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ./inhouse/video-policy */ "./src/calls/inhouse/video-policy.ts");
+/* harmony import */ var telegram_Helpers__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! telegram/Helpers */ "telegram/Helpers");
+/* harmony import */ var telegram_Helpers__WEBPACK_IMPORTED_MODULE_8___default = /*#__PURE__*/__webpack_require__.n(telegram_Helpers__WEBPACK_IMPORTED_MODULE_8__);
+/* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
+/* harmony import */ var _telegram_send_message__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ../telegram/send-message */ "./src/telegram/send-message.ts");
+/* harmony import */ var _telegram_unreachable_report__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ../telegram/unreachable-report */ "./src/telegram/unreachable-report.ts");
+/* harmony import */ var _telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! ../telegram/flood-safe-send */ "./src/telegram/flood-safe-send.ts");
+/* harmony import */ var _outbound_outbound_queue__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! ../outbound/outbound-queue */ "./src/outbound/outbound-queue.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _conversation_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! ../conversation/messages/upsell-messages */ "./src/conversation/messages/upsell-messages.ts");
+/* harmony import */ var _conversation_state_upsell_quiet__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! ../conversation/state/upsell-quiet */ "./src/conversation/state/upsell-quiet.ts");
+/* harmony import */ var _on_call_guard__WEBPACK_IMPORTED_MODULE_17__ = __webpack_require__(/*! ./on-call-guard */ "./src/calls/on-call-guard.ts");
+/* harmony import */ var _conversation_state_chat_moments__WEBPACK_IMPORTED_MODULE_18__ = __webpack_require__(/*! ../conversation/state/chat-moments */ "./src/conversation/state/chat-moments.ts");
+/* harmony import */ var _shared_schedule_task__WEBPACK_IMPORTED_MODULE_19__ = __webpack_require__(/*! ../shared/schedule-task */ "./src/shared/schedule-task.ts");
+/* harmony import */ var _service_completion__WEBPACK_IMPORTED_MODULE_20__ = __webpack_require__(/*! ./service-completion */ "./src/calls/service-completion.ts");
 
 
 
@@ -57020,7 +57021,8 @@ __webpack_require__.r(__webpack_exports__);
 
 
 
-const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_13__.Logger('tg-aut:core-utils');
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_14__.Logger('tg-aut:core-utils');
 /**
  * Automated (timer-driven) send to a user known by chatId: resolved via the canonical
  * cache -> dialogs -> accessHash -> username chain. If nothing resolves it throws locally
@@ -57036,24 +57038,24 @@ const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_13__.Logger('t
  */
 async function sendToUserAutomated(client, chatId, payload) {
     const text = typeof payload?.message === 'string' ? payload.message : undefined;
-    const voice = (0,_on_call_guard__WEBPACK_IMPORTED_MODULE_16__.isChatOnCall)(chatId) ? { send: false, reason: 'on a call' } : (0,_outbound_chat_voice__WEBPACK_IMPORTED_MODULE_0__.decide)(chatId, 'answer');
+    const voice = (0,_on_call_guard__WEBPACK_IMPORTED_MODULE_17__.isChatOnCall)(chatId) ? { send: false, reason: 'on a call' } : (0,_outbound_chat_voice__WEBPACK_IMPORTED_MODULE_0__.decide)(chatId, 'answer');
     if (!voice.send) {
         logger.log(`[voice] ${chatId}: post-show reminder not sent: ${voice.reason}`);
         return null;
     }
-    const peer = await (0,_telegram_send_message__WEBPACK_IMPORTED_MODULE_9__.resolveAutomatedPeer)(client, chatId);
+    const peer = await (0,_telegram_send_message__WEBPACK_IMPORTED_MODULE_10__.resolveAutomatedPeer)(client, chatId);
     if (!peer)
-        throw new _telegram_unreachable_report__WEBPACK_IMPORTED_MODULE_10__.UnresolvedPeerError(chatId);
+        throw new _telegram_unreachable_report__WEBPACK_IMPORTED_MODULE_11__.UnresolvedPeerError(chatId);
     try {
-        const record = payload ? (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_11__.outboundRecord)('text', payload, (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_11__.outboundTarget)(chatId, peer, { strict: true })) : null;
-        const sent = await (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_11__.floodSafe)(() => client.sendMessage(peer, payload), { chatId, label: 'sendToUserAutomated', kind: 'post-show', intent: 'postShow', text, file: payload?.file, record });
+        const record = payload ? (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_12__.outboundRecord)('text', payload, (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_12__.outboundTarget)(chatId, peer, { strict: true })) : null;
+        const sent = await (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_12__.floodSafe)(() => client.sendMessage(peer, payload), { chatId, label: 'sendToUserAutomated', kind: 'post-show', intent: 'postShow', text, file: payload?.file, record });
         (0,_outbound_chat_voice__WEBPACK_IMPORTED_MODULE_0__.noteSent)(chatId, text);
         return sent;
     }
     catch (error) {
         // A second pay ask inside the pitch window, or a pay ask in the upsell quiet after a ₹200+ show
         // (conversation/state/upsell-quiet), is dropped (not an error): the scripted sequence carries on.
-        if (error instanceof _outbound_outbound_queue__WEBPACK_IMPORTED_MODULE_12__.OutboundDroppedError && (error.reason === 'pitch' || error.reason === 'quiet'))
+        if (error instanceof _outbound_outbound_queue__WEBPACK_IMPORTED_MODULE_13__.OutboundDroppedError && (error.reason === 'pitch' || error.reason === 'quiet'))
             return null;
         throw error;
     }
@@ -57066,7 +57068,7 @@ async function sendToUserAutomated(client, chatId, payload) {
 async function paidForNextShow(chatId) {
     try {
         const fresh = await _data_user_data_crud__WEBPACK_IMPORTED_MODULE_1__.UserDataDtoCrud.getInstance().read(chatId);
-        return !!fresh && (0,_payments_ladder__WEBPACK_IMPORTED_MODULE_5__.hasPendingPaidService)(fresh);
+        return !!fresh && (0,_payments_ladder__WEBPACK_IMPORTED_MODULE_6__.hasPendingPaidService)(fresh);
     }
     catch (error) {
         logger.warn(`paidForNextShow read failed for ${chatId}`, error);
@@ -57080,7 +57082,7 @@ async function paidForNextShow(chatId) {
 async function paidSinceShow(chatId) {
     try {
         const fresh = await _data_user_data_crud__WEBPACK_IMPORTED_MODULE_1__.UserDataDtoCrud.getInstance().read(chatId);
-        return !!fresh && (0,_inhouse_video_policy__WEBPACK_IMPORTED_MODULE_6__.paidSinceLastShow)(fresh);
+        return !!fresh && (0,_inhouse_video_policy__WEBPACK_IMPORTED_MODULE_7__.paidSinceLastShow)(fresh);
     }
     catch (error) {
         logger.warn(`paidSinceShow read failed for ${chatId}`, error);
@@ -57093,13 +57095,13 @@ function postShowLabel(chatId, args) {
 /** Runs one post-show step (delayed record 'postShow'). Errors are logged, not retried. */
 async function runPostShowStep(client, chatId, args) {
     const label = postShowLabel(chatId, args);
-    if ((0,_on_call_guard__WEBPACK_IMPORTED_MODULE_16__.deferWhileOnCall)(chatId, 'postShow', args, label))
+    if ((0,_on_call_guard__WEBPACK_IMPORTED_MODULE_17__.deferWhileOnCall)(chatId, 'postShow', args, label))
         return;
     // Waited out a call that delivered another show (a 'demo' moment since the first deferral): that show's own post-show
     // sequence takes over. Before, the earlier show's ₹350 menu went out ~10 s after the next show ended, ahead of its
     // "did you like it" (journey M, 2026-10-22).
     const rechecks = Number(args.onCallRechecks ?? 0);
-    if (rechecks > 0 && ((0,_conversation_state_chat_moments__WEBPACK_IMPORTED_MODULE_17__.momentAt)(chatId, 'demo') ?? 0) >= Date.now() - rechecks * _on_call_guard__WEBPACK_IMPORTED_MODULE_16__.ON_CALL_RECHECK_MS) {
+    if (rechecks > 0 && ((0,_conversation_state_chat_moments__WEBPACK_IMPORTED_MODULE_18__.momentAt)(chatId, 'demo') ?? 0) >= Date.now() - rechecks * _on_call_guard__WEBPACK_IMPORTED_MODULE_17__.ON_CALL_RECHECK_MS) {
         logger.log(`[${label}] ${chatId}: another show was delivered meanwhile; step dropped`);
         return;
     }
@@ -57110,7 +57112,7 @@ async function runPostShowStep(client, chatId, args) {
             await runFullShowStep(client, chatId, args);
     }
     catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_8__.parseError)(error, label, false);
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_9__.parseError)(error, label, false);
     }
 }
 async function runDemoStep(client, chatId, args) {
@@ -57119,30 +57121,30 @@ async function runDemoStep(client, chatId, args) {
             await sendToUserAutomated(client, chatId, { message: (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)(_conversation_messages_conversational_replies__WEBPACK_IMPORTED_MODULE_3__.demoFeedback) });
         }
         catch (error) {
-            logger.error((0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_8__.parseError)(error, `executehs.feedback.${chatId}`, false));
+            logger.error((0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_9__.parseError)(error, `executehs.feedback.${chatId}`, false));
         }
-        (0,_service_completion__WEBPACK_IMPORTED_MODULE_19__.schedulePostShow)(chatId, { kind: 'hs', step: 'offer' }, _service_completion__WEBPACK_IMPORTED_MODULE_19__.POST_SHOW_OFFER_MS);
+        (0,_service_completion__WEBPACK_IMPORTED_MODULE_20__.schedulePostShow)(chatId, { kind: 'hs', step: 'offer' }, _service_completion__WEBPACK_IMPORTED_MODULE_20__.POST_SHOW_OFFER_MS);
     }
     else if (args.step === 'offer') {
         // They paid for the next show meanwhile (e.g. mid-demo, set up once it ended): don't pitch it.
         if (await paidForNextShow(chatId))
             return;
         try {
-            await sendToUserAutomated(client, chatId, { message: `**Take Full Show Baby...!!**\nPussy also!!\n\nWithout Face : **100₹**\nWith Face      : **150₹**` });
+            await sendToUserAutomated(client, chatId, { message: _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_4__.fullShowOffer });
         }
         catch (error) {
-            logger.error((0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_8__.parseError)(error, `executehs.fullShowPrompt.${chatId}`, false));
+            logger.error((0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_9__.parseError)(error, `executehs.fullShowPrompt.${chatId}`, false));
         }
-        (0,_service_completion__WEBPACK_IMPORTED_MODULE_19__.schedulePostShow)(chatId, { kind: 'hs', step: 'upsell' }, _service_completion__WEBPACK_IMPORTED_MODULE_19__.POST_SHOW_UPSELL_MS);
+        (0,_service_completion__WEBPACK_IMPORTED_MODULE_20__.schedulePostShow)(chatId, { kind: 'hs', step: 'upsell' }, _service_completion__WEBPACK_IMPORTED_MODULE_20__.POST_SHOW_UPSELL_MS);
     }
     else if (args.step === 'upsell') {
         if (await paidForNextShow(chatId))
             return;
         try {
-            await sendToUserAutomated(client, chatId, { message: (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)((0,_conversation_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_14__.getUpsellMessage)(50)) });
+            await sendToUserAutomated(client, chatId, { message: (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)((0,_conversation_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_15__.getUpsellMessage)(50)) });
         }
         catch (error) {
-            logger.error((0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_8__.parseError)(error, `executehs.upsell.${chatId}`, false));
+            logger.error((0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_9__.parseError)(error, `executehs.upsell.${chatId}`, false));
         }
     }
 }
@@ -57152,16 +57154,16 @@ async function runFullShowStep(client, chatId, args) {
             await sendToUserAutomated(client, chatId, { message: (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)(_conversation_messages_conversational_replies__WEBPACK_IMPORTED_MODULE_3__.feedbackQuestions) });
         }
         catch (error) {
-            logger.error((0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_8__.parseError)(error, `executehsl.feedback.${chatId}`, false));
+            logger.error((0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_9__.parseError)(error, `executehsl.feedback.${chatId}`, false));
         }
-        (0,_service_completion__WEBPACK_IMPORTED_MODULE_19__.schedulePostShow)(chatId, { kind: 'hsl', step: 'offer' }, _service_completion__WEBPACK_IMPORTED_MODULE_19__.POST_SHOW_OFFER_MS);
+        (0,_service_completion__WEBPACK_IMPORTED_MODULE_20__.schedulePostShow)(chatId, { kind: 'hsl', step: 'offer' }, _service_completion__WEBPACK_IMPORTED_MODULE_20__.POST_SHOW_OFFER_MS);
     }
     else if (args.step === 'offer') {
         try {
             await sendToUserAutomated(client, chatId, { message: (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)(_conversation_messages_conversational_replies__WEBPACK_IMPORTED_MODULE_3__.offerMsgs) });
         }
         catch (error) {
-            logger.error((0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_8__.parseError)(error, `executehsl.offer.${chatId}`, false));
+            logger.error((0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_9__.parseError)(error, `executehsl.offer.${chatId}`, false));
         }
         // This step may have waited out a long call (or a restart): read the user now.
         let current = null;
@@ -57169,44 +57171,44 @@ async function runFullShowStep(client, chatId, args) {
             current = (await _data_user_data_crud__WEBPACK_IMPORTED_MODULE_1__.UserDataDtoCrud.getInstance().read(chatId)) ?? null;
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_8__.parseError)(error, `executehsl.offer.read.${chatId}`, false);
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_9__.parseError)(error, `executehsl.offer.read.${chatId}`, false);
         }
-        if (current && !(0,_payments_ladder__WEBPACK_IMPORTED_MODULE_5__.paidForFullShow)(current.highestPayAmount)) {
-            (0,_service_completion__WEBPACK_IMPORTED_MODULE_19__.schedulePostShow)(chatId, { kind: 'hsl', step: 'upsell', highest: current.highestPayAmount }, _service_completion__WEBPACK_IMPORTED_MODULE_19__.POST_SHOW_UPSELL_MS);
+        if (current && !(0,_payments_ladder__WEBPACK_IMPORTED_MODULE_6__.paidForFullShow)(current.highestPayAmount)) {
+            (0,_service_completion__WEBPACK_IMPORTED_MODULE_20__.schedulePostShow)(chatId, { kind: 'hsl', step: 'upsell', highest: current.highestPayAmount }, _service_completion__WEBPACK_IMPORTED_MODULE_20__.POST_SHOW_UPSELL_MS);
         }
     }
     else if (args.step === 'upsell') {
         if (await paidSinceShow(chatId))
             return;
         try {
-            await sendToUserAutomated(client, chatId, { message: (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)((0,_conversation_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_14__.getUpsellMessage)(Number(args.highest) || 0)) });
+            await sendToUserAutomated(client, chatId, { message: (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)((0,_conversation_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_15__.getUpsellMessage)(Number(args.highest) || 0)) });
         }
         catch (error) {
-            logger.error((0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_8__.parseError)(error, `executehsl.upsell.${chatId}`, false));
+            logger.error((0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_9__.parseError)(error, `executehsl.upsell.${chatId}`, false));
         }
     }
     else if (args.step === 'reengage') {
-        await sendToUserAutomated(client, chatId, { message: _conversation_state_upsell_quiet__WEBPACK_IMPORTED_MODULE_15__.REENGAGE_AFTER_SOMETIME });
-        await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_7__.sleep)(15000);
+        await sendToUserAutomated(client, chatId, { message: _conversation_state_upsell_quiet__WEBPACK_IMPORTED_MODULE_16__.REENGAGE_AFTER_SOMETIME });
+        await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_8__.sleep)(15000);
         if ((Number(args.videos) || 0) < 5) {
             try {
-                await sendToUserAutomated(client, chatId, { message: _conversation_state_upsell_quiet__WEBPACK_IMPORTED_MODULE_15__.MESSAGE_AFTER_SOMETIME });
+                await sendToUserAutomated(client, chatId, { message: _conversation_state_upsell_quiet__WEBPACK_IMPORTED_MODULE_16__.MESSAGE_AFTER_SOMETIME });
                 await sendToUserAutomated(client, chatId, { message: (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)(_conversation_messages_conversational_replies__WEBPACK_IMPORTED_MODULE_3__.awayMessages), schedule: (60 * 5) + (Date.now() / 1000) });
                 await sendToUserAutomated(client, chatId, { message: (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)(_conversation_messages_conversational_replies__WEBPACK_IMPORTED_MODULE_3__.awayMessages), schedule: (60 * 10) + (Date.now() / 1000) });
                 await sendToUserAutomated(client, chatId, { message: (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)(_conversation_messages_conversational_replies__WEBPACK_IMPORTED_MODULE_3__.awayMessages), schedule: (60 * 15) + (Date.now() / 1000) });
             }
             catch (error) {
-                logger.error((0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_8__.parseError)(error, "Failed to send messages", false));
+                logger.error((0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_9__.parseError)(error, "Failed to send messages", false));
             }
         }
-        (0,_shared_schedule_task__WEBPACK_IMPORTED_MODULE_18__.scheduleCoreUtilsTask)(() => recallAfterShow(chatId), _service_completion__WEBPACK_IMPORTED_MODULE_19__.POST_SHOW_RECALL_MS, `executehsl.recall.${chatId}`);
+        (0,_shared_schedule_task__WEBPACK_IMPORTED_MODULE_19__.scheduleCoreUtilsTask)(() => recallAfterShow(chatId), _service_completion__WEBPACK_IMPORTED_MODULE_20__.POST_SHOW_RECALL_MS, `executehsl.recall.${chatId}`);
     }
 }
 /** Auto re-call after a big show (plain timer: a restart skips it, as the owner decided); the ladder's recallAfterShowDue decides. */
 async function recallAfterShow(chatId) {
     const userDetail = await _data_user_data_crud__WEBPACK_IMPORTED_MODULE_1__.UserDataDtoCrud.getInstance().read(chatId);
-    if (userDetail && (0,_payments_ladder__WEBPACK_IMPORTED_MODULE_5__.recallAfterShowDue)(userDetail, Date.now())) {
-        await (0,_call_initiation__WEBPACK_IMPORTED_MODULE_4__.initiateCall)(userDetail.payAmount, userDetail, 'ReCalling');
+    if (userDetail && (0,_payments_ladder__WEBPACK_IMPORTED_MODULE_6__.recallAfterShowDue)(userDetail, Date.now())) {
+        await (0,_call_initiation__WEBPACK_IMPORTED_MODULE_5__.initiateCall)(userDetail.payAmount, userDetail, 'ReCalling');
     }
 }
 
@@ -63163,7 +63165,8 @@ const singleReact = `{Awww|Hehe|Omg|Ufff|Heyy|Youu|Lol|Haha|Awwwie|Haww|Oye|Eiii
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   buildDemoMenu: () => (/* binding */ buildDemoMenu),
-/* harmony export */   demoMenuRows: () => (/* binding */ demoMenuRows)
+/* harmony export */   demoMenuRows: () => (/* binding */ demoMenuRows),
+/* harmony export */   faceMenuRows: () => (/* binding */ faceMenuRows)
 /* harmony export */ });
 // SINGLE SOURCE for the demo price menu (Pics / Video / Voice).
 //
@@ -63178,6 +63181,11 @@ const demoMenuRows = [
     { label: "Video Cal", amount: "𝟱𝟬₹" },
     { label: "Voice Cal", amount: "𝟰𝟬₹" },
     { label: "Prvt Pics ", amount: "𝟮𝟱₹" },
+];
+// Second-show / full-show price rows (No Face / With Face), rendered with buildDemoMenu like the demo menu.
+const faceMenuRows = [
+    { label: "No Face", amount: "𝟭𝟬𝟬₹" },
+    { label: "With Face", amount: "𝟭𝟱𝟬₹" },
 ];
 /**
  * Render the demo menu as a column-aligned list inside a monospace code fence (the only way to
@@ -63970,6 +63978,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   doing: () => (/* binding */ doing),
 /* harmony export */   dp: () => (/* binding */ dp),
 /* harmony export */   fine: () => (/* binding */ fine),
+/* harmony export */   fullShowOffer: () => (/* binding */ fullShowOffer),
 /* harmony export */   getChannelLinks: () => (/* binding */ getChannelLinks),
 /* harmony export */   getNameGreet: () => (/* binding */ getNameGreet),
 /* harmony export */   getPynw: () => (/* binding */ getPynw),
@@ -64059,6 +64068,8 @@ const qr1 = '**Pay to this NEW QR Code!!**';
 const pynw = getPynw();
 // buildDemoMenu() already supplies the leading/trailing newlines around the code fence,
 // so we must NOT add our own \n before/after it — that produced extra blank lines.
+// Full-show offer after a demo (post-show, operator hs/dmvr, pics, unread replies).
+const fullShowOffer = `**Take Full Show Baby...!!**\nPussy also!!${(0,_demo_menu__WEBPACK_IMPORTED_MODULE_2__.buildDemoMenu)(_demo_menu__WEBPACK_IMPORTED_MODULE_2__.faceMenuRows)}`;
 const demo = `\n**DEMO Services:**${(0,_demo_menu__WEBPACK_IMPORTED_MODULE_2__.buildDemoMenu)()}\n\n**Pay on My Website 👉🏻 ${process.env.link}**`;
 const noFreeDemo = `**No FREE** Demos!!`;
 const installments = 'You Can Take **Video Call** in Installments!!\n\n**Like... Daily 15Mins!!**\nSo 4 days u can enjoy in **Full video Call.** 🤗';
@@ -64286,31 +64297,31 @@ const demoMenus = [
     `\n**𝗗𝗲𝗺𝗼 𝗟𝗶𝘀𝘁:**${(0,_demo_menu__WEBPACK_IMPORTED_MODULE_0__.buildDemoMenu)()}`,
 ];
 const entry50Menus = [
-    `**𝗠𝗲𝗻𝘂:**\n• Quick Demo              **𝟱𝟬₹**`,
-    `**𝗢𝗽𝘁𝗶𝗼𝗻𝘀:**\n• Demo Access             **𝟱𝟬₹**`,
-    `**𝗦𝗽𝗲𝗰𝗶𝗮𝗹 𝗢𝗳𝗳𝗲𝗿:**\n• Trial Demo              **𝟱𝟬₹**`,
-    `**𝗣𝗿𝗲𝗺𝗶𝘂𝗺 𝗠𝗲𝗻𝘂:**\n• Trial Demo              **𝟱𝟬₹**`,
+    `**𝗠𝗲𝗻𝘂:**${(0,_demo_menu__WEBPACK_IMPORTED_MODULE_0__.buildDemoMenu)([{ label: "Quick Demo", amount: "𝟱𝟬₹" }])}`,
+    `**𝗢𝗽𝘁𝗶𝗼𝗻𝘀:**${(0,_demo_menu__WEBPACK_IMPORTED_MODULE_0__.buildDemoMenu)([{ label: "Demo Access", amount: "𝟱𝟬₹" }])}`,
+    `**𝗦𝗽𝗲𝗰𝗶𝗮𝗹 𝗢𝗳𝗳𝗲𝗿:**${(0,_demo_menu__WEBPACK_IMPORTED_MODULE_0__.buildDemoMenu)([{ label: "Trial Demo", amount: "𝟱𝟬₹" }])}`,
+    `**𝗣𝗿𝗲𝗺𝗶𝘂𝗺 𝗠𝗲𝗻𝘂:**${(0,_demo_menu__WEBPACK_IMPORTED_MODULE_0__.buildDemoMenu)([{ label: "Trial Demo", amount: "𝟱𝟬₹" }])}`,
 ];
 const menu150 = [
-    `**𝗠𝗲𝗻𝘂:**\n• No Face                 **𝟭𝟬𝟬₹**\n• With Face               **𝟭𝟱𝟬₹**`,
-    `**𝗢𝗽𝘁𝗶𝗼𝗻𝘀:**\n• No Face        **𝟭𝟬𝟬₹**\n• With Face      **𝟭𝟱𝟬₹**`,
-    `**𝗟𝗶𝘀𝘁:**\n• No Face                 **𝟭𝟬𝟬₹**\n• With Face              **𝟭𝟱𝟬₹**`,
-    `**𝗣𝗿𝗶𝗰𝗲𝘀:**\n• No Face          **𝟭𝟬𝟬₹**\n• With Face        **𝟭𝟱𝟬₹**`,
+    `**𝗠𝗲𝗻𝘂:**${(0,_demo_menu__WEBPACK_IMPORTED_MODULE_0__.buildDemoMenu)(_demo_menu__WEBPACK_IMPORTED_MODULE_0__.faceMenuRows)}`,
+    `**𝗢𝗽𝘁𝗶𝗼𝗻𝘀:**${(0,_demo_menu__WEBPACK_IMPORTED_MODULE_0__.buildDemoMenu)(_demo_menu__WEBPACK_IMPORTED_MODULE_0__.faceMenuRows)}`,
+    `**𝗟𝗶𝘀𝘁:**${(0,_demo_menu__WEBPACK_IMPORTED_MODULE_0__.buildDemoMenu)(_demo_menu__WEBPACK_IMPORTED_MODULE_0__.faceMenuRows)}`,
+    `**𝗣𝗿𝗶𝗰𝗲𝘀:**${(0,_demo_menu__WEBPACK_IMPORTED_MODULE_0__.buildDemoMenu)(_demo_menu__WEBPACK_IMPORTED_MODULE_0__.faceMenuRows)}`,
 ];
 const menu350 = [
-    `**𝟯𝟬 𝗺𝗶𝗻𝘀 𝗠𝗲𝗻𝘂:**\n• Full service            **𝟯𝟱𝟬₹**`,
-    `**𝗢𝗽𝘁𝗶𝗼𝗻:**\n• 𝟯𝟬 mins Full Call        **𝟯𝟱𝟬₹**`,
-    `**𝗣𝗿𝗶𝗰𝗲:**\n• 𝟯𝟬 mins Video Call sex    **𝟯𝟱𝟬₹**`,
+    `**𝟯𝟬 𝗺𝗶𝗻𝘀 𝗠𝗲𝗻𝘂:**${(0,_demo_menu__WEBPACK_IMPORTED_MODULE_0__.buildDemoMenu)([{ label: "Full service", amount: "𝟯𝟱𝟬₹" }])}`,
+    `**𝗢𝗽𝘁𝗶𝗼𝗻:**${(0,_demo_menu__WEBPACK_IMPORTED_MODULE_0__.buildDemoMenu)([{ label: "𝟯𝟬 mins Full Call", amount: "𝟯𝟱𝟬₹" }])}`,
+    `**𝗣𝗿𝗶𝗰𝗲:**${(0,_demo_menu__WEBPACK_IMPORTED_MODULE_0__.buildDemoMenu)([{ label: "𝟯𝟬 mins Video Call sex", amount: "𝟯𝟱𝟬₹" }])}`,
 ];
 const menu600 = [
-    `**𝟭 𝗵𝗼𝘂𝗿 𝗠𝗲𝗻𝘂:**\n• Unlimited access         **𝟲𝟬𝟬₹**`,
-    `**𝗙𝘂𝗹𝗹 𝗺𝗼𝗱𝗲:**\n• 𝟭 hour full              **𝟲𝟬𝟬₹**`,
-    `**𝗙𝘂𝗹𝗹 𝗻𝗶𝗴𝗵𝘁 𝗳𝗲𝗲𝗹:**\n• 𝟭 hour session           **𝟲𝟬𝟬₹**`,
-    `**𝗨𝘀𝗲 𝗺𝗲:**\n• 𝗙𝘂𝗹𝗹 𝟭 hour              **𝟲𝟬𝟬₹**`,
+    `**𝟭 𝗵𝗼𝘂𝗿 𝗠𝗲𝗻𝘂:**${(0,_demo_menu__WEBPACK_IMPORTED_MODULE_0__.buildDemoMenu)([{ label: "Unlimited access", amount: "𝟲𝟬𝟬₹" }])}`,
+    `**𝗙𝘂𝗹𝗹 𝗺𝗼𝗱𝗲:**${(0,_demo_menu__WEBPACK_IMPORTED_MODULE_0__.buildDemoMenu)([{ label: "𝟭 hour full", amount: "𝟲𝟬𝟬₹" }])}`,
+    `**𝗙𝘂𝗹𝗹 𝗻𝗶𝗴𝗵𝘁 𝗳𝗲𝗲𝗹:**${(0,_demo_menu__WEBPACK_IMPORTED_MODULE_0__.buildDemoMenu)([{ label: "𝟭 hour session", amount: "𝟲𝟬𝟬₹" }])}`,
+    `**𝗨𝘀𝗲 𝗺𝗲:**${(0,_demo_menu__WEBPACK_IMPORTED_MODULE_0__.buildDemoMenu)([{ label: "𝗙𝘂𝗹𝗹 𝟭 hour", amount: "𝟲𝟬𝟬₹" }])}`,
 ];
 const voiceMenus = [
-    `**𝗩𝗼𝗶𝗰𝗲 𝗖𝗮𝗹𝗹:**\n• Voice sex session        **𝟯𝟱𝟬₹**`,
-    `**𝗠𝗲𝗻𝘂:**\n• Voice call sex           **𝟯𝟱𝟬₹**`,
+    `**𝗩𝗼𝗶𝗰𝗲 𝗖𝗮𝗹𝗹:**${(0,_demo_menu__WEBPACK_IMPORTED_MODULE_0__.buildDemoMenu)([{ label: "Voice sex session", amount: "𝟯𝟱𝟬₹" }])}`,
+    `**𝗠𝗲𝗻𝘂:**${(0,_demo_menu__WEBPACK_IMPORTED_MODULE_0__.buildDemoMenu)([{ label: "Voice call sex", amount: "𝟯𝟱𝟬₹" }])}`,
 ];
 const paidShortDurationPriceMsgs = [
     `For **5 mins**, take the **Demo Video Call** baby\n\nPrice is **50₹**.`,
@@ -64702,26 +64713,27 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _messages_pick_one__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../messages/pick-one */ "./src/conversation/messages/pick-one.ts");
 /* harmony import */ var _messages_sexual_replies__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../messages/sexual-replies */ "./src/conversation/messages/sexual-replies.ts");
 /* harmony import */ var _messages_standard_messages__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../messages/standard-messages */ "./src/conversation/messages/standard-messages.ts");
-/* harmony import */ var _messages_upsell_messages__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ../messages/upsell-messages */ "./src/conversation/messages/upsell-messages.ts");
-/* harmony import */ var _payments_service_eligibility__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ../../payments/service-eligibility */ "./src/payments/service-eligibility.ts");
-/* harmony import */ var _payments_ladder__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ../../payments/ladder */ "./src/payments/ladder.ts");
-/* harmony import */ var _tp_messages__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ../tp-messages */ "./src/conversation/tp-messages.ts");
-/* harmony import */ var _telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ../../telegram/flood-safe-send */ "./src/telegram/flood-safe-send.ts");
-/* harmony import */ var _replier__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ../../replier */ "./src/replier/index.ts");
-/* harmony import */ var _payments_ask_to_pay_by_event__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ../../payments/ask-to-pay-by-event */ "./src/payments/ask-to-pay-by-event.ts");
-/* harmony import */ var _data_user_data_crud__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! ../../data/user-data-crud */ "./src/data/user-data-crud.ts");
-/* harmony import */ var _pattern_followup__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! ./pattern-followup */ "./src/conversation/patterns/pattern-followup.ts");
-/* harmony import */ var _outbound_chat_notice__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! ../../outbound/chat-notice */ "./src/outbound/chat-notice.ts");
-/* harmony import */ var _greetings_promo_pic__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! ../../greetings/promo-pic */ "./src/greetings/promo-pic.ts");
-/* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
-/* harmony import */ var _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_17__ = __webpack_require__(/*! @tg/core/utils/TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
-/* harmony import */ var _tg_core_utils_notification_format__WEBPACK_IMPORTED_MODULE_18__ = __webpack_require__(/*! @tg/core/utils/notification-format */ "../../packages/tg-core/src/utils/notification-format.ts");
-/* harmony import */ var _messages_post_show_resell__WEBPACK_IMPORTED_MODULE_19__ = __webpack_require__(/*! ../messages/post-show-resell */ "./src/conversation/messages/post-show-resell.ts");
-/* harmony import */ var _calls_call_me__WEBPACK_IMPORTED_MODULE_20__ = __webpack_require__(/*! ../../calls/call-me */ "./src/calls/call-me.ts");
-/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_21__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
-/* harmony import */ var _number_intent__WEBPACK_IMPORTED_MODULE_22__ = __webpack_require__(/*! ./number-intent */ "./src/conversation/patterns/number-intent.ts");
-/* harmony import */ var _state_chat_moments__WEBPACK_IMPORTED_MODULE_23__ = __webpack_require__(/*! ../state/chat-moments */ "./src/conversation/state/chat-moments.ts");
-/* harmony import */ var _state_upsell_quiet__WEBPACK_IMPORTED_MODULE_24__ = __webpack_require__(/*! ../state/upsell-quiet */ "./src/conversation/state/upsell-quiet.ts");
+/* harmony import */ var _messages_demo_menu__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ../messages/demo-menu */ "./src/conversation/messages/demo-menu.ts");
+/* harmony import */ var _messages_upsell_messages__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ../messages/upsell-messages */ "./src/conversation/messages/upsell-messages.ts");
+/* harmony import */ var _payments_service_eligibility__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ../../payments/service-eligibility */ "./src/payments/service-eligibility.ts");
+/* harmony import */ var _payments_ladder__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ../../payments/ladder */ "./src/payments/ladder.ts");
+/* harmony import */ var _tp_messages__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ../tp-messages */ "./src/conversation/tp-messages.ts");
+/* harmony import */ var _telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ../../telegram/flood-safe-send */ "./src/telegram/flood-safe-send.ts");
+/* harmony import */ var _replier__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ../../replier */ "./src/replier/index.ts");
+/* harmony import */ var _payments_ask_to_pay_by_event__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! ../../payments/ask-to-pay-by-event */ "./src/payments/ask-to-pay-by-event.ts");
+/* harmony import */ var _data_user_data_crud__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! ../../data/user-data-crud */ "./src/data/user-data-crud.ts");
+/* harmony import */ var _pattern_followup__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! ./pattern-followup */ "./src/conversation/patterns/pattern-followup.ts");
+/* harmony import */ var _outbound_chat_notice__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! ../../outbound/chat-notice */ "./src/outbound/chat-notice.ts");
+/* harmony import */ var _greetings_promo_pic__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! ../../greetings/promo-pic */ "./src/greetings/promo-pic.ts");
+/* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_17__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
+/* harmony import */ var _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_18__ = __webpack_require__(/*! @tg/core/utils/TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
+/* harmony import */ var _tg_core_utils_notification_format__WEBPACK_IMPORTED_MODULE_19__ = __webpack_require__(/*! @tg/core/utils/notification-format */ "../../packages/tg-core/src/utils/notification-format.ts");
+/* harmony import */ var _messages_post_show_resell__WEBPACK_IMPORTED_MODULE_20__ = __webpack_require__(/*! ../messages/post-show-resell */ "./src/conversation/messages/post-show-resell.ts");
+/* harmony import */ var _calls_call_me__WEBPACK_IMPORTED_MODULE_21__ = __webpack_require__(/*! ../../calls/call-me */ "./src/calls/call-me.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_22__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _number_intent__WEBPACK_IMPORTED_MODULE_23__ = __webpack_require__(/*! ./number-intent */ "./src/conversation/patterns/number-intent.ts");
+/* harmony import */ var _state_chat_moments__WEBPACK_IMPORTED_MODULE_24__ = __webpack_require__(/*! ../state/chat-moments */ "./src/conversation/state/chat-moments.ts");
+/* harmony import */ var _state_upsell_quiet__WEBPACK_IMPORTED_MODULE_25__ = __webpack_require__(/*! ../state/upsell-quiet */ "./src/conversation/state/upsell-quiet.ts");
 /**
  * Paid User Specific Pattern Handlers
  * These patterns only apply to users who have paid (payAmount >= 25)
@@ -64752,10 +64764,11 @@ __webpack_require__.r(__webpack_exports__);
 
 
 
+
 /** Every user send through this helper here is a payment text (direct answers; outbound arbiter §5.1 row 6): tagged for the [OUTBOUND] log only (outbound/outbound-log.ts). */
 const OUTBOUND_INTENT = 'payment';
-const sendMessageWithTimeout = (client, entity, params, options = {}) => (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_9__.sendMessageWithTimeout)(client, entity, params, { intent: OUTBOUND_INTENT, ...options });
-const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_21__.Logger("tg-aut:paid-patterns");
+const sendMessageWithTimeout = (client, entity, params, options = {}) => (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_10__.sendMessageWithTimeout)(client, entity, params, { intent: OUTBOUND_INTENT, ...options });
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_22__.Logger("tg-aut:paid-patterns");
 /**
  * A minutes message ("remaing 6 min", "u did only 4 minutes") this soon after a delivered show is about the call that
  * just ended: answer with callOverMessages, not the duration pitch. Same 'demo' moment askToPayByEvent reads (noted
@@ -64767,15 +64780,15 @@ const POST_SHOW_MINUTES_WINDOW_MS = 30 * 60 * 1000;
  * the user asked for the price / a call, else the post-show "after sometime" line (conversation/state/upsell-quiet).
  */
 function callOverOrQuiet(chatId) {
-    const quiet = (0,_state_upsell_quiet__WEBPACK_IMPORTED_MODULE_24__.upsellQuietAnswer)(chatId);
+    const quiet = (0,_state_upsell_quiet__WEBPACK_IMPORTED_MODULE_25__.upsellQuietAnswer)(chatId);
     if (quiet === 'price')
         return (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)(_messages_standard_messages__WEBPACK_IMPORTED_MODULE_4__.pricelistArray);
     if (quiet === 'soft')
-        return (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)([..._state_upsell_quiet__WEBPACK_IMPORTED_MODULE_24__.UPSELL_QUIET_REPLIES]);
-    return (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)(_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_5__.callOverMessages);
+        return (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)([..._state_upsell_quiet__WEBPACK_IMPORTED_MODULE_25__.UPSELL_QUIET_REPLIES]);
+    return (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)(_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_6__.callOverMessages);
 }
 function showDeliveredRecently(chatId) {
-    return (0,_state_chat_moments__WEBPACK_IMPORTED_MODULE_23__.msSince)(chatId, 'demo') < POST_SHOW_MINUTES_WINDOW_MS;
+    return (0,_state_chat_moments__WEBPACK_IMPORTED_MODULE_24__.msSince)(chatId, 'demo') < POST_SHOW_MINUTES_WINDOW_MS;
 }
 // Waiting for / asking where the call is: never a complaint about the last call (payment words are checked too).
 const WAITING_FOR_CALL = ['waiting', 'why no call', 'why not call', 'not coming', 'not calling', 'kab', 'where', 'nahi aaya', 'nhi aaya', 'nahi aya', 'nhi aya', 'nahi aayi', 'nhi aayi'];
@@ -64795,12 +64808,12 @@ const MINUTES_FOR_THIS_PRICE = /\b(?:this|that|same)\s+(?:price|amount|rate)\b|\
  * the amount (no duration to price), so it wants the duration line, not the price/pay reply.
  */
 function asksMinutesForPrice(text) {
-    if ((0,_number_intent__WEBPACK_IMPORTED_MODULE_22__.extractDurationMinutes)(text) !== -1 || (0,_number_intent__WEBPACK_IMPORTED_MODULE_22__.durationIntent)(text) !== 'question')
+    if ((0,_number_intent__WEBPACK_IMPORTED_MODULE_23__.extractDurationMinutes)(text) !== -1 || (0,_number_intent__WEBPACK_IMPORTED_MODULE_23__.durationIntent)(text) !== 'question')
         return false;
     if (MINUTES_FOR_THIS_PRICE.test(text.toLowerCase()))
         return true;
     const hasHowMuchPrice = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['how', 'hw', 'hm']) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['much', 'mch']);
-    return (0,_number_intent__WEBPACK_IMPORTED_MODULE_22__.firstAmountFromText)(text) > 0 && !hasHowMuchPrice && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['price', 'rate', 'cost', 'charge', 'amount', 'per min', 'pay']);
+    return (0,_number_intent__WEBPACK_IMPORTED_MODULE_23__.firstAmountFromText)(text) > 0 && !hasHowMuchPrice && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['price', 'rate', 'cost', 'charge', 'amount', 'per min', 'pay']);
 }
 /**
  * Duration response messages
@@ -64847,13 +64860,13 @@ function getDurationMessageByUserState(userDetails) {
 }
 async function notifyPaidPatternWarning(html, context) {
     try {
-        const sent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_17__.BotConfig.getInstance().sendHtml(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_17__.ChannelCategory.USER_WARNINGS, html);
+        const sent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_18__.BotConfig.getInstance().sendHtml(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_18__.ChannelCategory.USER_WARNINGS, html);
         if (sent === false) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_16__.parseError)(new Error("Paid pattern warning notification returned false"), context, false);
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_17__.parseError)(new Error("Paid pattern warning notification returned false"), context, false);
         }
     }
     catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_16__.parseError)(error, context, false);
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_17__.parseError)(error, context, false);
     }
 }
 function trimPunctuation(value) {
@@ -65125,12 +65138,12 @@ function hasRepeatRecoveryIntent(text) {
 }
 function paidDurationPriceReplyPool(minutes) {
     if (minutes < 10)
-        return _messages_upsell_messages__WEBPACK_IMPORTED_MODULE_5__.paidShortDurationPriceMsgs;
+        return _messages_upsell_messages__WEBPACK_IMPORTED_MODULE_6__.paidShortDurationPriceMsgs;
     if (minutes < 30)
-        return _messages_upsell_messages__WEBPACK_IMPORTED_MODULE_5__.paidTenMinuteDurationPriceMsgs;
+        return _messages_upsell_messages__WEBPACK_IMPORTED_MODULE_6__.paidTenMinuteDurationPriceMsgs;
     if (minutes < 60)
-        return _messages_upsell_messages__WEBPACK_IMPORTED_MODULE_5__.paidThirtyMinuteDurationPriceMsgs;
-    return _messages_upsell_messages__WEBPACK_IMPORTED_MODULE_5__.paidHourDurationPriceMsgs;
+        return _messages_upsell_messages__WEBPACK_IMPORTED_MODULE_6__.paidThirtyMinuteDurationPriceMsgs;
+    return _messages_upsell_messages__WEBPACK_IMPORTED_MODULE_6__.paidHourDurationPriceMsgs;
 }
 /**
  * Paid-specific patterns
@@ -65155,7 +65168,7 @@ const paidPatterns = [
             // Owner 2026-10-20: after a delivered show (the 'demo' moment within 30 min, or demoGiven on the record), a
             // complaint about the call ("just 2 mins", "itna hi?", "only 55 sec") gets callOverMessages.
             const PAYMENT_ARRAY = ['pay', 'payment', 'paisa', 'paise', 'transaction', 'amt', 'ant', 'amount', 'rupee', 'rupees', 'rs', '₹', '$'];
-            const intent = (0,_number_intent__WEBPACK_IMPORTED_MODULE_22__.durationIntent)(text);
+            const intent = (0,_number_intent__WEBPACK_IMPORTED_MODULE_23__.durationIntent)(text);
             const recentShow = showDeliveredRecently(context.chatId);
             const showDelivered = recentShow || Boolean(userDetails.demoGiven);
             // "paid 5 min ago why no call" / "waiting 10 min, call kab?" is a repeat payer waiting for the next call, not
@@ -65165,13 +65178,13 @@ const paidPatterns = [
                 await sendMessageWithTimeout(event.client, context.chatId, { message: callOverOrQuiet(context.chatId) });
                 return true;
             }
-            const durationMinutes = (0,_number_intent__WEBPACK_IMPORTED_MODULE_22__.extractDurationMinutes)(text);
+            const durationMinutes = (0,_number_intent__WEBPACK_IMPORTED_MODULE_23__.extractDurationMinutes)(text);
             const TIME_ARRAY = ['time', 'tim', 'duration', 'durat', 'lamba', 'lamb', 'when', 'wen', 'kab', 'how long'];
             const DURATION_UNITS = ['min', 'mins', 'minute', 'minutes', 'miny', 'mint'];
             const KITNA_ARRAY = ['dher', 'der', 'entha'];
             const HOW_MUCH_QUESTION = ['how much', 'hw much'];
             const bareDurationUnit = DURATION_UNITS.includes(trimPunctuation(text));
-            const hasDurationUnit = hasWordOrPhrase(text, DURATION_UNITS) || (0,_number_intent__WEBPACK_IMPORTED_MODULE_22__.hasMinuteUnit)(text);
+            const hasDurationUnit = hasWordOrPhrase(text, DURATION_UNITS) || (0,_number_intent__WEBPACK_IMPORTED_MODULE_23__.hasMinuteUnit)(text);
             // "one more time" / "again" asks for another call, not how long: leave it to user_repeat_service_request.
             if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['one more', 'once more', 'again', 'another', 'dobara', 'phir se', 'phirse']) &&
                 !hasDurationUnit &&
@@ -65206,7 +65219,7 @@ const paidPatterns = [
                 !hasNumberedKitnaDuration &&
                 (minutesForPrice || (!(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, PAYMENT_ARRAY) && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['price', 'cost', 'rate', 'amount', 'money', 'pay'])))) {
                 // "remaing 6 min" is 6 minutes, not ₹6 (kavya1 1008701926 2026-10-19 got the "Demo : 1 minute" menu).
-                const money = (0,_number_intent__WEBPACK_IMPORTED_MODULE_22__.firstAmountFromText)(text);
+                const money = (0,_number_intent__WEBPACK_IMPORTED_MODULE_23__.firstAmountFromText)(text);
                 // After a show a question ("how many mins?", "150 kitna minute") gets the duration line for the amount
                 // in the text, else for payAmount; a bare "5 min" right after the show is still about that call.
                 const message = intent === 'question' && showDelivered
@@ -65229,8 +65242,8 @@ const paidPatterns = [
         description: 'Number-only messages from paid users',
         handler: async (event, text, allMsg, userDetails, context) => {
             if (startsWithDigit(text) && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['time', 'duration', 'min', 'hr', 'hour'])) {
-                if ((0,_state_upsell_quiet__WEBPACK_IMPORTED_MODULE_24__.upsellQuietAnswer)(context.chatId) === 'soft') {
-                    await (0,_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)([..._state_upsell_quiet__WEBPACK_IMPORTED_MODULE_24__.UPSELL_QUIET_REPLIES]), true);
+                if ((0,_state_upsell_quiet__WEBPACK_IMPORTED_MODULE_25__.upsellQuietAnswer)(context.chatId) === 'soft') {
+                    await (0,_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)([..._state_upsell_quiet__WEBPACK_IMPORTED_MODULE_25__.UPSELL_QUIET_REPLIES]), true);
                     return true;
                 }
                 await (0,_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)([_messages_standard_messages__WEBPACK_IMPORTED_MODULE_4__.number, 'Haa fine!!\nPay and send Screenshot', "Hmm Done baby!\nPay and msg"]), true);
@@ -65246,11 +65259,11 @@ const paidPatterns = [
         description: 'Urgency requests like "call now", "do now" for paid users - confirm service',
         handler: async (event, text, allMsg, userDetails, context) => {
             if (isUrgencyRequest(text)) {
-                if ((0,_payments_service_eligibility__WEBPACK_IMPORTED_MODULE_6__.canProceedWithService)(userDetails)) {
+                if ((0,_payments_service_eligibility__WEBPACK_IMPORTED_MODULE_7__.canProceedWithService)(userDetails)) {
                     await (0,_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)(_messages_sexual_replies__WEBPACK_IMPORTED_MODULE_3__.urgencyRequestPaid));
                 }
                 else {
-                    const currentUpsell = (0,_messages_post_show_resell__WEBPACK_IMPORTED_MODULE_19__.resellOr)(userDetails, _messages_upsell_messages__WEBPACK_IMPORTED_MODULE_5__.getUpsellMessage(userDetails.payAmount));
+                    const currentUpsell = (0,_messages_post_show_resell__WEBPACK_IMPORTED_MODULE_20__.resellOr)(userDetails, _messages_upsell_messages__WEBPACK_IMPORTED_MODULE_6__.getUpsellMessage(userDetails.payAmount));
                     await (0,_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)(currentUpsell));
                 }
                 return true;
@@ -65294,7 +65307,7 @@ const paidPatterns = [
                 const userChatState = stateManager.getUserState(context.chatId);
                 const lastCheatTime = userChatState.demoPicsSentTimestamp || 0; // Reuse timestamp field for cheat cooldown
                 // Owner, 2026-10-18: the original one-liner, "<CLIENT>: <linked name> (paid ₹N): <what they said>".
-                await notifyPaidPatternWarning(`\n<a href="${(0,_tg_core_utils_notification_format__WEBPACK_IMPORTED_MODULE_18__.escapeTelegramHtml)((0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_14__.chatUrl)(event.chatId.toString()))}">${(0,_tg_core_utils_notification_format__WEBPACK_IMPORTED_MODULE_18__.escapeTelegramHtml)(context.broadcastName || event.chatId.toString())}</a> (paid ₹${userDetails.payAmount ?? 0}): ${(0,_tg_core_utils_notification_format__WEBPACK_IMPORTED_MODULE_18__.escapeTelegramHtml)(event.message.text ?? "")}`, "PaidPatterns.cheatWarningNotification");
+                await notifyPaidPatternWarning(`\n<a href="${(0,_tg_core_utils_notification_format__WEBPACK_IMPORTED_MODULE_19__.escapeTelegramHtml)((0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_15__.chatUrl)(event.chatId.toString()))}">${(0,_tg_core_utils_notification_format__WEBPACK_IMPORTED_MODULE_19__.escapeTelegramHtml)(context.broadcastName || event.chatId.toString())}</a> (paid ₹${userDetails.payAmount ?? 0}): ${(0,_tg_core_utils_notification_format__WEBPACK_IMPORTED_MODULE_19__.escapeTelegramHtml)(event.message.text ?? "")}`, "PaidPatterns.cheatWarningNotification");
                 // Cooldown: Only process if 40+ seconds since last cheat message
                 if (lastCheatTime < Date.now() - 40000) {
                     userChatState.demoPicsSentTimestamp = Date.now(); // Update cooldown
@@ -65310,7 +65323,7 @@ const paidPatterns = [
                             "Its me only baby😚😚",
                             "No Dear, Please understand"
                         ], 1)[0];
-                        await (0,_calls_call_me__WEBPACK_IMPORTED_MODULE_20__.offerCallOrLink)(userDetails.chatId.toString(), () => (0,_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, `**${msgElement}\n\nSee here**👇👇\nhttps://zomCall.netlify.app/${process.env.clientId}/${userDetails.chatId.toString()}\n\nCall me now!!`), (text) => (0,_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, `**${msgElement}**\n\n${text}`));
+                        await (0,_calls_call_me__WEBPACK_IMPORTED_MODULE_21__.offerCallOrLink)(userDetails.chatId.toString(), () => (0,_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, `**${msgElement}\n\nSee here**👇👇\nhttps://zomCall.netlify.app/${process.env.clientId}/${userDetails.chatId.toString()}\n\nCall me now!!`), (text) => (0,_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, `**${msgElement}**\n\n${text}`));
                         await sleep(2000);
                     }
                     catch (error) {
@@ -65318,8 +65331,8 @@ const paidPatterns = [
                         logger.warn(`offerCallOrLink send failed for ${userDetails.chatId}`, error);
                     }
                     // Record the accusation (floored at 0: the grace sentinel -2 never absorbs one), then the shared escalation.
-                    userDetails = await _data_user_data_crud__WEBPACK_IMPORTED_MODULE_12__.UserDataDtoCrud.getInstance().updateSingleKey(context.chatId, _data_user_data_crud__WEBPACK_IMPORTED_MODULE_12__.user.cheatCount, Math.max(Number(userDetails.cheatCount) || 0, 0) + 1);
-                    await (0,_tp_messages__WEBPACK_IMPORTED_MODULE_8__.escalateCheat)(context.chatId, userDetails, event.message.id, initiateCall, () => (0,_calls_call_me__WEBPACK_IMPORTED_MODULE_20__.offerCallOrLink)(userDetails.chatId.toString(), () => (0,_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, `Telegram Call is not Connecting Baby!!\n\nYou can Call me here👇👇\nhttps://zomCall.netlify.app/${process.env.clientId}/${userDetails.chatId.toString()}\n\nCall me now!!`), (text) => (0,_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, text)));
+                    userDetails = await _data_user_data_crud__WEBPACK_IMPORTED_MODULE_13__.UserDataDtoCrud.getInstance().updateSingleKey(context.chatId, _data_user_data_crud__WEBPACK_IMPORTED_MODULE_13__.user.cheatCount, Math.max(Number(userDetails.cheatCount) || 0, 0) + 1);
+                    await (0,_tp_messages__WEBPACK_IMPORTED_MODULE_9__.escalateCheat)(context.chatId, userDetails, event.message.id, initiateCall, () => (0,_calls_call_me__WEBPACK_IMPORTED_MODULE_21__.offerCallOrLink)(userDetails.chatId.toString(), () => (0,_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, `Telegram Call is not Connecting Baby!!\n\nYou can Call me here👇👇\nhttps://zomCall.netlify.app/${process.env.clientId}/${userDetails.chatId.toString()}\n\nCall me now!!`), (text) => (0,_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, text)));
                 }
                 return true;
             }
@@ -65336,7 +65349,7 @@ const paidPatterns = [
             const contentType = getContentRequestType(text);
             if (contentType) {
                 // Send promo pic with retry logic (handles check and state management internally)
-                const sent = await (0,_greetings_promo_pic__WEBPACK_IMPORTED_MODULE_15__.sendPromoPic)(event.message.id, userDetails.chatId, `Want more...?\n\nTake VideoCall Dear...!!\n**Full NUDE, With FACE!!\n\n${process.env.demolink}/${process.env.clientId}**`, `./pic.jpg`, undefined, 'reply');
+                const sent = await (0,_greetings_promo_pic__WEBPACK_IMPORTED_MODULE_16__.sendPromoPic)(event.message.id, userDetails.chatId, `Want more...?\n\nTake VideoCall Dear...!!\n**Full NUDE, With FACE!!\n\n${process.env.demolink}/${process.env.clientId}**`, `./pic.jpg`, undefined, 'reply');
                 if (!sent) {
                     // If promo wasn't sent (already sent max times), ask for payment
                     await (0,_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)([
@@ -65368,16 +65381,16 @@ const paidPatterns = [
             if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, DEMO_ARRAY)) {
                 if (userDetails.payAmount < 40) {
                     await (0,_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)([_messages_standard_messages__WEBPACK_IMPORTED_MODULE_4__.just50, _messages_standard_messages__WEBPACK_IMPORTED_MODULE_4__.just50two]));
-                    (0,_pattern_followup__WEBPACK_IMPORTED_MODULE_13__.schedulePatternFollowup)(event, context, 17000, {
+                    (0,_pattern_followup__WEBPACK_IMPORTED_MODULE_14__.schedulePatternFollowup)(event, context, 17000, {
                         kind: 'reply', text: (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)(['Pay Dear!', 'Pay na baby!', 'Pay first reyy!', 'Just pay baby!']), file: './confirm.mp3',
                     }, { label: 'paid.demo.payConfirm' });
                 }
-                else if ((0,_state_upsell_quiet__WEBPACK_IMPORTED_MODULE_24__.upsellQuietAnswer)(context.chatId) === 'soft') {
-                    await (0,_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)([..._state_upsell_quiet__WEBPACK_IMPORTED_MODULE_24__.UPSELL_QUIET_REPLIES]));
+                else if ((0,_state_upsell_quiet__WEBPACK_IMPORTED_MODULE_25__.upsellQuietAnswer)(context.chatId) === 'soft') {
+                    await (0,_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)([..._state_upsell_quiet__WEBPACK_IMPORTED_MODULE_25__.UPSELL_QUIET_REPLIES]));
                 }
                 else {
                     await (0,_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, `${_messages_standard_messages__WEBPACK_IMPORTED_MODULE_4__.pricelist}\n\n${(0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)(_messages_standard_messages__WEBPACK_IMPORTED_MODULE_4__.PayMsgArray)}`);
-                    (0,_pattern_followup__WEBPACK_IMPORTED_MODULE_13__.schedulePatternFollowup)(event, context, 15000, { kind: 'reply', text: '', file: './takefull.mp3' }, { label: 'paid.demo.takefull' });
+                    (0,_pattern_followup__WEBPACK_IMPORTED_MODULE_14__.schedulePatternFollowup)(event, context, 15000, { kind: 'reply', text: '', file: './takefull.mp3' }, { label: 'paid.demo.takefull' });
                 }
                 return true;
             }
@@ -65402,16 +65415,16 @@ const paidPatterns = [
                         "That's not in Demo baby! 🙈\nTake **Full Service** na...\n**I'll show you EVERYTHING!!**",
                         "Demo me nahi baby! Take **Full Service** reyy...\n**Sab kuch dikhaungi!!** 🔥",
                     ]));
-                    (0,_pattern_followup__WEBPACK_IMPORTED_MODULE_13__.schedulePatternFollowup)(event, context, 15000, {
+                    (0,_pattern_followup__WEBPACK_IMPORTED_MODULE_14__.schedulePatternFollowup)(event, context, 15000, {
                         kind: 'respond', text: (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)([
-                            `**Pussy also!!**\n\nWithout Face : **100₹**\nWith Face      : **150₹**`,
-                            `**Pussy bhi baby!!**\n\nWithout Face : **100₹**\nWith Face : **150₹** 💦`,
-                            `Yes **Pussy** too reyy! 🙈\n\nNo Face : **100₹**\nWith Face : **150₹**`,
+                            `**Pussy also!!**${(0,_messages_demo_menu__WEBPACK_IMPORTED_MODULE_5__.buildDemoMenu)(_messages_demo_menu__WEBPACK_IMPORTED_MODULE_5__.faceMenuRows)}`,
+                            `**Pussy bhi baby!!** 💦${(0,_messages_demo_menu__WEBPACK_IMPORTED_MODULE_5__.buildDemoMenu)(_messages_demo_menu__WEBPACK_IMPORTED_MODULE_5__.faceMenuRows)}`,
+                            `Yes **Pussy** too reyy! 🙈${(0,_messages_demo_menu__WEBPACK_IMPORTED_MODULE_5__.buildDemoMenu)(_messages_demo_menu__WEBPACK_IMPORTED_MODULE_5__.faceMenuRows)}`,
                         ]),
                     }, { label: 'paid.explicit.pussyPrice' });
                 }
                 else {
-                    await (0,_payments_ask_to_pay_by_event__WEBPACK_IMPORTED_MODULE_11__.asktoPayByEvent)(event.client, userDetails, true);
+                    await (0,_payments_ask_to_pay_by_event__WEBPACK_IMPORTED_MODULE_12__.asktoPayByEvent)(event.client, userDetails, true);
                 }
                 return true;
             }
@@ -65430,7 +65443,7 @@ const paidPatterns = [
             const hasHowMuchPrice = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['how', 'hw', 'hm']) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['much', 'mch']);
             const hasBareKitnaDuration = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['kitna', 'kitne', 'kitni', 'kitn', 'kithna', 'kithne', 'kithni', 'entha', 'ethra']) &&
                 hasDurationWord &&
-                (0,_number_intent__WEBPACK_IMPORTED_MODULE_22__.firstNumberFromText)(text) === -1 &&
+                (0,_number_intent__WEBPACK_IMPORTED_MODULE_23__.firstNumberFromText)(text) === -1 &&
                 !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['price', 'rate', 'cost', 'charge', 'amount']);
             if (hasBareKitnaDuration)
                 return false;
@@ -65438,9 +65451,9 @@ const paidPatterns = [
             if (asksMinutesForPrice(text))
                 return false;
             if (hasDurationWord && ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, PRICE_FOR_DURATION) || hasHowMuchPrice) && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['free', 'timepass', 'time pas'])) {
-                const durationMinutes = (0,_number_intent__WEBPACK_IMPORTED_MODULE_22__.extractDurationMinutes)(text);
+                const durationMinutes = (0,_number_intent__WEBPACK_IMPORTED_MODULE_23__.extractDurationMinutes)(text);
                 if (durationMinutes === -1) {
-                    await (0,_payments_ask_to_pay_by_event__WEBPACK_IMPORTED_MODULE_11__.asktoPayByEvent)(event.client, userDetails, true);
+                    await (0,_payments_ask_to_pay_by_event__WEBPACK_IMPORTED_MODULE_12__.asktoPayByEvent)(event.client, userDetails, true);
                     return true;
                 }
                 await (0,_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)(paidDurationPriceReplyPool(durationMinutes)), true);
@@ -65461,34 +65474,34 @@ const paidPatterns = [
             const hasHowMuchPrice = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['how', 'hw', 'hm']) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['much', 'mch']);
             const AGE_QUERY = ['saal', 'year', 'years', 'yrs', 'age', 'umar', 'umra', 'vayasu', 'vayassu'];
             const PRICE_OBJECTION = ['high', 'jyada', 'expensive', 'kam', 'reduce', 'decrease', 'discount'];
-            const isBareDemoRequest = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, DEMO) && (0,_number_intent__WEBPACK_IMPORTED_MODULE_22__.firstAmountFromText)(text) <= 0;
+            const isBareDemoRequest = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, DEMO) && (0,_number_intent__WEBPACK_IMPORTED_MODULE_23__.firstAmountFromText)(text) <= 0;
             if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, AGE_QUERY) || (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['kitne ki ho', 'kitni ki ho']))
                 return false;
             if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, PRICE_OBJECTION))
                 return false;
             if (((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['how much']) || hasHowMuchPrice) && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['full'])) {
-                await (0,_payments_ask_to_pay_by_event__WEBPACK_IMPORTED_MODULE_11__.asktoPayByEvent)(event.client, userDetails, true);
+                await (0,_payments_ask_to_pay_by_event__WEBPACK_IMPORTED_MODULE_12__.asktoPayByEvent)(event.client, userDetails, true);
                 return true;
             }
             if (((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, PRICE) || hasHowMuchPrice) && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, FULL_SERVICE) && !isBareDemoRequest) {
-                const amount = (0,_number_intent__WEBPACK_IMPORTED_MODULE_22__.firstAmountFromText)(text);
+                const amount = (0,_number_intent__WEBPACK_IMPORTED_MODULE_23__.firstAmountFromText)(text);
                 if (amount > 0) {
-                    await (0,_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)(_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_5__.getUpsellMessage(amount)));
+                    await (0,_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)(_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_6__.getUpsellMessage(amount)));
                 }
                 else if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['150', 'one fifty'])) {
-                    await (0,_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)(_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_5__.getUpsellMessage(150)));
+                    await (0,_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)(_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_6__.getUpsellMessage(150)));
                 }
                 else if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['350', 'three fifty'])) {
-                    await (0,_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)(_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_5__.getUpsellMessage(350)));
+                    await (0,_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)(_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_6__.getUpsellMessage(350)));
                 }
                 else if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['600', 'six hundred'])) {
-                    await (0,_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)(_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_5__.getUpsellMessage(600)));
+                    await (0,_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)(_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_6__.getUpsellMessage(600)));
                 }
                 else if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['50', 'fifty'])) {
-                    await (0,_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)(_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_5__.getUpsellMessage(50)));
+                    await (0,_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)(_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_6__.getUpsellMessage(50)));
                 }
                 else {
-                    await (0,_payments_ask_to_pay_by_event__WEBPACK_IMPORTED_MODULE_11__.asktoPayByEvent)(event.client, userDetails, true);
+                    await (0,_payments_ask_to_pay_by_event__WEBPACK_IMPORTED_MODULE_12__.asktoPayByEvent)(event.client, userDetails, true);
                 }
                 return true;
             }
@@ -65510,15 +65523,15 @@ const paidPatterns = [
             }
             // Removed ' id' (matched "upi id"/"your id", stealing from user_upi_id_request).
             if (isBusyOrDetail || isGreeting) {
-                await (0,_replier__WEBPACK_IMPORTED_MODULE_10__.pushToReplies)(event, context.chatId, _messages_standard_messages__WEBPACK_IMPORTED_MODULE_4__.qr + `\n\n${_messages_standard_messages__WEBPACK_IMPORTED_MODULE_4__.link}`, './QR.jpg');
-                if (!userDetails.payAmount || userDetails.payAmount < _payments_ladder__WEBPACK_IMPORTED_MODULE_7__.DEMO_GRANT_MIN) {
-                    (0,_pattern_followup__WEBPACK_IMPORTED_MODULE_13__.schedulePatternFollowup)(event, context, 15000, {
+                await (0,_replier__WEBPACK_IMPORTED_MODULE_11__.pushToReplies)(event, context.chatId, _messages_standard_messages__WEBPACK_IMPORTED_MODULE_4__.qr + `\n\n${_messages_standard_messages__WEBPACK_IMPORTED_MODULE_4__.link}`, './QR.jpg');
+                if (!userDetails.payAmount || userDetails.payAmount < _payments_ladder__WEBPACK_IMPORTED_MODULE_8__.DEMO_GRANT_MIN) {
+                    (0,_pattern_followup__WEBPACK_IMPORTED_MODULE_14__.schedulePatternFollowup)(event, context, 15000, {
                         kind: 'respond', text: "**Heyy **" + context.senderJson.firstName + "\n\n" + _messages_standard_messages__WEBPACK_IMPORTED_MODULE_4__.demo + "\n\n" + (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)(_messages_standard_messages__WEBPACK_IMPORTED_MODULE_4__.PayMsgArray),
                     }, { label: 'paid.busy.demo' });
                 }
                 else {
-                    const currentUpsell = (0,_messages_post_show_resell__WEBPACK_IMPORTED_MODULE_19__.resellOr)(userDetails, _messages_upsell_messages__WEBPACK_IMPORTED_MODULE_5__.getUpsellMessage(userDetails.payAmount));
-                    (0,_pattern_followup__WEBPACK_IMPORTED_MODULE_13__.schedulePatternFollowup)(event, context, 15000, {
+                    const currentUpsell = (0,_messages_post_show_resell__WEBPACK_IMPORTED_MODULE_20__.resellOr)(userDetails, _messages_upsell_messages__WEBPACK_IMPORTED_MODULE_6__.getUpsellMessage(userDetails.payAmount));
+                    (0,_pattern_followup__WEBPACK_IMPORTED_MODULE_14__.schedulePatternFollowup)(event, context, 15000, {
                         kind: 'respond', text: "**Heyy **" + context.senderJson.firstName + "\n\n" + (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)(currentUpsell),
                     }, { label: 'paid.busy.upsell' });
                 }
@@ -65571,9 +65584,9 @@ const paidPatterns = [
             // Check if user is saying they already paid
             if (paymentState === 'confirmation') {
                 // Held (PAYMENT_CLAIM_HOLD_MS): the screenshot usually follows the claim, and its flow answers then.
-                if ((0,_payments_service_eligibility__WEBPACK_IMPORTED_MODULE_6__.canProceedWithService)(userDetails)) {
+                if ((0,_payments_service_eligibility__WEBPACK_IMPORTED_MODULE_7__.canProceedWithService)(userDetails)) {
                     // User recently paid - reassure them
-                    (0,_pattern_followup__WEBPACK_IMPORTED_MODULE_13__.holdPaymentClaimReply)(event, context, (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)([
+                    (0,_pattern_followup__WEBPACK_IMPORTED_MODULE_14__.holdPaymentClaimReply)(event, context, (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)([
                         `You already paid! 😊\n\nI will call you in **1-2 minutes!**\n\nJust wait a bit! ⏱️`,
                         `Yes baby, I know you paid! 💋\n\nCall is coming in **1-2 mins**...\nJust be patient! 😉`,
                         `Payment received! ✅\n\nI'm preparing for your call...\nWait **1-2 minutes** na! ⏰`
@@ -65582,11 +65595,11 @@ const paidPatterns = [
                 }
                 else {
                     // Old payment or no recent payment - need to pay again
-                    const currentUpsell = _messages_upsell_messages__WEBPACK_IMPORTED_MODULE_5__.getUpsellMessage(userDetails.payAmount);
-                    (0,_pattern_followup__WEBPACK_IMPORTED_MODULE_13__.holdPaymentClaimReply)(event, context, (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)([
-                        `That was **old payment** baby! 😔\n\nYour call time is **over**!\n\n**Pay again** for new call! 💋\n\n${(0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)((0,_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_5__.getUpsellMenu)(userDetails.payAmount))}`,
-                        `**Call Finished** already reyy! ⏰\n\nThat payment was for **previous call**!\n\n**Pay again** if you want more! 💸\n\n${(0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)((0,_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_5__.getUpsellMenu)(userDetails.payAmount))}`,
-                        `**Your Show Finished** Baby! 📱\n\nNeed to **pay again** for Full Show! 💦\n\n${(0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)((0,_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_5__.getUpsellMenu)(userDetails.payAmount))}`
+                    const currentUpsell = _messages_upsell_messages__WEBPACK_IMPORTED_MODULE_6__.getUpsellMessage(userDetails.payAmount);
+                    (0,_pattern_followup__WEBPACK_IMPORTED_MODULE_14__.holdPaymentClaimReply)(event, context, (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)([
+                        `That was **old payment** baby! 😔\n\nYour call time is **over**!\n\n**Pay again** for new call! 💋\n\n${(0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)((0,_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_6__.getUpsellMenu)(userDetails.payAmount))}`,
+                        `**Call Finished** already reyy! ⏰\n\nThat payment was for **previous call**!\n\n**Pay again** if you want more! 💸\n\n${(0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)((0,_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_6__.getUpsellMenu)(userDetails.payAmount))}`,
+                        `**Your Show Finished** Baby! 📱\n\nNeed to **pay again** for Full Show! 💦\n\n${(0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)((0,_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_6__.getUpsellMenu)(userDetails.payAmount))}`
                     ]), 'paid.oldPayment');
                     return true;
                 }
@@ -65619,8 +65632,8 @@ const paidPatterns = [
         scope: 'paid',
         description: 'All call requests (voice/video) for paid users - merged and enhanced',
         handler: async (event, text, allMsg, userDetails, context) => {
-            const tierUpsell = _messages_upsell_messages__WEBPACK_IMPORTED_MODULE_5__.getUpsellMessage(userDetails.payAmount);
-            const currentUpsell = (0,_messages_post_show_resell__WEBPACK_IMPORTED_MODULE_19__.resellOr)(userDetails, tierUpsell);
+            const tierUpsell = _messages_upsell_messages__WEBPACK_IMPORTED_MODULE_6__.getUpsellMessage(userDetails.payAmount);
+            const currentUpsell = (0,_messages_post_show_resell__WEBPACK_IMPORTED_MODULE_20__.resellOr)(userDetails, tierUpsell);
             // Voice message request (not video/voice call): "send voice", "audio bhej", etc.
             const VOICE = ['voice', 'voic', 'vois', 'voc', 'audio', 'awaz', 'awj', 'vn ', 'v.n'];
             const SHOW_SEND = ['send', 'bhej', 'bhejo', 'bejo', 'dedo', 'deo', 'show', 'bhe', 'do', 'dal'];
@@ -65631,7 +65644,7 @@ const paidPatterns = [
                 !isCallRequestExcluded(text) &&
                 !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, MUSIC) // guard: "listen music" is not a voice-message request
             ) {
-                await (0,_replier__WEBPACK_IMPORTED_MODULE_10__.pushToReplies)(event, userDetails.chatId, (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)(currentUpsell), './takefull.mp3');
+                await (0,_replier__WEBPACK_IMPORTED_MODULE_11__.pushToReplies)(event, userDetails.chatId, (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)(currentUpsell), './takefull.mp3');
                 return true;
             }
             const callType = getCallRequestType(text);
@@ -65643,7 +65656,7 @@ const paidPatterns = [
                     return true;
                 }
                 // Used up (no show left at their pay): call-over + the next rung's price, once per window.
-                if ((0,_payments_service_eligibility__WEBPACK_IMPORTED_MODULE_6__.serviceUsedUp)(userDetails)) {
+                if ((0,_payments_service_eligibility__WEBPACK_IMPORTED_MODULE_7__.serviceUsedUp)(userDetails)) {
                     const { answerUsedUpCallRequest } = await Promise.resolve(/*! import() */).then(__webpack_require__.bind(__webpack_require__, /*! ../used-up-answer */ "./src/conversation/used-up-answer.ts"));
                     if (await answerUsedUpCallRequest(event, userDetails, text, 'paid-pattern'))
                         return true;
@@ -65654,15 +65667,15 @@ const paidPatterns = [
                     return true;
                 // Upsell quiet after a ₹200+ show: a call request is the user's own ask (noted 'priceAsked'), so it gets
                 // the price list, but not the "call over, pay again" line or the follow-up upsell.
-                const quiet = (0,_state_upsell_quiet__WEBPACK_IMPORTED_MODULE_24__.upsellQuietAnswer)(context.chatId);
+                const quiet = (0,_state_upsell_quiet__WEBPACK_IMPORTED_MODULE_25__.upsellQuietAnswer)(context.chatId);
                 if (quiet !== null) {
-                    await (0,_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, quiet === 'price' ? (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)(_messages_standard_messages__WEBPACK_IMPORTED_MODULE_4__.pricelistArray) : (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)([..._state_upsell_quiet__WEBPACK_IMPORTED_MODULE_24__.UPSELL_QUIET_REPLIES]));
+                    await (0,_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, quiet === 'price' ? (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)(_messages_standard_messages__WEBPACK_IMPORTED_MODULE_4__.pricelistArray) : (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)([..._state_upsell_quiet__WEBPACK_IMPORTED_MODULE_25__.UPSELL_QUIET_REPLIES]));
                     return true;
                 }
-                const replyMsg = `${(0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)(_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_5__.callOverMessages)}\n\n\n${(0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)(_messages_standard_messages__WEBPACK_IMPORTED_MODULE_4__.pricelistArray)}`;
+                const replyMsg = `${(0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)(_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_6__.callOverMessages)}\n\n\n${(0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)(_messages_standard_messages__WEBPACK_IMPORTED_MODULE_4__.pricelistArray)}`;
                 await (0,_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, replyMsg);
                 // The reply above already carries the price list: the follow-up stays the tier upsell (no second list).
-                (0,_pattern_followup__WEBPACK_IMPORTED_MODULE_13__.schedulePatternFollowup)(event, context, 17000, {
+                (0,_pattern_followup__WEBPACK_IMPORTED_MODULE_14__.schedulePatternFollowup)(event, context, 17000, {
                     kind: 'reply', text: (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)(tierUpsell),
                 }, { label: 'paid.callRequest.upsell' });
                 return true;
@@ -65694,12 +65707,12 @@ const paidPatterns = [
             const tooHigh = words.some((word) => TOO_HIGH_WORDS.includes(word) || TOO_HIGH_STEMS.some((stem) => word.startsWith(stem)));
             // A payer still owed the service they paid for keeps it: dropping a ₹150 payer before their second show
             // left them at 50 with the demo already used, i.e. nothing for what they paid.
-            if (tooHigh && !(0,_payments_ladder__WEBPACK_IMPORTED_MODULE_7__.hasPendingPaidService)(userDetails)) {
+            if (tooHigh && !(0,_payments_ladder__WEBPACK_IMPORTED_MODULE_8__.hasPendingPaidService)(userDetails)) {
                 // The ladder's lower-tier drop (tooHighDropUpdate): never above what they paid.
-                userDetails = await _data_user_data_crud__WEBPACK_IMPORTED_MODULE_12__.UserDataDtoCrud.getInstance().update(userDetails.chatId, (0,_payments_ladder__WEBPACK_IMPORTED_MODULE_7__.tooHighDropUpdate)(userDetails, Date.now()));
+                userDetails = await _data_user_data_crud__WEBPACK_IMPORTED_MODULE_13__.UserDataDtoCrud.getInstance().update(userDetails.chatId, (0,_payments_ladder__WEBPACK_IMPORTED_MODULE_8__.tooHighDropUpdate)(userDetails, Date.now()));
                 // Don't go silent after dropping the tier — tell the user their new, lower
                 // price with the dynamic upsell menu (reflects the just-updated payAmount).
-                await (0,_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)(_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_5__.getUpsellMessage(userDetails.payAmount)), true);
+                await (0,_respond__WEBPACK_IMPORTED_MODULE_0__.respond)(event, (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)(_messages_upsell_messages__WEBPACK_IMPORTED_MODULE_6__.getUpsellMessage(userDetails.payAmount)), true);
                 return true;
             }
             return false;
@@ -72385,7 +72398,7 @@ async function markDemoShown(event, db, chatId) {
     await (0,_telegram_delete_messages__WEBPACK_IMPORTED_MODULE_8__.deleteMessage)(event);
     await floodSafeSend(event.client, chatId, { message: `How is the Demo?♥️🙈` });
     scheduleOutgoingFollowups(chatId, [
-        { delayMs: 15000, send: { message: `**Take Full Show Baby...!!**\nPussy also!!\n\nWithout Face : **100₹**\nWith Face      : **150₹**` } },
+        { delayMs: 15000, send: { message: _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_5__.fullShowOffer } },
         { delayMs: 8000, send: { message: `${_conversation_messages_payment_links__WEBPACK_IMPORTED_MODULE_4__.payLinks.phonepe3}\n${_conversation_messages_payment_links__WEBPACK_IMPORTED_MODULE_4__.payLinks.paytm1}\n${_conversation_messages_payment_links__WEBPACK_IMPORTED_MODULE_4__.payLinks.gpay1}\n\n<b>I'm Waiting without dress for you!😚😚</b>`, parseMode: 'html', linkPreview: false } },
     ]);
     const userDetails = await db.read(chatId);
@@ -72404,7 +72417,7 @@ async function markFullShowGiven(event, db, chatId) {
 /** 'psy': full-show prices, then the pay links. */
 async function pitchFullShow(event, db, chatId) {
     await (0,_telegram_delete_messages__WEBPACK_IMPORTED_MODULE_8__.deleteMessage)(event);
-    await floodSafeSend(event.client, chatId, { message: `**Take Full Show Baby...!!**\nPussy also!!\n\nWithout Face : **100₹**\nWith Face      : **150₹**` });
+    await floodSafeSend(event.client, chatId, { message: _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_5__.fullShowOffer });
     scheduleOutgoingFollowups(chatId, [
         { delayMs: 11000, send: { message: `${_conversation_messages_payment_links__WEBPACK_IMPORTED_MODULE_4__.payLinks.phonepe3}\n${_conversation_messages_payment_links__WEBPACK_IMPORTED_MODULE_4__.payLinks.paytm1}\n${_conversation_messages_payment_links__WEBPACK_IMPORTED_MODULE_4__.payLinks.gpay1}\n\n<b>I'm Waiting without dress for you!😚😚</b>`, parseMode: 'html', linkPreview: false } },
     ]);
@@ -72457,7 +72470,7 @@ async function replyDontSpeak(event, db, chatId) {
             else {
                 await floodSafeSend(event.client, chatId, { message: "**Your Demo is Over Baby!!\nPay Again! if You want More....**" });
                 scheduleOutgoingFollowups(chatId, [
-                    { delayMs: 3000, send: { message: `**Take Full Show Baby...!!**\nPussy also!!\n\nWithout Face : **100₹**\nWith Face      : **150₹**` } },
+                    { delayMs: 3000, send: { message: _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_5__.fullShowOffer } },
                 ]);
             }
         }
@@ -76401,7 +76414,7 @@ async function runImageFollowupStep(client, chatId, params) {
                 msg = _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_13__.demo;
             }
             else if (payAmount < _payments_ladder__WEBPACK_IMPORTED_MODULE_4__.SECOND_SHOW_MIN) {
-                msg = "**Take Full Show Baby....!!**\nPussy also!!\n\nWithout Face : **100₹**\nWith Face      : **150₹**\n\nI'm alone in my room now!!\nLets Enjoy dear...\nPay and Msg!!";
+                msg = `${_conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_13__.fullShowOffer}\nI'm alone in my room now!!\nLets Enjoy dear...\nPay and Msg!!`;
             }
             else {
                 msg = "**30 Mins VideoCall   :  350₹/-\n1 Hour Full show with Face!!   :   600₹/-** 💋\n\nI'm all alone in my room waiting for you!!\nLet's enjoy together darling...\nPay me and message!! 😘";
