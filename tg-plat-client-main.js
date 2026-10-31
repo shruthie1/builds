@@ -10120,6 +10120,99 @@ function normalizeError(error) {
 
 /***/ },
 
+/***/ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/heartbeat.ts"
+/*!************************************************************************************************************!*\
+  !*** ../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/heartbeat.ts ***!
+  \************************************************************************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   PROMO_HEARTBEAT_INTERVAL_MS: () => (/* binding */ PROMO_HEARTBEAT_INTERVAL_MS),
+/* harmony export */   PROMO_HEARTBEAT_MIN_INTERVAL_MS: () => (/* binding */ PROMO_HEARTBEAT_MIN_INTERVAL_MS),
+/* harmony export */   PromoHeartbeat: () => (/* binding */ PromoHeartbeat),
+/* harmony export */   formatPromoHeartbeat: () => (/* binding */ formatPromoHeartbeat),
+/* harmony export */   promoHealthTier: () => (/* binding */ promoHealthTier)
+/* harmony export */ });
+/* harmony import */ var _tg_core_utils_spam_limit__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/core/utils/spam-limit */ "../../packages/tg-core/src/utils/spam-limit.ts");
+// PromotionFlowRunner: the per-mobile `promo heartbeat` log line on a fixed timer.
+//
+// A paced send cycle (batchTarget ~172-181 channels at 6-8 min) takes about a day, so a line written only at
+// cycle end left a running mobile silent for a day. The heartbeat runs while the runner runs (start() to stop()),
+// one interval per runner, unref'd, cleared on stop; a beat that is still awaiting its reads is not overlapped.
+
+const PROMO_HEARTBEAT_INTERVAL_MS = 15 * 60 * 1000;
+/** Smallest accepted interval (tests use fake timers; production uses the default). */
+const PROMO_HEARTBEAT_MIN_INTERVAL_MS = 1000;
+/** Reporting tier: harsh when SpamBot last said harsh (pace unchanged by it today), else limited/healthy by daysLeft. */
+function promoHealthTier(daysLeft, spamStatus) {
+    if (spamStatus === 'harsh')
+        return 'harsh';
+    return (0,_tg_core_utils_spam_limit__WEBPACK_IMPORTED_MODULE_0__.isSpamLimited)(daysLeft) ? 'limited' : 'healthy';
+}
+function formatPromoHeartbeat(f) {
+    const minutes = Math.round(f.intervalMs / 60000);
+    return [
+        `[${f.mobile}] promo heartbeat`,
+        `sends(last ${minutes}m)=${f.sends}`,
+        `capCount=${f.capCount ?? 'n/a'}/cap=${f.cap ?? 'n/a'}`,
+        `daysLeft=${f.daysLeft}`,
+        `health=${f.health}`,
+        `queueSize=${f.queueSize}`,
+    ].join(' | ');
+}
+/** The heartbeat timer and its send counter. `emit` receives the sends since the previous beat. */
+class PromoHeartbeat {
+    constructor(emit, intervalMs) {
+        this.timer = null;
+        this.sends = 0;
+        this.emitting = false;
+        this.emit = emit;
+        const value = typeof intervalMs === 'number' && Number.isFinite(intervalMs) ? Math.floor(intervalMs) : PROMO_HEARTBEAT_INTERVAL_MS;
+        this.intervalMs = Math.max(PROMO_HEARTBEAT_MIN_INTERVAL_MS, value);
+    }
+    get running() {
+        return this.timer !== null;
+    }
+    /** Starts (or restarts) the interval; the send counter starts at 0. */
+    start() {
+        this.stop();
+        this.sends = 0;
+        this.timer = setInterval(() => { void this.beat(); }, this.intervalMs);
+        this.timer.unref?.();
+    }
+    stop() {
+        if (this.timer) {
+            clearInterval(this.timer);
+            this.timer = null;
+        }
+    }
+    noteSend() {
+        this.sends += 1;
+    }
+    /** One beat; never throws. Skipped while the previous beat is still running (slow Redis). */
+    async beat() {
+        if (this.emitting)
+            return;
+        this.emitting = true;
+        const sends = this.sends;
+        this.sends = 0;
+        try {
+            await this.emit(sends);
+        }
+        catch {
+            // Logging must never change promotion control flow.
+        }
+        finally {
+            this.emitting = false;
+        }
+    }
+}
+
+
+/***/ },
+
 /***/ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/normalize.ts"
 /*!************************************************************************************************************!*\
   !*** ../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/normalize.ts ***!
@@ -11031,8 +11124,10 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _flow_runner_normalize__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ./flow-runner/normalize */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/normalize.ts");
 /* harmony import */ var _flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ./flow-runner/outcome-recording */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/outcome-recording.ts");
 /* harmony import */ var _flow_runner_follow_up__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ./flow-runner/follow-up */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/follow-up.ts");
-/* harmony import */ var _flow_runner_send_budget__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ./flow-runner/send-budget */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/send-budget.ts");
-/* harmony import */ var _flow_runner_formatting__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ./flow-runner/formatting */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/formatting.ts");
+/* harmony import */ var _flow_runner_heartbeat__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ./flow-runner/heartbeat */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/heartbeat.ts");
+/* harmony import */ var _flow_runner_send_budget__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ./flow-runner/send-budget */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/send-budget.ts");
+/* harmony import */ var _flow_runner_formatting__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! ./flow-runner/formatting */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/formatting.ts");
+
 
 
 
@@ -11106,6 +11201,30 @@ class PromotionFlowRunner {
         this.messageQueue = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_7__.isMessageQueueLike)(safeOptions.messageQueue)
             ? safeOptions.messageQueue
             : new _promotion_message_queue__WEBPACK_IMPORTED_MODULE_5__.PromotionMessageQueue(safeOptions.maxQueueSize ?? 500);
+        this.heartbeat = new _flow_runner_heartbeat__WEBPACK_IMPORTED_MODULE_10__.PromoHeartbeat(async (sends) => {
+            if (!this.running)
+                return;
+            // Same reads as the cycle-end line: stats + the daily cap snapshot (one Redis read per interval).
+            const stats = await this.getStatsOrDefault('heartbeat');
+            const budget = await this.options.account.getDailySendBudgetStatus(stats.daysLeft).catch(() => null);
+            let spamStatus = null;
+            try {
+                spamStatus = this.adapter.getSpamStatus?.() ?? null;
+            }
+            catch {
+                spamStatus = null;
+            }
+            this.log('info', (0,_flow_runner_heartbeat__WEBPACK_IMPORTED_MODULE_10__.formatPromoHeartbeat)({
+                mobile: this.options.account.mobile,
+                intervalMs: this.heartbeat.intervalMs,
+                sends,
+                capCount: budget ? budget.count : null,
+                cap: budget ? budget.cap : null,
+                daysLeft: stats.daysLeft,
+                health: (0,_flow_runner_heartbeat__WEBPACK_IMPORTED_MODULE_10__.promoHealthTier)(stats.daysLeft, spamStatus),
+                queueSize: this.messageQueue.size,
+            }));
+        }, safeOptions.heartbeatIntervalMs);
     }
     getQueueSize() {
         return this.messageQueue.size;
@@ -11128,6 +11247,7 @@ class PromotionFlowRunner {
         this.status = this.running ? 'stopping' : 'stopped';
         this.running = false;
         this.stopQueueChecker();
+        this.heartbeat.stop();
         for (const timeout of this.followUpTimers.values()) {
             clearTimeout(timeout);
         }
@@ -11146,6 +11266,7 @@ class PromotionFlowRunner {
         this.health.startedAt = Date.now();
         this.health.stoppedAt = null;
         this.startQueueChecker();
+        this.heartbeat.start();
         this.log('info', `Promotion runner started; batchTarget=${(0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_7__.safeBatchTarget)(this.options.batchTarget, Number.MAX_SAFE_INTEGER)} queueSize=${this.messageQueue.size}`);
         try {
             while (this.running) {
@@ -11322,8 +11443,10 @@ class PromotionFlowRunner {
                     continue;
                 }
                 cycleTally.chans += 1;
-                if (outcome === 'sent')
+                if (outcome === 'sent') {
                     cycleTally.sent += 1;
+                    this.heartbeat.noteSend();
+                }
                 else if (outcome === 'skipped')
                     cycleTally.skipped += 1;
                 else if (outcome === 'budget_exhausted')
@@ -11340,7 +11463,7 @@ class PromotionFlowRunner {
                 this.log('info', `Promotion exploration budget skipped ${exploreSkipped} unproven channel(s) mid-round`);
             }
             // Best-effort daily-cap snapshot reused for both the cap-reason on this summary and the
-            // per-mobile heartbeat below — no new Redis reads beyond what getDailySendBudgetStatus already does.
+            // per-mobile cycle-end line below — no new Redis reads beyond what getDailySendBudgetStatus already does.
             const budgetSnapshot = await this.options.account.getDailySendBudgetStatus(stats.daysLeft).catch(() => null);
             const summaryFields = {
                 sent: cycleTally.sent,
@@ -11360,12 +11483,11 @@ class PromotionFlowRunner {
                 }
             }
             promoLog.summary(summaryFields);
-            // Per-mobile heartbeat: one compact line per cycle so a future stall is debuggable from logs at
-            // a glance without any new Redis reads (reuses the same budget snapshot + stats already computed
-            // this cycle).
+            // Per-mobile cycle-end line (no new Redis reads: reuses this cycle's budget snapshot + stats). The
+            // timed `promo heartbeat` (flow-runner/heartbeat.ts) covers the hours inside a long paced cycle.
             this.log('info', [
-                `[${this.options.account.mobile}] promo heartbeat`,
-                `sends(last cycle)=${cycleTally.sent}`,
+                `[${this.options.account.mobile}] promo cycle end`,
+                `sends(cycle)=${cycleTally.sent}`,
                 `capCount=${budgetSnapshot ? budgetSnapshot.count : 'n/a'}/cap=${budgetSnapshot ? budgetSnapshot.cap : 'n/a'}`,
                 `daysLeft=${stats.daysLeft}`,
                 `queueSize=${this.messageQueue.size}`,
@@ -11874,16 +11996,16 @@ class PromotionFlowRunner {
         }
     }
     shouldProcessNextChannel(channel) {
-        return (0,_flow_runner_send_budget__WEBPACK_IMPORTED_MODULE_10__.shouldProcessNextChannel)(hostOf(this), channel);
+        return (0,_flow_runner_send_budget__WEBPACK_IMPORTED_MODULE_11__.shouldProcessNextChannel)(hostOf(this), channel);
     }
     readDailySendBudget(channel, daysLeft) {
-        return (0,_flow_runner_send_budget__WEBPACK_IMPORTED_MODULE_10__.readDailySendBudget)(hostOf(this), channel, daysLeft);
+        return (0,_flow_runner_send_budget__WEBPACK_IMPORTED_MODULE_11__.readDailySendBudget)(hostOf(this), channel, daysLeft);
     }
     reserveDailySendBudget(channel, daysLeft, isFollowUp) {
-        return (0,_flow_runner_send_budget__WEBPACK_IMPORTED_MODULE_10__.reserveDailySendBudget)(hostOf(this), channel, daysLeft, isFollowUp);
+        return (0,_flow_runner_send_budget__WEBPACK_IMPORTED_MODULE_11__.reserveDailySendBudget)(hostOf(this), channel, daysLeft, isFollowUp);
     }
     settleDailySendBudget(result, reservation) {
-        return (0,_flow_runner_send_budget__WEBPACK_IMPORTED_MODULE_10__.settleDailySendBudget)(hostOf(this), result, reservation);
+        return (0,_flow_runner_send_budget__WEBPACK_IMPORTED_MODULE_11__.settleDailySendBudget)(hostOf(this), result, reservation);
     }
     log(level, message) {
         try {
@@ -11902,40 +12024,40 @@ class PromotionFlowRunner {
         }
     }
     formatStats(stats) {
-        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_11__.formatStats)(stats);
+        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_12__.formatStats)(stats);
     }
     describeSelection(selection, intelligenceDocs) {
-        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_11__.describeSelection)(hostOf(this), selection, intelligenceDocs);
+        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_12__.describeSelection)(hostOf(this), selection, intelligenceDocs);
     }
     toChannelIdSet(channels) {
-        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_11__.toChannelIdSet)(channels);
+        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_12__.toChannelIdSet)(channels);
     }
     getSkippedSelectionReason(channel, intelligenceByChannel) {
-        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_11__.getSkippedSelectionReason)(channel, intelligenceByChannel);
+        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_12__.getSkippedSelectionReason)(channel, intelligenceByChannel);
     }
     summarizeSelectionChannels(channels, label) {
-        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_11__.summarizeSelectionChannels)(hostOf(this), channels, label);
+        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_12__.summarizeSelectionChannels)(hostOf(this), channels, label);
     }
     formatCounts(counts) {
-        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_11__.formatCounts)(counts);
+        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_12__.formatCounts)(counts);
     }
     formatChannel(channel) {
-        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_11__.formatChannel)(channel);
+        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_12__.formatChannel)(channel);
     }
     formatCompactChannel(channel) {
-        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_11__.formatCompactChannel)(channel);
+        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_12__.formatCompactChannel)(channel);
     }
     formatCandidate(candidate) {
-        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_11__.formatCandidate)(candidate);
+        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_12__.formatCandidate)(candidate);
     }
     compact(value) {
-        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_11__.compact)(value);
+        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_12__.compact)(value);
     }
     safeJson(value) {
-        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_11__.safeJson)(hostOf(this), value);
+        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_12__.safeJson)(hostOf(this), value);
     }
     normalizeError(error) {
-        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_11__.normalizeError)(error);
+        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_12__.normalizeError)(error);
     }
     recordCycleFailure(error) {
         this.health.totalCycleFailures += 1;
@@ -14342,6 +14464,10 @@ class BasePromotionEngine {
     getBanRateGateState() {
         return this.banRateGate ? { ...this.banRateGate } : null;
     }
+    /** Last SpamBot status, reported in the runner heartbeat only (harsh never changes sending here). */
+    getSpamStatus() {
+        return null;
+    }
     mergeLiveChannelInfo(existing, live) {
         return (0,_channel_state__WEBPACK_IMPORTED_MODULE_16__.mergeLiveChannelDocument)(existing, live, {
             normalizeChannelId: (id) => this.normalizeChannelId(id),
@@ -14850,6 +14976,7 @@ class BasePromotionEngine {
                 failStreak: this.stats.failStreak,
                 daysLeft: this.getDaysLeft(),
             }),
+            getSpamStatus: () => this.getSpamStatus(),
             loadChannels: () => this.loadChannelsForRunner(),
             getChannel: (channelId) => this.getChannelForRunner(channelId),
             getIntelligenceDocs: (channelIds) => this.getIntelligenceDocsForRunner(channelIds),
@@ -15991,7 +16118,7 @@ const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_0__.Logger('De
 //    both sending all day, both invisible to recovery.
 // 2. daysLeft CAN BE UNKNOWN AFTER A RESTART. The engine's `this.daysLeft` is in memory; at boot it is
 //    restored only from Redis `tg::acct::{mobile}` (PromotionEngine.restoreAccountState; TTL
-//    max(48 h, limitedUntil + 1 day)), never from Mongo (daysLeft is not stored in Mongo, owner
+//    max(48 h, or 30 days for harsh, limitedUntil + 1 day)), never from Mongo (daysLeft is not stored in Mongo, owner
 //    2026-10-28). With no Redis entry it stays -1 until the next SpamBot reply. check-tg-health's
 //    per-mobile daysLeftMap is also in memory and starts empty on every restart, and restore
 //    deliberately does not refill it (see restoreAccountState). Unknown coalesces to -1 (the
@@ -19900,6 +20027,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   HARSH_DELAY_MIN_MS: () => (/* reexport safe */ _pace__WEBPACK_IMPORTED_MODULE_2__.HARSH_DELAY_MIN_MS),
 /* harmony export */   HARSH_PROBE_GAPS_MS: () => (/* reexport safe */ _probe__WEBPACK_IMPORTED_MODULE_3__.HARSH_PROBE_GAPS_MS),
 /* harmony export */   HARSH_PROBE_REPEAT_MS: () => (/* reexport safe */ _probe__WEBPACK_IMPORTED_MODULE_3__.HARSH_PROBE_REPEAT_MS),
+/* harmony export */   HARSH_REMEMBER_MS: () => (/* reexport safe */ _probe__WEBPACK_IMPORTED_MODULE_3__.HARSH_REMEMBER_MS),
 /* harmony export */   HEALTHY_DAILY_CAP: () => (/* reexport safe */ _pace__WEBPACK_IMPORTED_MODULE_2__.HEALTHY_DAILY_CAP),
 /* harmony export */   HEALTHY_DELAY_MAX_MS: () => (/* reexport safe */ _pace__WEBPACK_IMPORTED_MODULE_2__.HEALTHY_DELAY_MAX_MS),
 /* harmony export */   HEALTHY_DELAY_MIN_MS: () => (/* reexport safe */ _pace__WEBPACK_IMPORTED_MODULE_2__.HEALTHY_DELAY_MIN_MS),
@@ -20186,6 +20314,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   HARSH_PROBE_GAPS_MS: () => (/* binding */ HARSH_PROBE_GAPS_MS),
 /* harmony export */   HARSH_PROBE_REPEAT_MS: () => (/* binding */ HARSH_PROBE_REPEAT_MS),
+/* harmony export */   HARSH_REMEMBER_MS: () => (/* binding */ HARSH_REMEMBER_MS),
 /* harmony export */   LIMITED_REPROBE_AFTER_MS: () => (/* binding */ LIMITED_REPROBE_AFTER_MS),
 /* harmony export */   LIMITED_REPROBE_JITTER_MS: () => (/* binding */ LIMITED_REPROBE_JITTER_MS),
 /* harmony export */   PROBE_FLOOR_MS: () => (/* binding */ PROBE_FLOOR_MS),
@@ -20210,6 +20339,13 @@ const LIMITED_REPROBE_JITTER_MS = 30 * 60 * 1000;
  */
 const HARSH_PROBE_GAPS_MS = [_time__WEBPACK_IMPORTED_MODULE_1__.DAY_MS, 2 * _time__WEBPACK_IMPORTED_MODULE_1__.DAY_MS, 4 * _time__WEBPACK_IMPORTED_MODULE_1__.DAY_MS];
 const HARSH_PROBE_REPEAT_MS = 7 * _time__WEBPACK_IMPORTED_MODULE_1__.DAY_MS;
+/**
+ * How long a harsh verdict is remembered across restarts after the last harsh SpamBot reply (Redis
+ * `tg::acct::{mobile}` TTL floor). 30 days = the pool rest harsh already gets (§6 D4; CMS
+ * `HARSH_RECHECK_AFTER_MS` for buffers, tg-aut `HARSH_SWAP_DAYS`): measured harsh verdicts never cleared
+ * within the 7-day window (§1.3). Any newer SpamBot verdict (free / limited) replaces it at once.
+ */
+const HARSH_REMEMBER_MS = 30 * _time__WEBPACK_IMPORTED_MODULE_1__.DAY_MS;
 /** Earliest instant the 6 h floor allows the next probe. */
 function probeFloorAt(h, now) {
     return h.checkedAt === null ? now : Math.max(now, h.checkedAt + PROBE_FLOOR_MS);
@@ -21067,6 +21203,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   HARSH_DELAY_MIN_MS: () => (/* reexport safe */ _account_health__WEBPACK_IMPORTED_MODULE_41__.HARSH_DELAY_MIN_MS),
 /* harmony export */   HARSH_PROBE_GAPS_MS: () => (/* reexport safe */ _account_health__WEBPACK_IMPORTED_MODULE_41__.HARSH_PROBE_GAPS_MS),
 /* harmony export */   HARSH_PROBE_REPEAT_MS: () => (/* reexport safe */ _account_health__WEBPACK_IMPORTED_MODULE_41__.HARSH_PROBE_REPEAT_MS),
+/* harmony export */   HARSH_REMEMBER_MS: () => (/* reexport safe */ _account_health__WEBPACK_IMPORTED_MODULE_41__.HARSH_REMEMBER_MS),
 /* harmony export */   HEALTHY_DAILY_CAP: () => (/* reexport safe */ _account_health__WEBPACK_IMPORTED_MODULE_41__.HEALTHY_DAILY_CAP),
 /* harmony export */   HEALTHY_DAYS_LEFT: () => (/* reexport safe */ _utils_spam_limit__WEBPACK_IMPORTED_MODULE_34__.HEALTHY_DAYS_LEFT),
 /* harmony export */   HEALTHY_DELAY_MAX_MS: () => (/* reexport safe */ _account_health__WEBPACK_IMPORTED_MODULE_41__.HEALTHY_DELAY_MAX_MS),
@@ -21978,6 +22115,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ });
 /* harmony import */ var _utils_Redis_Redis_Client__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../utils/Redis/Redis.Client */ "../../packages/tg-core/src/utils/Redis/Redis.Client.ts");
 /* harmony import */ var _utils_logger__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _account_health_probe__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../account-health/probe */ "../../packages/tg-core/src/account-health/probe.ts");
 /**
  * Restart-safe state: memory is the working copy, Redis a backup read once at boot.
  *
@@ -21995,6 +22133,7 @@ __webpack_require__.r(__webpack_exports__);
  *  - RedisWrites:          any other shape (JSON keys, ZSETs, counters, several keys per change): the caller gives
  *                          the commands and names the slots; same outage replay as the classes above.
  */
+
 
 
 const logger = new _utils_logger__WEBPACK_IMPORTED_MODULE_1__.Logger("state-redis");
@@ -22568,13 +22707,18 @@ function takePreloadedPromoteRestartState(mobile) {
 function resetPromoteRestartStateForTests() {
     bootRestartStates.clear();
 }
-/** TTL of `tg::acct`: max(48 h, limitedUntil + 1 day), so a long dated limit outlives the default TTL. */
-function accountStateTtlMs(limitedUntil, now = Date.now()) {
+/**
+ * TTL of `tg::acct`: max(floor, limitedUntil + 1 day), so a long dated limit outlives the floor. The floor is 48 h,
+ * or HARSH_REMEMBER_MS (30 days) for a harsh verdict, so a harsh mobile is not restored as healthy after the
+ * next maintenance restart. A fresh free/limited verdict rewrites the whole hash with its own TTL.
+ */
+function accountStateTtlMs(limitedUntil, now = Date.now(), spamStatus = null) {
+    const floor = spamStatus === "harsh" ? _account_health_probe__WEBPACK_IMPORTED_MODULE_2__.HARSH_REMEMBER_MS : RESTART_STATE_TTL_MS;
     if (limitedUntil === null || !Number.isFinite(limitedUntil))
-        return RESTART_STATE_TTL_MS;
-    return Math.max(RESTART_STATE_TTL_MS, limitedUntil + DAY_MS - now);
+        return floor;
+    return Math.max(floor, limitedUntil + DAY_MS - now);
 }
-/** Saves the verdict for `mobile` (whole hash, TTL from limitedUntil). Never throws; false = memory-only. */
+/** Saves the verdict for `mobile` (whole hash, TTL from limitedUntil and spamStatus). Never throws; false = memory-only. */
 function saveAccountRestartState(mobile, state, now = Date.now()) {
     const entries = restartStateEntries({
         daysLeft: state.daysLeft,
@@ -22584,7 +22728,7 @@ function saveAccountRestartState(mobile, state, now = Date.now()) {
         source: state.source,
         updatedAt: now,
     });
-    return accountStateStore(mobile).replace(entries, accountStateTtlMs(state.limitedUntil, now));
+    return accountStateStore(mobile).replace(entries, accountStateTtlMs(state.limitedUntil, now, state.spamStatus));
 }
 /**
  * Boot: the stored verdict with daysLeft recomputed from limitedUntil (a dated limit counts down while the process
@@ -24315,8 +24459,8 @@ function extractSpamBotReleaseDate(text) {
 }
 /**
  * Parses the string returned by extractSpamBotReleaseDate into a UTC instant. Without a year the
- * next occurrence is used (dates up to 1 day past stay in the current year); without a time the
- * instant is 23:59 UTC of that day.
+ * occurrence (last, this or next year) nearest to `now` is used, so it may be in the past; without a
+ * time the instant is 23:59 UTC of that day.
  * Returns null for anything unparseable or an impossible calendar date.
  */
 function parseSpamBotReleaseDate(raw, now = new Date()) {
@@ -24354,12 +24498,20 @@ function parseSpamBotReleaseDate(raw, now = new Date()) {
     if (month < 0 || day < 1 || day > 31)
         return null;
     if (year === null) {
-        const todayUtc = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
-        year = now.getUTCFullYear();
-        // Roll to next year only when the date is clearly in the past (> 1 day): a just-passed
-        // yearless date ("9 Oct" read on 10 Oct) must not become a ~365-day limit.
-        if (Date.UTC(year, month, day) < todayUtc - 24 * 60 * 60 * 1000)
-            year += 1;
+        // Take the valid candidate in last, this or next year nearest to now: "2 Jan" read on 30 Dec is
+        // next year, "31 Dec" read on 1 Jan is last year's (already lapsed) limit, never ~365 days ahead.
+        let best = null;
+        for (const y of [now.getUTCFullYear() - 1, now.getUTCFullYear(), now.getUTCFullYear() + 1]) {
+            const candidate = new Date(Date.UTC(y, month, day, hours, minutes));
+            if (candidate.getUTCMonth() !== month || candidate.getUTCDate() !== day)
+                continue;
+            if (best === null || Math.abs(candidate.getTime() - now.getTime()) < Math.abs(Date.UTC(best, month, day, hours, minutes) - now.getTime())) {
+                best = y;
+            }
+        }
+        if (best === null)
+            return null;
+        year = best;
     }
     const result = new Date(Date.UTC(year, month, day, hours, minutes));
     // Reject overflow such as 31 Feb, which Date.UTC silently rolls into March.
@@ -50761,8 +50913,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "ec2424de18e23523f8296ac07aab657ab2e9b4e3" : 0;
-    const builtAt =  true ? "2026-10-31T07:36:58.427Z" : 0;
+    const sha =  true ? "0919f753beb2fe9acfe9029b6c37fad45ca4e4aa" : 0;
+    const builtAt =  true ? "2026-10-31T09:29:19.314Z" : 0;
     return { sha, builtAt };
 }
 
@@ -94688,7 +94840,9 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! @tg/core/utils/TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
 /* harmony import */ var _tg_core_utils_notification_format__WEBPACK_IMPORTED_MODULE_17__ = __webpack_require__(/*! @tg/core/utils/notification-format */ "../../packages/tg-core/src/utils/notification-format.ts");
 /* harmony import */ var _tg_core_utils_telegram_error_parser__WEBPACK_IMPORTED_MODULE_18__ = __webpack_require__(/*! @tg/core/utils/telegram-error-parser */ "../../packages/tg-core/src/utils/telegram-error-parser.ts");
-/* harmony import */ var _tg_channel_state__WEBPACK_IMPORTED_MODULE_19__ = __webpack_require__(/*! @tg/channel-state */ "../../packages/tg-channel-state/src/index.ts");
+/* harmony import */ var _telegram_spam_state__WEBPACK_IMPORTED_MODULE_19__ = __webpack_require__(/*! ../telegram/spam-state */ "./src/telegram/spam-state.ts");
+/* harmony import */ var _tg_channel_state__WEBPACK_IMPORTED_MODULE_20__ = __webpack_require__(/*! @tg/channel-state */ "../../packages/tg-channel-state/src/index.ts");
+
 
 
 
@@ -94711,7 +94865,7 @@ __webpack_require__.r(__webpack_exports__);
 
 const randomNumber = Math.floor(Math.random() * 10);
 const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_15__.Logger(`promotion-engine-${randomNumber}`);
-class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_19__.BasePromotionEngine {
+class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_20__.BasePromotionEngine {
     constructor(client, dialogManager, options) {
         super(client, dialogManager, options.instanceName || "defaultClient", options.instanceId || process.env.mobile || "defaultMobile");
         this.channelIndex = 0;
@@ -94785,6 +94939,9 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_19__.Ba
     getDaysLeft() {
         return (0,_conversation_reply_switch__WEBPACK_IMPORTED_MODULE_7__.daysLeftForRelease)();
     }
+    getSpamStatus() {
+        return (0,_telegram_spam_state__WEBPACK_IMPORTED_MODULE_19__.currentSpamStatus)();
+    }
     logRunnerMessage(level, message) {
         const normalized = this.formatHelperRunnerLog(message);
         if (!normalized)
@@ -94803,9 +94960,9 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_19__.Ba
     }
     getMessageMaterializers() {
         return {
-            ai: (client, channelInfo) => (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_19__.generateAIMsg)(client, channelInfo),
-            custom: () => (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_19__.generateCustomMessage)(_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_11__.pickOneMsg),
-            followUp: () => (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_19__.generateFollowupMsg)(),
+            ai: (client, channelInfo) => (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_20__.generateAIMsg)(client, channelInfo),
+            custom: () => (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_20__.generateCustomMessage)(_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_11__.pickOneMsg),
+            followUp: () => (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_20__.generateFollowupMsg)(),
         };
     }
     adapterShouldContinue() {
@@ -95016,7 +95173,7 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_19__.Ba
         }
     }
     strategyForMessageIndex(messageIndex) {
-        return (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_19__.messageIndexToStrategy)(messageIndex) || (_default_messages__WEBPACK_IMPORTED_MODULE_3__.defaultMessages.includes(messageIndex) ? 'legacy' : messageIndex || 'unknown');
+        return (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_20__.messageIndexToStrategy)(messageIndex) || (_default_messages__WEBPACK_IMPORTED_MODULE_3__.defaultMessages.includes(messageIndex) ? 'legacy' : messageIndex || 'unknown');
     }
     extractLogFields(message) {
         const fields = {};
@@ -95138,7 +95295,7 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_19__.Ba
     }
     async shouldContinueHelperPromotion() {
         const paidUserStats = await _data_user_data_crud__WEBPACK_IMPORTED_MODULE_0__.UserDataDtoCrud.getInstance().getTodayPaidUsers();
-        if ((0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_19__.isPaidUserLimitReached)(paidUserStats)) {
+        if ((0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_20__.isPaidUserLimitReached)(paidUserStats)) {
             logger.log("💰 Paid user limits reached, stopping promotions");
             await _data_user_data_crud__WEBPACK_IMPORTED_MODULE_0__.UserDataDtoCrud.getInstance().deactivatePromotions();
             this.promotionActive = false;
@@ -95288,7 +95445,7 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_19__.Ba
                 // lastMessageTime/messageIndex/messageId are dropped from IChannel (dead-on-read, no
                 // remaining consumer) — this used to stamp a message cursor on activeChannels that
                 // pickActiveChannelWrite would silently drop anyway; the write is removed outright.
-                if (_default_messages__WEBPACK_IMPORTED_MODULE_3__.defaultMessages.includes(messageIndex) && !(0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_19__.isPoolMessageIndex)(messageIndex)) {
+                if (_default_messages__WEBPACK_IMPORTED_MODULE_3__.defaultMessages.includes(messageIndex) && !(0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_20__.isPoolMessageIndex)(messageIndex)) {
                     await _data_db__WEBPACK_IMPORTED_MODULE_1__.channelsStore.addToAvailableMsgs(messageItem.channelId, messageIndex);
                 }
                 logger.debug([
@@ -95661,7 +95818,7 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_19__.Ba
                 includeRestricted: true,
             });
             const observedChannels = [...dialogs.channels];
-            await (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_19__.persistObservedChannels)(_data_db__WEBPACK_IMPORTED_MODULE_1__.channelsStore, observedChannels, (level, message) => this.logRunnerMessage(level, message));
+            await (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_20__.persistObservedChannels)(_data_db__WEBPACK_IMPORTED_MODULE_1__.channelsStore, observedChannels, (level, message) => this.logRunnerMessage(level, message));
             const sendableCount = observedChannels.filter((channel) => channel.canSendMsgs === true).length;
             channelData = observedChannels;
             logger.info(`[${this.mobile}] Observed ${observedChannels.length} channels; ${sendableCount} currently sendable (DialogManager has ${this.dialogManager.getAllDialogs().length} total dialogs)`);
@@ -112179,6 +112336,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   MAX_SWAP_REST_DAYS: () => (/* binding */ MAX_SWAP_REST_DAYS),
 /* harmony export */   MIN_LIMIT_DAYS_FOR_SWAP: () => (/* binding */ MIN_LIMIT_DAYS_FOR_SWAP),
 /* harmony export */   clampSwapRestDays: () => (/* binding */ clampSwapRestDays),
+/* harmony export */   currentSpamStatus: () => (/* binding */ currentSpamStatus),
 /* harmony export */   daysUntil: () => (/* binding */ daysUntil),
 /* harmony export */   resetSpamState: () => (/* binding */ resetSpamState),
 /* harmony export */   setSpamState: () => (/* binding */ setSpamState),
@@ -112204,6 +112362,10 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 let current = null;
 function setSpamState(status, limitedUntil) {
     current = { status, limitedUntil };
+}
+/** The last verdict's status (live, or restored at boot from tg::acct), or null when none is known. */
+function currentSpamStatus() {
+    return current?.status ?? null;
 }
 function resetSpamState() {
     current = null;
