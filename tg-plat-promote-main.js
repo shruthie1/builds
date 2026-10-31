@@ -5352,6 +5352,98 @@ function normalizeError(error) {
 
 /***/ },
 
+/***/ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/heartbeat.ts"
+/*!************************************************************************************************************!*\
+  !*** ../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/heartbeat.ts ***!
+  \************************************************************************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   PROMO_HEARTBEAT_INTERVAL_MS: () => (/* binding */ PROMO_HEARTBEAT_INTERVAL_MS),
+/* harmony export */   PROMO_HEARTBEAT_MIN_INTERVAL_MS: () => (/* binding */ PROMO_HEARTBEAT_MIN_INTERVAL_MS),
+/* harmony export */   PromoHeartbeat: () => (/* binding */ PromoHeartbeat),
+/* harmony export */   formatPromoHeartbeat: () => (/* binding */ formatPromoHeartbeat),
+/* harmony export */   promoHealthTier: () => (/* binding */ promoHealthTier)
+/* harmony export */ });
+/* harmony import */ var _tg_core_utils_spam_limit__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/core/utils/spam-limit */ "../../packages/tg-core/src/utils/spam-limit.ts");
+// PromotionFlowRunner: the per-mobile `promo heartbeat` log line on a fixed timer.
+//
+// A paced send cycle (batchTarget ~172-181 channels at 6-8 min) takes about a day, so a line written only at
+// cycle end left a running mobile silent for a day. The heartbeat runs while the runner runs (start() to stop()),
+// one interval per runner, unref'd, cleared on stop; a beat that is still awaiting its reads is not overlapped.
+
+const PROMO_HEARTBEAT_INTERVAL_MS = 15 * 60 * 1000;
+/** Smallest accepted interval (tests use fake timers; production uses the default). */
+const PROMO_HEARTBEAT_MIN_INTERVAL_MS = 1000;
+/** Reporting tier: harsh when SpamBot last said harsh (pace unchanged by it today), else limited/healthy by daysLeft. */
+function promoHealthTier(daysLeft, spamStatus) {
+    if (spamStatus === 'harsh')
+        return 'harsh';
+    return (0,_tg_core_utils_spam_limit__WEBPACK_IMPORTED_MODULE_0__.isSpamLimited)(daysLeft) ? 'limited' : 'healthy';
+}
+function formatPromoHeartbeat(f) {
+    const minutes = Math.round(f.intervalMs / 60000);
+    return [
+        `[${f.mobile}] promo heartbeat`,
+        `sends(last ${minutes}m)=${f.sends}`,
+        `capCount=${f.capCount ?? 'n/a'}/cap=${f.cap ?? 'n/a'}`,
+        `daysLeft=${f.daysLeft}`,
+        `health=${f.health}`,
+        `queueSize=${f.queueSize}`,
+    ].join(' | ');
+}
+/** The heartbeat timer and its send counter. `emit` receives the sends since the previous beat. */
+class PromoHeartbeat {
+    constructor(emit, intervalMs) {
+        this.timer = null;
+        this.sends = 0;
+        this.emitting = false;
+        this.emit = emit;
+        const value = typeof intervalMs === 'number' && Number.isFinite(intervalMs) ? Math.floor(intervalMs) : PROMO_HEARTBEAT_INTERVAL_MS;
+        this.intervalMs = Math.max(PROMO_HEARTBEAT_MIN_INTERVAL_MS, value);
+    }
+    get running() {
+        return this.timer !== null;
+    }
+    /** Starts (or restarts) the interval; the send counter starts at 0. */
+    start() {
+        this.stop();
+        this.sends = 0;
+        this.timer = setInterval(() => { void this.beat(); }, this.intervalMs);
+        this.timer.unref?.();
+    }
+    stop() {
+        if (this.timer) {
+            clearInterval(this.timer);
+            this.timer = null;
+        }
+    }
+    noteSend() {
+        this.sends += 1;
+    }
+    /** One beat; never throws. Skipped while the previous beat is still running (slow Redis). */
+    async beat() {
+        if (this.emitting)
+            return;
+        this.emitting = true;
+        const sends = this.sends;
+        this.sends = 0;
+        try {
+            await this.emit(sends);
+        }
+        catch {
+            // Logging must never change promotion control flow.
+        }
+        finally {
+            this.emitting = false;
+        }
+    }
+}
+
+
+/***/ },
+
 /***/ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/normalize.ts"
 /*!************************************************************************************************************!*\
   !*** ../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/normalize.ts ***!
@@ -6258,8 +6350,10 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _flow_runner_normalize__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ./flow-runner/normalize */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/normalize.ts");
 /* harmony import */ var _flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ./flow-runner/outcome-recording */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/outcome-recording.ts");
 /* harmony import */ var _flow_runner_follow_up__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ./flow-runner/follow-up */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/follow-up.ts");
-/* harmony import */ var _flow_runner_send_budget__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ./flow-runner/send-budget */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/send-budget.ts");
-/* harmony import */ var _flow_runner_formatting__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ./flow-runner/formatting */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/formatting.ts");
+/* harmony import */ var _flow_runner_heartbeat__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ./flow-runner/heartbeat */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/heartbeat.ts");
+/* harmony import */ var _flow_runner_send_budget__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ./flow-runner/send-budget */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/send-budget.ts");
+/* harmony import */ var _flow_runner_formatting__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! ./flow-runner/formatting */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/formatting.ts");
+
 
 
 
@@ -6333,6 +6427,30 @@ class PromotionFlowRunner {
         this.messageQueue = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_7__.isMessageQueueLike)(safeOptions.messageQueue)
             ? safeOptions.messageQueue
             : new _promotion_message_queue__WEBPACK_IMPORTED_MODULE_5__.PromotionMessageQueue(safeOptions.maxQueueSize ?? 500);
+        this.heartbeat = new _flow_runner_heartbeat__WEBPACK_IMPORTED_MODULE_10__.PromoHeartbeat(async (sends) => {
+            if (!this.running)
+                return;
+            // Same reads as the cycle-end line: stats + the daily cap snapshot (one Redis read per interval).
+            const stats = await this.getStatsOrDefault('heartbeat');
+            const budget = await this.options.account.getDailySendBudgetStatus(stats.daysLeft).catch(() => null);
+            let spamStatus = null;
+            try {
+                spamStatus = this.adapter.getSpamStatus?.() ?? null;
+            }
+            catch {
+                spamStatus = null;
+            }
+            this.log('info', (0,_flow_runner_heartbeat__WEBPACK_IMPORTED_MODULE_10__.formatPromoHeartbeat)({
+                mobile: this.options.account.mobile,
+                intervalMs: this.heartbeat.intervalMs,
+                sends,
+                capCount: budget ? budget.count : null,
+                cap: budget ? budget.cap : null,
+                daysLeft: stats.daysLeft,
+                health: (0,_flow_runner_heartbeat__WEBPACK_IMPORTED_MODULE_10__.promoHealthTier)(stats.daysLeft, spamStatus),
+                queueSize: this.messageQueue.size,
+            }));
+        }, safeOptions.heartbeatIntervalMs);
     }
     getQueueSize() {
         return this.messageQueue.size;
@@ -6355,6 +6473,7 @@ class PromotionFlowRunner {
         this.status = this.running ? 'stopping' : 'stopped';
         this.running = false;
         this.stopQueueChecker();
+        this.heartbeat.stop();
         for (const timeout of this.followUpTimers.values()) {
             clearTimeout(timeout);
         }
@@ -6373,6 +6492,7 @@ class PromotionFlowRunner {
         this.health.startedAt = Date.now();
         this.health.stoppedAt = null;
         this.startQueueChecker();
+        this.heartbeat.start();
         this.log('info', `Promotion runner started; batchTarget=${(0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_7__.safeBatchTarget)(this.options.batchTarget, Number.MAX_SAFE_INTEGER)} queueSize=${this.messageQueue.size}`);
         try {
             while (this.running) {
@@ -6549,8 +6669,10 @@ class PromotionFlowRunner {
                     continue;
                 }
                 cycleTally.chans += 1;
-                if (outcome === 'sent')
+                if (outcome === 'sent') {
                     cycleTally.sent += 1;
+                    this.heartbeat.noteSend();
+                }
                 else if (outcome === 'skipped')
                     cycleTally.skipped += 1;
                 else if (outcome === 'budget_exhausted')
@@ -6567,7 +6689,7 @@ class PromotionFlowRunner {
                 this.log('info', `Promotion exploration budget skipped ${exploreSkipped} unproven channel(s) mid-round`);
             }
             // Best-effort daily-cap snapshot reused for both the cap-reason on this summary and the
-            // per-mobile heartbeat below — no new Redis reads beyond what getDailySendBudgetStatus already does.
+            // per-mobile cycle-end line below — no new Redis reads beyond what getDailySendBudgetStatus already does.
             const budgetSnapshot = await this.options.account.getDailySendBudgetStatus(stats.daysLeft).catch(() => null);
             const summaryFields = {
                 sent: cycleTally.sent,
@@ -6587,12 +6709,11 @@ class PromotionFlowRunner {
                 }
             }
             promoLog.summary(summaryFields);
-            // Per-mobile heartbeat: one compact line per cycle so a future stall is debuggable from logs at
-            // a glance without any new Redis reads (reuses the same budget snapshot + stats already computed
-            // this cycle).
+            // Per-mobile cycle-end line (no new Redis reads: reuses this cycle's budget snapshot + stats). The
+            // timed `promo heartbeat` (flow-runner/heartbeat.ts) covers the hours inside a long paced cycle.
             this.log('info', [
-                `[${this.options.account.mobile}] promo heartbeat`,
-                `sends(last cycle)=${cycleTally.sent}`,
+                `[${this.options.account.mobile}] promo cycle end`,
+                `sends(cycle)=${cycleTally.sent}`,
                 `capCount=${budgetSnapshot ? budgetSnapshot.count : 'n/a'}/cap=${budgetSnapshot ? budgetSnapshot.cap : 'n/a'}`,
                 `daysLeft=${stats.daysLeft}`,
                 `queueSize=${this.messageQueue.size}`,
@@ -7101,16 +7222,16 @@ class PromotionFlowRunner {
         }
     }
     shouldProcessNextChannel(channel) {
-        return (0,_flow_runner_send_budget__WEBPACK_IMPORTED_MODULE_10__.shouldProcessNextChannel)(hostOf(this), channel);
+        return (0,_flow_runner_send_budget__WEBPACK_IMPORTED_MODULE_11__.shouldProcessNextChannel)(hostOf(this), channel);
     }
     readDailySendBudget(channel, daysLeft) {
-        return (0,_flow_runner_send_budget__WEBPACK_IMPORTED_MODULE_10__.readDailySendBudget)(hostOf(this), channel, daysLeft);
+        return (0,_flow_runner_send_budget__WEBPACK_IMPORTED_MODULE_11__.readDailySendBudget)(hostOf(this), channel, daysLeft);
     }
     reserveDailySendBudget(channel, daysLeft, isFollowUp) {
-        return (0,_flow_runner_send_budget__WEBPACK_IMPORTED_MODULE_10__.reserveDailySendBudget)(hostOf(this), channel, daysLeft, isFollowUp);
+        return (0,_flow_runner_send_budget__WEBPACK_IMPORTED_MODULE_11__.reserveDailySendBudget)(hostOf(this), channel, daysLeft, isFollowUp);
     }
     settleDailySendBudget(result, reservation) {
-        return (0,_flow_runner_send_budget__WEBPACK_IMPORTED_MODULE_10__.settleDailySendBudget)(hostOf(this), result, reservation);
+        return (0,_flow_runner_send_budget__WEBPACK_IMPORTED_MODULE_11__.settleDailySendBudget)(hostOf(this), result, reservation);
     }
     log(level, message) {
         try {
@@ -7129,40 +7250,40 @@ class PromotionFlowRunner {
         }
     }
     formatStats(stats) {
-        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_11__.formatStats)(stats);
+        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_12__.formatStats)(stats);
     }
     describeSelection(selection, intelligenceDocs) {
-        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_11__.describeSelection)(hostOf(this), selection, intelligenceDocs);
+        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_12__.describeSelection)(hostOf(this), selection, intelligenceDocs);
     }
     toChannelIdSet(channels) {
-        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_11__.toChannelIdSet)(channels);
+        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_12__.toChannelIdSet)(channels);
     }
     getSkippedSelectionReason(channel, intelligenceByChannel) {
-        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_11__.getSkippedSelectionReason)(channel, intelligenceByChannel);
+        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_12__.getSkippedSelectionReason)(channel, intelligenceByChannel);
     }
     summarizeSelectionChannels(channels, label) {
-        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_11__.summarizeSelectionChannels)(hostOf(this), channels, label);
+        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_12__.summarizeSelectionChannels)(hostOf(this), channels, label);
     }
     formatCounts(counts) {
-        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_11__.formatCounts)(counts);
+        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_12__.formatCounts)(counts);
     }
     formatChannel(channel) {
-        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_11__.formatChannel)(channel);
+        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_12__.formatChannel)(channel);
     }
     formatCompactChannel(channel) {
-        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_11__.formatCompactChannel)(channel);
+        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_12__.formatCompactChannel)(channel);
     }
     formatCandidate(candidate) {
-        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_11__.formatCandidate)(candidate);
+        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_12__.formatCandidate)(candidate);
     }
     compact(value) {
-        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_11__.compact)(value);
+        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_12__.compact)(value);
     }
     safeJson(value) {
-        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_11__.safeJson)(hostOf(this), value);
+        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_12__.safeJson)(hostOf(this), value);
     }
     normalizeError(error) {
-        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_11__.normalizeError)(error);
+        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_12__.normalizeError)(error);
     }
     recordCycleFailure(error) {
         this.health.totalCycleFailures += 1;
@@ -9547,6 +9668,10 @@ class BasePromotionEngine {
     getBanRateGateState() {
         return this.banRateGate ? { ...this.banRateGate } : null;
     }
+    /** Last SpamBot status, reported in the runner heartbeat only (harsh never changes sending here). */
+    getSpamStatus() {
+        return null;
+    }
     mergeLiveChannelInfo(existing, live) {
         return (0,_channel_state__WEBPACK_IMPORTED_MODULE_16__.mergeLiveChannelDocument)(existing, live, {
             normalizeChannelId: (id) => this.normalizeChannelId(id),
@@ -10055,6 +10180,7 @@ class BasePromotionEngine {
                 failStreak: this.stats.failStreak,
                 daysLeft: this.getDaysLeft(),
             }),
+            getSpamStatus: () => this.getSpamStatus(),
             loadChannels: () => this.loadChannelsForRunner(),
             getChannel: (channelId) => this.getChannelForRunner(channelId),
             getIntelligenceDocs: (channelIds) => this.getIntelligenceDocsForRunner(channelIds),
@@ -11188,7 +11314,7 @@ const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_0__.Logger('De
 //    both sending all day, both invisible to recovery.
 // 2. daysLeft CAN BE UNKNOWN AFTER A RESTART. The engine's `this.daysLeft` is in memory; at boot it is
 //    restored only from Redis `tg::acct::{mobile}` (PromotionEngine.restoreAccountState; TTL
-//    max(48 h, limitedUntil + 1 day)), never from Mongo (daysLeft is not stored in Mongo, owner
+//    max(48 h, or 30 days for harsh, limitedUntil + 1 day)), never from Mongo (daysLeft is not stored in Mongo, owner
 //    2026-10-28). With no Redis entry it stays -1 until the next SpamBot reply. check-tg-health's
 //    per-mobile daysLeftMap is also in memory and starts empty on every restart, and restore
 //    deliberately does not refill it (see restoreAccountState). Unknown coalesces to -1 (the
@@ -14938,6 +15064,133 @@ function readPaceEnvMs(env, name, fallback) {
 
 /***/ },
 
+/***/ "../../packages/tg-core/src/account-health/probe.ts"
+/*!**********************************************************!*\
+  !*** ../../packages/tg-core/src/account-health/probe.ts ***!
+  \**********************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   HARSH_PROBE_GAPS_MS: () => (/* binding */ HARSH_PROBE_GAPS_MS),
+/* harmony export */   HARSH_PROBE_REPEAT_MS: () => (/* binding */ HARSH_PROBE_REPEAT_MS),
+/* harmony export */   HARSH_REMEMBER_MS: () => (/* binding */ HARSH_REMEMBER_MS),
+/* harmony export */   LIMITED_REPROBE_AFTER_MS: () => (/* binding */ LIMITED_REPROBE_AFTER_MS),
+/* harmony export */   LIMITED_REPROBE_JITTER_MS: () => (/* binding */ LIMITED_REPROBE_JITTER_MS),
+/* harmony export */   PROBE_FLOOR_MS: () => (/* binding */ PROBE_FLOOR_MS),
+/* harmony export */   nextProbeAt: () => (/* binding */ nextProbeAt),
+/* harmony export */   probeDue: () => (/* binding */ probeDue),
+/* harmony export */   probeFloorAt: () => (/* binding */ probeFloorAt)
+/* harmony export */ });
+/* harmony import */ var _types__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./types */ "../../packages/tg-core/src/account-health/types.ts");
+/* harmony import */ var _time__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./time */ "../../packages/tg-core/src/account-health/time.ts");
+
+
+/** SpamBot is never probed more often than this, `force` included (§2.3; today force bypasses it, C24). */
+const PROBE_FLOOR_MS = 6 * _time__WEBPACK_IMPORTED_MODULE_1__.HOUR_MS;
+/** A dated limit is re-probed this long after it lifts, plus jitter. */
+const LIMITED_REPROBE_AFTER_MS = _time__WEBPACK_IMPORTED_MODULE_1__.HOUR_MS;
+/** Jitter added to the limited re-probe (assumption: 0-30 min; the design says "plus jitter"). */
+const LIMITED_REPROBE_JITTER_MS = 30 * 60 * 1000;
+/**
+ * Harsh re-probe points, cumulative from the first harsh verdict (`statusSince`): the gaps are
+ * 24 h, 48 h, 96 h, then every 7 d (§2.3). Today promote re-probes harsh every ~6 h for no new
+ * information (§1.3).
+ */
+const HARSH_PROBE_GAPS_MS = [_time__WEBPACK_IMPORTED_MODULE_1__.DAY_MS, 2 * _time__WEBPACK_IMPORTED_MODULE_1__.DAY_MS, 4 * _time__WEBPACK_IMPORTED_MODULE_1__.DAY_MS];
+const HARSH_PROBE_REPEAT_MS = 7 * _time__WEBPACK_IMPORTED_MODULE_1__.DAY_MS;
+/**
+ * How long a harsh verdict is remembered across restarts after the last harsh SpamBot reply (Redis
+ * `tg::acct::{mobile}` TTL floor). 30 days = the pool rest harsh already gets (§6 D4; CMS
+ * `HARSH_RECHECK_AFTER_MS` for buffers, tg-aut `HARSH_SWAP_DAYS`): measured harsh verdicts never cleared
+ * within the 7-day window (§1.3). Any newer SpamBot verdict (free / limited) replaces it at once.
+ */
+const HARSH_REMEMBER_MS = 30 * _time__WEBPACK_IMPORTED_MODULE_1__.DAY_MS;
+/** Earliest instant the 6 h floor allows the next probe. */
+function probeFloorAt(h, now) {
+    return h.checkedAt === null ? now : Math.max(now, h.checkedAt + PROBE_FLOOR_MS);
+}
+/**
+ * Next scheduled SpamBot probe (epoch ms), or null for none. Never sooner than 6 h after the last
+ * probe; never during a flood pause; never for a dead account.
+ */
+function nextProbeAt(h, now, options = {}) {
+    const floor = probeFloorAt(h, now);
+    const notBeforeFlood = (at) => (h.floodUntil !== null && h.floodUntil > at ? h.floodUntil : at);
+    switch (h.state) {
+        case 'dead':
+            return null;
+        case 'healthy':
+            return options.massBanSignal === true ? notBeforeFlood(floor) : null;
+        case 'unknown':
+            return notBeforeFlood(floor);
+        case 'limited': {
+            if (h.limitedUntil === null)
+                return notBeforeFlood(floor);
+            const random = options.random ?? Math.random;
+            const jitter = Math.floor(unit(random()) * LIMITED_REPROBE_JITTER_MS);
+            return notBeforeFlood(Math.max(floor, h.limitedUntil + LIMITED_REPROBE_AFTER_MS + jitter));
+        }
+        case 'harsh': {
+            const since = h.statusSince ?? h.checkedAt ?? now;
+            const last = h.checkedAt ?? since;
+            return notBeforeFlood(Math.max(floor, nextHarshPoint(since, last)));
+        }
+        default:
+            return null;
+    }
+}
+/** True when a probe may be sent now. `force` skips the schedule but never the 6 h floor. */
+function probeDue(h, now, force = false, options = {}) {
+    if ((0,_types__WEBPACK_IMPORTED_MODULE_0__.effectiveState)(h, now) === 'flood' || h.state === 'dead')
+        return false;
+    if (now < probeFloorAt(h, now))
+        return false;
+    if (force)
+        return true;
+    const at = h.nextProbeAt ?? nextProbeAt(h, now, options);
+    return at !== null && at <= now;
+}
+/** First harsh schedule point strictly after the last probe. */
+function nextHarshPoint(since, last) {
+    let at = since;
+    for (const gap of HARSH_PROBE_GAPS_MS) {
+        at += gap;
+        if (at > last)
+            return at;
+    }
+    const behind = last - at;
+    const steps = Math.floor(behind / HARSH_PROBE_REPEAT_MS) + 1;
+    return at + steps * HARSH_PROBE_REPEAT_MS;
+}
+function unit(value) {
+    if (!Number.isFinite(value))
+        return 0;
+    return Math.max(0, Math.min(0.999999, value));
+}
+
+
+/***/ },
+
+/***/ "../../packages/tg-core/src/account-health/time.ts"
+/*!*********************************************************!*\
+  !*** ../../packages/tg-core/src/account-health/time.ts ***!
+  \*********************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   DAY_MS: () => (/* binding */ DAY_MS),
+/* harmony export */   HOUR_MS: () => (/* binding */ HOUR_MS)
+/* harmony export */ });
+// Module-internal time units for account-health. Deliberately NOT re-exported from
+// account-health/index.ts, so the @tg/core barrel does not export generic DAY_MS / HOUR_MS names.
+const HOUR_MS = 60 * 60 * 1000;
+const DAY_MS = 24 * HOUR_MS;
+
+
+/***/ },
+
 /***/ "../../packages/tg-core/src/account-health/types.ts"
 /*!**********************************************************!*\
   !*** ../../packages/tg-core/src/account-health/types.ts ***!
@@ -16279,6 +16532,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ });
 /* harmony import */ var _utils_Redis_Redis_Client__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../utils/Redis/Redis.Client */ "../../packages/tg-core/src/utils/Redis/Redis.Client.ts");
 /* harmony import */ var _utils_logger__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _account_health_probe__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../account-health/probe */ "../../packages/tg-core/src/account-health/probe.ts");
 /**
  * Restart-safe state: memory is the working copy, Redis a backup read once at boot.
  *
@@ -16296,6 +16550,7 @@ __webpack_require__.r(__webpack_exports__);
  *  - RedisWrites:          any other shape (JSON keys, ZSETs, counters, several keys per change): the caller gives
  *                          the commands and names the slots; same outage replay as the classes above.
  */
+
 
 
 const logger = new _utils_logger__WEBPACK_IMPORTED_MODULE_1__.Logger("state-redis");
@@ -16869,13 +17124,18 @@ function takePreloadedPromoteRestartState(mobile) {
 function resetPromoteRestartStateForTests() {
     bootRestartStates.clear();
 }
-/** TTL of `tg::acct`: max(48 h, limitedUntil + 1 day), so a long dated limit outlives the default TTL. */
-function accountStateTtlMs(limitedUntil, now = Date.now()) {
+/**
+ * TTL of `tg::acct`: max(floor, limitedUntil + 1 day), so a long dated limit outlives the floor. The floor is 48 h,
+ * or HARSH_REMEMBER_MS (30 days) for a harsh verdict, so a harsh mobile is not restored as healthy after the
+ * next maintenance restart. A fresh free/limited verdict rewrites the whole hash with its own TTL.
+ */
+function accountStateTtlMs(limitedUntil, now = Date.now(), spamStatus = null) {
+    const floor = spamStatus === "harsh" ? _account_health_probe__WEBPACK_IMPORTED_MODULE_2__.HARSH_REMEMBER_MS : RESTART_STATE_TTL_MS;
     if (limitedUntil === null || !Number.isFinite(limitedUntil))
-        return RESTART_STATE_TTL_MS;
-    return Math.max(RESTART_STATE_TTL_MS, limitedUntil + DAY_MS - now);
+        return floor;
+    return Math.max(floor, limitedUntil + DAY_MS - now);
 }
-/** Saves the verdict for `mobile` (whole hash, TTL from limitedUntil). Never throws; false = memory-only. */
+/** Saves the verdict for `mobile` (whole hash, TTL from limitedUntil and spamStatus). Never throws; false = memory-only. */
 function saveAccountRestartState(mobile, state, now = Date.now()) {
     const entries = restartStateEntries({
         daysLeft: state.daysLeft,
@@ -16885,7 +17145,7 @@ function saveAccountRestartState(mobile, state, now = Date.now()) {
         source: state.source,
         updatedAt: now,
     });
-    return accountStateStore(mobile).replace(entries, accountStateTtlMs(state.limitedUntil, now));
+    return accountStateStore(mobile).replace(entries, accountStateTtlMs(state.limitedUntil, now, state.spamStatus));
 }
 /**
  * Boot: the stored verdict with daysLeft recomputed from limitedUntil (a dated limit counts down while the process
@@ -17793,8 +18053,8 @@ function extractSpamBotReleaseDate(text) {
 }
 /**
  * Parses the string returned by extractSpamBotReleaseDate into a UTC instant. Without a year the
- * next occurrence is used (dates up to 1 day past stay in the current year); without a time the
- * instant is 23:59 UTC of that day.
+ * occurrence (last, this or next year) nearest to `now` is used, so it may be in the past; without a
+ * time the instant is 23:59 UTC of that day.
  * Returns null for anything unparseable or an impossible calendar date.
  */
 function parseSpamBotReleaseDate(raw, now = new Date()) {
@@ -17832,12 +18092,20 @@ function parseSpamBotReleaseDate(raw, now = new Date()) {
     if (month < 0 || day < 1 || day > 31)
         return null;
     if (year === null) {
-        const todayUtc = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
-        year = now.getUTCFullYear();
-        // Roll to next year only when the date is clearly in the past (> 1 day): a just-passed
-        // yearless date ("9 Oct" read on 10 Oct) must not become a ~365-day limit.
-        if (Date.UTC(year, month, day) < todayUtc - 24 * 60 * 60 * 1000)
-            year += 1;
+        // Take the valid candidate in last, this or next year nearest to now: "2 Jan" read on 30 Dec is
+        // next year, "31 Dec" read on 1 Jan is last year's (already lapsed) limit, never ~365 days ahead.
+        let best = null;
+        for (const y of [now.getUTCFullYear() - 1, now.getUTCFullYear(), now.getUTCFullYear() + 1]) {
+            const candidate = new Date(Date.UTC(y, month, day, hours, minutes));
+            if (candidate.getUTCMonth() !== month || candidate.getUTCDate() !== day)
+                continue;
+            if (best === null || Math.abs(candidate.getTime() - now.getTime()) < Math.abs(Date.UTC(best, month, day, hours, minutes) - now.getTime())) {
+                best = y;
+            }
+        }
+        if (best === null)
+            return null;
+        year = best;
     }
     const result = new Date(Date.UTC(year, month, day, hours, minutes));
     // Reject overflow such as 31 Feb, which Date.UTC silently rolls into March.
@@ -39764,8 +40032,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "ec2424de18e23523f8296ac07aab657ab2e9b4e3" : 0;
-    const builtAt =  true ? "2026-10-31T07:36:58.164Z" : 0;
+    const sha =  true ? "0919f753beb2fe9acfe9029b6c37fad45ca4e4aa" : 0;
+    const builtAt =  true ? "2026-10-31T09:29:13.971Z" : 0;
     return { sha, builtAt };
 }
 
@@ -43153,6 +43421,8 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_17__.Ba
         super(client, dialogManager, options.instanceName || dialogManager.instanceName || process.env.clientId || "defaultClient", options.instanceId || dialogManager.instanceId || process.env.mobile || "defaultMobile");
         // --- Public mutable fields preserved from the old Promotion API ---
         this.daysLeft = -1;
+        /** Last SpamBot status (live or restored from tg::acct). 'harsh' changes nothing about sending (C6); it is reported only. */
+        this.spamStatus = null;
         this.messageCount = 0;
         this.converted = 0;
         this.previousSuccessfulMessages = [];
@@ -43178,6 +43448,9 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_17__.Ba
     // =================================================================
     getDaysLeft() {
         return this.daysLeft;
+    }
+    getSpamStatus() {
+        return this.spamStatus;
     }
     logRunnerMessage(level, message) {
         logger[level === 'info' ? 'log' : level](`[${this.mobile}] ${message}`);
@@ -43614,7 +43887,25 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_17__.Ba
         if (!state)
             return;
         this.daysLeft = state.daysLeft;
+        this.spamStatus = state.spamStatus;
         logger.log(`[${this.mobile}] SpamBot verdict restored after restart: status=${state.spamStatus ?? '-'} daysLeft=${state.daysLeft}`);
+    }
+    /**
+     * SpamBot harsh warning: remembered in tg::acct::{mobile} for HARSH_REMEMBER_MS (30 days; restored at boot) until a
+     * newer free/limited verdict replaces it. Nothing else changes (owner): promotion keeps running, daysLeft keeps its
+     * previous value (legacyDaysLeft 'promote' harsh, C6), promoteClients.availableDate is not moved, and the
+     * check-tg-health map is not filled, so the SpamBot probe cadence is unchanged.
+     */
+    recordHarshVerdict() {
+        this.spamStatus = 'harsh';
+        const now = Date.now();
+        void (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_13__.saveAccountRestartState)(this.mobile, {
+            daysLeft: this.daysLeft,
+            spamStatus: 'harsh',
+            limitedUntil: null,
+            spamCheckedAt: now,
+            source: 'promote',
+        }, now);
     }
     setDaysLeft(daysLeft) {
         this.daysLeft = daysLeft;
@@ -43623,9 +43914,11 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_17__.Ba
         // Restart restore (tg::acct::{mobile}). A limited daysLeft is stored sanitized (release days + 1), so
         // the release day is now + (daysLeft - 1) days; boot recomputes daysLeft from it.
         const limited = (0,_tg_core_utils_spam_limit__WEBPACK_IMPORTED_MODULE_12__.isSpamLimited)(daysLeft) && daysLeft > 0;
+        // A fresh free/limited verdict replaces a remembered harsh one at once (whole hash, its own TTL).
+        this.spamStatus = (0,_tg_core_utils_spam_limit__WEBPACK_IMPORTED_MODULE_12__.isSpamLimited)(daysLeft) ? 'limited' : 'free';
         void (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_13__.saveAccountRestartState)(this.mobile, {
             daysLeft,
-            spamStatus: (0,_tg_core_utils_spam_limit__WEBPACK_IMPORTED_MODULE_12__.isSpamLimited)(daysLeft) ? 'limited' : 'free',
+            spamStatus: this.spamStatus,
             limitedUntil: limited ? now + Math.max(0, daysLeft - 1) * 24 * 60 * 60 * 1000 : null,
             spamCheckedAt: now,
             source: 'promote',
@@ -48359,8 +48652,8 @@ class TelegramManager {
                                     }, `TelegramManager.goodNewsNotification.${this.clientDetails.mobile}`);
                             }
                             else if (spamBotKind === 'harsh-warning') {
-                                // this.promoterInstance.setChannels(openChannels)
-                                // this.promoterInstance.setDaysLeft(99);
+                                // Remembered across restarts (tg::acct, 30 days); promotion, daysLeft and availableDate unchanged.
+                                this.promoterInstance.recordHarshVerdict();
                                 if (shouldNotify)
                                     await sendTelegramManagerNotification(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_25__.ChannelCategory.ACCOUNT_NOTIFICATIONS, {
                                         title: "Harsh limit",
