@@ -1851,6 +1851,28 @@ class AnalyticsSink {
         }
     }
     /**
+     * Shutdown pre-flush: writes the coalesced counters NOW (not at the next counterFlushIntervalMs)
+     * plus whatever is buffered, while the process is still healthy and before slower teardown steps
+     * run. The sink keeps running: rows recorded afterwards go out with stop() or the 'exit' spill.
+     * Unbounded by itself (each INSERT is bounded by queryTimeoutMs); the caller bounds it. Never throws.
+     */
+    async flushNow() {
+        if (!this.enabled || !this.pool || this.finalSpilled)
+            return;
+        try {
+            // A flush already running may have skipped the counters: let it finish, then drain them.
+            if (this.inFlight)
+                await this.inFlight;
+            // Stays set: the process is shutting down, so every later flush (and stop()) drains counters too.
+            this.drainCountersNow = true;
+            this.backoffUntil = 0;
+            await this.flush();
+            if (this.counters.size > 0 || this.buffer.length > 0)
+                await this.flush();
+        }
+        catch { /* rule 3 */ }
+    }
+    /**
      * Bounded drain, then a synchronous spill of whatever is left, then close. Never throws.
      * Drain budget = min(stopTimeoutMs, killWindowMs - 1 s), so the spill always runs before pm2's
      * kill (server.js exits after SHUTDOWN_TIMEOUT; the 'exit' hook covers that too).
@@ -2055,6 +2077,7 @@ function describe(err) {
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   __setAnalyticsForTests: () => (/* binding */ __setAnalyticsForTests),
+/* harmony export */   flushAnalytics: () => (/* binding */ flushAnalytics),
 /* harmony export */   getAnalytics: () => (/* binding */ getAnalytics),
 /* harmony export */   initAnalytics: () => (/* binding */ initAnalytics),
 /* harmony export */   shutdownAnalytics: () => (/* binding */ shutdownAnalytics)
@@ -2250,6 +2273,20 @@ async function shutdownAnalytics() {
     // (10d gap 2), waiting at most 2 s so a dead notification channel never holds up exit.
     await (0,_loss_notifier__WEBPACK_IMPORTED_MODULE_1__.flushAnalyticsNotifiers)(2000);
 }
+/**
+ * Shutdown pre-flush (sink stays running): writes pending counters and buffered rows now, so a
+ * slow later shutdown step cannot cost them. No-op while init is in flight or analytics is off.
+ * Never throws; the caller bounds how long it waits. shutdownAnalytics() still runs afterwards.
+ */
+async function flushAnalytics() {
+    const sink = instance;
+    if (!sink || typeof sink.flushNow !== "function")
+        return;
+    try {
+        await sink.flushNow();
+    }
+    catch { /* total */ }
+}
 /** Test seam. `null` also resets the pre-init buffer. */
 function __setAnalyticsForTests(sink) {
     instance = sink;
@@ -2294,6 +2331,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   createAlertNotifier: () => (/* reexport safe */ _loss_notifier__WEBPACK_IMPORTED_MODULE_1__.createAlertNotifier),
 /* harmony export */   createLossNotifier: () => (/* reexport safe */ _loss_notifier__WEBPACK_IMPORTED_MODULE_1__.createLossNotifier),
 /* harmony export */   defaultSpoolDir: () => (/* reexport safe */ _analytics_sink__WEBPACK_IMPORTED_MODULE_0__.defaultSpoolDir),
+/* harmony export */   flushAnalytics: () => (/* reexport safe */ _analytics__WEBPACK_IMPORTED_MODULE_2__.flushAnalytics),
 /* harmony export */   flushAnalyticsNotifiers: () => (/* reexport safe */ _loss_notifier__WEBPACK_IMPORTED_MODULE_1__.flushAnalyticsNotifiers),
 /* harmony export */   getAnalytics: () => (/* reexport safe */ _analytics__WEBPACK_IMPORTED_MODULE_2__.getAnalytics),
 /* harmony export */   initAnalytics: () => (/* reexport safe */ _analytics__WEBPACK_IMPORTED_MODULE_2__.initAnalytics),
@@ -39726,8 +39764,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "0da7d5c207068235c857b524711ca21e76c94134" : 0;
-    const builtAt =  true ? "2026-10-30T19:50:52.330Z" : 0;
+    const sha =  true ? "ec2424de18e23523f8296ac07aab657ab2e9b4e3" : 0;
+    const builtAt =  true ? "2026-10-31T07:36:58.164Z" : 0;
     return { sha, builtAt };
 }
 
