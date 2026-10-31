@@ -50913,8 +50913,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "b095624713f53cefe77b1b9e28567ed1a34b86c2" : 0;
-    const builtAt =  true ? "2026-10-31T11:47:01.862Z" : 0;
+    const sha =  true ? "c410f9220a497442af93c099c2fff4f697fdcf64" : 0;
+    const builtAt =  true ? "2026-10-31T17:05:54.618Z" : 0;
     return { sha, builtAt };
 }
 
@@ -53672,7 +53672,9 @@ class WatchedEventScheduler extends _tg_events__WEBPACK_IMPORTED_MODULE_1__.Even
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   operatorCall: () => (/* binding */ operatorCall),
-/* harmony export */   requestCall: () => (/* binding */ requestCall)
+/* harmony export */   requestCall: () => (/* binding */ requestCall),
+/* harmony export */   testCall: () => (/* binding */ testCall),
+/* harmony export */   testCallInfo: () => (/* binding */ testCallInfo)
 /* harmony export */ });
 /* harmony import */ var _data_user_data_crud__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../data/user-data-crud */ "./src/data/user-data-crud.ts");
 /* harmony import */ var _conversation_state_user_state__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../conversation/state/user-state */ "./src/conversation/state/user-state.ts");
@@ -53682,6 +53684,10 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _telegram_client_access__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ../telegram/client-access */ "./src/telegram/client-access.ts");
 /* harmony import */ var _outbound_chat_notice__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ../outbound/chat-notice */ "./src/outbound/chat-notice.ts");
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _inhouse_video_policy__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ./inhouse/video-policy */ "./src/calls/inhouse/video-policy.ts");
+/* harmony import */ var _inhouse_test_call__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ./inhouse/test-call */ "./src/calls/inhouse/test-call.ts");
+
+
 
 
 
@@ -53757,6 +53763,31 @@ async function operatorCall(chatId) {
     logger.log(`[operator-call] ${chatId}: queued in-house call`);
     callManager.addToQueue(chatId, { noLegacyRing: true });
     return { called: true };
+}
+/**
+ * Ops test call (tg-chats "Test call"): ring `username` (default @myvcacc) and play show video `videoId` once.
+ * Bad input is refused here; the call itself runs in the in-house service (see inhouse/test-call.ts).
+ */
+async function testCall(usernameInput, videoInput) {
+    const username = usernameInput === undefined || usernameInput === '' ? _inhouse_test_call__WEBPACK_IMPORTED_MODULE_9__.DEFAULT_TEST_CALL_USERNAME : (0,_inhouse_test_call__WEBPACK_IMPORTED_MODULE_9__.normaliseTestUsername)(usernameInput);
+    if (!username)
+        return { started: false, reason: 'bad_username' };
+    const videoId = Number(videoInput);
+    const url = Number.isInteger(videoId) ? (0,_inhouse_video_policy__WEBPACK_IMPORTED_MODULE_8__.videoUrl)(videoId) : null;
+    if (!url)
+        return { started: false, reason: 'unknown_video' };
+    const inHouse = await _telegram_client_access__WEBPACK_IMPORTED_MODULE_5__.TelegramManager.getInstance().callManager.getInHouse();
+    if (!inHouse)
+        return { started: false, reason: 'in_house_off' };
+    const result = inHouse.startTestCall(username, videoId, url);
+    if ('reason' in result)
+        logger.log(`[test-call] @${username} video ${videoId} not started: ${result.reason}`);
+    return result;
+}
+/** What the tg-chats form needs: the video ids, the default username and the last test call (null if none). */
+async function testCallInfo() {
+    const inHouse = await _telegram_client_access__WEBPACK_IMPORTED_MODULE_5__.TelegramManager.getInstance().callManager.getInHouse();
+    return { videos: [..._inhouse_video_policy__WEBPACK_IMPORTED_MODULE_8__.VIDEO_IDS], defaultUsername: _inhouse_test_call__WEBPACK_IMPORTED_MODULE_9__.DEFAULT_TEST_CALL_USERNAME, last: inHouse?.testCallState() ?? null, inHouse: Boolean(inHouse) };
 }
 
 
@@ -54414,14 +54445,15 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _voice_proof_config__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./voice-proof-config */ "./src/calls/inhouse/voice-proof-config.ts");
 /* harmony import */ var _telegram_unreachable_report__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../../telegram/unreachable-report */ "./src/telegram/unreachable-report.ts");
 /* harmony import */ var _call_flood_cooldown__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../call-flood-cooldown */ "./src/calls/call-flood-cooldown.ts");
-/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
-/* harmony import */ var _call_notes__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ./call-notes */ "./src/calls/inhouse/call-notes.ts");
-/* harmony import */ var _conversation_state_upsell_quiet__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ../../conversation/state/upsell-quiet */ "./src/conversation/state/upsell-quiet.ts");
-/* harmony import */ var _call_pause__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ../call-pause */ "./src/calls/call-pause.ts");
-/* harmony import */ var _crash_quarantine__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ./crash-quarantine */ "./src/calls/inhouse/crash-quarantine.ts");
-/* harmony import */ var _payments_ladder__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ../../payments/ladder */ "./src/payments/ladder.ts");
-/* harmony import */ var _tg_core_utils_readbleTimeDifference__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! @tg/core/utils/readbleTimeDifference */ "../../packages/tg-core/src/utils/readbleTimeDifference.ts");
-/* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
+/* harmony import */ var _test_call__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ./test-call */ "./src/calls/inhouse/test-call.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _call_notes__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ./call-notes */ "./src/calls/inhouse/call-notes.ts");
+/* harmony import */ var _conversation_state_upsell_quiet__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ../../conversation/state/upsell-quiet */ "./src/conversation/state/upsell-quiet.ts");
+/* harmony import */ var _call_pause__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ../call-pause */ "./src/calls/call-pause.ts");
+/* harmony import */ var _crash_quarantine__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ./crash-quarantine */ "./src/calls/inhouse/crash-quarantine.ts");
+/* harmony import */ var _payments_ladder__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ../../payments/ladder */ "./src/payments/ladder.ts");
+/* harmony import */ var _tg_core_utils_readbleTimeDifference__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! @tg/core/utils/readbleTimeDifference */ "../../packages/tg-core/src/utils/readbleTimeDifference.ts");
+/* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
 
 
 
@@ -54435,7 +54467,8 @@ __webpack_require__.r(__webpack_exports__);
 
 
 
-const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_5__.Logger("tg-aut:in-house-call-service");
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_6__.Logger("tg-aut:in-house-call-service");
 function defaultTimer(fn, ms) {
     const timer = setInterval(fn, ms);
     timer.unref?.();
@@ -54535,15 +54568,17 @@ class InHouseCallService {
         this.durations = new Map();
         this.sizes = new Map();
         this.audioTracks = new Map();
-        this.autoRetries = new _call_notes__WEBPACK_IMPORTED_MODULE_6__.NoteMap('autoRetries', () => this.deps?.notes);
+        this.autoRetries = new _call_notes__WEBPACK_IMPORTED_MODULE_7__.NoteMap('autoRetries', () => this.deps?.notes);
         this.incomingPlans = new Map();
-        this.payPrompts = new _call_notes__WEBPACK_IMPORTED_MODULE_6__.NoteMap('payPrompts', () => this.deps?.notes);
+        this.payPrompts = new _call_notes__WEBPACK_IMPORTED_MODULE_7__.NoteMap('payPrompts', () => this.deps?.notes);
         /** Per caller: recent pitch decisions (true = picked up), newest last; last clip played. */
         this.pitchHistory = new Map();
         this.lastClip = new Map();
         this.pitchCalls = new Map();
         /** Voice-proof calls in progress (audio only, a clip to a non-show chat); they hold a slot. */
         this.voiceProofCalls = new Set();
+        /** The ops test call in progress, or the last one (startTestCall). */
+        this.testCall = null;
         /** Proof calls a paid show took the line from (hung up, or stopped before ringing). */
         this.voiceProofPreempted = new Set();
         /** chatId -> the peer key its proof call rings (to hang it up on preemption). */
@@ -54568,20 +54603,20 @@ class InHouseCallService {
         this.connectedChats = new Set();
         this.cancelled = new Set();
         this.deliveredAt = new Map();
-        this.probeFailures = new _call_notes__WEBPACK_IMPORTED_MODULE_6__.NoteMap('probeFailures', () => this.deps?.notes);
+        this.probeFailures = new _call_notes__WEBPACK_IMPORTED_MODULE_7__.NoteMap('probeFailures', () => this.deps?.notes);
         /** play() calls in progress, so stop() can let them settle. */
         this.plays = new Set();
         this.stopped = false;
-        this.warnNotices = new _call_notes__WEBPACK_IMPORTED_MODULE_6__.NoteMap('warnNotices', () => this.deps?.notes);
-        this.privacyNotices = new _call_notes__WEBPACK_IMPORTED_MODULE_6__.NoteMap('privacyNotices', () => this.deps?.notes);
+        this.warnNotices = new _call_notes__WEBPACK_IMPORTED_MODULE_7__.NoteMap('warnNotices', () => this.deps?.notes);
+        this.privacyNotices = new _call_notes__WEBPACK_IMPORTED_MODULE_7__.NoteMap('privacyNotices', () => this.deps?.notes);
         this.privacyEpisodes = new Map();
-        this.waitNotices = new _call_notes__WEBPACK_IMPORTED_MODULE_6__.NoteMap('waitNotices', () => this.deps?.notes);
+        this.waitNotices = new _call_notes__WEBPACK_IMPORTED_MODULE_7__.NoteMap('waitNotices', () => this.deps?.notes);
         this.mediaFailures = new Map();
         this.legacyLadders = new Map();
         /** Owed payers reported unreachable (entity not found), once per chat per process. */
         this.unreachableNotices = new Map();
         /** Last time each chat was sent the Zoom link because calls are paused (once per cooldown episode). */
-        this.floodLinks = new _call_notes__WEBPACK_IMPORTED_MODULE_6__.NoteMap('floodLinks', () => this.deps?.notes);
+        this.floodLinks = new _call_notes__WEBPACK_IMPORTED_MODULE_7__.NoteMap('floodLinks', () => this.deps?.notes);
         /** Running progress checkpoints per chat. */
         this.checkpoints = new Map();
         this.notesHydrated = false;
@@ -54687,7 +54722,7 @@ class InHouseCallService {
         const held = this.outgoing.size + this.incomingPlans.size + this.pitchCalls.size;
         if (held >= this.maxCalls)
             return true;
-        if (this.voiceProofCalls.size > 0)
+        if (this.voiceProofCalls.size > 0 || this.testCallLive())
             return false;
         return this.engine?.isBusy() ?? false;
     }
@@ -54727,7 +54762,7 @@ class InHouseCallService {
             return;
         this.notesHydrated = true;
         try {
-            const restored = await (0,_call_notes__WEBPACK_IMPORTED_MODULE_6__.hydrateNoteMaps)(this.deps.notes, [
+            const restored = await (0,_call_notes__WEBPACK_IMPORTED_MODULE_7__.hydrateNoteMaps)(this.deps.notes, [
                 this.autoRetries, this.payPrompts, this.probeFailures, this.warnNotices, this.privacyNotices, this.waitNotices, this.floodLinks,
             ]);
             if (restored > 0)
@@ -54749,7 +54784,7 @@ class InHouseCallService {
         const barred = guard.takeUnnoticed();
         if (!barred.length)
             return;
-        const tails = barred.map(_crash_quarantine__WEBPACK_IMPORTED_MODULE_9__.chatTail).join(', ');
+        const tails = barred.map(_crash_quarantine__WEBPACK_IMPORTED_MODULE_10__.chatTail).join(', ');
         this.logger.warn(`[in-house-calls] the previous process died setting up a call to ${barred.join(', ')}: no in-house calls to them for 6 h (legacy ring / link instead)`);
         await this.safeNotify({
             title: 'Call crash guard',
@@ -54763,7 +54798,7 @@ class InHouseCallService {
     }
     /** True while any outgoing or incoming call (show or pitch) is in progress. */
     hasActiveCalls() {
-        return this.outgoing.size + this.incomingPlans.size + this.pitchCalls.size + this.voiceProofCalls.size > 0;
+        return this.outgoing.size + this.incomingPlans.size + this.pitchCalls.size + this.voiceProofCalls.size > 0 || this.testCallLive();
     }
     /** Hang up any live call and unsubscribe from updates. Never leaves a call connected. */
     async stop() {
@@ -55008,6 +55043,111 @@ class InHouseCallService {
             this.notifyCallEnded(chatId);
         }
     }
+    /**
+     * Ops test call (test-call.ts): ring `username` and play video `videoId` once. Starts and returns at once; the
+     * outcome lands in testCallState(). One at a time, refused while any call is up or queued, and a paid show
+     * hangs it up. Never touches a customer row. `url` is the video's file (videoUrl), checked by the caller.
+     */
+    startTestCall(username, videoId, url) {
+        if (this.stopped || !this.isEnabled() || !this.deps.resolveUsername)
+            return { started: false, reason: 'calls_off' };
+        if (this.testCallLive())
+            return { started: false, reason: 'test_running' };
+        if (this.cooldown.isActive())
+            return { started: false, reason: 'flood_limited' };
+        if (this.hasActiveCalls() || this.isBusy() || this.deps.isLineBusy?.() || this.deps.hasQueuedCalls?.())
+            return { started: false, reason: 'busy' };
+        const run = { username, videoId, state: 'calling', startedAt: this.now() };
+        this.testCall = run;
+        this.logger.log(`[in-house-calls] test call to @${username} with video ${videoId}`);
+        void this.runTestCall(run, url);
+        return { started: true };
+    }
+    /** The ops test call in progress, or the last one; null when none ran since start. */
+    testCallState() {
+        if (!this.testCall)
+            return null;
+        const { peerId: _peer, preempted: _preempted, ...view } = this.testCall;
+        return { ...view };
+    }
+    testCallLive() {
+        return this.testCall?.state === 'calling';
+    }
+    isTestCallPeer(peerId) {
+        return this.testCallLive() && this.testCall?.peerId === peerId;
+    }
+    /** A paid show needs the line: hang the test call up (or stop it before it rings). */
+    preemptTestCall(why, hangups) {
+        const run = this.testCall;
+        if (!run || run.state !== 'calling' || run.preempted)
+            return;
+        run.preempted = true;
+        this.logger.log(`[in-house-calls] test call to @${run.username} preempted (${why})`);
+        if (run.peerId && this.engine?.hangup) {
+            hangups.push(this.engine.hangup(run.peerId).catch((error) => {
+                this.logger.warn('[in-house-calls] hanging up the test call failed', error?.message ?? error);
+            }));
+        }
+    }
+    async runTestCall(run, url) {
+        const end = (state, detail) => {
+            run.state = run.preempted && state !== 'played' ? 'preempted' : state;
+            run.endedAt = this.now();
+            if (detail)
+                run.detail = detail;
+            this.logger.log(`[in-house-calls] test call to @${run.username} (video ${run.videoId}): ${run.state}${detail ? ` (${detail})` : ''}`);
+        };
+        let requesting = false;
+        try {
+            if (!(await this.isAvailable()))
+                return end('unsupported');
+            const stepMs = this.deps.planTimeoutMs ?? PLAN_TIMEOUT_MS;
+            const engine = this.getEngine();
+            const peer = await withStepTimeout(this.deps.resolveUsername(run.username), stepMs, 'resolving the username');
+            const peerId = peer?.id === undefined || peer?.id === null ? '' : String(peer.id);
+            if (!peerId)
+                return end('not_found');
+            run.peerId = peerId;
+            if (this.deps.crashGuard?.isBarred(peerId))
+                return end('crash_quarantine');
+            const [durationSec, size, audio] = await Promise.all([this.duration(url), this.videoSize(url), this.hasAudio(url)]);
+            // A paid show took the line (or is waiting for it) while we prepared: do not ring.
+            if (this.stopped || run.preempted || this.outgoing.size + this.incomingPlans.size > 0 || this.deps.hasQueuedCalls?.())
+                return end('preempted');
+            requesting = true;
+            await this.deps.crashGuard?.settingUp(peerId, this);
+            if (this.stopped || run.preempted)
+                return end('preempted');
+            const record = await engine.call(peer, { file: url, video: true, ...(size ? { size } : {}), ...(audio === false ? { audio: false } : {}) }, {
+                answerTimeoutMs: _test_call__WEBPACK_IMPORTED_MODULE_5__.TEST_CALL_RING_MS,
+                maxDurationMs: durationSec ? durationSec * 1000 + CAP_SLACK_MS : _test_call__WEBPACK_IMPORTED_MODULE_5__.TEST_CALL_MAX_MS,
+                hangupOnMediaEnd: true,
+            });
+            run.talkSec = record.talkMs === null ? undefined : Math.round(record.talkMs / 1000);
+            const outcome = (0,_test_call__WEBPACK_IMPORTED_MODULE_5__.testCallOutcome)(record);
+            if (outcome.flood)
+                this.noteCallFlood(outcome.flood, peerId);
+            return end(outcome.state, outcome.detail);
+        }
+        catch (error) {
+            if (error instanceof StepTimeout)
+                return end('not_found', error.message);
+            const flood = requesting ? (0,_call_flood_cooldown__WEBPACK_IMPORTED_MODULE_4__.classifyCallFlood)(error) : null;
+            if (flood) {
+                this.noteCallFlood(flood, run.peerId);
+                return end('flood', error?.message);
+            }
+            if (/USERNAME_(NOT_OCCUPIED|INVALID)|No user has|Cannot find any entity/i.test(error?.message ?? ''))
+                return end('not_found', error?.message);
+            this.logger.error(`[in-house-calls] test call to @${run.username} failed`, error);
+            return end('error', error?.message);
+        }
+        finally {
+            if (requesting && run.peerId)
+                this.deps.crashGuard?.setupEnded(run.peerId, this);
+            this.notifyCallEnded(run.peerId ?? run.username);
+        }
+    }
     /** This chat's proof-call times within windowMs (oldest first). */
     proofCallsFor(chatId, now, windowMs) {
         return (this.voiceProofByChat.get(chatId) ?? []).filter((at) => now - at < windowMs);
@@ -55018,9 +55158,13 @@ class InHouseCallService {
      * before any await; the show's engine.call waits for the hang-ups via afterPreemption().
      */
     preemptVoiceProofs(why) {
-        if (this.voiceProofCalls.size === 0)
-            return;
         const hangups = [];
+        this.preemptTestCall(why, hangups);
+        if (this.voiceProofCalls.size === 0) {
+            if (hangups.length)
+                this.preemption = Promise.all([this.preemption, ...hangups]);
+            return;
+        }
         for (const proofChat of this.voiceProofCalls) {
             if (this.voiceProofPreempted.has(proofChat))
                 continue;
@@ -55457,7 +55601,7 @@ class InHouseCallService {
         const last = this.payPrompts.get(chatId);
         const now = this.now();
         // Upsell quiet after a ₹200+ show (conversation/state/upsell-quiet): no pay-again prompt (and no cooldown spent).
-        if ((0,_conversation_state_upsell_quiet__WEBPACK_IMPORTED_MODULE_7__.holdUpsell)(chatId, now))
+        if ((0,_conversation_state_upsell_quiet__WEBPACK_IMPORTED_MODULE_8__.holdUpsell)(chatId, now))
             return;
         if (last !== undefined && now - last < PAY_PROMPT_COOLDOWN_MS)
             return;
@@ -55481,7 +55625,7 @@ class InHouseCallService {
                     this.connectedAt.delete(this.connectedAt.keys().next().value);
                 if (!plan) {
                     // A voice-proof call: media is up, its setup is over (crash guard marker).
-                    if (record.direction === 'outgoing' && this.voiceProofCalls.has(connectedChat))
+                    if (record.direction === 'outgoing' && (this.voiceProofCalls.has(connectedChat) || this.isTestCallPeer(connectedChat)))
                         this.deps.crashGuard?.setupEnded(connectedChat, this);
                     return; // pitch / voice proof, not a show
                 }
@@ -55500,6 +55644,8 @@ class InHouseCallService {
                     void engine.hangup?.(record.peerUserId);
                 // A proof call preempted before the engine knew it: hang up as soon as it rings.
                 if (!plan && this.voiceProofPreempted.has(record.peerUserId))
+                    void engine.hangup?.(record.peerUserId);
+                if (!plan && this.isTestCallPeer(record.peerUserId) && this.testCall?.preempted)
                     void engine.hangup?.(record.peerUserId);
             });
             engine.on('busy-declined', (info) => {
@@ -55560,15 +55706,15 @@ class InHouseCallService {
             return;
         const resets = [];
         for (const row of rows) {
-            const update = (0,_payments_ladder__WEBPACK_IMPORTED_MODULE_10__.staleOtherPersonaReset)(row, now);
+            const update = (0,_payments_ladder__WEBPACK_IMPORTED_MODULE_11__.staleOtherPersonaReset)(row, now);
             if (!update || !row.profile)
                 continue;
             try {
                 await this.deps.resetOtherPersona(chatId, row.profile, update);
-                resets.push([row.profile, chatId, (0,_tg_core_utils_readbleTimeDifference__WEBPACK_IMPORTED_MODULE_11__.getReadableTimeDifference)(Number(row.lastMsgTimeStamp) || 0, now)]);
+                resets.push([row.profile, chatId, (0,_tg_core_utils_readbleTimeDifference__WEBPACK_IMPORTED_MODULE_12__.getReadableTimeDifference)(Number(row.lastMsgTimeStamp) || 0, now)]);
             }
             catch (error) {
-                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_12__.parseError)(error, `[in-house-calls] stale ${row.profile} row reset failed for ${chatId}`, false);
+                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_13__.parseError)(error, `[in-house-calls] stale ${row.profile} row reset failed for ${chatId}`, false);
             }
         }
         if (!resets.length)
@@ -55731,7 +55877,7 @@ class InHouseCallService {
             void this.safeNotify({
                 title: 'Owed payer unreachable',
                 summary: 'owed payer unreachable after swap: this account has no access hash for them and no usable username',
-                fields: [{ label: 'Chat', value: (0,_crash_quarantine__WEBPACK_IMPORTED_MODULE_9__.chatTail)(plan.chatId), code: false }, { label: 'Show', value: plan.videoType, code: false }],
+                fields: [{ label: 'Chat', value: (0,_crash_quarantine__WEBPACK_IMPORTED_MODULE_10__.chatTail)(plan.chatId), code: false }, { label: 'Show', value: plan.videoType, code: false }],
             });
         }
         return { status: 'unreachable', videoId: plan.videoId, videoType: plan.videoType };
@@ -55777,7 +55923,7 @@ class InHouseCallService {
                 // A decline (hangup) is not re-rung by us, and pending ladder events already retry; a decline pauses
                 // them like "don't call" (one ring at the end of the pause, no "pick up na" texts meanwhile).
                 if (record.endReason === 'hangup')
-                    (0,_call_pause__WEBPACK_IMPORTED_MODULE_8__.noteCallDeclined)(chatId);
+                    (0,_call_pause__WEBPACK_IMPORTED_MODULE_9__.noteCallDeclined)(chatId);
                 else if (!(await this.hasPendingEvents(chatId)) && this.claimAutoRetry(chatId)) {
                     this.deps.requeue(chatId, UNANSWERED_RETRY_MS);
                 }
@@ -56363,6 +56509,11 @@ function createInHouseCallService(client, hooks) {
                 logger.warn(`[in-house-calls] ${chatId}: not resolvable by id on this account (swap?); resolved via its username`);
             return byName ?? chatId;
         },
+        // Ops test call: a plain username lookup (ResolveUsername) on this account; only users can be called.
+        resolveUsername: async (username) => {
+            const entity = await client.getEntity(username);
+            return entity instanceof telegram__WEBPACK_IMPORTED_MODULE_4__.Api.User ? entity : null;
+        },
         probeDurationSec,
         probeVideoSize,
         probeHasAudio,
@@ -56495,6 +56646,57 @@ function inHouseCallsSwitchState(env = process.env) {
         return { enabled: override, source: 'override' };
     const fromEnv = parse(env.INHOUSE_CALLS);
     return fromEnv === null ? { enabled: true, source: 'default' } : { enabled: fromEnv, source: 'env' };
+}
+
+
+/***/ },
+
+/***/ "./src/calls/inhouse/test-call.ts"
+/*!****************************************!*\
+  !*** ./src/calls/inhouse/test-call.ts ***!
+  \****************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   DEFAULT_TEST_CALL_USERNAME: () => (/* binding */ DEFAULT_TEST_CALL_USERNAME),
+/* harmony export */   TEST_CALL_MAX_MS: () => (/* binding */ TEST_CALL_MAX_MS),
+/* harmony export */   TEST_CALL_RING_MS: () => (/* binding */ TEST_CALL_RING_MS),
+/* harmony export */   normaliseTestUsername: () => (/* binding */ normaliseTestUsername),
+/* harmony export */   testCallOutcome: () => (/* binding */ testCallOutcome)
+/* harmony export */ });
+/* harmony import */ var _call_flood_cooldown__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../call-flood-cooldown */ "./src/calls/call-flood-cooldown.ts");
+
+/** Our own call-test account; the tg-chats form starts with it. */
+const DEFAULT_TEST_CALL_USERNAME = 'myvcacc';
+/** How long the test call rings before it counts as unanswered. */
+const TEST_CALL_RING_MS = 60 * 1000;
+/** Upper bound on a test call whose video length could not be read. */
+const TEST_CALL_MAX_MS = 15 * 60 * 1000;
+/** A Telegram username, without '@' and t.me/: 5-32 letters, digits or '_', starting with a letter. Null if not one. */
+function normaliseTestUsername(input) {
+    if (typeof input !== 'string')
+        return null;
+    const name = input.trim().replace(/^(?:https?:\/\/)?(?:www\.)?t\.me\//i, '').replace(/^@/, '');
+    return /^[A-Za-z][A-Za-z0-9_]{4,31}$/.test(name) ? name : null;
+}
+/** How a finished call record ends the test call; `flood` is set when Telegram refused the call request. */
+function testCallOutcome(record) {
+    const detail = record.endReason ?? record.error ?? undefined;
+    if (record.endReason === 'privacy_restricted')
+        return { state: 'privacy_restricted', detail };
+    if (record.connectedAt === null) {
+        const flood = record.error ? (0,_call_flood_cooldown__WEBPACK_IMPORTED_MODULE_0__.classifyCallFlood)({ message: record.error }) : null;
+        if (flood)
+            return { state: 'flood', detail, flood };
+        if (!record.answeredAt && record.endReason === 'hangup')
+            return { state: 'declined', detail };
+        return { state: 'unanswered', detail };
+    }
+    if (record.endReason === 'media_failed' || record.endReason === 'error')
+        return { state: 'media_failed', detail };
+    return { state: record.mediaCompleted ? 'played' : 'cut', detail };
 }
 
 
@@ -104759,6 +104961,8 @@ router.get("/media/avatar/:chatId", _http_middlewares_leader_middleware__WEBPACK
 router.get("/media/:chatId/:messageId", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_1__.leaderOnlyMiddleware, _telegram_media_handlers__WEBPACK_IMPORTED_MODULE_8__.handleMedia);
 router.get("/deletecallrequest/:chatId", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_1__.leaderOnlyMiddleware, _telegram_call_handlers__WEBPACK_IMPORTED_MODULE_3__.handleDeletecallrequest);
 router.get(["/calls/inhouse", "/calls/inhouse/:mode"], _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_1__.leaderOnlyMiddleware, _telegram_call_handlers__WEBPACK_IMPORTED_MODULE_3__.handleCallsInhouse);
+router.get("/calls/test", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_1__.leaderOnlyMiddleware, _telegram_call_handlers__WEBPACK_IMPORTED_MODULE_3__.handleTestCallInfo);
+router.post("/calls/test", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_1__.leaderOnlyMiddleware, _telegram_call_handlers__WEBPACK_IMPORTED_MODULE_3__.handleTestCall);
 /**
  * @swagger
  * /executehs/{chatId}:
@@ -104946,6 +105150,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   handleOperatorCall: () => (/* binding */ handleOperatorCall),
 /* harmony export */   handleRequestcall: () => (/* binding */ handleRequestcall),
 /* harmony export */   handleSendvclink: () => (/* binding */ handleSendvclink),
+/* harmony export */   handleTestCall: () => (/* binding */ handleTestCall),
+/* harmony export */   handleTestCallInfo: () => (/* binding */ handleTestCallInfo),
 /* harmony export */   runVcLinkFollowup: () => (/* binding */ runVcLinkFollowup)
 /* harmony export */ });
 /* harmony import */ var _telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../../telegram/flood-safe-send */ "./src/telegram/flood-safe-send.ts");
@@ -105015,6 +105221,69 @@ async function handleOperatorCall(req, res) {
     catch (error) {
         (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, `Error in /operatorcall endpoint, ${chatId}`);
         (0,_route_responses__WEBPACK_IMPORTED_MODULE_8__.sendTelegramOperationFailure)(req, res, operation, error, "Failed to start operator call", "Telegram operator call failed", false);
+    }
+}
+/**
+ * @swagger
+ * /calls/test:
+ *   get:
+ *     summary: Test call status (tgchats "Test call")
+ *     description: The video ids that can be played, the default username (myvcacc) and the last test call with its outcome.
+ *     tags: [Telegram]
+ *     security:
+ *       - ApiKeyAuth: []
+ *     responses:
+ *       200:
+ *         description: "{ videos, defaultUsername, inHouse, last: { username, videoId, state, startedAt, endedAt?, talkSec?, detail? } | null }"
+ *   post:
+ *     summary: Start a test call
+ *     description: The account rings the username (default myvcacc) and plays one show video. Ops testing only, no customer data is read or written. Refused while any other call is up or queued; a paid show hangs it up. Returns at once; poll GET /calls/test for the outcome.
+ *     tags: [Telegram]
+ *     security:
+ *       - ApiKeyAuth: []
+ *     requestBody:
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [videoId]
+ *             properties:
+ *               username: { type: string, example: myvcacc }
+ *               videoId: { type: integer, example: 203 }
+ *     responses:
+ *       202:
+ *         description: "{ started: true }"
+ *       400:
+ *         description: "{ started: false, reason: bad_username | unknown_video }"
+ *       409:
+ *         description: "{ started: false, reason: in_house_off | calls_off | test_running | flood_limited | busy }"
+ */
+async function handleTestCallInfo(req, res) {
+    const operation = "test-call-info";
+    try {
+        if (!(await (0,_route_responses__WEBPACK_IMPORTED_MODULE_8__.getTelegramManagerForOperation)(req, res, operation)))
+            return;
+        res.status(200).json({ operation, readOnly: true, success: true, ...(await (0,_calls__WEBPACK_IMPORTED_MODULE_2__.testCallInfo)()), requestId: req.requestId });
+    }
+    catch (error) {
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, "Error in GET /calls/test");
+        (0,_route_responses__WEBPACK_IMPORTED_MODULE_8__.sendTelegramOperationFailure)(req, res, operation, error, "Failed to read the test call", "Test call status failed", true);
+    }
+}
+async function handleTestCall(req, res) {
+    const operation = "test-call";
+    const body = (req.body ?? {});
+    try {
+        if (!(await (0,_route_responses__WEBPACK_IMPORTED_MODULE_8__.getTelegramManagerForOperation)(req, res, operation)))
+            return;
+        const result = await (0,_calls__WEBPACK_IMPORTED_MODULE_2__.testCall)(body.username, body.videoId);
+        const reason = "reason" in result ? result.reason : null;
+        const status = !reason ? 202 : reason === "bad_username" || reason === "unknown_video" ? 400 : 409;
+        res.status(status).json({ operation, readOnly: false, success: result.started, ...result, requestId: req.requestId });
+    }
+    catch (error) {
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, "Error in POST /calls/test");
+        (0,_route_responses__WEBPACK_IMPORTED_MODULE_8__.sendTelegramOperationFailure)(req, res, operation, error, "Failed to start the test call", "Test call failed", false);
     }
 }
 /**
