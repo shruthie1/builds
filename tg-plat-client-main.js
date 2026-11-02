@@ -51156,8 +51156,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "ee45d608d4e7db7c4123feea0d4a2c27a3f79689" : 0;
-    const builtAt =  true ? "2026-11-02T17:35:58.703Z" : 0;
+    const sha =  true ? "1bf3baf5a3624af1781f83d7527a156d16c9e802" : 0;
+    const builtAt =  true ? "2026-11-02T18:27:20.099Z" : 0;
     return { sha, builtAt };
 }
 
@@ -60725,6 +60725,11 @@ const CONSTANTS = {
     LIMITED_CALL_REQUEST_THROTTLE_MS: 60 * 1000,
     LIMITED_CALL_REQUEST_FAILURE_RETRY_MS: 10 * 1000,
 };
+/** The message's Telegram date (never later than now). */
+function messageArrivedAt(event, now = Date.now()) {
+    const dateSec = Number(event.message?.date);
+    return Number.isFinite(dateSec) && dateSec > 0 ? Math.min(dateSec * 1000, now) : now;
+}
 /**
  * Handle existing user message
  */
@@ -60759,6 +60764,15 @@ async function handleExistingUserMessage(event, userDetails, text, broadcastName
                 await updateUserStats(db, chatId, senderJson.firstName, userDetails);
                 return;
             }
+        }
+        // "Done" / "paid" / "." right after (or while we check) the photo they just sent: no reply of its own, the photo's
+        // result answers (payment-chat-guard proofAckWindowOpen; owner 2026-11-02). A real question still goes on below.
+        // Judged at the message's own arrival: the 5-8 s text batching may have run past the photo's result.
+        if (!event.message.media && (0,_payments_payment_chat_guard__WEBPACK_IMPORTED_MODULE_9__.isBareProofAck)(text) && (0,_payments_payment_chat_guard__WEBPACK_IMPORTED_MODULE_9__.proofAckWindowOpen)(chatId, messageArrivedAt(event))) {
+            logger.log(`[MEDIA] ${chatId}: "${text.slice(0, 20)}" acknowledges the photo just sent; its result answers`);
+            (0,_inbound_decision__WEBPACK_IMPORTED_MODULE_34__.markInbound)(event, "ignored", "proof-ack-while-photo-checked");
+            await updateUserStats(db, chatId, senderJson.firstName, userDetails);
+            return;
         }
         // A paid balance closes the warning for every reader (reply queue, pitches, this gate): a payer is never muted.
         // Credits outside the gate do not clear it themselves (owner's manual CMS credit = $inc payAmount only).
@@ -66392,22 +66406,32 @@ function schedulePatternFollowup(event, context, delayMs, action, options) {
  */
 const PAYMENT_CLAIM_HOLD_MS = 20000;
 /** The hold for a claim message. The text batching (5-8 s) already ran, so the claim's own date is the start. */
-function paymentClaimHold(event, now = Date.now()) {
+function paymentClaimHold(event, now = Date.now(), chatId = chatIdOf(event)) {
     const dateSec = Number(event?.message?.date);
     const claimedAt = Number.isFinite(dateSec) && dateSec > 0 ? Math.min(dateSec * 1000, now) : now;
+    // A claim made while the screenshot sent just before it was still being checked is about that screenshot (receipt,
+    // then "done"): its result answers. Counting only screenshots since the claim let the claim's reply out after a check
+    // slower than the hold (owner 2026-11-02: "Wait, Calling" then "What should I check baby?").
+    const inCheck = chatId ? (0,_payments_payment_chat_guard__WEBPACK_IMPORTED_MODULE_5__.paymentPhotoInCheckAt)(chatId, claimedAt) : undefined;
     return {
         claimedAt,
         delayMs: Math.max(0, claimedAt + PAYMENT_CLAIM_HOLD_MS - now),
-        guards: { skipIfPaymentPhotoSince: claimedAt, skipIfCreditedSince: claimedAt },
+        guards: { skipIfPaymentPhotoSince: inCheck ?? claimedAt, skipIfCreditedSince: claimedAt },
     };
+}
+function chatIdOf(event) {
+    const id = event?.chatId
+        ?? event?.message?.chatId;
+    return id == null ? "" : String(id);
 }
 /**
  * respond(event, text) for a payment-done claim, held until PAYMENT_CLAIM_HOLD_MS after the claim and dropped when a
- * payment screenshot came or a payment was credited since (the screenshot flow answers then). Returns the hold, so the
+ * payment screenshot came since the claim (or was still being checked when the claim came) or a payment was credited since
+ * the claim (the screenshot flow answers then). Returns the hold, so the
  * claim's later follow-ups can use the same guards and stay after the held reply.
  */
 function holdPaymentClaimReply(event, context, text, label) {
-    const hold = paymentClaimHold(event);
+    const hold = paymentClaimHold(event, Date.now(), String(context.chatId));
     schedulePatternFollowup(event, context, hold.delayMs, { kind: "respond", text }, { label, guards: hold.guards });
     return hold;
 }
@@ -91119,6 +91143,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   FRAUD_REMINDER_EVERY_MS: () => (/* binding */ FRAUD_REMINDER_EVERY_MS),
 /* harmony export */   PAYMENT_ACTIVITY_WINDOW_MS: () => (/* binding */ PAYMENT_ACTIVITY_WINDOW_MS),
 /* harmony export */   PAYMENT_CHECK_HOLD_MAX_MS: () => (/* binding */ PAYMENT_CHECK_HOLD_MAX_MS),
+/* harmony export */   PROOF_ACK_WINDOW_MS: () => (/* binding */ PROOF_ACK_WINDOW_MS),
 /* harmony export */   claimFraudReminder: () => (/* binding */ claimFraudReminder),
 /* harmony export */   clearFraudWarning: () => (/* binding */ clearFraudWarning),
 /* harmony export */   creditedSince: () => (/* binding */ creditedSince),
@@ -91126,13 +91151,16 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   fraudWarningOpen: () => (/* binding */ fraudWarningOpen),
 /* harmony export */   holdPayAskForPaymentCheck: () => (/* binding */ holdPayAskForPaymentCheck),
 /* harmony export */   insidePaymentAnalysis: () => (/* binding */ insidePaymentAnalysis),
+/* harmony export */   isBareProofAck: () => (/* binding */ isBareProofAck),
 /* harmony export */   isSupersededByPaymentVerdict: () => (/* binding */ isSupersededByPaymentVerdict),
 /* harmony export */   noteFraudWarning: () => (/* binding */ noteFraudWarning),
 /* harmony export */   notePaymentCredited: () => (/* binding */ notePaymentCredited),
 /* harmony export */   notePaymentPhoto: () => (/* binding */ notePaymentPhoto),
 /* harmony export */   notePaymentVerdict: () => (/* binding */ notePaymentVerdict),
 /* harmony export */   paymentPhotoBeingChecked: () => (/* binding */ paymentPhotoBeingChecked),
+/* harmony export */   paymentPhotoInCheckAt: () => (/* binding */ paymentPhotoInCheckAt),
 /* harmony export */   paymentPhotoSince: () => (/* binding */ paymentPhotoSince),
+/* harmony export */   proofAckWindowOpen: () => (/* binding */ proofAckWindowOpen),
 /* harmony export */   recentPaymentActivity: () => (/* binding */ recentPaymentActivity),
 /* harmony export */   resetPaymentChatGuard: () => (/* binding */ resetPaymentChatGuard),
 /* harmony export */   runPaymentAnalysis: () => (/* binding */ runPaymentAnalysis)
@@ -91176,6 +91204,50 @@ function paymentPhotoBeingChecked(chatId, now = Date.now()) {
         return false;
     const judged = (0,_conversation_state_chat_moments__WEBPACK_IMPORTED_MODULE_2__.momentAt)(chatId, 'paymentJudged');
     return judged === undefined || judged < photo;
+}
+/**
+ * Owner 2026-11-02 (live chat: receipt, "Done" during its check, then "Wait, Calling" followed by "What should I check
+ * baby? ... share the payment proof"): a bare acknowledgement of a photo just sent ("done", "paid", "check", ".") gets
+ * no reply of its own while the photo is being checked, nor within PROOF_ACK_WINDOW_MS of its arrival once it was
+ * credited. The photo's result is the reply. After any other result (a gate question, a fake warning, a non-payment
+ * photo) the next message is answered as before; a real question always is. Bounded by the photo's arrival
+ * (PAYMENT_CHECK_HOLD_MAX_MS while unjudged), so a lost check never silences the chat.
+ */
+const PROOF_ACK_WINDOW_MS = 90 * 1000;
+/**
+ * When the screenshot that was still being checked at `at` (a message's arrival) arrived; undefined when none was. "Being
+ * checked at `at`": it came before `at` and was not judged by then (judged later, or not yet, within
+ * PAYMENT_CHECK_HOLD_MAX_MS). Only the chat's latest photo is known; a later one already counts as "since the claim".
+ */
+function paymentPhotoInCheckAt(chatId, at) {
+    const photo = (0,_conversation_state_chat_moments__WEBPACK_IMPORTED_MODULE_2__.momentAt)(chatId, 'paymentPhoto');
+    if (photo === undefined || photo > at || at - photo >= PAYMENT_CHECK_HOLD_MAX_MS)
+        return undefined;
+    const judged = (0,_conversation_state_chat_moments__WEBPACK_IMPORTED_MODULE_2__.momentAt)(chatId, 'paymentJudged');
+    return judged === undefined || judged < photo || judged >= at ? photo : undefined;
+}
+/** A message arriving at `at` is in the photo's window: its check was running then, or the photo was credited and came
+ * less than PROOF_ACK_WINDOW_MS before it. */
+function proofAckWindowOpen(chatId, at = Date.now()) {
+    if (paymentPhotoInCheckAt(chatId, at) !== undefined)
+        return true;
+    const photo = (0,_conversation_state_chat_moments__WEBPACK_IMPORTED_MODULE_2__.momentAt)(chatId, 'paymentPhoto');
+    if (photo === undefined || photo > at || at - photo >= PROOF_ACK_WINDOW_MS)
+        return false;
+    const credited = (0,_conversation_state_chat_moments__WEBPACK_IMPORTED_MODULE_2__.momentAt)(chatId, 'paymentCredited');
+    return credited !== undefined && credited >= photo;
+}
+/** Whole-message acknowledgements of a just-sent receipt (compared after stripping punctuation, emoji and case). */
+const PROOF_ACKS = new Set([
+    'done', 'sent', 'send', 'check', 'paid', 'payment', 'payment done', 'done payment', 'paid done', 'payment sent',
+    'done baby', 'sent baby', 'paid baby', 'check it', 'check karo', 'check kro', 'check kar', 'check pls', 'check plz',
+    'pls check', 'plz check', 'please check', 'check please', 'bhej diya', 'kar diya', 'ho gaya', 'hogaya',
+    'ss', 'ss sent', 'screenshot', 'screenshot sent',
+]);
+/** "done", "Paid!", "." , "👍", "check karo": nothing in it but an acknowledgement of the photo just sent. */
+function isBareProofAck(text) {
+    const t = (text ?? '').toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, ' ').replace(/\s+/g, ' ').trim();
+    return t === '' || PROOF_ACKS.has(t);
 }
 // The analysis's own replies (verdicts, partial-payment asks, the non-payment-photo QR offer) must still go while its
 // photo is being checked: they run inside runPaymentAnalysis. `active` ends with the analysis, so a timer created
