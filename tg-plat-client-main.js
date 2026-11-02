@@ -36357,6 +36357,13 @@ class UserDataRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_2__.B
     async hasBlockedRow(chatId) {
         return !!(await this.collection.findOne({ chatId, canReply: 0 }, { projection: { _id: 1 } }));
     }
+    /**
+     * True when ANY persona row for chatId carries the operator's fake-payment mark (tg-aut payments/fake-payer.ts:
+     * `fakePaymentAt` not null). Deliberately unscoped, like hasBlockedRow: the mark is per user, not per persona. Throws.
+     */
+    async hasFakePaymentRow(chatId) {
+        return !!(await this.collection.findOne({ chatId, fakePaymentAt: { $ne: null } }, { projection: { _id: 1 } }));
+    }
     /** chatId's rows under OTHER personas (full docs). Throws. */
     async findInOtherPersonas(chatId, identity) {
         return this.collection.find((0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.othersFilter)(chatId, identity)).toArray();
@@ -36378,12 +36385,13 @@ class UserDataRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_2__.B
             .toArray();
     }
     /**
-     * chatIds of this persona's real payers (highestPayAmount >= 15, never caught with a fake
-     * screenshot), most recently active first. Feeds the in-house call allow-list. Throws.
+     * chatIds of this persona's real payers (highestPayAmount >= 15, not fake-marked by an operator), most recently
+     * active first. Feeds the in-house call allow-list. Until 2026-11-02 this excluded cheatCount > 0, which is the
+     * user's complaint score, not payment fraud (owner 2026-11-02). Throws.
      */
     async listPaidChatIds(identity, limit) {
         const rows = await this.collection
-            .find({ ...(0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.mineFilter)(identity), highestPayAmount: { $gte: 15 }, cheatCount: { $not: { $gt: 0 } } }, { projection: { chatId: 1 } })
+            .find({ ...(0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.mineFilter)(identity), highestPayAmount: { $gte: 15 }, fakePaymentAt: null }, { projection: { chatId: 1 } })
             .sort({ lastMsgTimeStamp: -1 })
             .limit(limit)
             .toArray();
@@ -51148,8 +51156,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "d220776dce4ac9bc0b176bdea6617707033c87f4" : 0;
-    const builtAt =  true ? "2026-11-02T16:33:57.995Z" : 0;
+    const sha =  true ? "ee45d608d4e7db7c4123feea0d4a2c27a3f79689" : 0;
+    const builtAt =  true ? "2026-11-02T17:35:58.703Z" : 0;
     return { sha, builtAt };
 }
 
@@ -51830,7 +51838,8 @@ async function initiateCall(amount, userDetails, reason = "Default") {
         secondShow: userDetails.secondShow,
         paidCount: 0,
         highestPayAmount: userDetails.highestPayAmount,
-        cheatCount: userDetails.cheatCount,
+        // cheatCount is not written here (2026-11-02): it rewrote the value just read on every call setup, so each one
+        // appended an unchanged cheat_flag row (mirrorCheatCount) and could undo an accusation counted in between.
         limitTime: limitTime,
         paidReply: false,
     };
@@ -57123,12 +57132,14 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _conversation_state_chat_moments__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../../conversation/state/chat-moments */ "./src/conversation/state/chat-moments.ts");
 /* harmony import */ var _payments_proof_gate_decide__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../../payments/proof-gate/decide */ "./src/payments/proof-gate/decide.ts");
 /* harmony import */ var _payments_ladder__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../../payments/ladder */ "./src/payments/ladder.ts");
+/* harmony import */ var _payments_fake_payer__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ../../payments/fake-payer */ "./src/payments/fake-payer.ts");
 /**
  * In-house video call policy: the VCUI rules (vcui src/utils/callPolicy.ts, pages/Idle.tsx,
  * pages/CallEnded.tsx and CMS getPaymentStats) ported server-side. Pure functions only, so the
  * decision of who gets which video, where it resumes and whether it counts as delivered is made
  * here, not in a browser.
  */
+
 
 
 
@@ -57177,17 +57188,19 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 function videoIds(values) {
     return (Array.isArray(values) ? values : []).map(Number).filter(Number.isFinite);
 }
-/** Some row of this chat on another persona is blocked (canReply 0), at any age. A fact; callBlock decides. */
+/** Some row of this chat on another persona is blocked (canReply 0, or fake-payment marked), at any age. A fact; callBlock decides. */
 function blockedOnAnyProfile(rows) {
-    return rows.some((row) => row?.canReply === 0);
+    return rows.some((row) => row?.canReply === 0 || (0,_payments_fake_payer__WEBPACK_IMPORTED_MODULE_5__.fakePaymentMarked)(row));
 }
 /**
  * The facts callBlock weighs about blocks on other personas: false when no other row is blocked, else the blocked
  * personas and the chat's recent paymentProofs rows (read only when some other row is blocked; [] when not read).
  */
 function blockedElsewhereFrom(rows, proofs = []) {
-    const profiles = rows.filter((row) => row?.canReply === 0).map((row) => String(row.profile ?? ''));
-    return profiles.length ? { profiles, proofs: [...(proofs ?? [])] } : false;
+    const profiles = rows.filter((row) => row?.canReply === 0 || (0,_payments_fake_payer__WEBPACK_IMPORTED_MODULE_5__.fakePaymentMarked)(row)).map((row) => String(row.profile ?? ''));
+    if (!profiles.length)
+        return false;
+    return (0,_payments_fake_payer__WEBPACK_IMPORTED_MODULE_5__.anyFakePaymentMark)(rows) ? { profiles, proofs: [...(proofs ?? [])], fakePayment: true } : { profiles, proofs: [...(proofs ?? [])] };
 }
 /**
  * An unresolved fake/edited-screenshot request on `profile`, opened within the answer window. A credit there resolves
@@ -57229,12 +57242,16 @@ function fraudBlockOn(proofs, profiles) {
  *       No age limit here (owner 2026-10-23): a fake-payment block elsewhere keeps blocking while its row exists (7 d);
  *       a credit HERE never resolves the other persona's request, so the window of rule 2 does not apply.
  *    `true` instead of BlockedElsewhere (no proofs read) checks 1 only. The other row is never touched.
+ *  - The operator's fake-payment mark (payments/fake-payer.ts, owner 2026-11-02) on this row ('own') or any other
+ *    persona's row ('other') always blocks: the user is owed nothing, and no credit anywhere overrides it.
  */
 function callBlock(chatId, own, blockedElsewhere, now = Date.now()) {
-    if (own?.canReply === 0)
+    if (own?.canReply === 0 || (0,_payments_fake_payer__WEBPACK_IMPORTED_MODULE_5__.fakePaymentMarked)(own))
         return 'own';
     if (!blockedElsewhere)
         return null;
+    if (blockedElsewhere !== true && blockedElsewhere.fakePayment)
+        return 'other';
     const creditedHere = (Number(own?.lifetimePaid) || 0) > 0 || (own?.creditKeys?.length ?? 0) > 0
         || (0,_conversation_state_chat_moments__WEBPACK_IMPORTED_MODULE_2__.momentAt)(chatId, 'paymentCredited') !== undefined;
     if (!creditedHere)
@@ -58171,7 +58188,8 @@ async function executehs(client, chatId, data) {
     const updatedData = {
         paidReply: true,
         // The show settles accusations made while it was owed (failed calls); the cheat ban counts only later ones.
-        cheatCount: 0,
+        // Written only when it changes (an unchanged write appends a duplicate cheat_flag row, mirrorCheatCount).
+        ...(userDetails?.cheatCount !== 0 ? { cheatCount: 0 } : {}),
         limitTime: Date.now(),
         totalCount: 10,
         // D3: totalCount: 10 is a FLAG, not a count — and 10 lands inside live thresholds in
@@ -58259,7 +58277,8 @@ async function executehsl(client, chatId, data) {
     (0,_conversation_state_upsell_quiet__WEBPACK_IMPORTED_MODULE_5__.noteShowCompleted)(chatId, before.highestPayAmount);
     const updatedData = {
         // The show settles accusations made while it was owed (failed calls); the cheat ban counts only later ones.
-        cheatCount: 0,
+        // Written only when it changes (an unchanged write appends a duplicate cheat_flag row, mirrorCheatCount).
+        ...(userDetails?.cheatCount !== 0 ? { cheatCount: 0 } : {}),
         paidReply: true,
         limitTime: (0,_payments_ladder__WEBPACK_IMPORTED_MODULE_6__.showHoldsReplies)(userDetails.payAmount) ? Date.now() + _payments_ladder__WEBPACK_IMPORTED_MODULE_6__.SHOW_HOLD_REPLIES_MS : Date.now(),
         totalCount: 10,
@@ -61991,6 +62010,14 @@ async function handlePrivateMessage(event) {
         : senderJson.firstName;
     const text = event.message.text?.toLowerCase() || "";
     const userDetails = (await db.read(chatId));
+    // The operator's fake-payment mark on ANY persona row of the chat (payments/fake-payer.ts) = canReply 0 for the
+    // whole chat: ignored here, before the existing-user path (whose per-row canReply 0 branch has a photo bypass and
+    // the 5-day auto-unblock) and before the new-user path (which would create a row and greet). Covers a persona row
+    // created after the mark and a row unblocked by hand (review 2026-11-02). The only inbound read of the mark.
+    if (await db.isFakePayer(chatId)) {
+        (0,_inbound_decision__WEBPACK_IMPORTED_MODULE_7__.markInbound)(event, "ignored", "canReply=0 (fake-payment mark)");
+        return;
+    }
     if (userDetails) {
         (0,_inbound_decision__WEBPACK_IMPORTED_MODULE_7__.markInbound)(event, "handled", "existing-user", (0,_payments_ladder__WEBPACK_IMPORTED_MODULE_8__.isPaidUser)(userDetails) ? "paid" : "unpaid");
         await _existing_user_handler__WEBPACK_IMPORTED_MODULE_4__.handleExistingUserMessage.call(this, event, userDetails, text, broadcastName, chatId);
@@ -67126,7 +67153,9 @@ const unpaidPatterns = [
             if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_1__.contains)(text, ['fake', 'fack', 'fak', 'scam', 'frau', 'cheat'])) {
                 // Track cheat accusation in database
                 const db = _data_user_data_crud__WEBPACK_IMPORTED_MODULE_9__.UserDataDtoCrud.getInstance();
-                const cheatCount = (userDetails.cheatCount || 0) + 1;
+                // Floored at 0 like the paid paths (existing-user-handler updateCheatCount, paid-patterns): the grace
+                // sentinel -2 must not absorb two real accusations (-2 + 1 = -1, a value no code means).
+                const cheatCount = Math.max(Number(userDetails.cheatCount) || 0, 0) + 1;
                 userDetails = await db.updateSingleKey(context.chatId, _data_user_data_crud__WEBPACK_IMPORTED_MODULE_9__.user.cheatCount, cheatCount);
                 // "Fake" after earlier voice/proof requests: ring them with the voice instead of a voice note
                 // (a few seconds after our text, never straight after the pay menu).
@@ -70715,6 +70744,10 @@ class UserDataDtoCrud {
             (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, "Error fetching texted client count");
             return { count: 1, list: [], lastDay: [], lastHour: [] };
         }
+    }
+    /** Some persona row of this chat carries the operator's fake-payment mark (payments/fake-payer.ts). Throws on DB failure. */
+    async isFakePayer(chatId) {
+        return this.userDataRepository().hasFakePaymentRow(String(chatId));
     }
     /** This user's rows on OTHER personas (read-only; throws on DB failure). Used by in-house calls. */
     async readOtherPersonaRows(chatId) {
@@ -78026,6 +78059,14 @@ async function processImage(event) {
     };
     try {
         const chatId = event.message.chatId.toString();
+        // An operator marked this user a fake payer (payments/fake-payer.ts, any persona row): nothing is credited, no call,
+        // no reply, no unblock, no ops notice (owner 2026-11-02: owed nothing; 2026-10-13: no notices for blocked users).
+        // First, before the download and the vision call (no cost), the analysis-outage hold and the proof-blocked notices,
+        // and before the block-answering gate below, whose genuine payment page would otherwise unblock and credit.
+        if (await db.isFakePayer(chatId)) {
+            logger.warn(`[ProcessImage] ${chatId} is fake-payment marked: screenshot ignored (no analysis, credit or call)`);
+            return;
+        }
         const photoBuffer = await (0,_payments_screenshot_download_media__WEBPACK_IMPORTED_MODULE_25__.downloadMedia)(event);
         // In-process tg-vision analysis (payments/vision-shadow.ts); an outage comes back as analysisUnavailable.
         const imageDetails = await (0,_payments_vision_shadow__WEBPACK_IMPORTED_MODULE_15__.analyzeImage)(photoBuffer, {
@@ -90329,6 +90370,49 @@ async function asktoPayByEvent(client, userDetails, force = false, prefix = '', 
         (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_8__.parseError)(error, "ErrorReplying", false);
         return false;
     }
+}
+
+
+/***/ },
+
+/***/ "./src/payments/fake-payer.ts"
+/*!************************************!*\
+  !*** ./src/payments/fake-payer.ts ***!
+  \************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   anyFakePaymentMark: () => (/* binding */ anyFakePaymentMark),
+/* harmony export */   fakePaymentMarked: () => (/* binding */ fakePaymentMarked)
+/* harmony export */ });
+/**
+ * The operator's fake-payment mark (owner decision 2026-11-02; docs/design/2026-11-02-fake-payment-flag.md): the ONE
+ * definition of "this chat was marked as a fake payer". Pure, no I/O.
+ *
+ * An operator marks a chat from ops-ui (CMS POST /fake-payment/:chatId/mark). CMS stamps `fakePaymentAt` (a Date),
+ * `fakePaymentBy`, `fakePaymentReason` and `fakePaymentPrev` on EVERY persona row of the chatId, zeroes payAmount /
+ * canReply there, and sets Postgres payment_event.is_fake on every payment of the chat; the unmark reverses all of it.
+ * When any row of the chat carries the mark, none of the user's payments count as revenue, no message is answered
+ * (inbound/private-message-handler.ts), nothing new is credited (imageUtils/processImage.ts) and no call is placed
+ * (calls/inhouse/video-policy.ts callBlock): the user is owed nothing. userData is swept after 30 days idle, so the Mongo mark can lapse with
+ * the rows (accepted; the Postgres is_fake rows stay).
+ *
+ * Not to be confused with userData.cheatCount: that is a SCORE of how strongly the user feels cheated by us ("fake",
+ * "scam" in chat), it drives complaint calls / grace / the 48 h block (ladder cheatCallDue / cheatBlockDue) and it is
+ * never a fake-payment signal. Nothing here reads it, and the mark never writes it.
+ *
+ * The Mongo filter for the same predicate is `{ fakePaymentAt: { $ne: null } }` (tg-db UserDataRepository
+ * hasFakePaymentRow / listPaidChatIds): a missing or null field is "not marked".
+ */
+/** The row carries the operator's fake-payment mark. */
+function fakePaymentMarked(row) {
+    return row?.fakePaymentAt != null;
+}
+/** Some row of the chat (any persona) carries the mark. */
+function anyFakePaymentMark(rows) {
+    return (rows ?? []).some(fakePaymentMarked);
 }
 
 
