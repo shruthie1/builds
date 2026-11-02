@@ -29774,6 +29774,13 @@ class UserDataRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_2__.B
     async hasBlockedRow(chatId) {
         return !!(await this.collection.findOne({ chatId, canReply: 0 }, { projection: { _id: 1 } }));
     }
+    /**
+     * True when ANY persona row for chatId carries the operator's fake-payment mark (tg-aut payments/fake-payer.ts:
+     * `fakePaymentAt` not null). Deliberately unscoped, like hasBlockedRow: the mark is per user, not per persona. Throws.
+     */
+    async hasFakePaymentRow(chatId) {
+        return !!(await this.collection.findOne({ chatId, fakePaymentAt: { $ne: null } }, { projection: { _id: 1 } }));
+    }
     /** chatId's rows under OTHER personas (full docs). Throws. */
     async findInOtherPersonas(chatId, identity) {
         return this.collection.find((0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.othersFilter)(chatId, identity)).toArray();
@@ -29795,12 +29802,13 @@ class UserDataRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_2__.B
             .toArray();
     }
     /**
-     * chatIds of this persona's real payers (highestPayAmount >= 15, never caught with a fake
-     * screenshot), most recently active first. Feeds the in-house call allow-list. Throws.
+     * chatIds of this persona's real payers (highestPayAmount >= 15, not fake-marked by an operator), most recently
+     * active first. Feeds the in-house call allow-list. Until 2026-11-02 this excluded cheatCount > 0, which is the
+     * user's complaint score, not payment fraud (owner 2026-11-02). Throws.
      */
     async listPaidChatIds(identity, limit) {
         const rows = await this.collection
-            .find({ ...(0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.mineFilter)(identity), highestPayAmount: { $gte: 15 }, cheatCount: { $not: { $gt: 0 } } }, { projection: { chatId: 1 } })
+            .find({ ...(0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.mineFilter)(identity), highestPayAmount: { $gte: 15 }, fakePaymentAt: null }, { projection: { chatId: 1 } })
             .sort({ lastMsgTimeStamp: -1 })
             .limit(limit)
             .toArray();
@@ -40266,8 +40274,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "d220776dce4ac9bc0b176bdea6617707033c87f4" : 0;
-    const builtAt =  true ? "2026-11-02T16:33:57.597Z" : 0;
+    const sha =  true ? "ee45d608d4e7db7c4123feea0d4a2c27a3f79689" : 0;
+    const builtAt =  true ? "2026-11-02T17:35:52.708Z" : 0;
     return { sha, builtAt };
 }
 
