@@ -2484,6 +2484,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _convert__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ./convert */ "../../packages/tg-calls/src/convert.ts");
 /* harmony import */ var _media__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ./media */ "../../packages/tg-calls/src/media.ts");
 /* harmony import */ var _audio_feeder__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ./audio-feeder */ "../../packages/tg-calls/src/audio-feeder.ts");
+/* harmony import */ var _native_log__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ./native-log */ "../../packages/tg-calls/src/native-log.ts");
+
 
 
 
@@ -2550,6 +2552,9 @@ class CallEngine extends events__WEBPACK_IMPORTED_MODULE_0__.EventEmitter {
             hangupOnMediaEnd: options.hangupOnMediaEnd ?? DEFAULTS.hangupOnMediaEnd,
             hangupGraceMs: options.hangupGraceMs ?? DEFAULTS.hangupGraceMs,
         };
+        this.tap = options.nativeLogTap ?? _native_log__WEBPACK_IMPORTED_MODULE_8__.nativeLogTap;
+        if (options.nativeLogs && options.nativeLogs !== 'off')
+            this.tap.install(this.ntgLib, options.nativeLogs);
         this.wireNtgCallbacks();
     }
     /** True when the native ntgcalls binary loads on this host. */
@@ -2648,6 +2653,7 @@ class CallEngine extends events__WEBPACK_IMPORTED_MODULE_0__.EventEmitter {
                     await this.ntg.stop(call.userId);
                 }
                 catch { /* not created / already stopped */ }
+                this.releaseTap(call);
                 return done;
             }
             const req = await this.client.invoke(new telegram__WEBPACK_IMPORTED_MODULE_3__.Api.phone.RequestCall({
@@ -2770,6 +2776,7 @@ class CallEngine extends events__WEBPACK_IMPORTED_MODULE_0__.EventEmitter {
                     await this.ntg.stop(call.userId);
                 }
                 catch { /* not created / already stopped */ }
+                this.releaseTap(call);
                 return;
             }
             await this.client.invoke(new telegram__WEBPACK_IMPORTED_MODULE_3__.Api.phone.AcceptCall({ peer: inputCall, gB: Buffer.from(gB), protocol: this.protocol() }));
@@ -2820,6 +2827,7 @@ class CallEngine extends events__WEBPACK_IMPORTED_MODULE_0__.EventEmitter {
         if (!(dhc instanceof telegram__WEBPACK_IMPORTED_MODULE_3__.Api.messages.DhConfig))
             throw new Error('Unexpected DH config response');
         await this.ntg.createP2pCall(call.userId);
+        call.tap = this.tap.open();
         const { MediaSource, StreamMode } = this.ntgLib;
         const audioCommand = media.audio === false && (0,_media__WEBPACK_IMPORTED_MODULE_6__.wantsVideo)(media)
             ? (0,_media__WEBPACK_IMPORTED_MODULE_6__.silenceShellCommand)(this.audio, this.ffmpeg)
@@ -2837,6 +2845,7 @@ class CallEngine extends events__WEBPACK_IMPORTED_MODULE_0__.EventEmitter {
         // gets the camera only when the policy turned it on (videoOnVoiceCall).
         if ((0,_media__WEBPACK_IMPORTED_MODULE_6__.wantsVideo)(media) && (call.record.video || media.videoOnVoiceCall === true)) {
             const video = media.size ? { ...this.video, width: media.size.width, height: media.size.height } : this.video;
+            call.record.sentVideo = { width: video.width, height: video.height, fps: video.fps };
             description.camera = {
                 mediaSource: MediaSource.SHELL, input: (0,_media__WEBPACK_IMPORTED_MODULE_6__.videoShellCommand)(media.file, video, this.ffmpeg, media.startSec),
                 width: video.width, height: video.height, fps: video.fps, keepOpen: false,
@@ -2962,6 +2971,10 @@ class CallEngine extends events__WEBPACK_IMPORTED_MODULE_0__.EventEmitter {
                     clearTimeout(call.connectTimer);
                 call.connectTimer = undefined;
                 call.record.connectMs = call.record.answeredAt ? call.record.connectedAt - call.record.answeredAt : null;
+                call.record.activeCallsAtConnect = this.calls.size;
+                call.record.connectedCallsAtConnect = Array.from(this.calls.values()).filter((c) => c.record.connectedAt !== null).length;
+                if (call.tap)
+                    this.tap.connected(call.tap);
                 call.feeder?.start();
                 this.emit('connected', { ...call.record });
             }
@@ -3063,12 +3076,17 @@ class CallEngine extends events__WEBPACK_IMPORTED_MODULE_0__.EventEmitter {
         if (call.feeder) {
             const s = call.feeder.stats;
             this.logger.log(`[tg-calls] audio feed ${call.record.peerUserId}: sent=${s.framesSent} underruns=${s.underruns} remoteFrames=${s.remoteFrames} remoteBytes=${s.remoteBytes} echoMixed=${s.echoMixedFrames}`);
+            call.record.audioFramesSent = s.framesSent;
+            call.record.audioUnderruns = s.underruns;
             call.feeder.stop();
         }
         try {
             await this.ntg.stop(call.userId);
         }
         catch { /* no media instance yet / already stopped */ }
+        const network = this.releaseTap(call);
+        if (network)
+            call.record.network = network;
         const r = call.record;
         r.endedAt = Date.now();
         r.endReason = reason;
@@ -3080,6 +3098,14 @@ class CallEngine extends events__WEBPACK_IMPORTED_MODULE_0__.EventEmitter {
         call.onAccepted = undefined;
         this.emit('ended', { ...r });
         call.resolve({ ...r });
+    }
+    /** Close the call's native-log session (its media instance is stopped): its network numbers, once. */
+    releaseTap(call) {
+        const token = call.tap;
+        if (!token)
+            return null;
+        call.tap = undefined;
+        return this.tap.close(token);
     }
     async discard(peer, reason, duration) {
         try {
@@ -3529,21 +3555,27 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   CallEngine: () => (/* reexport safe */ _CallEngine__WEBPACK_IMPORTED_MODULE_0__.CallEngine),
 /* harmony export */   DEFAULT_AUDIO: () => (/* reexport safe */ _media__WEBPACK_IMPORTED_MODULE_1__.DEFAULT_AUDIO),
 /* harmony export */   DEFAULT_VIDEO: () => (/* reexport safe */ _media__WEBPACK_IMPORTED_MODULE_1__.DEFAULT_VIDEO),
+/* harmony export */   MAX_SAMPLES_PER_CALL: () => (/* reexport safe */ _native_log__WEBPACK_IMPORTED_MODULE_2__.MAX_SAMPLES_PER_CALL),
+/* harmony export */   NativeLogTap: () => (/* reexport safe */ _native_log__WEBPACK_IMPORTED_MODULE_2__.NativeLogTap),
 /* harmony export */   audioShellCommand: () => (/* reexport safe */ _media__WEBPACK_IMPORTED_MODULE_1__.audioShellCommand),
-/* harmony export */   discardReason: () => (/* reexport safe */ _convert__WEBPACK_IMPORTED_MODULE_2__.discardReason),
-/* harmony export */   enumName: () => (/* reexport safe */ _convert__WEBPACK_IMPORTED_MODULE_2__.enumName),
+/* harmony export */   discardReason: () => (/* reexport safe */ _convert__WEBPACK_IMPORTED_MODULE_3__.discardReason),
+/* harmony export */   enumName: () => (/* reexport safe */ _convert__WEBPACK_IMPORTED_MODULE_3__.enumName),
+/* harmony export */   isNativeLine: () => (/* reexport safe */ _native_log__WEBPACK_IMPORTED_MODULE_2__.isNativeLine),
 /* harmony export */   isVideoFile: () => (/* reexport safe */ _media__WEBPACK_IMPORTED_MODULE_1__.isVideoFile),
+/* harmony export */   nativeLogTap: () => (/* reexport safe */ _native_log__WEBPACK_IMPORTED_MODULE_2__.nativeLogTap),
+/* harmony export */   parseNativeLine: () => (/* reexport safe */ _native_log__WEBPACK_IMPORTED_MODULE_2__.parseNativeLine),
 /* harmony export */   shellQuote: () => (/* reexport safe */ _media__WEBPACK_IMPORTED_MODULE_1__.shellQuote),
 /* harmony export */   silenceShellCommand: () => (/* reexport safe */ _media__WEBPACK_IMPORTED_MODULE_1__.silenceShellCommand),
-/* harmony export */   toBigInt: () => (/* reexport safe */ _convert__WEBPACK_IMPORTED_MODULE_2__.toBigInt),
-/* harmony export */   toByteArray: () => (/* reexport safe */ _convert__WEBPACK_IMPORTED_MODULE_2__.toByteArray),
-/* harmony export */   toRtcServers: () => (/* reexport safe */ _convert__WEBPACK_IMPORTED_MODULE_2__.toRtcServers),
+/* harmony export */   toBigInt: () => (/* reexport safe */ _convert__WEBPACK_IMPORTED_MODULE_3__.toBigInt),
+/* harmony export */   toByteArray: () => (/* reexport safe */ _convert__WEBPACK_IMPORTED_MODULE_3__.toByteArray),
+/* harmony export */   toRtcServers: () => (/* reexport safe */ _convert__WEBPACK_IMPORTED_MODULE_3__.toRtcServers),
 /* harmony export */   videoShellCommand: () => (/* reexport safe */ _media__WEBPACK_IMPORTED_MODULE_1__.videoShellCommand),
 /* harmony export */   wantsVideo: () => (/* reexport safe */ _media__WEBPACK_IMPORTED_MODULE_1__.wantsVideo)
 /* harmony export */ });
 /* harmony import */ var _CallEngine__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./CallEngine */ "../../packages/tg-calls/src/CallEngine.ts");
 /* harmony import */ var _media__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./media */ "../../packages/tg-calls/src/media.ts");
-/* harmony import */ var _convert__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./convert */ "../../packages/tg-calls/src/convert.ts");
+/* harmony import */ var _native_log__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./native-log */ "../../packages/tg-calls/src/native-log.ts");
+/* harmony import */ var _convert__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ./convert */ "../../packages/tg-calls/src/convert.ts");
 /**
  * Calls Module
  *
@@ -3554,6 +3586,7 @@ __webpack_require__.r(__webpack_exports__);
  *
  * Requires the native `ntgcalls` binary (darwin-arm64, linux-x64/arm64) and ffmpeg on PATH.
  */
+
 
 
 
@@ -3617,6 +3650,207 @@ function silenceShellCommand(audio, ffmpeg = 'ffmpeg') {
 function videoShellCommand(file, video, ffmpeg = 'ffmpeg', startSec) {
     return `${ffmpeg} ${seekArg(startSec)}${reconnectArgs(file)}-i ${shellQuote(file)} -an -v quiet -f rawvideo -r ${video.fps} -pix_fmt yuv420p -vf scale=${video.width}:${video.height}:force_original_aspect_ratio=increase,crop=${video.width}:${video.height},setsar=1 pipe:1`;
 }
+
+
+/***/ },
+
+/***/ "../../packages/tg-calls/src/native-log.ts"
+/*!*************************************************!*\
+  !*** ../../packages/tg-calls/src/native-log.ts ***!
+  \*************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   MAX_SAMPLES_PER_CALL: () => (/* binding */ MAX_SAMPLES_PER_CALL),
+/* harmony export */   NativeLogTap: () => (/* binding */ NativeLogTap),
+/* harmony export */   isNativeLine: () => (/* binding */ isNativeLine),
+/* harmony export */   nativeLogTap: () => (/* binding */ nativeLogTap),
+/* harmony export */   parseNativeLine: () => (/* binding */ parseNativeLine)
+/* harmony export */ });
+/**
+ * Network numbers for a call, read from ntgcalls' own WebRTC log (ntgcalls 3.0.5 has no stats API).
+ *
+ * How the binding logs (measured 2026-11-02 on the darwin-arm64 3.0.5 binary, local loopback call):
+ *  - nothing reaches JS until setLogLevel() is called (default: no native lines at all);
+ *  - after it, every native line is ONE string passed to console.debug / info / warn / error, looked up on each
+ *    call: "[webrtc] <file>.cc:<line> <message>" or "[ntgcalls] <file>.cpp:<line> <message>";
+ *  - INFO:  "[webrtc] bitrate_allocator.cc:499 Current BWE 300000"  (bps, about every 5 s while media flows)
+ *  - DEBUG: "[webrtc] video_stream_encoder.cc:2508 OnBitrateUpdated, bitrate 258976 link allocation bitrate = 258976 packet loss 0 rtt 0"
+ *    (encoder target bps, RTCP fraction lost in 1/256 units, rtt ms; about once a second per video call).
+ * Volume per call in that loopback: INFO ~16 lines/s while connecting, ~2/s after; DEBUG ~650-840 lines/s
+ * (~300 KB/s through the binding into the JS thread). So 'info' is the default and 'debug' is opt-in.
+ *
+ * The lines carry no call id: a sample is credited to a call only while that call is the ONLY live ntgcalls
+ * instance in the process. A call that shared the process with another live instance at any point while it was
+ * connected reports 'ambiguous' instead of numbers. Native lines are consumed here, never printed (before this
+ * nothing was printed either).
+ */
+const NATIVE_LINE = /^\[(?:webrtc|ntgcalls)\] /;
+const CURRENT_BWE = /^\[webrtc\] \S*bitrate_allocator\.cc:\d+ Current BWE (\d+)\s*$/;
+const ON_BITRATE = /^\[webrtc\] \S*video_stream_encoder\.cc:\d+ OnBitrateUpdated, bitrate (\d+)\b.*?\bpacket loss (\d+)\b.*?\brtt (\d+)\b/;
+/** True for a line the ntgcalls binding printed (single string, "[webrtc] " / "[ntgcalls] " prefix). */
+function isNativeLine(args) {
+    return args.length === 1 && typeof args[0] === 'string' && NATIVE_LINE.test(args[0]);
+}
+/** One native log line → a network sample, or null for every other line. */
+function parseNativeLine(line) {
+    const bwe = CURRENT_BWE.exec(line);
+    if (bwe)
+        return { kind: 'bwe', bps: Number(bwe[1]) };
+    const enc = ON_BITRATE.exec(line);
+    if (enc)
+        return { kind: 'encoder', bps: Number(enc[1]), lossFraction: Number(enc[2]), rttMs: Number(enc[3]) };
+    return null;
+}
+/** Bounded sample list: past `cap` it keeps every other value (and then every 4th, ...), so the median stays representative. */
+class Samples {
+    constructor(cap) {
+        this.values = [];
+        this.stride = 1;
+        this.seen = 0;
+        this.count = 0;
+        this.min = null;
+        this.max = null;
+        this.last = null;
+        this.cap = cap;
+    }
+    push(value) {
+        this.count += 1;
+        this.last = value;
+        this.min = this.min === null ? value : Math.min(this.min, value);
+        this.max = this.max === null ? value : Math.max(this.max, value);
+        this.seen += 1;
+        if ((this.seen - 1) % this.stride !== 0)
+            return;
+        this.values.push(value);
+        if (this.values.length >= this.cap) {
+            this.values = this.values.filter((_, i) => i % 2 === 0);
+            this.stride *= 2;
+        }
+    }
+    median() {
+        if (!this.values.length)
+            return null;
+        const sorted = [...this.values].sort((a, b) => a - b);
+        const mid = sorted.length >> 1;
+        return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+    }
+}
+/** Samples kept per call and series (BWE comes every 5 s: 240 = 20 min before thinning). */
+const MAX_SAMPLES_PER_CALL = 240;
+const METHODS = ['debug', 'info', 'warn', 'error'];
+class NativeLogTap {
+    constructor(maxSamples = MAX_SAMPLES_PER_CALL) {
+        this.level = 'off';
+        this.sessions = new Map();
+        /** Native lines consumed since install (all kinds), for the volume check. */
+        this.lines = 0;
+        this.maxSamples = maxSamples;
+    }
+    get enabled() {
+        return this.level;
+    }
+    /**
+     * Route the binding's lines here and raise its log level. Idempotent; a later 'debug' raises an 'info' tap.
+     * 'off' (or a binding without setLogLevel) changes nothing.
+     */
+    install(lib, level, target = console) {
+        if (level === 'off' || typeof lib.setLogLevel !== 'function')
+            return;
+        if (this.level === 'debug' || this.level === level)
+            return;
+        if (this.level === 'off') {
+            for (const method of METHODS) {
+                const previous = target[method];
+                target[method] = (...args) => {
+                    if (isNativeLine(args)) {
+                        this.handle(args[0]);
+                        return;
+                    }
+                    previous.apply(target, args);
+                };
+            }
+        }
+        // Console first, then the level: no native line can slip out to the old console in between.
+        lib.setLogLevel(lib.LogLevel?.[level === 'debug' ? 'DEBUG' : 'INFO'] ?? (level === 'debug' ? 1 : 2));
+        this.level = level;
+    }
+    /** An ntgcalls instance was created for a call (it can log from now on). */
+    open() {
+        const token = Symbol('call');
+        // A connected call now shares the log with another live instance.
+        if (this.sessions.size > 0)
+            for (const s of this.sessions.values())
+                if (s.connected)
+                    s.ambiguous = true;
+        this.sessions.set(token, {
+            connected: false, ambiguous: false,
+            bwe: new Samples(this.maxSamples), loss: new Samples(this.maxSamples), rtt: new Samples(this.maxSamples),
+        });
+        return token;
+    }
+    connected(token) {
+        const session = this.sessions.get(token);
+        if (!session)
+            return;
+        session.connected = true;
+        if (this.sessions.size > 1)
+            session.ambiguous = true;
+    }
+    /** The call's ntgcalls instance is gone: its numbers. */
+    close(token) {
+        const session = this.sessions.get(token);
+        this.sessions.delete(token);
+        const level = this.level;
+        if (!session || level === 'off')
+            return emptyStats(level === 'off' ? 'off' : 'ambiguous', level);
+        if (session.ambiguous)
+            return emptyStats('ambiguous', level);
+        const kbps = (bps) => (bps === null ? null : Math.round(bps / 1000));
+        const lossMax = session.loss.max;
+        return {
+            status: 'ok', level,
+            bweSamples: session.bwe.count,
+            bweMinKbps: kbps(session.bwe.min),
+            bweMedianKbps: kbps(session.bwe.median()),
+            bweLastKbps: kbps(session.bwe.last),
+            encoderSamples: session.loss.count,
+            lossMaxPct: lossMax === null ? null : Math.round((lossMax / 256) * 1000) / 10,
+            rttMedianMs: session.rtt.median() === null ? null : Math.round(session.rtt.median()),
+        };
+    }
+    /** One native line. Credited only when exactly one instance is live and it is connected. */
+    handle(line) {
+        this.lines += 1;
+        if (this.sessions.size !== 1)
+            return;
+        const session = this.sessions.values().next().value;
+        if (!session.connected || session.ambiguous)
+            return;
+        const sample = parseNativeLine(line);
+        if (!sample)
+            return;
+        if (sample.kind === 'bwe') {
+            session.bwe.push(sample.bps);
+            return;
+        }
+        // The encoder reports 0/0/0 until its first allocation; an rtt of 0 means "no RTCP yet".
+        if (sample.bps === 0 && sample.rttMs === 0)
+            return;
+        session.loss.push(sample.lossFraction);
+        if (sample.rttMs > 0)
+            session.rtt.push(sample.rttMs);
+    }
+}
+function emptyStats(status, level) {
+    return {
+        status, level, bweSamples: 0, bweMinKbps: null, bweMedianKbps: null, bweLastKbps: null,
+        encoderSamples: 0, lossMaxPct: null, rttMedianMs: null,
+    };
+}
+/** One per process: the binding's log level and console are process-wide. */
+const nativeLogTap = new NativeLogTap();
 
 
 /***/ },
@@ -40032,8 +40266,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "0919f753beb2fe9acfe9029b6c37fad45ca4e4aa" : 0;
-    const builtAt =  true ? "2026-10-31T09:29:13.971Z" : 0;
+    const sha =  true ? "d220776dce4ac9bc0b176bdea6617707033c87f4" : 0;
+    const builtAt =  true ? "2026-11-02T16:33:57.597Z" : 0;
     return { sha, builtAt };
 }
 
