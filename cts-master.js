@@ -1147,6 +1147,7 @@ const event_manager_module_1 = __webpack_require__(/*! ./components/event-manage
 const collection_insights_module_1 = __webpack_require__(/*! ./components/collection-insights/collection-insights.module */ "./src/components/collection-insights/collection-insights.module.ts");
 const daily_analytics_module_1 = __webpack_require__(/*! ./components/daily-analytics/daily-analytics.module */ "./src/components/daily-analytics/daily-analytics.module.ts");
 const monitor_module_1 = __webpack_require__(/*! ./components/monitor/monitor.module */ "./src/components/monitor/monitor.module.ts");
+const fake_payment_module_1 = __webpack_require__(/*! ./components/fake-payment/fake-payment.module */ "./src/components/fake-payment/fake-payment.module.ts");
 const file_module_1 = __webpack_require__(/*! ./components/files/file.module */ "./src/components/files/file.module.ts");
 const app_service_1 = __webpack_require__(/*! ./app.service */ "./src/app.service.ts");
 const runtime_config_service_1 = __webpack_require__(/*! ./control-plane/config/runtime-config.service */ "./src/control-plane/config/runtime-config.service.ts");
@@ -1182,6 +1183,7 @@ exports.AppModule = AppModule = __decorate([
             promote_stat_module_1.PromoteStatModule,
             daily_analytics_module_1.DailyAnalyticsModule,
             monitor_module_1.MonitorModule,
+            fake_payment_module_1.FakePaymentModule,
             stat_module_1.StatModule,
             stat2_module_1.Stat2Module,
             tg_signup_module_1.TgSignupModule,
@@ -30375,7 +30377,7 @@ exports.DailyAnalyticsModule = DailyAnalyticsModule = __decorate([
     (0, common_1.Module)({
         controllers: [daily_analytics_controller_1.DailyAnalyticsController],
         providers: [daily_analytics_service_1.DailyAnalyticsService, analytics_pg_reader_1.AnalyticsPgReader, analytics_health_check_1.AnalyticsHealthCheck],
-        exports: [daily_analytics_service_1.DailyAnalyticsService, analytics_health_check_1.AnalyticsHealthCheck],
+        exports: [daily_analytics_service_1.DailyAnalyticsService, analytics_health_check_1.AnalyticsHealthCheck, analytics_pg_reader_1.AnalyticsPgReader],
     })
 ], DailyAnalyticsModule);
 
@@ -31873,6 +31875,385 @@ exports.Event = Event = __decorate([
     })
 ], Event);
 exports.EventSchema = mongoose_1.SchemaFactory.createForClass(Event);
+
+
+/***/ },
+
+/***/ "./src/components/fake-payment/fake-payment.controller.ts"
+/*!****************************************************************!*\
+  !*** ./src/components/fake-payment/fake-payment.controller.ts ***!
+  \****************************************************************/
+(__unused_webpack_module, exports, __webpack_require__) {
+
+
+var __decorate = (this && this.__decorate) || function (decorators, target, key, desc) {
+    var c = arguments.length, r = c < 3 ? target : desc === null ? desc = Object.getOwnPropertyDescriptor(target, key) : desc, d;
+    if (typeof Reflect === "object" && typeof Reflect.decorate === "function") r = Reflect.decorate(decorators, target, key, desc);
+    else for (var i = decorators.length - 1; i >= 0; i--) if (d = decorators[i]) r = (c < 3 ? d(r) : c > 3 ? d(target, key, r) : d(target, key)) || r;
+    return c > 3 && r && Object.defineProperty(target, key, r), r;
+};
+var __metadata = (this && this.__metadata) || function (k, v) {
+    if (typeof Reflect === "object" && typeof Reflect.metadata === "function") return Reflect.metadata(k, v);
+};
+var __param = (this && this.__param) || function (paramIndex, decorator) {
+    return function (target, key) { decorator(target, key, paramIndex); }
+};
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.FakePaymentController = exports.OPS_WRITE_KEY_HEADER = void 0;
+exports.assertOpsWriteKey = assertOpsWriteKey;
+const common_1 = __webpack_require__(/*! @nestjs/common */ "@nestjs/common");
+const swagger_1 = __webpack_require__(/*! @nestjs/swagger */ "@nestjs/swagger");
+const crypto_1 = __webpack_require__(/*! crypto */ "crypto");
+const fake_payment_service_1 = __webpack_require__(/*! ./fake-payment.service */ "./src/components/fake-payment/fake-payment.service.ts");
+exports.OPS_WRITE_KEY_HEADER = 'x-ops-write-key';
+function assertOpsWriteKey(provided, env = process.env) {
+    const expected = (env.OPS_WRITE_KEY || '').trim();
+    if (!expected)
+        throw new common_1.ServiceUnavailableException('OPS_WRITE_KEY is not configured: fake-payment writes are disabled');
+    const got = typeof provided === 'string' ? provided : '';
+    const a = (0, crypto_1.createHash)('sha256').update(got).digest();
+    const b = (0, crypto_1.createHash)('sha256').update(expected).digest();
+    if (!got || !(0, crypto_1.timingSafeEqual)(a, b))
+        throw new common_1.UnauthorizedException('invalid x-ops-write-key');
+}
+let FakePaymentController = class FakePaymentController {
+    constructor(service) {
+        this.service = service;
+    }
+    status(chatId) {
+        return this.service.status(chatId);
+    }
+    mark(chatId, body, writeKey) {
+        assertOpsWriteKey(writeKey);
+        return this.service.mark(chatId, body ?? {});
+    }
+    unmark(chatId, body, writeKey) {
+        assertOpsWriteKey(writeKey);
+        return this.service.unmark(chatId, body ?? {});
+    }
+};
+exports.FakePaymentController = FakePaymentController;
+__decorate([
+    (0, common_1.Get)(':chatId'),
+    (0, swagger_1.ApiOperation)({ summary: 'Fake-payment mark state of a chat (Mongo rows + Postgres payment_event.is_fake / payments)' }),
+    (0, swagger_1.ApiParam)({ name: 'chatId' }),
+    __param(0, (0, common_1.Param)('chatId')),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [String]),
+    __metadata("design:returntype", void 0)
+], FakePaymentController.prototype, "status", null);
+__decorate([
+    (0, common_1.Post)(':chatId/mark'),
+    (0, common_1.HttpCode)(200),
+    (0, swagger_1.ApiOperation)({ summary: 'Mark ALL payments of the chat fake: no revenue, blocked, owed nothing (idempotent)' }),
+    (0, swagger_1.ApiParam)({ name: 'chatId' }),
+    (0, swagger_1.ApiHeader)({ name: exports.OPS_WRITE_KEY_HEADER, required: true }),
+    (0, swagger_1.ApiBody)({ schema: { type: 'object', required: ['by', 'reason'], properties: { by: { type: 'string' }, reason: { type: 'string' } } } }),
+    __param(0, (0, common_1.Param)('chatId')),
+    __param(1, (0, common_1.Body)()),
+    __param(2, (0, common_1.Headers)(exports.OPS_WRITE_KEY_HEADER)),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [String, Object, String]),
+    __metadata("design:returntype", void 0)
+], FakePaymentController.prototype, "mark", null);
+__decorate([
+    (0, common_1.Post)(':chatId/unmark'),
+    (0, common_1.HttpCode)(200),
+    (0, swagger_1.ApiOperation)({ summary: 'Remove the fake-payment mark: restore payAmount / canReply and revenue (idempotent)' }),
+    (0, swagger_1.ApiParam)({ name: 'chatId' }),
+    (0, swagger_1.ApiHeader)({ name: exports.OPS_WRITE_KEY_HEADER, required: true }),
+    (0, swagger_1.ApiBody)({ schema: { type: 'object', required: ['by'], properties: { by: { type: 'string' }, reason: { type: 'string' } } } }),
+    __param(0, (0, common_1.Param)('chatId')),
+    __param(1, (0, common_1.Body)()),
+    __param(2, (0, common_1.Headers)(exports.OPS_WRITE_KEY_HEADER)),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [String, Object, String]),
+    __metadata("design:returntype", void 0)
+], FakePaymentController.prototype, "unmark", null);
+exports.FakePaymentController = FakePaymentController = __decorate([
+    (0, swagger_1.ApiTags)('fake-payment'),
+    (0, common_1.Controller)('fake-payment'),
+    __metadata("design:paramtypes", [fake_payment_service_1.FakePaymentService])
+], FakePaymentController);
+
+
+/***/ },
+
+/***/ "./src/components/fake-payment/fake-payment.module.ts"
+/*!************************************************************!*\
+  !*** ./src/components/fake-payment/fake-payment.module.ts ***!
+  \************************************************************/
+(__unused_webpack_module, exports, __webpack_require__) {
+
+
+var __decorate = (this && this.__decorate) || function (decorators, target, key, desc) {
+    var c = arguments.length, r = c < 3 ? target : desc === null ? desc = Object.getOwnPropertyDescriptor(target, key) : desc, d;
+    if (typeof Reflect === "object" && typeof Reflect.decorate === "function") r = Reflect.decorate(decorators, target, key, desc);
+    else for (var i = decorators.length - 1; i >= 0; i--) if (d = decorators[i]) r = (c < 3 ? d(r) : c > 3 ? d(target, key, r) : d(target, key)) || r;
+    return c > 3 && r && Object.defineProperty(target, key, r), r;
+};
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.FakePaymentModule = void 0;
+const common_1 = __webpack_require__(/*! @nestjs/common */ "@nestjs/common");
+const mongoose_1 = __webpack_require__(/*! @nestjs/mongoose */ "@nestjs/mongoose");
+const user_data_schema_1 = __webpack_require__(/*! ../user-data/schemas/user-data.schema */ "./src/components/user-data/schemas/user-data.schema.ts");
+const daily_analytics_module_1 = __webpack_require__(/*! ../daily-analytics/daily-analytics.module */ "./src/components/daily-analytics/daily-analytics.module.ts");
+const fake_payment_controller_1 = __webpack_require__(/*! ./fake-payment.controller */ "./src/components/fake-payment/fake-payment.controller.ts");
+const fake_payment_service_1 = __webpack_require__(/*! ./fake-payment.service */ "./src/components/fake-payment/fake-payment.service.ts");
+let FakePaymentModule = class FakePaymentModule {
+};
+exports.FakePaymentModule = FakePaymentModule;
+exports.FakePaymentModule = FakePaymentModule = __decorate([
+    (0, common_1.Module)({
+        imports: [
+            daily_analytics_module_1.DailyAnalyticsModule,
+            mongoose_1.MongooseModule.forFeature([{ name: user_data_schema_1.UserData.name, schema: user_data_schema_1.UserDataSchema, collection: 'userData' }]),
+        ],
+        controllers: [fake_payment_controller_1.FakePaymentController],
+        providers: [fake_payment_service_1.FakePaymentService],
+    })
+], FakePaymentModule);
+
+
+/***/ },
+
+/***/ "./src/components/fake-payment/fake-payment.service.ts"
+/*!*************************************************************!*\
+  !*** ./src/components/fake-payment/fake-payment.service.ts ***!
+  \*************************************************************/
+(__unused_webpack_module, exports, __webpack_require__) {
+
+
+var __decorate = (this && this.__decorate) || function (decorators, target, key, desc) {
+    var c = arguments.length, r = c < 3 ? target : desc === null ? desc = Object.getOwnPropertyDescriptor(target, key) : desc, d;
+    if (typeof Reflect === "object" && typeof Reflect.decorate === "function") r = Reflect.decorate(decorators, target, key, desc);
+    else for (var i = decorators.length - 1; i >= 0; i--) if (d = decorators[i]) r = (c < 3 ? d(r) : c > 3 ? d(target, key, r) : d(target, key)) || r;
+    return c > 3 && r && Object.defineProperty(target, key, r), r;
+};
+var __metadata = (this && this.__metadata) || function (k, v) {
+    if (typeof Reflect === "object" && typeof Reflect.metadata === "function") return Reflect.metadata(k, v);
+};
+var __param = (this && this.__param) || function (paramIndex, decorator) {
+    return function (target, key) { decorator(target, key, paramIndex); }
+};
+var FakePaymentService_1;
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.FakePaymentService = exports.CHAT_ID_RE = void 0;
+const common_1 = __webpack_require__(/*! @nestjs/common */ "@nestjs/common");
+const mongoose_1 = __webpack_require__(/*! @nestjs/mongoose */ "@nestjs/mongoose");
+const mongoose_2 = __webpack_require__(/*! mongoose */ "mongoose");
+const user_data_schema_1 = __webpack_require__(/*! ../user-data/schemas/user-data.schema */ "./src/components/user-data/schemas/user-data.schema.ts");
+const analytics_pg_reader_1 = __webpack_require__(/*! ../daily-analytics/analytics-pg.reader */ "./src/components/daily-analytics/analytics-pg.reader.ts");
+const channel_category_enum_1 = __webpack_require__(/*! ../bots/channel-category.enum */ "./src/components/bots/channel-category.enum.ts");
+const utils_1 = __webpack_require__(/*! ../../utils */ "./src/utils/index.ts");
+exports.CHAT_ID_RE = /^-?\d{3,20}$/;
+const MAX_REASON = 300;
+const MAX_BY = 60;
+const ROW_PROJECTION = { chatId: 1, profile: 1, clientId: 1, payAmount: 1, highestPayAmount: 1, canReply: 1, cheatCount: 1, fakePaymentAt: 1, fakePaymentBy: 1, fakePaymentReason: 1, fakePaymentPrev: 1 };
+function clean(value, max) {
+    return typeof value === 'string' ? value.trim().slice(0, max) : '';
+}
+function pgMessage(err) {
+    if (!err)
+        return 'unknown error';
+    return err.code ? `${err.message} (${err.code})` : err.message;
+}
+let FakePaymentService = FakePaymentService_1 = class FakePaymentService {
+    constructor(userDataModel, pg) {
+        this.userDataModel = userDataModel;
+        this.pg = pg;
+        this.logger = new common_1.Logger(FakePaymentService_1.name);
+    }
+    chatIdOrThrow(chatId) {
+        const id = typeof chatId === 'string' ? chatId.trim() : '';
+        if (!exports.CHAT_ID_RE.test(id))
+            throw new common_1.BadRequestException('chatId must be a numeric Telegram chat id');
+        return id;
+    }
+    async rows(chatId) {
+        return this.userDataModel.find({ chatId }, ROW_PROJECTION).lean().exec();
+    }
+    async pgCall(sql, params) {
+        let failure;
+        const rows = await this.pg.query(sql, params, (e) => { failure = e; });
+        if (!rows)
+            return { error: pgMessage(failure) };
+        return { row: rows[0] };
+    }
+    async status(rawChatId) {
+        const chatId = this.chatIdOrThrow(rawChatId);
+        const rows = await this.rows(chatId);
+        const pay = await this.pgCall(`SELECT count(*)::int AS payments, coalesce(sum(o.amount), 0)::bigint AS amount,
+                    count(*) FILTER (WHERE p.is_fake)::int AS fake_payments,
+                    coalesce(sum(o.owner_amount), 0)::bigint AS owner_amount
+               FROM payment_event_owner o JOIN payment_event p ON p.id = o.id
+              WHERE o.chat_id = $1`, [chatId]);
+        const markedRows = rows.filter((r) => r.fakePaymentAt != null);
+        const fakePayments = pay.row ? Number(pay.row.fake_payments) : 0;
+        return {
+            chatId,
+            marked: markedRows.length > 0 || fakePayments > 0,
+            mongo: {
+                rows: rows.length,
+                markedRows: markedRows.length,
+                personas: rows.map((r) => ({
+                    profile: r.profile,
+                    clientId: r.clientId ?? null,
+                    payAmount: r.payAmount,
+                    canReply: r.canReply,
+                    cheatCount: r.cheatCount,
+                    fakePaymentAt: r.fakePaymentAt ?? null,
+                    fakePaymentBy: r.fakePaymentBy ?? null,
+                    fakePaymentReason: r.fakePaymentReason ?? null,
+                })),
+            },
+            postgres: {
+                error: pay.error ?? null,
+                payments: pay.row
+                    ? {
+                        payments: Number(pay.row.payments),
+                        amount: Number(pay.row.amount),
+                        fakePayments,
+                        ownerAmount: Number(pay.row.owner_amount),
+                    }
+                    : null,
+            },
+        };
+    }
+    async mark(rawChatId, body = {}) {
+        const chatId = this.chatIdOrThrow(rawChatId);
+        const by = clean(body.by, MAX_BY);
+        const reason = clean(body.reason, MAX_REASON);
+        if (!by)
+            throw new common_1.BadRequestException('by (operator name) is required');
+        if (!reason)
+            throw new common_1.BadRequestException('reason is required');
+        const rows = await this.rows(chatId);
+        const now = new Date();
+        const ops = rows.map((r) => r.fakePaymentAt == null
+            ? {
+                updateOne: {
+                    filter: { _id: r._id, fakePaymentAt: null },
+                    update: {
+                        $set: {
+                            fakePaymentAt: now,
+                            fakePaymentBy: by,
+                            fakePaymentReason: reason,
+                            fakePaymentPrev: { payAmount: r.payAmount ?? 0, canReply: r.canReply ?? 1 },
+                            payAmount: 0,
+                            canReply: 0,
+                        },
+                    },
+                },
+            }
+            : { updateOne: { filter: { _id: r._id }, update: { $set: { payAmount: 0, canReply: 0 } } } });
+        const newlyMarked = rows.filter((r) => r.fakePaymentAt == null).length;
+        if (ops.length)
+            await this.userDataModel.bulkWrite(ops, { ordered: true });
+        const mongo = { rows: rows.length, newlyMarked };
+        const pg = await this.pgCall('SELECT * FROM fake_payment_mark($1)', [chatId]);
+        if (!pg.row) {
+            this.logger.error(`fake-payment mark ${chatId}: Mongo marked ${newlyMarked}/${rows.length} rows, Postgres failed: ${pg.error}`);
+            this.notify('error', 'Fake payment mark: Postgres FAILED (repeat the mark)', chatId, by, reason, [
+                { label: 'Mongo rows marked', value: `${newlyMarked}/${rows.length}` },
+                { label: 'Postgres error', value: String(pg.error) },
+            ]);
+            throw new common_1.HttpException({ message: 'Mongo marked; Postgres failed, revenue not yet excluded. Repeat the mark.', chatId, mongo, postgresError: pg.error }, common_1.HttpStatus.BAD_GATEWAY);
+        }
+        const postgres = {
+            markedNow: Number(pg.row.marked_now),
+            payments: Number(pg.row.payments),
+            amountMarked: Number(pg.row.amount_marked),
+            payerDays: Number(pg.row.payer_days),
+            payerDaysSkipped: Number(pg.row.payer_days_skipped),
+        };
+        this.logger.warn(`fake-payment mark ${chatId} by ${by}: mongo ${newlyMarked}/${rows.length}, pg ${JSON.stringify(postgres)}`);
+        this.notify('warning', 'Payment marked fake', chatId, by, reason, [
+            { label: 'Persona rows', value: `${newlyMarked} newly marked of ${rows.length}` },
+            { label: 'Payments excluded', value: postgres.payments ? `${postgres.payments} (₹${postgres.amountMarked} newly)` : 'none in Postgres (no payment_event rows for this chat)' },
+            { label: 'Payer-days taken back', value: `${postgres.payerDays} (skipped ${postgres.payerDaysSkipped})` },
+        ]);
+        return { chatId, marked: true, mongo, postgres };
+    }
+    async unmark(rawChatId, body = {}) {
+        const chatId = this.chatIdOrThrow(rawChatId);
+        const by = clean(body.by, MAX_BY);
+        const reason = clean(body.reason, MAX_REASON);
+        if (!by)
+            throw new common_1.BadRequestException('by (operator name) is required');
+        const rows = (await this.rows(chatId)).filter((r) => r.fakePaymentAt != null);
+        const ops = rows.map((r) => {
+            const prev = r.fakePaymentPrev ?? {};
+            const restore = {};
+            if (typeof prev.payAmount === 'number' && r.payAmount === 0) {
+                const peak = r.highestPayAmount;
+                restore.payAmount = typeof peak === 'number' ? Math.min(prev.payAmount, peak) : prev.payAmount;
+            }
+            if (typeof prev.canReply === 'number' && r.canReply === 0)
+                restore.canReply = prev.canReply;
+            return {
+                updateOne: {
+                    filter: { _id: r._id },
+                    update: {
+                        ...(Object.keys(restore).length ? { $set: restore } : {}),
+                        $unset: { fakePaymentAt: '', fakePaymentBy: '', fakePaymentReason: '', fakePaymentPrev: '' },
+                    },
+                },
+            };
+        });
+        if (ops.length)
+            await this.userDataModel.bulkWrite(ops, { ordered: true });
+        const mongo = { rowsUnmarked: rows.length };
+        const pg = await this.pgCall('SELECT * FROM fake_payment_unmark($1)', [chatId]);
+        if (!pg.row) {
+            this.logger.error(`fake-payment unmark ${chatId}: Mongo unmarked ${rows.length} rows, Postgres failed: ${pg.error}`);
+            this.notify('error', 'Fake payment unmark: Postgres FAILED (repeat the unmark)', chatId, by, reason, [
+                { label: 'Mongo rows unmarked', value: String(rows.length) },
+                { label: 'Postgres error', value: String(pg.error) },
+            ]);
+            throw new common_1.HttpException({ message: 'Mongo unmarked; Postgres failed, revenue still excluded. Repeat the unmark.', chatId, mongo, postgresError: pg.error }, common_1.HttpStatus.BAD_GATEWAY);
+        }
+        const postgres = {
+            unmarkedNow: Number(pg.row.unmarked_now),
+            amountRestored: Number(pg.row.amount_restored),
+            payerDays: Number(pg.row.payer_days),
+        };
+        this.logger.warn(`fake-payment unmark ${chatId} by ${by}: mongo ${rows.length}, pg ${JSON.stringify(postgres)}`);
+        this.notify('info', 'Fake payment mark removed', chatId, by, reason, [
+            { label: 'Persona rows restored', value: String(rows.length) },
+            { label: 'Payments restored', value: `${postgres.unmarkedNow} (₹${postgres.amountRestored})` },
+            { label: 'Payer-days given back', value: String(postgres.payerDays) },
+        ]);
+        return { chatId, marked: false, mongo, postgres };
+    }
+    notify(severity, title, chatId, by, reason, extra) {
+        try {
+            const bots = (0, utils_1.getBotsServiceInstance)();
+            if (!bots)
+                return;
+            void bots.sendMessageByCategory(channel_category_enum_1.ChannelCategory.ACCOUNT_NOTIFICATIONS, {
+                severity,
+                title,
+                fields: [
+                    { label: 'Chat', value: chatId },
+                    { label: 'By', value: by },
+                    ...(reason ? [{ label: 'Reason', value: reason }] : []),
+                    ...extra,
+                ],
+            }).catch((e) => this.logger.warn(`fake-payment notice failed: ${e?.message ?? e}`));
+        }
+        catch (e) {
+            this.logger.warn(`fake-payment notice failed: ${e?.message ?? e}`);
+        }
+    }
+};
+exports.FakePaymentService = FakePaymentService;
+exports.FakePaymentService = FakePaymentService = FakePaymentService_1 = __decorate([
+    (0, common_1.Injectable)(),
+    __param(0, (0, mongoose_1.InjectModel)(user_data_schema_1.UserData.name)),
+    __metadata("design:paramtypes", [mongoose_2.Model,
+        analytics_pg_reader_1.AnalyticsPgReader])
+], FakePaymentService);
 
 
 /***/ },
@@ -52318,7 +52699,7 @@ __decorate([
     __metadata("design:type", Number)
 ], CreateUserDataDto.prototype, "highestPayAmount", void 0);
 __decorate([
-    (0, swagger_1.ApiProperty)({ description: 'cheatCount', default: 0 }),
+    (0, swagger_1.ApiProperty)({ description: 'cheatCount: complaint score: how strongly the user feels cheated; never a fake-payment or revenue signal', default: 0 }),
     __metadata("design:type", Number)
 ], CreateUserDataDto.prototype, "cheatCount", void 0);
 __decorate([
@@ -52369,6 +52750,22 @@ __decorate([
     (0, swagger_1.ApiProperty)({ description: 'Unix timestamp of the latest attribution lookup', default: 0 }),
     __metadata("design:type", Number)
 ], CreateUserDataDto.prototype, "attributionUpdatedAt", void 0);
+__decorate([
+    (0, swagger_1.ApiPropertyOptional)({ description: 'When an operator marked this chat a fake payer (set by /fake-payment only). Absent = not marked.', type: String, format: 'date-time' }),
+    __metadata("design:type", Date)
+], CreateUserDataDto.prototype, "fakePaymentAt", void 0);
+__decorate([
+    (0, swagger_1.ApiPropertyOptional)({ description: 'Operator who marked the fake payment (set by /fake-payment only)' }),
+    __metadata("design:type", String)
+], CreateUserDataDto.prototype, "fakePaymentBy", void 0);
+__decorate([
+    (0, swagger_1.ApiPropertyOptional)({ description: 'Operator reason for the fake-payment mark (set by /fake-payment only)' }),
+    __metadata("design:type", String)
+], CreateUserDataDto.prototype, "fakePaymentReason", void 0);
+__decorate([
+    (0, swagger_1.ApiPropertyOptional)({ description: 'payAmount / canReply before the mark; restored and unset by the unmark (set by /fake-payment only)' }),
+    __metadata("design:type", Object)
+], CreateUserDataDto.prototype, "fakePaymentPrev", void 0);
 
 
 /***/ },
@@ -52781,6 +53178,22 @@ __decorate([
     (0, mongoose_1.Prop)({ type: mongoose.Schema.Types.Mixed, required: false, default: undefined }),
     __metadata("design:type", Object)
 ], UserData.prototype, "callProgress", void 0);
+__decorate([
+    (0, mongoose_1.Prop)({ type: Date, required: false, default: undefined }),
+    __metadata("design:type", Date)
+], UserData.prototype, "fakePaymentAt", void 0);
+__decorate([
+    (0, mongoose_1.Prop)({ type: String, required: false }),
+    __metadata("design:type", String)
+], UserData.prototype, "fakePaymentBy", void 0);
+__decorate([
+    (0, mongoose_1.Prop)({ type: String, required: false }),
+    __metadata("design:type", String)
+], UserData.prototype, "fakePaymentReason", void 0);
+__decorate([
+    (0, mongoose_1.Prop)({ type: mongoose.Schema.Types.Mixed, required: false, default: undefined }),
+    __metadata("design:type", Object)
+], UserData.prototype, "fakePaymentPrev", void 0);
 exports.UserData = UserData = __decorate([
     (0, mongoose_1.Schema)({
         collection: 'userData', versionKey: false, autoIndex: true, timestamps: true,
