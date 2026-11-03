@@ -32020,6 +32020,7 @@ const common_1 = __webpack_require__(/*! @nestjs/common */ "@nestjs/common");
 const mongoose_1 = __webpack_require__(/*! @nestjs/mongoose */ "@nestjs/mongoose");
 const user_data_schema_1 = __webpack_require__(/*! ../user-data/schemas/user-data.schema */ "./src/components/user-data/schemas/user-data.schema.ts");
 const daily_analytics_module_1 = __webpack_require__(/*! ../daily-analytics/daily-analytics.module */ "./src/components/daily-analytics/daily-analytics.module.ts");
+const payment_proofs_module_1 = __webpack_require__(/*! ../payment-proofs/payment-proofs.module */ "./src/components/payment-proofs/payment-proofs.module.ts");
 const fake_payment_controller_1 = __webpack_require__(/*! ./fake-payment.controller */ "./src/components/fake-payment/fake-payment.controller.ts");
 const fake_payment_service_1 = __webpack_require__(/*! ./fake-payment.service */ "./src/components/fake-payment/fake-payment.service.ts");
 let FakePaymentModule = class FakePaymentModule {
@@ -32029,6 +32030,7 @@ exports.FakePaymentModule = FakePaymentModule = __decorate([
     (0, common_1.Module)({
         imports: [
             daily_analytics_module_1.DailyAnalyticsModule,
+            payment_proofs_module_1.PaymentProofsModule,
             mongoose_1.MongooseModule.forFeature([{ name: user_data_schema_1.UserData.name, schema: user_data_schema_1.UserDataSchema, collection: 'userData' }]),
         ],
         controllers: [fake_payment_controller_1.FakePaymentController],
@@ -32068,6 +32070,7 @@ const user_data_schema_1 = __webpack_require__(/*! ../user-data/schemas/user-dat
 const analytics_pg_reader_1 = __webpack_require__(/*! ../daily-analytics/analytics-pg.reader */ "./src/components/daily-analytics/analytics-pg.reader.ts");
 const channel_category_enum_1 = __webpack_require__(/*! ../bots/channel-category.enum */ "./src/components/bots/channel-category.enum.ts");
 const utils_1 = __webpack_require__(/*! ../../utils */ "./src/utils/index.ts");
+const payment_proofs_service_1 = __webpack_require__(/*! ../payment-proofs/payment-proofs.service */ "./src/components/payment-proofs/payment-proofs.service.ts");
 exports.CHAT_ID_RE = /^-?\d{3,20}$/;
 const MAX_REASON = 300;
 const MAX_BY = 60;
@@ -32081,10 +32084,21 @@ function pgMessage(err) {
     return err.code ? `${err.message} (${err.code})` : err.message;
 }
 let FakePaymentService = FakePaymentService_1 = class FakePaymentService {
-    constructor(userDataModel, pg) {
+    constructor(userDataModel, pg, paymentProofs) {
         this.userDataModel = userDataModel;
         this.pg = pg;
+        this.paymentProofs = paymentProofs;
         this.logger = new common_1.Logger(FakePaymentService_1.name);
+    }
+    async writeRows(chatId, ops) {
+        if (!ops.length)
+            return;
+        try {
+            await this.userDataModel.bulkWrite(ops, { ordered: true });
+        }
+        finally {
+            await this.paymentProofs?.chatChanged(chatId);
+        }
     }
     chatIdOrThrow(chatId) {
         const id = typeof chatId === 'string' ? chatId.trim() : '';
@@ -32170,8 +32184,7 @@ let FakePaymentService = FakePaymentService_1 = class FakePaymentService {
             }
             : { updateOne: { filter: { _id: r._id }, update: { $set: { payAmount: 0, canReply: 0 } } } });
         const newlyMarked = rows.filter((r) => r.fakePaymentAt == null).length;
-        if (ops.length)
-            await this.userDataModel.bulkWrite(ops, { ordered: true });
+        await this.writeRows(chatId, ops);
         const mongo = { rows: rows.length, newlyMarked };
         const pg = await this.pgCall('SELECT * FROM fake_payment_mark($1)', [chatId]);
         if (!pg.row) {
@@ -32223,8 +32236,7 @@ let FakePaymentService = FakePaymentService_1 = class FakePaymentService {
                 },
             };
         });
-        if (ops.length)
-            await this.userDataModel.bulkWrite(ops, { ordered: true });
+        await this.writeRows(chatId, ops);
         const mongo = { rowsUnmarked: rows.length };
         const pg = await this.pgCall('SELECT * FROM fake_payment_unmark($1)', [chatId]);
         if (!pg.row) {
@@ -32273,8 +32285,10 @@ exports.FakePaymentService = FakePaymentService;
 exports.FakePaymentService = FakePaymentService = FakePaymentService_1 = __decorate([
     (0, common_1.Injectable)(),
     __param(0, (0, mongoose_1.InjectModel)(user_data_schema_1.UserData.name)),
+    __param(2, (0, common_1.Optional)()),
     __metadata("design:paramtypes", [mongoose_2.Model,
-        analytics_pg_reader_1.AnalyticsPgReader])
+        analytics_pg_reader_1.AnalyticsPgReader,
+        payment_proofs_service_1.PaymentProofsService])
 ], FakePaymentService);
 
 
@@ -41384,6 +41398,7 @@ exports.PaymentProofsModule = PaymentProofsModule = __decorate([
         ],
         controllers: [payment_proofs_controller_1.PaymentProofsController],
         providers: [payment_proofs_service_1.PaymentProofsService],
+        exports: [payment_proofs_service_1.PaymentProofsService],
     })
 ], PaymentProofsModule);
 
@@ -41409,8 +41424,10 @@ var __metadata = (this && this.__metadata) || function (k, v) {
 var __param = (this && this.__param) || function (paramIndex, decorator) {
     return function (target, key) { decorator(target, key, paramIndex); }
 };
+var PaymentProofsService_1;
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.PaymentProofsService = exports.PROOF_SORTS = exports.MAX_WINDOW_ROWS = exports.DEFAULT_WINDOW_MS = exports.MAX_LIMIT = exports.DEFAULT_LIMIT = void 0;
+exports.PaymentProofsService = exports.PROOF_SORTS = exports.MAX_CACHED_WINDOWS = exports.DEFAULT_LIST_CACHE_MS = exports.MAX_WINDOW_ROWS = exports.DEFAULT_WINDOW_MS = exports.MAX_LIMIT = exports.DEFAULT_LIMIT = void 0;
+exports.listCacheMs = listCacheMs;
 const common_1 = __webpack_require__(/*! @nestjs/common */ "@nestjs/common");
 const mongoose_1 = __webpack_require__(/*! @nestjs/mongoose */ "@nestjs/mongoose");
 const mongoose_2 = __webpack_require__(/*! mongoose */ "mongoose");
@@ -41425,6 +41442,16 @@ const USERDATA_IN_CHUNK = 1_000;
 const CLIENT_HOST_TTL_MS = 5 * 60 * 1000;
 const CLIENT_ID_RE = /^[A-Za-z0-9_.-]{1,40}$/;
 const MAX_BY = 60;
+exports.DEFAULT_LIST_CACHE_MS = 60_000;
+exports.MAX_CACHED_WINDOWS = 4;
+const DEFAULT_WINDOW_KEY = 'default';
+function listCacheMs(env = process.env) {
+    const raw = env.PAYMENT_PROOFS_LIST_CACHE_MS;
+    if (raw === undefined || raw.trim() === '')
+        return exports.DEFAULT_LIST_CACHE_MS;
+    const n = Number(raw);
+    return Number.isFinite(n) && n >= 0 ? n : exports.DEFAULT_LIST_CACHE_MS;
+}
 const ROW_PROJECTION = { shadow: 0, imageHash: 0, servedUtr: 0, servedSha: 0 };
 const CLASSIFY_PROJECTION = {
     _id: 1, chatId: 1, profile: 1, clientId: 1, telegramMsgId: 1, createdAt: 1, amount: 1, creditAmount: 1, decision: 1,
@@ -41434,11 +41461,15 @@ const CLASSIFY_PROJECTION = {
     'verdict.fakeSignals': 1, 'ocr.payerName': 1,
 };
 exports.PROOF_SORTS = ['risk', 'time'];
-let PaymentProofsService = class PaymentProofsService {
+let PaymentProofsService = PaymentProofsService_1 = class PaymentProofsService {
     constructor(proofModel, userDataModel) {
         this.proofModel = proofModel;
         this.userDataModel = userDataModel;
+        this.logger = new common_1.Logger(PaymentProofsService_1.name);
         this.clientHosts = null;
+        this.windows = new Map();
+        this.loading = new Map();
+        this.gen = 0;
     }
     parseQuery(q, now = Date.now()) {
         let since = now - exports.DEFAULT_WINDOW_MS;
@@ -41483,20 +41514,8 @@ let PaymentProofsService = class PaymentProofsService {
     }
     async list(q, now = Date.now()) {
         const p = this.parseQuery(q, now);
-        const from = Math.min(p.since, now - exports.DEFAULT_WINDOW_MS);
-        const rows = await this.proofModel
-            .find({ createdAt: { $gte: new Date(from) } }, CLASSIFY_PROJECTION)
-            .sort({ createdAt: -1, _id: -1 })
-            .limit(exports.MAX_WINDOW_ROWS + 1)
-            .lean()
-            .exec();
-        const truncated = rows.length > exports.MAX_WINDOW_ROWS;
-        if (truncated)
-            rows.length = exports.MAX_WINDOW_ROWS;
-        const everything = rows.map((row) => ({ row, c: (0, payment_proofs_classify_1.classify)(row) }));
-        const chats = await this.chatInfo([...new Set(everything.map((x) => String(x.row.chatId)))]);
+        const { everything, chats, reviewModel, truncated } = await this.window(p.since, now);
         const isMarked = (chatId) => !!chats.get(chatId)?.marked;
-        const reviewModel = (0, payment_proofs_classify_1.buildReviewModel)(everything, isMarked, (0, payment_proofs_classify_1.reviewOptionsFromEnv)());
         const classified = everything.filter(({ row, c }) => new Date(row.createdAt).getTime() >= p.since
             && (!p.client || row.clientId === p.client)
             && (p.minAmount === null || (c.amount !== null && c.amount >= p.minAmount)));
@@ -41561,6 +41580,92 @@ let PaymentProofsService = class PaymentProofsService {
             : null;
         return { items, nextCursor, counts, reviewModel, truncated };
     }
+    async window(since, now) {
+        const wide = since < now - exports.DEFAULT_WINDOW_MS;
+        const ttl = listCacheMs();
+        if (ttl <= 0)
+            return this.loadWindow(wide ? since : now - exports.DEFAULT_WINDOW_MS, now);
+        const key = wide ? `since:${since}` : DEFAULT_WINDOW_KEY;
+        const hit = this.windows.get(key);
+        if (hit && now - hit.loadedAt < ttl)
+            return hit;
+        const load = () => this.refreshWindow(key, wide ? since : now - exports.DEFAULT_WINDOW_MS, now);
+        if (!hit)
+            return load();
+        load().catch((err) => this.logger.error(`payment-proofs ${key} window reload failed; serving the copy from ${new Date(hit.loadedAt).toISOString()}: ${err?.stack ?? err}`));
+        return hit;
+    }
+    refreshWindow(key, from, now) {
+        const running = this.loading.get(key);
+        if (running && running.gen === this.gen)
+            return running.promise;
+        const gen = this.gen;
+        const promise = this.loadWindow(from, now)
+            .then((data) => {
+            if (gen === this.gen) {
+                this.windows.delete(key);
+                this.windows.set(key, data);
+                while (this.windows.size > exports.MAX_CACHED_WINDOWS)
+                    this.windows.delete(this.windows.keys().next().value);
+            }
+            return data;
+        })
+            .finally(() => { if (this.loading.get(key)?.promise === promise)
+            this.loading.delete(key); });
+        this.loading.set(key, { gen, promise });
+        return promise;
+    }
+    async loadWindow(from, now) {
+        const rows = await this.proofModel
+            .find({ createdAt: { $gte: new Date(from) } }, CLASSIFY_PROJECTION)
+            .sort({ createdAt: -1, _id: -1 })
+            .limit(exports.MAX_WINDOW_ROWS + 1)
+            .lean()
+            .exec();
+        const truncated = rows.length > exports.MAX_WINDOW_ROWS;
+        if (truncated)
+            rows.length = exports.MAX_WINDOW_ROWS;
+        const chats = await this.chatInfo([...new Set(rows.map((row) => String(row.chatId)))]);
+        return this.derive({ loadedAt: now, rows, truncated, chats });
+    }
+    derive(d) {
+        const everything = d.rows.map((row) => ({ row, c: (0, payment_proofs_classify_1.classify)(row) }));
+        const reviewModel = (0, payment_proofs_classify_1.buildReviewModel)(everything, (chatId) => !!d.chats.get(chatId)?.marked, (0, payment_proofs_classify_1.reviewOptionsFromEnv)());
+        return { ...d, everything, reviewModel };
+    }
+    async patchWindows(what, apply) {
+        this.gen++;
+        if (!this.windows.size)
+            return;
+        try {
+            const patch = await apply();
+            for (const [key, w] of this.windows) {
+                const next = patch(w);
+                if (next)
+                    this.windows.set(key, next);
+            }
+        }
+        catch (err) {
+            this.windows.clear();
+            this.logger.error(`payment-proofs cache patch after ${what} failed; cache dropped: ${err?.stack ?? err}`);
+        }
+    }
+    async chatChanged(chatId) {
+        const id = String(chatId);
+        await this.patchWindows(`fake-payment ${id}`, async () => {
+            const fresh = (await this.chatInfo([id])).get(id);
+            return (w) => {
+                if (!w.rows.some((r) => String(r.chatId) === id))
+                    return null;
+                const chats = new Map(w.chats);
+                if (fresh)
+                    chats.set(id, fresh);
+                else
+                    chats.delete(id);
+                return this.derive({ ...w, chats });
+            };
+        });
+    }
     async chatInfo(chatIds) {
         const out = new Map();
         for (let i = 0; i < chatIds.length; i += USERDATA_IN_CHUNK) {
@@ -41616,11 +41721,21 @@ let PaymentProofsService = class PaymentProofsService {
         const res = await this.proofModel.updateOne(filter, update).exec();
         if (!res.matchedCount)
             throw new common_1.NotFoundException('payment proof not found (gone after the 7-day TTL?)');
+        await this.patchWindows(`review ${proofId}`, async () => {
+            const fresh = new Map((await this.proofModel.find(filter, CLASSIFY_PROJECTION).lean().exec())
+                .map((r) => [String(r._id), r]));
+            return (w) => {
+                let hit = false;
+                const rows = w.rows.map((r) => { const f = fresh.get(String(r._id)); if (f)
+                    hit = true; return f ?? r; });
+                return hit ? this.derive({ ...w, rows }) : null;
+            };
+        });
         return { proofId, review };
     }
 };
 exports.PaymentProofsService = PaymentProofsService;
-exports.PaymentProofsService = PaymentProofsService = __decorate([
+exports.PaymentProofsService = PaymentProofsService = PaymentProofsService_1 = __decorate([
     (0, common_1.Injectable)(),
     __param(0, (0, mongoose_1.InjectModel)(payment_proof_schema_1.PAYMENT_PROOF_MODEL)),
     __param(1, (0, mongoose_1.InjectModel)(user_data_schema_1.UserData.name)),
