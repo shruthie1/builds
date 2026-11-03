@@ -51230,8 +51230,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "c4442d6a174193cba1a1ee0aef8b84d745838315" : 0;
-    const builtAt =  true ? "2026-11-03T05:43:55.653Z" : 0;
+    const sha =  true ? "ef06d5d6cb9e835c51ad4bc0dcc4e3924bbd64e8" : 0;
+    const builtAt =  true ? "2026-11-03T17:57:45.705Z" : 0;
     return { sha, builtAt };
 }
 
@@ -54978,6 +54978,7 @@ class InHouseCallService {
     constructor(deps) {
         this.engine = null;
         this.supported = null;
+        this.supportedProbe = null;
         this.unsupportedNotified = false;
         this.durations = new Map();
         this.sizes = new Map();
@@ -55110,16 +55111,22 @@ class InHouseCallService {
     isEnabled() {
         return this.deps.isEnabled();
     }
-    /** Can this host run calls at all? Cached; notifies once when the switch is on but it cannot. */
+    /**
+     * Can this host run calls at all? A "yes" is cached; a "no" asks deps.isSupported again next time (it
+     * rate-limits its own re-probes). Concurrent callers share one probe. Notifies once when it cannot.
+     */
     async isAvailable() {
-        if (this.supported === null) {
-            try {
-                this.supported = this.deps.isSupported();
-            }
-            catch (error) {
-                logger.warn('isSupported probe failed, treating in-house calls as unsupported', error);
-                this.supported = false;
-            }
+        if (this.supported !== true) {
+            this.supportedProbe ?? (this.supportedProbe = (async () => {
+                try {
+                    return (await this.deps.isSupported()) === true;
+                }
+                catch (error) {
+                    logger.warn('isSupported probe failed, treating in-house calls as unsupported', error);
+                    return false;
+                }
+            })().finally(() => { this.supportedProbe = null; }));
+            this.supported = await this.supportedProbe;
         }
         if (!this.supported && !this.unsupportedNotified) {
             this.unsupportedNotified = true;
@@ -56648,9 +56655,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   sendInHouseText: () => (/* binding */ sendInHouseText),
 /* harmony export */   setInHouseCallsOverride: () => (/* reexport safe */ _switch__WEBPACK_IMPORTED_MODULE_21__.setInHouseCallsOverride)
 /* harmony export */ });
-/* harmony import */ var child_process__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! child_process */ "child_process");
-/* harmony import */ var child_process__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(child_process__WEBPACK_IMPORTED_MODULE_0__);
-/* harmony import */ var _ffprobe__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./ffprobe */ "./src/calls/inhouse/ffprobe.ts");
+/* harmony import */ var _ffprobe__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./ffprobe */ "./src/calls/inhouse/ffprobe.ts");
+/* harmony import */ var _media_tools__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./media-tools */ "./src/calls/inhouse/media-tools.ts");
 /* harmony import */ var fs__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! fs */ "fs");
 /* harmony import */ var fs__WEBPACK_IMPORTED_MODULE_2___default = /*#__PURE__*/__webpack_require__.n(fs__WEBPACK_IMPORTED_MODULE_2__);
 /* harmony import */ var path__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! path */ "path");
@@ -56724,19 +56730,11 @@ const engineLogger = {
     warn: (...a) => logger.warn(fmt(a)),
     error: (...a) => logger.error(fmt(a)),
 };
-function binaryRuns(bin) {
-    try {
-        return (0,child_process__WEBPACK_IMPORTED_MODULE_0__.spawnSync)(bin, ['-version'], { timeout: 5000, stdio: 'ignore' }).status === 0;
-    }
-    catch {
-        return false;
-    }
-}
 function probeDurationSec(url) {
     if (!/^https?:\/\//i.test(url) && !fs__WEBPACK_IMPORTED_MODULE_2___default().existsSync(url)) {
         logger.warn(`[in-house-calls] video file missing: ${url} (set INHOUSE_VIDEO_DIR, or INHOUSE_VIDEO_CDN=on)`);
     }
-    return (0,_ffprobe__WEBPACK_IMPORTED_MODULE_1__.runFfprobe)(['-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', url])
+    return (0,_ffprobe__WEBPACK_IMPORTED_MODULE_0__.runFfprobe)(['-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', url])
         .then((stdout) => {
         const value = Number(String(stdout ?? '').trim());
         return stdout !== null && Number.isFinite(value) && value > 0 ? value : null;
@@ -56744,7 +56742,7 @@ function probeDurationSec(url) {
 }
 /** Width/height of the video stream, via ffprobe; mapped to the call size by pickCallVideoSize. */
 function probeVideoSize(url) {
-    return (0,_ffprobe__WEBPACK_IMPORTED_MODULE_1__.runFfprobe)(['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=width,height', '-of', 'csv=p=0:s=x', url])
+    return (0,_ffprobe__WEBPACK_IMPORTED_MODULE_0__.runFfprobe)(['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=width,height', '-of', 'csv=p=0:s=x', url])
         .then((stdout) => {
         const m = /^(\d+)x(\d+)/.exec(String(stdout ?? '').trim());
         return m ? (0,_video_policy__WEBPACK_IMPORTED_MODULE_22__.pickCallVideoSize)(Number(m[1]), Number(m[2])) : null;
@@ -56753,7 +56751,7 @@ function probeVideoSize(url) {
 /** Whether the video has an audio stream (video_1013 has none), via ffprobe; null when the probe failed. */
 function probeHasAudio(url) {
     // codec_type of every stream: never empty for a readable video ("video" alone = no audio).
-    return (0,_ffprobe__WEBPACK_IMPORTED_MODULE_1__.runFfprobe)(['-v', 'error', '-show_entries', 'stream=codec_type', '-of', 'csv=p=0', url])
+    return (0,_ffprobe__WEBPACK_IMPORTED_MODULE_0__.runFfprobe)(['-v', 'error', '-show_entries', 'stream=codec_type', '-of', 'csv=p=0', url])
         .then((stdout) => {
         const types = String(stdout ?? '').split(/\s+/).filter(Boolean);
         return types.length ? types.includes('audio') : null;
@@ -56869,7 +56867,8 @@ function createInHouseCallService(client, hooks) {
         },
         privacyText: (chatId) => (0,_conversation_messages_call_messages__WEBPACK_IMPORTED_MODULE_5__.callPrivacyMessage)(chatId),
         isEnabled: () => (0,_switch__WEBPACK_IMPORTED_MODULE_21__.isInHouseCallsEnabled)(),
-        isSupported: () => _tg_calls__WEBPACK_IMPORTED_MODULE_10__.CallEngine.isSupported() && binaryRuns('ffmpeg') && binaryRuns('ffprobe'),
+        // ffmpeg/ffprobe: probed once per process, async (media-tools.ts); a rebuild after a reconnect reuses the answer.
+        isSupported: async () => _tg_calls__WEBPACK_IMPORTED_MODULE_10__.CallEngine.isSupported() && (await (0,_media_tools__WEBPACK_IMPORTED_MODULE_1__.mediaToolsAvailable)()),
         maxConcurrentCalls: maxCalls,
         // slots = maxCalls + 1 (the proof call's slot; the service limits shows to maxCalls).
         createEngine: (slots) => new _tg_calls__WEBPACK_IMPORTED_MODULE_10__.CallEngine(client, {
@@ -57014,6 +57013,80 @@ function usableUserRef(entity) {
     if (user?.className === 'User' && user.accessHash && !user.min)
         return { userId: user.id, accessHash: user.accessHash };
     return null;
+}
+
+
+/***/ },
+
+/***/ "./src/calls/inhouse/media-tools.ts"
+/*!******************************************!*\
+  !*** ./src/calls/inhouse/media-tools.ts ***!
+  \******************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   MEDIA_TOOL_PROBE_TIMEOUT_MS: () => (/* binding */ MEDIA_TOOL_PROBE_TIMEOUT_MS),
+/* harmony export */   MEDIA_TOOL_RETRY_MS: () => (/* binding */ MEDIA_TOOL_RETRY_MS),
+/* harmony export */   binaryRuns: () => (/* binding */ binaryRuns),
+/* harmony export */   mediaToolsAvailable: () => (/* binding */ mediaToolsAvailable),
+/* harmony export */   resetMediaToolsProbeForTests: () => (/* binding */ resetMediaToolsProbeForTests)
+/* harmony export */ });
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _ffprobe__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./ffprobe */ "./src/calls/inhouse/ffprobe.ts");
+
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_0__.Logger('tg-aut:in-house-calls');
+/** Hard deadline for one `<bin> -version` run. */
+const MEDIA_TOOL_PROBE_TIMEOUT_MS = 5000;
+/** After a failed probe, how long the answer stays "no" before the next probe may run. */
+const MEDIA_TOOL_RETRY_MS = 10 * 60000;
+/**
+ * Whether `<bin> -version` runs on this host. Async and deadline-bounded (runFfprobe): it never blocks the
+ * event loop and never depends on Node seeing the child's exit.
+ *
+ * Was spawnSync(bin, ['-version'], { timeout }) per service build. After ntgcalls replaces libuv's SIGCHLD
+ * handler (see ffprobe.ts) no child exit is ever reported, and spawnSync waits for that exit even after it
+ * kills the child on timeout: the main thread blocked in epoll forever (sneha1, 2026-11-03, on the in-process
+ * client rebuild after a Telegram reconnect).
+ */
+function binaryRuns(bin, timeoutMs = MEDIA_TOOL_PROBE_TIMEOUT_MS) {
+    return (0,_ffprobe__WEBPACK_IMPORTED_MODULE_1__.runFfprobe)(['-version'], { bin, timeoutMs }).then((stdout) => stdout !== null, () => false);
+}
+let available = false;
+let lastFailedAt = Number.NEGATIVE_INFINITY;
+let inflight = null;
+/**
+ * ffmpeg + ffprobe present: probed once per process and shared by every InHouseCallService (a client
+ * rebuild makes a new service; it must not spawn again). A "yes" is kept for the process; a "no"
+ * (missing binary or deadline hit) is kept for MEDIA_TOOL_RETRY_MS, then the next caller probes again.
+ */
+function mediaToolsAvailable(now = Date.now) {
+    if (available)
+        return Promise.resolve(true);
+    if (inflight)
+        return inflight;
+    if (now() - lastFailedAt < MEDIA_TOOL_RETRY_MS)
+        return Promise.resolve(false);
+    inflight = Promise.all([binaryRuns('ffmpeg'), binaryRuns('ffprobe')])
+        .then(([ffmpeg, ffprobe]) => {
+        if (ffmpeg && ffprobe) {
+            available = true;
+            return true;
+        }
+        lastFailedAt = now();
+        logger.warn(`[in-house-calls] media tools unavailable (ffmpeg=${ffmpeg} ffprobe=${ffprobe}); in-house calls off, next check in ${Math.round(MEDIA_TOOL_RETRY_MS / 60000)} min`);
+        return false;
+    })
+        .finally(() => { inflight = null; });
+    return inflight;
+}
+/** Test seam: forget the per-process answer. */
+function resetMediaToolsProbeForTests() {
+    available = false;
+    lastFailedAt = Number.NEGATIVE_INFINITY;
+    inflight = null;
 }
 
 
@@ -104819,8 +104892,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   handleGetnewfiles: () => (/* binding */ handleGetnewfiles),
 /* harmony export */   handleLs: () => (/* binding */ handleLs)
 /* harmony export */ });
-/* harmony import */ var child_process__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! child_process */ "child_process");
-/* harmony import */ var child_process__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(child_process__WEBPACK_IMPORTED_MODULE_0__);
+/* harmony import */ var _run_command__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./run-command */ "./src/routes/system/run-command.ts");
 /* harmony import */ var _telegram_client_access__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../../telegram/client-access */ "./src/telegram/client-access.ts");
 /* harmony import */ var _services_cloudinaryService__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../../services/cloudinaryService */ "./src/services/cloudinaryService.ts");
 /* harmony import */ var _media_profile_pic__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../../media/profile-pic */ "./src/media/profile-pic.ts");
@@ -104945,7 +105017,7 @@ const handleDownloadprofilepic = async (req, res) => {
  *               type: string
  */
 const handleLs = async (req, res) => {
-    res.send((0,child_process__WEBPACK_IMPORTED_MODULE_0__.execSync)("ls").toString());
+    res.send(await (0,_run_command__WEBPACK_IMPORTED_MODULE_0__.runCommand)("ls"));
 };
 /**
  * @swagger
@@ -104966,9 +105038,9 @@ const handleLs = async (req, res) => {
  *               example: "HEllo"
  */
 const handleDeletefiles = async (req, res) => {
-    logger.log((0,child_process__WEBPACK_IMPORTED_MODULE_0__.execSync)("cd ../../"));
-    logger.log((0,child_process__WEBPACK_IMPORTED_MODULE_0__.execSync)("rm -rf *.mp3"));
-    logger.log((0,child_process__WEBPACK_IMPORTED_MODULE_0__.execSync)("rm -rf *.jpg"));
+    logger.log(await (0,_run_command__WEBPACK_IMPORTED_MODULE_0__.runCommand)("cd ../../"));
+    logger.log(await (0,_run_command__WEBPACK_IMPORTED_MODULE_0__.runCommand)("rm -rf *.mp3"));
+    logger.log(await (0,_run_command__WEBPACK_IMPORTED_MODULE_0__.runCommand)("rm -rf *.jpg"));
     res.send("HEllo");
 };
 /**
@@ -105426,8 +105498,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   handleGetpid: () => (/* binding */ handleGetpid),
 /* harmony export */   rebootAfterDsudostop: () => (/* binding */ rebootAfterDsudostop)
 /* harmony export */ });
-/* harmony import */ var child_process__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! child_process */ "child_process");
-/* harmony import */ var child_process__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(child_process__WEBPACK_IMPORTED_MODULE_0__);
+/* harmony import */ var _run_command__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./run-command */ "./src/routes/system/run-command.ts");
 /* harmony import */ var _bootstrap_shutdown_signal__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../../bootstrap/shutdown-signal */ "./src/bootstrap/shutdown-signal.ts");
 /* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
@@ -105440,6 +105511,7 @@ __webpack_require__.r(__webpack_exports__);
 
 
 const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_3__.Logger("tg-aut:system-routes");
+const EXEC_ROUTE_TIMEOUT_MS = 120000;
 /**
  * @swagger
  * /exit:
@@ -105515,7 +105587,8 @@ const handleExec = async (req, res) => {
     const cmd = req.params.cmd;
     logger.log(`executing: `, cmd);
     try {
-        const result = (0,child_process__WEBPACK_IMPORTED_MODULE_0__.execSync)(cmd).toString();
+        // Operator commands (pm2, git, npm) can take a while; still bounded so a hung child cannot pin the request.
+        const result = await (0,_run_command__WEBPACK_IMPORTED_MODULE_0__.runCommand)(cmd, { timeoutMs: EXEC_ROUTE_TIMEOUT_MS });
         logger.log(result);
         res.send(result);
     }
@@ -105583,7 +105656,7 @@ const handleDsudostop = async (req, res, next) => {
     next();
 };
 const rebootAfterDsudostop = async (req, res) => {
-    (0,child_process__WEBPACK_IMPORTED_MODULE_0__.execSync)("reboot");
+    await (0,_run_command__WEBPACK_IMPORTED_MODULE_0__.runCommand)("reboot");
 };
 
 
@@ -106319,6 +106392,107 @@ function sendRouteValidationFailure(req, res, operation, error, statusCode = 400
         success: false,
         error,
         requestId: req.requestId,
+    });
+}
+
+
+/***/ },
+
+/***/ "./src/routes/system/run-command.ts"
+/*!******************************************!*\
+  !*** ./src/routes/system/run-command.ts ***!
+  \******************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   RUN_COMMAND_EXIT_WAIT_MS: () => (/* binding */ RUN_COMMAND_EXIT_WAIT_MS),
+/* harmony export */   RUN_COMMAND_MAX_OUTPUT_BYTES: () => (/* binding */ RUN_COMMAND_MAX_OUTPUT_BYTES),
+/* harmony export */   RUN_COMMAND_TIMEOUT_MS: () => (/* binding */ RUN_COMMAND_TIMEOUT_MS),
+/* harmony export */   runCommand: () => (/* binding */ runCommand)
+/* harmony export */ });
+/* harmony import */ var child_process__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! child_process */ "child_process");
+/* harmony import */ var child_process__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(child_process__WEBPACK_IMPORTED_MODULE_0__);
+
+const RUN_COMMAND_TIMEOUT_MS = 30000;
+/** After the command's stdout and stderr close, how long to wait for its exit status before trusting the output. */
+const RUN_COMMAND_EXIT_WAIT_MS = 1000;
+/** Same cap as execSync's default maxBuffer. */
+const RUN_COMMAND_MAX_OUTPUT_BYTES = 1024 * 1024;
+/**
+ * Runs `cmd` through /bin/sh (as execSync did) and resolves with its stdout; rejects when it fails, prints
+ * more than RUN_COMMAND_MAX_OUTPUT_BYTES, or is not done within timeoutMs (the child is then SIGKILLed).
+ *
+ * Async and never waits on the exit event alone: once ntgcalls replaces libuv's SIGCHLD handler no child
+ * exit is reported in this process (see calls/inhouse/ffprobe.ts), and an execSync then blocks the event
+ * loop for good. When both output pipes have closed but no exit follows within exitWaitMs, the output is
+ * used as is.
+ */
+function runCommand(cmd, opts = {}) {
+    const timeoutMs = opts.timeoutMs ?? RUN_COMMAND_TIMEOUT_MS;
+    const exitWaitMs = opts.exitWaitMs ?? RUN_COMMAND_EXIT_WAIT_MS;
+    return new Promise((resolve, reject) => {
+        let settled = false;
+        let deadline;
+        let exitWait;
+        const out = [];
+        const err = [];
+        let bytes = 0;
+        let openPipes = 2;
+        const done = (error) => {
+            if (settled)
+                return;
+            settled = true;
+            clearTimeout(deadline);
+            clearTimeout(exitWait);
+            if (error)
+                reject(error);
+            else
+                resolve(Buffer.concat(out).toString());
+        };
+        let child;
+        try {
+            child = (0,child_process__WEBPACK_IMPORTED_MODULE_0__.spawn)('/bin/sh', ['-c', cmd], { stdio: ['ignore', 'pipe', 'pipe'] });
+        }
+        catch (error) {
+            done(error instanceof Error ? error : new Error(String(error)));
+            return;
+        }
+        const kill = () => { try {
+            child.kill('SIGKILL');
+        }
+        catch { /* already gone */ } };
+        const collect = (into) => (chunk) => {
+            bytes += chunk.length;
+            if (bytes > RUN_COMMAND_MAX_OUTPUT_BYTES) {
+                kill();
+                done(new Error(`Command output over ${RUN_COMMAND_MAX_OUTPUT_BYTES} bytes: ${cmd}`));
+                return;
+            }
+            into.push(chunk);
+        };
+        const pipeClosed = () => {
+            openPipes -= 1;
+            if (openPipes > 0 || settled)
+                return;
+            exitWait = setTimeout(() => done(null), exitWaitMs);
+        };
+        child.on('error', (error) => done(error));
+        child.on('close', (code, signal) => {
+            if (code === 0 && !signal)
+                return done(null);
+            const stderr = Buffer.concat(err).toString().trim();
+            done(new Error(`Command failed: ${cmd}${signal ? ` (signal ${signal})` : ` (exit ${code})`}${stderr ? `\n${stderr}` : ''}`));
+        });
+        child.stdout?.on('data', collect(out));
+        child.stderr?.on('data', collect(err));
+        child.stdout?.on('end', pipeClosed);
+        child.stderr?.on('end', pipeClosed);
+        deadline = setTimeout(() => {
+            kill();
+            done(new Error(`Command timed out after ${Math.round(timeoutMs / 1000)}s: ${cmd}`));
+        }, timeoutMs);
     });
 }
 
