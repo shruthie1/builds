@@ -34615,9 +34615,14 @@ __webpack_require__.r(__webpack_exports__);
  * `paymentProofs`: one small row per analysed payment screenshot, used only for fraud lookups
  * (cross-chat UTR reuse, near-duplicate images). Design: docs/design/2026-10-10-tg-vision-payment-proof.md section 7.
  *
- * Not stored (PII / size): image bytes, OCR text, payer and payee names. Budget is about 30 MB, so
- * rows stay ~500 B and the TTL index (7 days) is what keeps the collection bounded.
+ * Not stored here (size): image bytes and the full OCR text; those live on the VM disk (tg-aut payments/proof-archive,
+ * owner scope 2026-11-03). Rows carry short review fields (`proofId`, `verdict`, `image`, `ocr`, about 0.5 KB more) and
+ * the TTL index (7 days) is what keeps the collection bounded.
  * Never write rows before ensureIndexes() has created the TTL index (registered in ensureAllIndexes).
+ *
+ * `mode: 'record'` rows are written only for the review screen (recordReview: a screenshot the proof gate wrote no row
+ * for, e.g. not ours / not a receipt / over the credit limit). The gate's reads (recentForChat, findReuse) skip them, so
+ * the gate sees exactly the rows it saw before they existed; insert() upgrades one to the gate's row.
  */
 const PAYMENT_PROOF_TTL_SECONDS = 7 * 24 * 60 * 60; // 604_800 (was 45 days; see ensureTtlIndex migration)
 const PAYMENT_PROOF_TTL_INDEX = 'createdAt_ttl';
@@ -34626,6 +34631,10 @@ const PAYMENT_PROOF_MAX_REASONS = 6;
 const NEAR_HASH_SCAN_LIMIT = 200;
 /** Default Hamming radius (of 256 bits) for "same image, re-encoded". */
 const NEAR_HASH_MAX_DISTANCE = 4;
+/** Not one of the gate's rows: the gate's reads skip it. */
+const NOT_RECORD_ONLY = { mode: { $ne: 'record' } };
+/** The review fields recordReview sets (always $set: they describe the final outcome). */
+const REVIEW_FIELDS = ['proofId', 'verdict', 'image', 'ocr'];
 /** Served rows scanned for a near picture (any chat). ~200 credits/day fleet-wide, so this covers a few days. */
 const SERVED_NEAR_SCAN_LIMIT = 600;
 /** The near-picture scan gives up after this (the exact UTR / file lookups still answer). */
@@ -34686,15 +34695,79 @@ class PaymentProofsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_
         delete doc.servedUtr;
         delete doc.servedSha;
         delete doc.creditAmount; // credit state too: only markServed writes it (at the credit decision)
+        for (const k of REVIEW_FIELDS)
+            delete doc[k]; // review fields: recordReview only
+        const key = { chatId, profile: input.profile, telegramMsgId: input.telegramMsgId };
         return this.guardWrite(`insert(${chatId})`, async () => {
+            let upserted = false;
             try {
-                await this.collection.updateOne({ chatId, profile: input.profile, telegramMsgId: input.telegramMsgId }, { $setOnInsert: doc }, { upsert: true });
+                const res = await this.collection.updateOne(key, { $setOnInsert: doc }, { upsert: true });
+                upserted = (res?.upsertedCount ?? 0) > 0;
             }
             catch (error) {
                 // A concurrent insert of the same screenshot won the unique key: the row exists, which is the goal.
                 if (!isDuplicateKey(error))
                     throw error;
             }
+            // A review-only row of this screenshot exists (it was judged before, e.g. re-processed after a restart):
+            // it becomes the gate's row. createdAt stays (TTL from the first sight).
+            if (!upserted && doc.mode !== 'record') {
+                const gateFields = { ...doc };
+                delete gateFields.createdAt;
+                await this.collection.updateOne({ ...key, mode: 'record' }, { $set: gateFields });
+            }
+        });
+    }
+    /**
+     * The review fields of one screenshot (`proofId`, `verdict`, `image`, `ocr`): set on the gate's row when it exists,
+     * else a review-only row (mode 'record') is created from the other fields of `input`. Idempotent per screenshot;
+     * the last call's review fields win. Never touches served / ask state.
+     */
+    async recordReview(input) {
+        const chatId = String(input.chatId || '').trim();
+        if (!chatId || !input.profile || !input.proofId)
+            return false;
+        const review = {};
+        const base = {};
+        for (const [k, v] of Object.entries(input)) {
+            if (v === undefined || v === null || k === '_id')
+                continue;
+            if (REVIEW_FIELDS.includes(k))
+                review[k] = v;
+            else
+                base[k] = v;
+        }
+        base.chatId = chatId;
+        base.mode = 'record';
+        base.reasons = (input.reasons ?? []).slice(0, PAYMENT_PROOF_MAX_REASONS);
+        base.createdAt = input.createdAt ?? new Date();
+        if (typeof base.imageHash === 'string' && !HEX64.test(base.imageHash))
+            delete base.imageHash;
+        if (typeof base.imageSha256 === 'string' && !HEX64.test(base.imageSha256))
+            delete base.imageSha256;
+        for (const k of ['servedAt', 'servedService', 'servedUtr', 'servedSha', 'creditAmount', 'ask', 'proof'])
+            delete base[k];
+        const key = { chatId, profile: input.profile, telegramMsgId: input.telegramMsgId };
+        return this.guardWrite(`recordReview(${chatId})`, async () => {
+            try {
+                await this.collection.updateOne(key, { $set: review, $setOnInsert: base }, { upsert: true });
+            }
+            catch (error) {
+                if (!isDuplicateKey(error))
+                    throw error;
+                // Lost the insert race to the gate's insert: the row exists now, set the review fields on it.
+                await this.collection.updateOne(key, { $set: review });
+            }
+        });
+    }
+    /** The image + sidecar of this screenshot landed on the VM disk. */
+    async markProofStored(chatId, profile, telegramMsgId) {
+        const id = String(chatId || '').trim();
+        if (!id || !profile)
+            return false;
+        return this.guard(`markProofStored(${id})`, false, async () => {
+            const res = await this.collection.updateOne({ chatId: id, profile, telegramMsgId, image: { $exists: true } }, { $set: { 'image.stored': true } });
+            return res.matchedCount > 0;
         });
     }
     /**
@@ -34707,10 +34780,11 @@ class PaymentProofsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_
         if (!chatId)
             return null;
         const elsewhere = [{ chatId: { $ne: chatId } }, { profile: { $ne: profile } }];
+        // NOT_RECORD_ONLY rides along in every lookup below (review-only rows are not proofs the gate knows).
         return this.guard(`findReuse(${chatId})`, null, async () => {
             if (query.utr) {
                 const doc = await this.collection
-                    .find({ utr: query.utr, $or: elsewhere })
+                    .find({ utr: query.utr, $or: elsewhere, ...NOT_RECORD_ONLY })
                     .limit(1)
                     .next();
                 if (doc)
@@ -34718,7 +34792,7 @@ class PaymentProofsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_
             }
             if (query.imageHash && HEX64.test(query.imageHash)) {
                 const max = query.maxHamming ?? NEAR_HASH_MAX_DISTANCE;
-                const near = await this.nearHashRows({ imageHash: { $exists: true }, $or: elsewhere }, query.imageHash, max, NEAR_HASH_SCAN_LIMIT);
+                const near = await this.nearHashRows({ imageHash: { $exists: true }, $or: elsewhere, ...NOT_RECORD_ONLY }, query.imageHash, max, NEAR_HASH_SCAN_LIMIT);
                 let best = null;
                 for (const { distance, doc } of near) {
                     if (!best || distance < best.distance)
@@ -34729,14 +34803,14 @@ class PaymentProofsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_
             return null;
         });
     }
-    /** Newest first; backs the per-chat near-duplicate scan (default last 20). */
+    /** Newest first; backs the per-chat near-duplicate scan (default last 20). Review-only rows are not counted. */
     async recentForChat(chatId, limit = 20) {
         const id = String(chatId || '').trim();
         if (!id)
             return [];
         const n = Math.max(1, Math.min(100, Math.floor(limit)));
         return this.guard(`recentForChat(${id})`, [], () => this.collection
-            .find({ chatId: id })
+            .find({ chatId: id, ...NOT_RECORD_ONLY })
             .sort({ createdAt: -1 })
             .limit(n)
             .toArray());
@@ -51156,8 +51230,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "3e1f82b62c5c8d39c5a90e1b4c982d5a72ebbfe7" : 0;
-    const builtAt =  true ? "2026-11-03T04:33:44.023Z" : 0;
+    const sha =  true ? "c4442d6a174193cba1a1ee0aef8b84d745838315" : 0;
+    const builtAt =  true ? "2026-11-03T05:43:55.653Z" : 0;
     return { sha, builtAt };
 }
 
@@ -76875,37 +76949,41 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! ../conversation/messages/standard-messages */ "./src/conversation/messages/standard-messages.ts");
 /* harmony import */ var _payments_screenshot_parse_image__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! ../payments/screenshot/parse-image */ "./src/payments/screenshot/parse-image.ts");
 /* harmony import */ var _payments_vision_shadow__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! ../payments/vision-shadow */ "./src/payments/vision-shadow.ts");
-/* harmony import */ var _payments_proof_check_messages__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! ../payments/proof-check/messages */ "./src/payments/proof-check/messages.ts");
-/* harmony import */ var _payments_proof_check_upi_ownership__WEBPACK_IMPORTED_MODULE_17__ = __webpack_require__(/*! ../payments/proof-check/upi-ownership */ "./src/payments/proof-check/upi-ownership.ts");
-/* harmony import */ var _payments_payment_time__WEBPACK_IMPORTED_MODULE_18__ = __webpack_require__(/*! ../payments/payment-time */ "./src/payments/payment-time.ts");
-/* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_19__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
-/* harmony import */ var _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_20__ = __webpack_require__(/*! @tg/core/utils/TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
-/* harmony import */ var _telegram_file_sender__WEBPACK_IMPORTED_MODULE_21__ = __webpack_require__(/*! ../telegram/file-sender */ "./src/telegram/file-sender.ts");
-/* harmony import */ var _outbound_unwanted_photo__WEBPACK_IMPORTED_MODULE_22__ = __webpack_require__(/*! ../outbound/unwanted-photo */ "./src/outbound/unwanted-photo.ts");
-/* harmony import */ var _conversation_state_user_state__WEBPACK_IMPORTED_MODULE_23__ = __webpack_require__(/*! ../conversation/state/user-state */ "./src/conversation/state/user-state.ts");
-/* harmony import */ var _conversation_abuse_detection__WEBPACK_IMPORTED_MODULE_24__ = __webpack_require__(/*! ../conversation/abuse-detection */ "./src/conversation/abuse-detection.ts");
-/* harmony import */ var _payments_screenshot_download_media__WEBPACK_IMPORTED_MODULE_25__ = __webpack_require__(/*! ../payments/screenshot/download-media */ "./src/payments/screenshot/download-media.ts");
-/* harmony import */ var _payments_screenshot_normalise_amount__WEBPACK_IMPORTED_MODULE_26__ = __webpack_require__(/*! ../payments/screenshot/normalise-amount */ "./src/payments/screenshot/normalise-amount.ts");
-/* harmony import */ var _calls_call_initiation__WEBPACK_IMPORTED_MODULE_27__ = __webpack_require__(/*! ../calls/call-initiation */ "./src/calls/call-initiation.ts");
-/* harmony import */ var _conversation_failed_message_followup__WEBPACK_IMPORTED_MODULE_28__ = __webpack_require__(/*! ../conversation/failed-message-followup */ "./src/conversation/failed-message-followup.ts");
-/* harmony import */ var _outbound_chat_notice__WEBPACK_IMPORTED_MODULE_29__ = __webpack_require__(/*! ../outbound/chat-notice */ "./src/outbound/chat-notice.ts");
-/* harmony import */ var _payments_screenshot_helpers__WEBPACK_IMPORTED_MODULE_30__ = __webpack_require__(/*! ../payments/screenshot/helpers */ "./src/payments/screenshot/helpers.ts");
-/* harmony import */ var _telegram_client_access__WEBPACK_IMPORTED_MODULE_31__ = __webpack_require__(/*! ../telegram/client-access */ "./src/telegram/client-access.ts");
-/* harmony import */ var _telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_32__ = __webpack_require__(/*! ../telegram/flood-safe-send */ "./src/telegram/flood-safe-send.ts");
-/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_33__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
-/* harmony import */ var _conversation_state_state_reset__WEBPACK_IMPORTED_MODULE_34__ = __webpack_require__(/*! ../conversation/state/state-reset */ "./src/conversation/state/state-reset.ts");
-/* harmony import */ var _payments_screenshot_detect_fake__WEBPACK_IMPORTED_MODULE_35__ = __webpack_require__(/*! ../payments/screenshot/detect-fake */ "./src/payments/screenshot/detect-fake.ts");
-/* harmony import */ var _tg_core_utils_timers__WEBPACK_IMPORTED_MODULE_36__ = __webpack_require__(/*! @tg/core/utils/timers */ "../../packages/tg-core/src/utils/timers.ts");
-/* harmony import */ var _calls_call_me__WEBPACK_IMPORTED_MODULE_37__ = __webpack_require__(/*! ../calls/call-me */ "./src/calls/call-me.ts");
-/* harmony import */ var _calls_inhouse_active__WEBPACK_IMPORTED_MODULE_38__ = __webpack_require__(/*! ../calls/inhouse-active */ "./src/calls/inhouse-active.ts");
-/* harmony import */ var _payments_proof_gate_gate__WEBPACK_IMPORTED_MODULE_39__ = __webpack_require__(/*! ../payments/proof-gate/gate */ "./src/payments/proof-gate/gate.ts");
-/* harmony import */ var _payments_proof_gate_decide__WEBPACK_IMPORTED_MODULE_40__ = __webpack_require__(/*! ../payments/proof-gate/decide */ "./src/payments/proof-gate/decide.ts");
-/* harmony import */ var _payments_proof_gate_flow__WEBPACK_IMPORTED_MODULE_41__ = __webpack_require__(/*! ../payments/proof-gate/flow */ "./src/payments/proof-gate/flow.ts");
-/* harmony import */ var _payments_proof_gate_signals__WEBPACK_IMPORTED_MODULE_42__ = __webpack_require__(/*! ../payments/proof-gate/signals */ "./src/payments/proof-gate/signals.ts");
-/* harmony import */ var _payments_screenshot_paid_to_us__WEBPACK_IMPORTED_MODULE_43__ = __webpack_require__(/*! ../payments/screenshot/paid-to-us */ "./src/payments/screenshot/paid-to-us.ts");
-/* harmony import */ var _payments_upi__WEBPACK_IMPORTED_MODULE_44__ = __webpack_require__(/*! ../payments/upi */ "./src/payments/upi.ts");
-/* harmony import */ var _tg_vision__WEBPACK_IMPORTED_MODULE_45__ = __webpack_require__(/*! @tg/vision */ "../../packages/tg-vision/src/index.ts");
-/* harmony import */ var _jobs_delayed__WEBPACK_IMPORTED_MODULE_46__ = __webpack_require__(/*! ../jobs/delayed */ "./src/jobs/delayed.ts");
+/* harmony import */ var _payments_proof_archive_recorder__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! ../payments/proof-archive/recorder */ "./src/payments/proof-archive/recorder.ts");
+/* harmony import */ var _payments_proof_archive_verdict__WEBPACK_IMPORTED_MODULE_17__ = __webpack_require__(/*! ../payments/proof-archive/verdict */ "./src/payments/proof-archive/verdict.ts");
+/* harmony import */ var _payments_proof_check_messages__WEBPACK_IMPORTED_MODULE_18__ = __webpack_require__(/*! ../payments/proof-check/messages */ "./src/payments/proof-check/messages.ts");
+/* harmony import */ var _payments_proof_check_upi_ownership__WEBPACK_IMPORTED_MODULE_19__ = __webpack_require__(/*! ../payments/proof-check/upi-ownership */ "./src/payments/proof-check/upi-ownership.ts");
+/* harmony import */ var _payments_payment_time__WEBPACK_IMPORTED_MODULE_20__ = __webpack_require__(/*! ../payments/payment-time */ "./src/payments/payment-time.ts");
+/* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_21__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
+/* harmony import */ var _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_22__ = __webpack_require__(/*! @tg/core/utils/TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
+/* harmony import */ var _telegram_file_sender__WEBPACK_IMPORTED_MODULE_23__ = __webpack_require__(/*! ../telegram/file-sender */ "./src/telegram/file-sender.ts");
+/* harmony import */ var _outbound_unwanted_photo__WEBPACK_IMPORTED_MODULE_24__ = __webpack_require__(/*! ../outbound/unwanted-photo */ "./src/outbound/unwanted-photo.ts");
+/* harmony import */ var _conversation_state_user_state__WEBPACK_IMPORTED_MODULE_25__ = __webpack_require__(/*! ../conversation/state/user-state */ "./src/conversation/state/user-state.ts");
+/* harmony import */ var _conversation_abuse_detection__WEBPACK_IMPORTED_MODULE_26__ = __webpack_require__(/*! ../conversation/abuse-detection */ "./src/conversation/abuse-detection.ts");
+/* harmony import */ var _payments_screenshot_download_media__WEBPACK_IMPORTED_MODULE_27__ = __webpack_require__(/*! ../payments/screenshot/download-media */ "./src/payments/screenshot/download-media.ts");
+/* harmony import */ var _payments_screenshot_normalise_amount__WEBPACK_IMPORTED_MODULE_28__ = __webpack_require__(/*! ../payments/screenshot/normalise-amount */ "./src/payments/screenshot/normalise-amount.ts");
+/* harmony import */ var _calls_call_initiation__WEBPACK_IMPORTED_MODULE_29__ = __webpack_require__(/*! ../calls/call-initiation */ "./src/calls/call-initiation.ts");
+/* harmony import */ var _conversation_failed_message_followup__WEBPACK_IMPORTED_MODULE_30__ = __webpack_require__(/*! ../conversation/failed-message-followup */ "./src/conversation/failed-message-followup.ts");
+/* harmony import */ var _outbound_chat_notice__WEBPACK_IMPORTED_MODULE_31__ = __webpack_require__(/*! ../outbound/chat-notice */ "./src/outbound/chat-notice.ts");
+/* harmony import */ var _payments_screenshot_helpers__WEBPACK_IMPORTED_MODULE_32__ = __webpack_require__(/*! ../payments/screenshot/helpers */ "./src/payments/screenshot/helpers.ts");
+/* harmony import */ var _telegram_client_access__WEBPACK_IMPORTED_MODULE_33__ = __webpack_require__(/*! ../telegram/client-access */ "./src/telegram/client-access.ts");
+/* harmony import */ var _telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_34__ = __webpack_require__(/*! ../telegram/flood-safe-send */ "./src/telegram/flood-safe-send.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_35__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _conversation_state_state_reset__WEBPACK_IMPORTED_MODULE_36__ = __webpack_require__(/*! ../conversation/state/state-reset */ "./src/conversation/state/state-reset.ts");
+/* harmony import */ var _payments_screenshot_detect_fake__WEBPACK_IMPORTED_MODULE_37__ = __webpack_require__(/*! ../payments/screenshot/detect-fake */ "./src/payments/screenshot/detect-fake.ts");
+/* harmony import */ var _tg_core_utils_timers__WEBPACK_IMPORTED_MODULE_38__ = __webpack_require__(/*! @tg/core/utils/timers */ "../../packages/tg-core/src/utils/timers.ts");
+/* harmony import */ var _calls_call_me__WEBPACK_IMPORTED_MODULE_39__ = __webpack_require__(/*! ../calls/call-me */ "./src/calls/call-me.ts");
+/* harmony import */ var _calls_inhouse_active__WEBPACK_IMPORTED_MODULE_40__ = __webpack_require__(/*! ../calls/inhouse-active */ "./src/calls/inhouse-active.ts");
+/* harmony import */ var _payments_proof_gate_gate__WEBPACK_IMPORTED_MODULE_41__ = __webpack_require__(/*! ../payments/proof-gate/gate */ "./src/payments/proof-gate/gate.ts");
+/* harmony import */ var _payments_proof_gate_decide__WEBPACK_IMPORTED_MODULE_42__ = __webpack_require__(/*! ../payments/proof-gate/decide */ "./src/payments/proof-gate/decide.ts");
+/* harmony import */ var _payments_proof_gate_flow__WEBPACK_IMPORTED_MODULE_43__ = __webpack_require__(/*! ../payments/proof-gate/flow */ "./src/payments/proof-gate/flow.ts");
+/* harmony import */ var _payments_proof_gate_signals__WEBPACK_IMPORTED_MODULE_44__ = __webpack_require__(/*! ../payments/proof-gate/signals */ "./src/payments/proof-gate/signals.ts");
+/* harmony import */ var _payments_screenshot_paid_to_us__WEBPACK_IMPORTED_MODULE_45__ = __webpack_require__(/*! ../payments/screenshot/paid-to-us */ "./src/payments/screenshot/paid-to-us.ts");
+/* harmony import */ var _payments_upi__WEBPACK_IMPORTED_MODULE_46__ = __webpack_require__(/*! ../payments/upi */ "./src/payments/upi.ts");
+/* harmony import */ var _tg_vision__WEBPACK_IMPORTED_MODULE_47__ = __webpack_require__(/*! @tg/vision */ "../../packages/tg-vision/src/index.ts");
+/* harmony import */ var _jobs_delayed__WEBPACK_IMPORTED_MODULE_48__ = __webpack_require__(/*! ../jobs/delayed */ "./src/jobs/delayed.ts");
+
+
 
 
 
@@ -76956,8 +77034,8 @@ __webpack_require__.r(__webpack_exports__);
 
 /** Every user send through this helper here is a payment text (verdicts, proof gate, hold re-checks; outbound arbiter §5.1 row 7) unless the call says 'call': tagged for the [OUTBOUND] log only (outbound/outbound-log.ts). */
 const OUTBOUND_INTENT = 'payment';
-const sendMessageWithTimeout = (client, entity, params, options = {}) => (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_32__.sendMessageWithTimeout)(client, entity, params, { intent: OUTBOUND_INTENT, ...options });
-const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_33__.Logger("tg-aut:process-image");
+const sendMessageWithTimeout = (client, entity, params, options = {}) => (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_34__.sendMessageWithTimeout)(client, entity, params, { intent: OUTBOUND_INTENT, ...options });
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_35__.Logger("tg-aut:process-image");
 /**
  * Ask for the full payment screenshot, never reject: a payment whose amount nobody could read (category 'payment',
  * no amount).
@@ -76971,15 +77049,15 @@ const UNCLEAR_SCREENSHOT_MESSAGES = [
     "Darling send the **full screenshot** 😚\n\nI need to see the amount\nAnd the payment time",
 ];
 function scheduleProcessImageTask(callback, delayMs, context) {
-    return (0,_tg_core_utils_timers__WEBPACK_IMPORTED_MODULE_36__.scheduleUnrefTimeout)(() => {
+    return (0,_tg_core_utils_timers__WEBPACK_IMPORTED_MODULE_38__.scheduleUnrefTimeout)(() => {
         void callback().catch((error) => {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_19__.parseError)(error, context);
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_21__.parseError)(error, context);
         });
     }, delayMs);
 }
 function scheduleImageFollowup(event, chatId, kind, delayMs, extra = {}) {
     const msgId = Number(event.message?.id) || 0;
-    (0,_jobs_delayed__WEBPACK_IMPORTED_MODULE_46__.scheduleDelayed)(chatId, 'imageFollowup', { kind, msgId, ...extra }, delayMs);
+    (0,_jobs_delayed__WEBPACK_IMPORTED_MODULE_48__.scheduleDelayed)(chatId, 'imageFollowup', { kind, msgId, ...extra }, delayMs);
 }
 /** Delayed record 'imageFollowup'. Never throws (same reporting as the old timer wrapper). */
 async function runImageFollowup(client, chatId, params) {
@@ -76987,7 +77065,7 @@ async function runImageFollowup(client, chatId, params) {
         await runImageFollowupStep(client, chatId, params);
     }
     catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_19__.parseError)(error, `processImage.${params.kind}.${chatId}`);
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_21__.parseError)(error, `processImage.${params.kind}.${chatId}`);
     }
 }
 async function runImageFollowupStep(client, chatId, params) {
@@ -77007,7 +77085,7 @@ async function runImageFollowupStep(client, chatId, params) {
         case 'fakeScreenshotLimit':
             await db.updateSingleKey(chatId, _data_user_data_crud__WEBPACK_IMPORTED_MODULE_0__.user.limitTime, Date.now() + 10 * 60 * 1000);
             await db.updateSingleKey(chatId, _data_user_data_crud__WEBPACK_IMPORTED_MODULE_0__.user.canReply, 0);
-            await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_29__.notifyChat)(chatId, { title: 'Fake pic blocked', summary: 'Payment store unavailable, previous rule.' });
+            await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_31__.notifyChat)(chatId, { title: 'Fake pic blocked', summary: 'Payment store unavailable, previous rule.' });
             return;
         case 'amountOutOfRangeReminder':
             await send({
@@ -77020,7 +77098,7 @@ async function runImageFollowupStep(client, chatId, params) {
             return;
         case 'demoPicsFollowup': {
             await send({
-                file: await _telegram_file_sender__WEBPACK_IMPORTED_MODULE_21__.fileSender.getFileHandles(["dmp1.jpg", "dmp2.jpg", "dmp3.jpg", "dmp4.jpg"]),
+                file: await _telegram_file_sender__WEBPACK_IMPORTED_MODULE_23__.fileSender.getFileHandles(["dmp1.jpg", "dmp2.jpg", "dmp3.jpg", "dmp4.jpg"]),
                 message: (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_12__.pickOneMsg)([
                     "Take Demo Video Call..!\nI'll show you directly!!\nI'm not wearing clothes now!!♥️🙈\n\n**Just 50₹!!**",
                     "Take live video call baby!!\nI'm completely naked right now!!🔥💋\n\n**Only 50₹ darling!!**",
@@ -77031,12 +77109,12 @@ async function runImageFollowupStep(client, chatId, params) {
             // payAmount is RAISED atomically ($max), never set from the snapshot taken when this was scheduled: a credit that
             // landed in between (a bigger payment) must not be lowered back to this amount.
             await db.updateRaising(chatId, { picsSent: (Number(params.picsSentBefore) || 0) + 1 }, amount > 0 ? { payAmount: amount } : {});
-            _conversation_state_user_state__WEBPACK_IMPORTED_MODULE_23__.stateManager.setDemoPicsSent(chatId, true);
+            _conversation_state_user_state__WEBPACK_IMPORTED_MODULE_25__.stateManager.setDemoPicsSent(chatId, true);
             return;
         }
         case 'firstDemoPicsFollowup': {
             await send({
-                file: await _telegram_file_sender__WEBPACK_IMPORTED_MODULE_21__.fileSender.getFileHandles(["dmp1.jpg", "dmp2.jpg", "dmp3.jpg", "dmp4.jpg"]),
+                file: await _telegram_file_sender__WEBPACK_IMPORTED_MODULE_23__.fileSender.getFileHandles(["dmp1.jpg", "dmp2.jpg", "dmp3.jpg", "dmp4.jpg"]),
                 message: (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_12__.pickOneMsg)([
                     "Take a Demo video call with me baby!!\n\nI'll show you everything directly 💋\nI'm completely naked right now waiting for you!!♥️🙈\n\n**Just 50₹ darling!!**",
                     "Take live video call Dear!!\n\nI'll strip everything for you 🔥\nI'm fingering myself thinking of you right now!!💦🙈\n\n**Only 50₹ baby!!**",
@@ -77049,7 +77127,7 @@ async function runImageFollowupStep(client, chatId, params) {
             // Money fields are RAISED atomically ($max): a failed read (snapshot fallback) or a credit between the read and
             // this write can no longer lower them.
             await db.updateRaising(chatId, { picsSent: (Number(fresh?.picsSent ?? params.picsSentBefore) || 0) + 1 }, amount > 0 ? { payAmount: amount, highestPayAmount: amount } : {});
-            _conversation_state_user_state__WEBPACK_IMPORTED_MODULE_23__.stateManager.setDemoPicsSent(chatId, true);
+            _conversation_state_user_state__WEBPACK_IMPORTED_MODULE_25__.stateManager.setDemoPicsSent(chatId, true);
             return;
         }
         case 'callOverFollowup': {
@@ -77081,13 +77159,13 @@ async function runImageFollowupStep(client, chatId, params) {
                 await client.deleteMessages(chatId, [params.msgId], { revoke: true });
             }
             catch (error) {
-                logger.log((0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_19__.parseError)(error, "Failed to Delete Message", true));
+                logger.log((0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_21__.parseError)(error, "Failed to Delete Message", true));
             }
             return;
         case 'paymentValidationQr':
             await send({
                 message: `${_conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_13__.qr}\n\n${_conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_13__.link}`,
-                file: await _telegram_file_sender__WEBPACK_IMPORTED_MODULE_21__.fileSender.getFileHandle("./QR.jpg"),
+                file: await _telegram_file_sender__WEBPACK_IMPORTED_MODULE_23__.fileSender.getFileHandle("./QR.jpg"),
             });
             return;
         case 'paymentNotMineReminder': {
@@ -77110,8 +77188,8 @@ async function runImageFollowupStep(client, chatId, params) {
         }
     }
 }
-function notifyProcessImage(context, title, summary, fields = [], severity = _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_20__.NotificationSeverity.INFO, details) {
-    void _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_20__.BotConfig.getInstance().sendMessage(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_20__.ChannelCategory.CLIENT_UPDATES, {
+function notifyProcessImage(context, title, summary, fields = [], severity = _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_22__.NotificationSeverity.INFO, details) {
+    void _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_22__.BotConfig.getInstance().sendMessage(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_22__.ChannelCategory.CLIENT_UPDATES, {
         severity,
         title,
         summary,
@@ -77120,10 +77198,10 @@ function notifyProcessImage(context, title, summary, fields = [], severity = _tg
         tags: ["process-image", "payment-image"],
     }).then((sent) => {
         if (sent === false) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_19__.parseError)(new Error("Process image notification returned false"), `ProcessImage.notification.${context}`, false);
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_21__.parseError)(new Error("Process image notification returned false"), `ProcessImage.notification.${context}`, false);
         }
     }).catch((error) => {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_19__.parseError)(error, `ProcessImage.notification.${context}`, false);
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_21__.parseError)(error, `ProcessImage.notification.${context}`, false);
     });
 }
 function imageUserFields(chatId, broadcastName, fields = []) {
@@ -77141,7 +77219,7 @@ function imageUserFields(chatId, broadcastName, fields = []) {
  */
 function canSendPicsScore(userDetails, chatId) {
     const picCount = userDetails.picCount || 0; // Use database picCount instead of Redis
-    const pleaseRequestCount = _conversation_state_user_state__WEBPACK_IMPORTED_MODULE_23__.stateManager.getPleaseRequestCount(chatId);
+    const pleaseRequestCount = _conversation_state_user_state__WEBPACK_IMPORTED_MODULE_25__.stateManager.getPleaseRequestCount(chatId);
     return (picCount * 2) + (pleaseRequestCount * 1);
 }
 /**
@@ -77183,7 +77261,7 @@ allowAmountMismatch = false) {
             logger.debug(`[ProcessImage] Time format validation failed. Expected ISO format (YYYY-MM-DDTHH:mm:ss), got: "${timeString}"`);
             // Try parsing anyway in case it's a valid date string in another format
         }
-        const paymentTime = (0,_payments_payment_time__WEBPACK_IMPORTED_MODULE_18__.parseRawPaymentTime)(timeString);
+        const paymentTime = (0,_payments_payment_time__WEBPACK_IMPORTED_MODULE_20__.parseRawPaymentTime)(timeString);
         if (!paymentTime) {
             logger.debug(`[ProcessImage] Invalid date parsed from time string: "${timeString}"`);
             return false;
@@ -77272,7 +77350,7 @@ function tierAmountFor(chatId, userDetails, amount, key) {
     const armed = unservedCredits.get(chatId);
     if (!armed)
         return amount;
-    const connectedAt = _telegram_client_access__WEBPACK_IMPORTED_MODULE_31__.TelegramManager.getInstance()?.callManager?.lastInHouseCallConnectedAt?.(chatId) ?? 0;
+    const connectedAt = _telegram_client_access__WEBPACK_IMPORTED_MODULE_33__.TelegramManager.getInstance()?.callManager?.lastInHouseCallConnectedAt?.(chatId) ?? 0;
     if (Date.now() - armed.at > UNSERVED_SUM_WINDOW_MS || armed.key === key || armed.sig !== serviceSig(userDetails) || connectedAt >= armed.at) {
         if (armed.key !== key)
             unservedCredits.delete(chatId);
@@ -77325,7 +77403,7 @@ async function holdForLaterAnalysis(event, chatId, held) {
         if (holdTimer)
             holdTimer(() => { void runHoldRecheck(client, chatId, args); }, delay);
         else
-            (0,_jobs_delayed__WEBPACK_IMPORTED_MODULE_46__.scheduleDelayed)(chatId, 'holdRecheck', args, delay);
+            (0,_jobs_delayed__WEBPACK_IMPORTED_MODULE_48__.scheduleDelayed)(chatId, 'holdRecheck', args, delay);
     }
     // Ops hear about it only when the last re-check also failed (2026-10-19: one slow call fired "Analysis down" for a
     // screenshot the 3-min re-check then read fine). The holds before that are the log line above.
@@ -77374,7 +77452,7 @@ async function askAfterHoldGiveUp(event, chatId, held, verdicts, hold) {
     catch (error) {
         logger.warn(`[ProcessImage] hold give-up for ${chatId} msg ${msgId}: user read failed, asking anyway:`, error);
     }
-    const invalidPhotoCount = _conversation_state_user_state__WEBPACK_IMPORTED_MODULE_23__.stateManager.getInvalidPhotoCount(chatId);
+    const invalidPhotoCount = _conversation_state_user_state__WEBPACK_IMPORTED_MODULE_25__.stateManager.getInvalidPhotoCount(chatId);
     let broadcastName = "";
     try {
         const senderJson = await (0,_conversation_sender__WEBPACK_IMPORTED_MODULE_7__.getSenderJson)(event);
@@ -77416,6 +77494,12 @@ async function askAfterHoldGiveUp(event, chatId, held, verdicts, hold) {
         return `${seen}; evidence ${saved ? "saved" : "NOT saved"}, photo ${deleted ? "deleted" : "kept"}; chat credited meanwhile, user not asked`;
     const message = unclearPayment ? (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_12__.pickOneMsg)(UNCLEAR_SCREENSHOT_MESSAGES) : pickPayAskMsg();
     await sendMessageWithTimeout(event.client, chatId, { message });
+    if (unclearPayment) {
+        // Never analysed, but an image model saw a payment screen: it goes to the review queue (payments/proof-archive).
+        const record = startProofRecord(event, chatId, _data_user_data_crud__WEBPACK_IMPORTED_MODULE_0__.UserDataDtoCrud.getInstance(), held.photoBuffer, held.imageDetails);
+        record.outcome("not_receipt", ["ANALYSIS_UNAVAILABLE"]);
+        void record.finish();
+    }
     const askedShort = unclearPayment ? "asked for the full screenshot" : "asked to pay";
     logger.warn(`[ProcessImage] hold give-up for ${chatId} msg ${msgId}: ${seen}; evidence ${saved ? "saved" : "NOT saved"}, photo ${deleted ? "deleted" : "kept"}, ${askedShort}`);
     return `${seen}; evidence ${saved ? "saved" : "NOT saved"}, photo ${deleted ? "deleted" : "kept"}, user ${unclearPayment ? "asked for the full screenshot" : "asked to pay"}`;
@@ -77461,7 +77545,7 @@ async function runHoldRecheck(client, chatId, args) {
  */
 async function screenshotEvent(client, chatId, msgId) {
     const found = await client.getMessages(chatId, { ids: [msgId] }).catch((error) => {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_19__.parseError)(error, `[ProcessImage] ${chatId}: could not re-read msg ${msgId}`, false);
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_21__.parseError)(error, `[ProcessImage] ${chatId}: could not re-read msg ${msgId}`, false);
         return null;
     });
     const message = Array.isArray(found) ? found[0] : undefined;
@@ -77469,7 +77553,7 @@ async function screenshotEvent(client, chatId, msgId) {
 }
 async function sendAnalysisUnavailableNotice(chatId, note, extra = []) {
     try {
-        await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_20__.BotConfig.getInstance().sendMessage(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_20__.ChannelCategory.CLIENT_UPDATES, analysisUnavailableNotice(chatId, note, extra));
+        await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_22__.BotConfig.getInstance().sendMessage(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_22__.ChannelCategory.CLIENT_UPDATES, analysisUnavailableNotice(chatId, note, extra));
     }
     catch (error) {
         logger.error('[ProcessImage] analysis-unavailable notice failed', error);
@@ -77485,7 +77569,7 @@ function reachesPaymentGate(imageDetails, sanitizedData, caption) {
     const text = String(imageDetails.text ?? "").toLowerCase().replace(/(\r\n|\n|\r)/g, " ");
     return !!sanitizedData.isPaymentRelated && !!sanitizedData.isPaymentMine && !!sanitizedData.isFinishedPayment
         && !sanitizedData.isFailedPayment && !!imageDetails.isSuccess && !imageDetails.isFailed && !(0,_payments_screenshot_parse_image__WEBPACK_IMPORTED_MODULE_14__.isLocalFailed)(imageDetails)
-        && (0,_payments_screenshot_helpers__WEBPACK_IMPORTED_MODULE_30__.isNotQuestionable)(caption?.toLowerCase())
+        && (0,_payments_screenshot_helpers__WEBPACK_IMPORTED_MODULE_32__.isNotQuestionable)(caption?.toLowerCase())
         && !(text.startsWith("payment to") && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ["phonepe", "transfer details"]))
         && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, [`${process.env.name} connecting`, "failed to connect"]);
 }
@@ -77503,7 +77587,7 @@ function paymentEvidenceCard(v) {
         title: "",
         fields: [
             { label: "User", value: v.broadcastName || "-", code: false },
-            { label: "Chat", value: v.chatId, url: (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_29__.chatUrl)(v.chatId) },
+            { label: "Chat", value: v.chatId, url: (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_31__.chatUrl)(v.chatId) },
             { label: "Amount", value: v.amount, code: false },
             ...(v.amount !== v.readAmount ? [{ label: "Amount read", value: v.readAmount, code: false }] : []),
             { label: "Paid before", value: v.payAmount ?? 0, code: false },
@@ -77527,7 +77611,7 @@ const MODEL_BLOCK_TITLE = {
     LLM_FAKE_FUTURE_DATE: "Suspect: future date",
 };
 function proofBlockTitle(reasons) {
-    if (reasons.some((r) => _payments_proof_gate_flow__WEBPACK_IMPORTED_MODULE_41__.TEXT_PROVEN_BLOCKS.has(r)))
+    if (reasons.some((r) => _payments_proof_gate_flow__WEBPACK_IMPORTED_MODULE_43__.TEXT_PROVEN_BLOCKS.has(r)))
         return "Fake screenshot";
     for (const r of reasons)
         if (MODEL_BLOCK_TITLE[r])
@@ -77538,7 +77622,7 @@ function fakeEvidenceCard(chatId, imageDetails) {
     return {
         title: proofBlockTitle(imageDetails.proofReasons ?? []),
         fields: [
-            { label: "Chat", value: chatId, url: (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_29__.chatUrl)(chatId) },
+            { label: "Chat", value: chatId, url: (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_31__.chatUrl)(chatId) },
             { label: "Amount read", value: Number(imageDetails.amount) || 0, code: false },
             { label: "Flags", value: (imageDetails.proofReasons ?? []).join(", ") || "proof blocked", code: false },
         ],
@@ -77552,7 +77636,7 @@ function analysisUnavailableNotice(chatId, note, extra = []) {
     return {
         title: "Analysis down",
         summary: note,
-        fields: [{ label: "Chat", value: chatId, url: (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_29__.chatUrl)(chatId) }, ...extra],
+        fields: [{ label: "Chat", value: chatId, url: (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_31__.chatUrl)(chatId) }, ...extra],
     };
 }
 /**
@@ -77560,23 +77644,23 @@ function analysisUnavailableNotice(chatId, note, extra = []) {
  * the call, never "old payment, pay now" (regression from e23dc35, live 2026-10-21 shruthi1 8935085498).
  */
 function answerResendFor(event, chatId, db) {
-    return async () => (0,_calls_call_initiation__WEBPACK_IMPORTED_MODULE_27__.answerPendingService)(await db.read(chatId), chatId, "Image Processed", (message) => {
+    return async () => (0,_calls_call_initiation__WEBPACK_IMPORTED_MODULE_29__.answerPendingService)(await db.read(chatId), chatId, "Image Processed", (message) => {
         (0,_payments_payment_chat_guard__WEBPACK_IMPORTED_MODULE_1__.notePaymentVerdict)(chatId);
         return sendMessageWithTimeout(event.client, chatId, { message });
     });
 }
-function paymentFlowFor(event, chatId, db, imageDetails) {
-    return paymentFlowWith(event.client, chatId, db, Number(imageDetails.amount) || 0);
+function paymentFlowFor(event, chatId, db, imageDetails, proof) {
+    return paymentFlowWith(event.client, chatId, db, Number(imageDetails.amount) || 0, proof);
 }
-function paymentFlowWith(client, chatId, db, amountRead) {
-    const gate = (0,_payments_proof_gate_gate__WEBPACK_IMPORTED_MODULE_39__.proofGateFrom)(() => db.getRepositories?.() ?? null);
-    return new _payments_proof_gate_flow__WEBPACK_IMPORTED_MODULE_41__.PaymentFlow(gate, {
+function paymentFlowWith(client, chatId, db, amountRead, proof) {
+    const gate = (0,_payments_proof_gate_gate__WEBPACK_IMPORTED_MODULE_41__.proofGateFrom)(() => db.getRepositories?.() ?? null);
+    return new _payments_proof_gate_flow__WEBPACK_IMPORTED_MODULE_43__.PaymentFlow(gate, {
         reply: (message) => {
             // Queued replies written before this answer (e.g. "Checking...") are now out of date: the replier drops them.
             (0,_payments_payment_chat_guard__WEBPACK_IMPORTED_MODULE_1__.notePaymentVerdict)(chatId);
             return sendMessageWithTimeout(client, chatId, { message });
         },
-        notifyOps: (notice) => (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_29__.notifyChat)(chatId, {
+        notifyOps: (notice) => (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_31__.notifyChat)(chatId, {
             ...notice,
             fields: [...(notice.fields ?? []), fact("Amount read", amountRead)],
         }),
@@ -77589,12 +77673,55 @@ function paymentFlowWith(client, chatId, db, amountRead) {
         // The 15-min block after a fake-payment warning: a delayed record (restart-safe; markAskBlocked is atomic).
         scheduleFraudBlock: (due, delayMs) => {
             const args = { profile: due.profile, msgId: due.msgId, label: due.label, amountRead };
-            (0,_jobs_delayed__WEBPACK_IMPORTED_MODULE_46__.scheduleDelayed)(due.chatId, 'fraudBlock', args, delayMs, `pifraud::${due.chatId}::${due.msgId}`);
+            (0,_jobs_delayed__WEBPACK_IMPORTED_MODULE_48__.scheduleDelayed)(due.chatId, 'fraudBlock', args, delayMs, `pifraud::${due.chatId}::${due.msgId}`);
         },
         log: (m) => logger.log(m),
         warn: (m) => logger.warn(m),
         pick: (pool) => (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_12__.pickOneMsg)([...pool]),
+        outcome: (outcome, reasons) => proof?.outcome(outcome, reasons),
     });
+}
+/**
+ * The payment-proof review record of this screenshot (payments/proof-archive): image + sidecar on the VM disk and the
+ * review fields on its paymentProofs row. Written after the reply (processImage's finally), never awaited.
+ */
+function startProofRecord(event, chatId, db, photoBuffer, imageDetails) {
+    return new _payments_proof_archive_recorder__WEBPACK_IMPORTED_MODULE_16__.ProofRecord({
+        chatId,
+        msgId: Number(event.message.id) || 0,
+        clientId: process.env.clientId || "",
+        profile: (process.env.dbcoll || "").toLowerCase(),
+        photo: photoBuffer,
+        details: imageDetails,
+        rawText: String(imageDetails.text ?? ""),
+        receivedAtMs: pictureArrivalMs(event),
+        vision: (0,_payments_vision_shadow__WEBPACK_IMPORTED_MODULE_15__.proofVisionOf)(imageDetails),
+        store: () => (db.getRepositories?.()?.paymentProofs ?? null),
+        // The same payee rules the payment branch applies (paid-to-us.ts), read only for the review's payee class.
+        payee: () => (0,_payments_proof_archive_verdict__WEBPACK_IMPORTED_MODULE_17__.payeeClassOf)((0,_payments_screenshot_paid_to_us__WEBPACK_IMPORTED_MODULE_45__.payeeVerdict)(imageDetails, {
+            ownUpiIds: (0,_payments_proof_check_upi_ownership__WEBPACK_IMPORTED_MODULE_19__.ourUpiIds)(_payments_upi__WEBPACK_IMPORTED_MODULE_46__.UpiIds),
+            upiListLoaded: (0,_payments_proof_check_upi_ownership__WEBPACK_IMPORTED_MODULE_19__.ownIdsFrom)(_payments_upi__WEBPACK_IMPORTED_MODULE_46__.UpiIds).length > 0,
+            personaNames: [...db.getOwnClientNames(), ...db.getClientFirstNames()],
+        })),
+        paymentMs: () => printedPaymentMs(imageDetails),
+    });
+}
+/** handleMyPayment's reject (its ops title) -> the review outcome and reason code. */
+const REJECT_OUTCOME = {
+    [_payments_screenshot_helpers__WEBPACK_IMPORTED_MODULE_32__.REJECT_TITLE.oldPayment]: ["old_time", "OLD_PAYMENT"],
+    [_payments_screenshot_helpers__WEBPACK_IMPORTED_MODULE_32__.REJECT_TITLE.confirmTime]: ["old_time", "TIME_UNCONFIRMED"],
+    [_payments_screenshot_helpers__WEBPACK_IMPORTED_MODULE_32__.REJECT_TITLE.timeUnclear]: ["old_time", "TIME_UNREADABLE"],
+    [_payments_screenshot_helpers__WEBPACK_IMPORTED_MODULE_32__.REJECT_TITLE.callOver]: ["other", "CALL_ACTIVE"],
+    [_payments_screenshot_helpers__WEBPACK_IMPORTED_MODULE_32__.REJECT_TITLE.suspiciousOld]: ["cross_client", "PAID_OTHERS_OLD_TIME"],
+    [_payments_screenshot_helpers__WEBPACK_IMPORTED_MODULE_32__.REJECT_TITLE.suspiciousNotMine]: ["cross_client", "PAID_OTHERS_NO_TIME"],
+    [_payments_screenshot_helpers__WEBPACK_IMPORTED_MODULE_32__.REJECT_TITLE.otherClient]: ["cross_client", "OTHER_CLIENT"],
+};
+function rejectOutcome(title) {
+    if (title && REJECT_OUTCOME[title])
+        return REJECT_OUTCOME[title];
+    if (title && /misread/i.test(title))
+        return ["old_time", "TIME_MISREAD"];
+    return ["other", "REJECTED"];
 }
 /** Delayed record 'fraudBlock'. */
 async function runFraudBlock(client, chatId, args) {
@@ -77603,7 +77730,7 @@ async function runFraudBlock(client, chatId, args) {
             .fraudBlockDue({ chatId, profile: args.profile, msgId: Number(args.msgId) || 0, label: args.label });
     }
     catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_19__.parseError)(error, `paymentGate.fraudBlock.${chatId}`);
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_21__.parseError)(error, `paymentGate.fraudBlock.${chatId}`);
     }
 }
 function screenshotRef(event, chatId, photoBuffer, imageDetails, paymentMs) {
@@ -77619,27 +77746,30 @@ function screenshotRef(event, chatId, photoBuffer, imageDetails, paymentMs) {
 }
 /** Payment moment as printed (no AM/PM correction): used where the time check did not run. */
 function printedPaymentMs(imageDetails) {
-    return (0,_payments_proof_gate_signals__WEBPACK_IMPORTED_MODULE_42__.phonePeTxnTimeMs)(imageDetails.text) ?? (0,_payments_payment_time__WEBPACK_IMPORTED_MODULE_18__.parsePaymentTime)(imageDetails.time || "", new Date(), imageDetails.text)?.getTime() ?? null;
+    return (0,_payments_proof_gate_signals__WEBPACK_IMPORTED_MODULE_44__.phonePeTxnTimeMs)(imageDetails.text) ?? (0,_payments_payment_time__WEBPACK_IMPORTED_MODULE_20__.parsePaymentTime)(imageDetails.time || "", new Date(), imageDetails.text)?.getTime() ?? null;
 }
 /** A proof-blocked screenshot: never credited. */
-async function handleProofBlockedImage(event, chatId, db, imageDetails, photoBuffer) {
+async function handleProofBlockedImage(event, chatId, db, imageDetails, photoBuffer, proof) {
     // No credit. Not counted as an invalid photo (no ban path). Owner (2026-10-13): a fake PROVEN by text on the
     // screenshot (generator disclaimer / blocklist) gets the rude warning and a block after 15 min unless the real
     // payment page arrives; a block that rests on model judgement only keeps the previous polite "old payment" reply.
     logger.warn(`[ProcessImage] proof blocked for ${chatId} msg ${event.message.id} (${(imageDetails.proofReasons ?? []).join(",")}): not crediting`);
     const politeOldPayment = async () => {
         await sendMessageWithTimeout(event.client, chatId, {
-            message: _payments_proof_check_messages__WEBPACK_IMPORTED_MODULE_16__.OLD_PAYMENT_MESSAGES[Math.floor(Math.random() * _payments_proof_check_messages__WEBPACK_IMPORTED_MODULE_16__.OLD_PAYMENT_MESSAGES.length)],
+            message: _payments_proof_check_messages__WEBPACK_IMPORTED_MODULE_18__.OLD_PAYMENT_MESSAGES[Math.floor(Math.random() * _payments_proof_check_messages__WEBPACK_IMPORTED_MODULE_18__.OLD_PAYMENT_MESSAGES.length)],
         });
     };
-    const textProven = (imageDetails.proofReasons ?? []).filter((r) => _payments_proof_gate_flow__WEBPACK_IMPORTED_MODULE_41__.TEXT_PROVEN_BLOCKS.has(r));
+    const textProven = (imageDetails.proofReasons ?? []).filter((r) => _payments_proof_gate_flow__WEBPACK_IMPORTED_MODULE_43__.TEXT_PROVEN_BLOCKS.has(r));
+    const blockedOutcome = textProven.length > 0 ? "fake_blocked" : "model_blocked";
+    proof?.outcome(blockedOutcome, imageDetails.proofReasons ?? []);
     const blockedUser = await db.read(chatId);
     if (blockedUser?.canReply === 0) {
         // Blocked (only the fake-payment flow's blocks reach here): no reply, no ops notice (owner 2026-10-13).
         logger.warn(`[ProcessImage] blocked user ${chatId}: proof-blocked screenshot ignored silently`);
+        proof?.outcome(blockedOutcome, [...(imageDetails.proofReasons ?? []), "BLOCKED_IGNORED"]);
         return;
     }
-    const flow = paymentFlowFor(event, chatId, db, imageDetails);
+    const flow = paymentFlowFor(event, chatId, db, imageDetails, proof);
     const session = await flow.begin(screenshotRef(event, chatId, photoBuffer, imageDetails, printedPaymentMs(imageDetails)));
     // A model-only block on a payment already credited in this chat is a resend: the gate's repeat reply and notice,
     // not a fake (live keerthi2 8895791565 2026-10-20). A fake proven by text still gets the fraud flow below.
@@ -77647,13 +77777,13 @@ async function handleProofBlockedImage(event, chatId, db, imageDetails, photoBuf
         return;
     // Ops must see the image to judge the call. Fire-and-forget: the evidence post must never delay or abort the
     // warning/block below.
-    void _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_20__.BotConfig.getInstance().sendPhotoCard(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_20__.ChannelCategory.CLIENT_UPDATES, photoBuffer, fakeEvidenceCard(chatId, imageDetails)).then((sent) => {
+    void _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_22__.BotConfig.getInstance().sendPhotoCard(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_22__.ChannelCategory.CLIENT_UPDATES, photoBuffer, fakeEvidenceCard(chatId, imageDetails)).then((sent) => {
         if (!sent)
             logger.error(`[ProcessImage] fake-screenshot evidence photo NOT delivered to CLIENT_UPDATES for ${chatId} (dead channel/no bot?)`);
     }).catch((error) => logger.error(`[ProcessImage] fake-screenshot evidence photo failed for ${chatId}:`, error));
     if (textProven.length === 0) {
         await politeOldPayment();
-        await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_29__.notifyChat)(chatId, {
+        await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_31__.notifyChat)(chatId, {
             title: proofBlockTitle(imageDetails.proofReasons ?? []),
             summary: 'Not credited: blocked on the models\' judgement (no fake text on the screenshot).',
             fields: [fact('Flags', (imageDetails.proofReasons ?? []).join(', ') || 'proof blocked'), fact('Amount read', Number(imageDetails.amount) || 0)],
@@ -77666,7 +77796,7 @@ async function handleProofBlockedImage(event, chatId, db, imageDetails, photoBuf
 async function postPaymentEvidence(chatId, photoBuffer, imageDetails, broadcastName, processedAmount, userDetails, invalidPhotoCount) {
     // Single message: the image WITH the analysis as its caption. (Previously this both
     // forwarded the image AND sent a separate text-only card — the same info twice.)
-    const paymentEvidenceSent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_20__.BotConfig.getInstance().sendPhotoCard(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_20__.ChannelCategory.CLIENT_UPDATES, photoBuffer, paymentEvidenceCard({ chatId, broadcastName, readAmount: Number(imageDetails.amount) || 0, amount: processedAmount, payAmount: userDetails.payAmount, demoGiven: !!userDetails.demoGiven, invalidPhotoCount, text: imageDetails.text }));
+    const paymentEvidenceSent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_22__.BotConfig.getInstance().sendPhotoCard(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_22__.ChannelCategory.CLIENT_UPDATES, photoBuffer, paymentEvidenceCard({ chatId, broadcastName, readAmount: Number(imageDetails.amount) || 0, amount: processedAmount, payAmount: userDetails.payAmount, demoGiven: !!userDetails.demoGiven, invalidPhotoCount, text: imageDetails.text }));
     if (!paymentEvidenceSent) {
         logger.error(`[ProcessImage] payment-related evidence photo NOT delivered to CLIENT_UPDATES for ${chatId} (dead channel/no bot?)`);
     }
@@ -77677,7 +77807,7 @@ async function postPaymentEvidence(chatId, photoBuffer, imageDetails, broadcastN
  * landed; callers that delete the user's photo depend on it.
  */
 async function postUnwantedImage(event, chatId, photoBuffer, broadcastName, invalidPhotoCount, msg) {
-    return (0,_outbound_unwanted_photo__WEBPACK_IMPORTED_MODULE_22__.postUnwantedPhoto)({
+    return (0,_outbound_unwanted_photo__WEBPACK_IMPORTED_MODULE_24__.postUnwantedPhoto)({
         event,
         chatId,
         text: msg,
@@ -77686,7 +77816,7 @@ async function postUnwantedImage(event, chatId, photoBuffer, broadcastName, inva
             title: "Unwanted image",
             fields: [
                 { label: "User", value: broadcastName || "-", code: false },
-                { label: "Chat", value: chatId, url: (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_29__.chatUrl)(chatId) },
+                { label: "Chat", value: chatId, url: (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_31__.chatUrl)(chatId) },
                 { label: "Invalid pics", value: invalidPhotoCount, code: false },
             ],
             details: msg.split("\n").slice(4).filter((l) => l.trim()),
@@ -77704,14 +77834,16 @@ async function rejectFailedPaymentScreenshot(event, chatId, imageDetails, photoB
             "**Darling!! This payment failed, try again!**"
         ]),
     });
-    await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_29__.notifyChat)(chatId, { title: 'Sent pay number' });
-    await (0,_conversation_failed_message_followup__WEBPACK_IMPORTED_MODULE_28__.respToFailedMSg)(event, imageDetails.text, broadcastName);
+    await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_31__.notifyChat)(chatId, { title: 'Sent pay number' });
+    await (0,_conversation_failed_message_followup__WEBPACK_IMPORTED_MODULE_30__.respToFailedMSg)(event, imageDetails.text, broadcastName);
     await scheduleImageFollowup(event, chatId, 'failedPaymentReminder', 10000);
     await (0,_media_channel_upload__WEBPACK_IMPORTED_MODULE_9__.sendImageToChannel)(photoBuffer);
 }
 /** Text-proven fake screenshot: the payment flow's fraud path (warning, then block). */
-async function blockFakePaymentScreenshot(event, chatId, db, imageDetails, photoBuffer, userDetails, fraudReasons) {
-    const flow = paymentFlowFor(event, chatId, db, imageDetails);
+async function blockFakePaymentScreenshot(event, chatId, db, imageDetails, photoBuffer, userDetails, fraudReasons, proof) {
+    // Without the store the old rude reply + block below; with it the flow records its own outcome (warning / block).
+    proof?.outcome("fake_blocked", fraudReasons);
+    const flow = paymentFlowFor(event, chatId, db, imageDetails, proof);
     const session = await flow.begin(screenshotRef(event, chatId, photoBuffer, imageDetails, printedPaymentMs(imageDetails)));
     await flow.fraud(session, userDetails.canReply, fraudReasons, async () => {
         await sendMessageWithTimeout(event.client, chatId, {
@@ -77721,7 +77853,7 @@ async function blockFakePaymentScreenshot(event, chatId, db, imageDetails, photo
                 "That's clearly fake baby!!\n\nI'm Blocking you Now!!"
             ]),
         });
-        await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_29__.notifyChat)(chatId, { title: 'Fake pic: told' });
+        await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_31__.notifyChat)(chatId, { title: 'Fake pic: told' });
         await scheduleImageFollowup(event, chatId, 'fakeScreenshotLimit', 20000);
     });
 }
@@ -77743,7 +77875,7 @@ async function flagCrossClientPayment(chatId, db, text, broadcastName, blockedAn
             notifyProcessImage("crossClientPayment", "Cross-client pay", "User may have paid another client", imageUserFields(chatId, broadcastName, [
                 { label: "Paid", value: didPayOthersResp.paid || "none" },
                 { label: "Demo", value: didPayOthersResp.demoGiven || "none" },
-            ]), _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_20__.NotificationSeverity.WARNING, reply);
+            ]), _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_22__.NotificationSeverity.WARNING, reply);
         didPayOthers = true;
     }
     return didPayOthers;
@@ -77755,7 +77887,7 @@ async function flagCrossClientPayment(chatId, db, text, broadcastName, blockedAn
  */
 function picsUpgradeCheck(chatId, imageDetails, userDetails, amount, payAmount, isWithinPastTenMinutesImage, differentAmount) {
     const weightedScore = canSendPicsScore(userDetails, chatId);
-    const picsSentTimestamp = _conversation_state_user_state__WEBPACK_IMPORTED_MODULE_23__.stateManager.getDemoPicsSentTimestamp(chatId);
+    const picsSentTimestamp = _conversation_state_user_state__WEBPACK_IMPORTED_MODULE_25__.stateManager.getDemoPicsSentTimestamp(chatId);
     const isSameImageRecently = differentAmount
         ? isSamePaymentImageRecently(imageDetails, picsSentTimestamp, amount, payAmount, true)
         : isSamePaymentImageRecently(imageDetails, picsSentTimestamp, amount, payAmount);
@@ -77771,7 +77903,7 @@ async function tellPicsAlreadySent(event, chatId, check, isWithinPastTenMinutesI
             "My nude pics are with you already 💋\nJust **50Rs** for video call darling\n\nLet me remove Dress live for you baby 🙈"
         ]),
     });
-    await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_29__.notifyChat)(chatId, {
+    await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_31__.notifyChat)(chatId, {
         title: 'Pics already sent',
         fields: [fact('Score', check.weightedScore), ...(check.isSameImageRecently ? [fact('Same image', 'detected')] : []), fact('Time', isWithinPastTenMinutesImage.time)],
     });
@@ -77795,7 +77927,7 @@ async function handleLowAmountPayment(event, chatId, db, imageDetails, userDetai
     }
     else {
         // Send demo pics (first time or weighted score >= 3)
-        await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_29__.notifyChat)(chatId, { title: 'Pics sent', summary: '', fields: [] });
+        await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_31__.notifyChat)(chatId, { title: 'Pics sent', summary: '', fields: [] });
         try {
             await sendMessageWithTimeout(event.client, chatId, {
                 message: (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_12__.pickOneMsg)([
@@ -77807,7 +77939,7 @@ async function handleLowAmountPayment(event, chatId, db, imageDetails, userDetai
             await scheduleImageFollowup(event, chatId, 'demoPicsFollowup', 6000, { amount, payAmountBefore: payAmount, picsSentBefore: userDetails.picsSent || 0 });
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_19__.parseError)(error);
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_21__.parseError)(error);
         }
     }
 }
@@ -77832,7 +77964,7 @@ async function handlePaidServiceAmount(event, chatId, db, imageDetails, userDeta
                 await handleRepeatPayment(event, chatId, imageDetails, userDetails, amount, isWithinPastTenMinutesImage, userChatState, initiateCallKeepingClaim);
             }
             else {
-                await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_29__.notifyChat)(chatId, { title: 'Pic ignored', summary: 'Weird case.' });
+                await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_31__.notifyChat)(chatId, { title: 'Pic ignored', summary: 'Weird case.' });
             }
         }
         if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ["fmp"])) {
@@ -77841,7 +77973,7 @@ async function handlePaidServiceAmount(event, chatId, db, imageDetails, userDeta
         if (amount <= userDetails.payAmount &&
             !isWithinPastTenMinutesImage.result) {
             await (0,_telegram_delete_messages__WEBPACK_IMPORTED_MODULE_6__.deleteMessage)(event);
-            await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_29__.notifyChat)(chatId, {
+            await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_31__.notifyChat)(chatId, {
                 title: 'Low pic deleted',
                 summary: 'Unwanted pic: same or less amount.',
                 fields: [fact('Previous', userDetails.payAmount), fact('Now', amount)],
@@ -77864,7 +77996,7 @@ async function sendCallLinkForPayment(event, chatId, db, userDetails, amount, se
     if (amount > userDetails.highestPayAmount) {
         updatedData['highestPayAmount'] = amount;
     }
-    const inHouse = await (0,_calls_inhouse_active__WEBPACK_IMPORTED_MODULE_38__.inHouseCallsActive)();
+    const inHouse = await (0,_calls_inhouse_active__WEBPACK_IMPORTED_MODULE_40__.inHouseCallsActive)();
     // VCUI path: link first, exactly as before.
     if (!inHouse)
         await sendMessageWithTimeout(event.client, chatId, { message: linkMessage }, { intent: 'call' });
@@ -77874,10 +78006,10 @@ async function sendCallLinkForPayment(event, chatId, db, userDetails, amount, se
     serviceStarted();
     // In-house: after the update, so the re-call sees the new amount.
     if (inHouse) {
-        await (0,_calls_call_me__WEBPACK_IMPORTED_MODULE_37__.offerCallOrLink)(chatId, () => sendMessageWithTimeout(event.client, chatId, { message: linkMessage }, { intent: 'call' }), (text) => sendMessageWithTimeout(event.client, chatId, { message: text }, { intent: 'call' }));
+        await (0,_calls_call_me__WEBPACK_IMPORTED_MODULE_39__.offerCallOrLink)(chatId, () => sendMessageWithTimeout(event.client, chatId, { message: linkMessage }, { intent: 'call' }), (text) => sendMessageWithTimeout(event.client, chatId, { message: text }, { intent: 'call' }));
         serviceStarted();
     }
-    await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_29__.notifyChat)(chatId, { title: 'Told to call' });
+    await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_31__.notifyChat)(chatId, { title: 'Told to call' });
     return userDetails;
 }
 /** Under-PAID_MIN payment that cannot start a service: demo pics, or a demo call on a strong score. Exported for tests. */
@@ -77894,7 +78026,7 @@ async function handleSmallPicsPayment(event, chatId, imageDetails, userDetails, 
         }
         else {
             await tellPicsAlreadySent(event, chatId, check, isWithinPastTenMinutesImage);
-            _conversation_state_user_state__WEBPACK_IMPORTED_MODULE_23__.stateManager.incrementPleaseRequestCount(chatId);
+            _conversation_state_user_state__WEBPACK_IMPORTED_MODULE_25__.stateManager.incrementPleaseRequestCount(chatId);
         }
     }
     else {
@@ -77910,7 +78042,7 @@ async function handleSmallPicsPayment(event, chatId, imageDetails, userDetails, 
             await scheduleImageFollowup(event, chatId, 'firstDemoPicsFollowup', 6000, { amount, payAmountBefore: userDetails.payAmount, highestBefore: userDetails.highestPayAmount, picsSentBefore: userDetails.picsSent || 0 });
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_19__.parseError)(error);
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_21__.parseError)(error);
         }
     }
 }
@@ -77943,7 +78075,7 @@ async function handleRepeatPayment(event, chatId, imageDetails, userDetails, amo
             ])
         });
         await scheduleImageFollowup(event, chatId, 'callOverFollowup', 15000, { payAmountBefore: userDetails.payAmount });
-        await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_29__.notifyChat)(chatId, {
+        await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_31__.notifyChat)(chatId, {
             title: 'Call is over',
             fields: [fact('Image time', imageDetails.time), fact('Time', isWithinPastTenMinutesImage.time)],
         });
@@ -77952,7 +78084,7 @@ async function handleRepeatPayment(event, chatId, imageDetails, userDetails, amo
             markEndedUnserved(chatId);
     }
     // Decrement invalid photo count (user sent valid payment)
-    const currentInvalidCount = _conversation_state_user_state__WEBPACK_IMPORTED_MODULE_23__.stateManager.getInvalidPhotoCount(chatId);
+    const currentInvalidCount = _conversation_state_user_state__WEBPACK_IMPORTED_MODULE_25__.stateManager.getInvalidPhotoCount(chatId);
     if (currentInvalidCount > 0) {
         userChatState.invalidPhotoCount = currentInvalidCount - 1;
         userChatState.invalidPhotoTimestamp = Date.now();
@@ -77977,7 +78109,7 @@ async function recordValidPaymentCredit(event, chatId, db, userDetails, amount, 
     // re-screenshot of the same payment has a new message id; nothing written; the write threw) is left undefined:
     // the legacy rise-over-highest rule, which never double-books.
     let credit;
-    if ((0,_tg_vision__WEBPACK_IMPORTED_MODULE_45__.isCreditableAmount)(amount)) {
+    if ((0,_tg_vision__WEBPACK_IMPORTED_MODULE_47__.isCreditableAmount)(amount)) {
         creditedSeq.delete(chatId);
         creditedSeq.set(chatId, ++holdSeq);
         capMap(creditedSeq);
@@ -77988,11 +78120,11 @@ async function recordValidPaymentCredit(event, chatId, db, userDetails, amount, 
         }
         catch (creditError) {
             // A ledger failure must never break the payment flow the user is watching.
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_19__.parseError)(creditError, `[ProcessImage] creditPayment failed for ${chatId}`, false);
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_21__.parseError)(creditError, `[ProcessImage] creditPayment failed for ${chatId}`, false);
         }
     }
     // Same-day unserved sum: the balance is the summed tier, not this screenshot alone.
-    if ((0,_tg_vision__WEBPACK_IMPORTED_MODULE_45__.isCreditableAmount)(amount) && tierAmount > currentUserDetails.payAmount) {
+    if ((0,_tg_vision__WEBPACK_IMPORTED_MODULE_47__.isCreditableAmount)(amount) && tierAmount > currentUserDetails.payAmount) {
         // Only update if amount is greater than current payAmount
         // This automatically skips if payAmount was already updated to a higher value (e.g., 50 for demo)
         userDetails = await db.update(chatId, {
@@ -78020,7 +78152,7 @@ async function recordValidPaymentCredit(event, chatId, db, userDetails, amount, 
     }
     catch (error) {
         // Payment service must not be withheld because analytics is unavailable.
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_19__.parseError)(error, `processImage.paymentAttribution.${chatId}`, false);
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_21__.parseError)(error, `processImage.paymentAttribution.${chatId}`, false);
     }
 }
 /** The pay nudge an ordinary picture gets (also the hold give-up's ask for a fallback "not a payment"). */
@@ -78034,7 +78166,7 @@ function pickPayAskMsg() {
 /** Ordinary picture: compliment + pay nudge for the first two (then, or while muted, deleted silently); the photo-abuse decision. */
 async function replyToNonPaymentPicture(event, chatId, imageDetails, userDetails) {
     // The count holds only non-payment photos (it used to add every received photo too, so "<= 4" meant two replies).
-    const invalidPhotoCount = _conversation_state_user_state__WEBPACK_IMPORTED_MODULE_23__.stateManager.getInvalidPhotoCount(chatId);
+    const invalidPhotoCount = _conversation_state_user_state__WEBPACK_IMPORTED_MODULE_25__.stateManager.getInvalidPhotoCount(chatId);
     // Muted for photo spam (limitTime ahead): the mute reset the count, but no compliment / pay nudge until it ends.
     const muted = (Number(userDetails.limitTime) || 0) > Date.now();
     if (invalidPhotoCount <= 1 && !muted) {
@@ -78057,7 +78189,7 @@ async function replyToNonPaymentPicture(event, chatId, imageDetails, userDetails
     else {
         await (0,_telegram_delete_messages__WEBPACK_IMPORTED_MODULE_6__.deleteMessage)(event);
     }
-    await (0,_conversation_abuse_detection__WEBPACK_IMPORTED_MODULE_24__.notePhotoVerdict)(chatId, imageDetails, userDetails);
+    await (0,_conversation_abuse_detection__WEBPACK_IMPORTED_MODULE_26__.notePhotoVerdict)(chatId, imageDetails, userDetails);
 }
 /** A payee verdict's fraud reasons: only TAMPERED is a fake (NOT_OURS gets the "not my payment" reply). */
 function tamperedPayeeReasons(payee) {
@@ -78076,8 +78208,10 @@ async function processImage(event) {
     // second credit of the same payment).
     let serviceSent = false;
     const serviceStarted = () => { releaseClaim = undefined; serviceSent = true; };
+    // This screenshot's review record (payments/proof-archive); written in the finally below, after every reply.
+    let proof;
     const initiateCallKeepingClaim = async (...args) => {
-        const started = await (0,_calls_call_initiation__WEBPACK_IMPORTED_MODULE_27__.initiateCall)(...args);
+        const started = await (0,_calls_call_initiation__WEBPACK_IMPORTED_MODULE_29__.initiateCall)(...args);
         serviceStarted();
         return started;
     };
@@ -78091,7 +78225,7 @@ async function processImage(event) {
             logger.warn(`[ProcessImage] ${chatId} is fake-payment marked: screenshot ignored (no analysis, credit or call)`);
             return;
         }
-        const photoBuffer = await (0,_payments_screenshot_download_media__WEBPACK_IMPORTED_MODULE_25__.downloadMedia)(event);
+        const photoBuffer = await (0,_payments_screenshot_download_media__WEBPACK_IMPORTED_MODULE_27__.downloadMedia)(event);
         // In-process tg-vision analysis (payments/vision-shadow.ts); an outage comes back as analysisUnavailable.
         const imageDetails = await (0,_payments_vision_shadow__WEBPACK_IMPORTED_MODULE_15__.analyzeImage)(photoBuffer, {
             clientId: process.env.clientId || "",
@@ -78106,8 +78240,9 @@ async function processImage(event) {
             await holdForLaterAnalysis(event, chatId, { photoBuffer: photoBuffer, imageDetails });
             return;
         }
+        proof = startProofRecord(event, chatId, db, photoBuffer, imageDetails);
         if (imageDetails.proofBlocked) {
-            await handleProofBlockedImage(event, chatId, db, imageDetails, photoBuffer);
+            await handleProofBlockedImage(event, chatId, db, imageDetails, photoBuffer, proof);
             return;
         }
         imageDetails.amount = imageDetails.amount || 0;
@@ -78134,12 +78269,14 @@ async function processImage(event) {
         const blockedAnswering = userDetails?.canReply === 0;
         if (blockedAnswering && !reachesPaymentGate(imageDetails, sanitizedData, event.message?.text)) {
             logger.warn(`[ProcessImage] blocked user ${chatId}: photo is not a successful payment to us, ignored silently`);
+            proof.fallback("not_ours", ["BLOCKED_IGNORED"]); // recorded only when the model called it a payment (recorder)
             return;
         }
-        const processedAmount = (0,_payments_screenshot_normalise_amount__WEBPACK_IMPORTED_MODULE_26__.normalizeAmount)(imageDetails.amount, userDetails.payAmount);
+        const processedAmount = (0,_payments_screenshot_normalise_amount__WEBPACK_IMPORTED_MODULE_28__.normalizeAmount)(imageDetails.amount, userDetails.payAmount);
         const amount = processedAmount;
-        if (blockedAnswering && !(amount > 11 && (0,_tg_vision__WEBPACK_IMPORTED_MODULE_45__.isCreditableAmount)(amount))) {
+        if (blockedAnswering && !(amount > 11 && (0,_tg_vision__WEBPACK_IMPORTED_MODULE_47__.isCreditableAmount)(amount))) {
             logger.warn(`[ProcessImage] blocked user ${chatId}: amount ${amount} out of range, ignored silently`);
+            proof.outcome((0,_tg_vision__WEBPACK_IMPORTED_MODULE_47__.isCreditableAmount)(amount) ? "other" : "over_limit", [(0,_tg_vision__WEBPACK_IMPORTED_MODULE_47__.isCreditableAmount)(amount) ? "AMOUNT_TOO_SMALL" : "OVER_1000", "BLOCKED_IGNORED"]);
             return;
         }
         const text = imageDetails.text.toLowerCase().replace(/(\r\n|\n|\r)/g, " ");
@@ -78147,15 +78284,15 @@ async function processImage(event) {
         // Track "please" in payment messages (desperation indicator)
         const messageText = event.message.text?.toLowerCase() || "";
         if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(messageText, ['please', 'pls', 'plz', 'plss'])) {
-            _conversation_state_user_state__WEBPACK_IMPORTED_MODULE_23__.stateManager.incrementPleaseRequestCount(chatId);
+            _conversation_state_user_state__WEBPACK_IMPORTED_MODULE_25__.stateManager.incrementPleaseRequestCount(chatId);
             logger.debug(`[ProcessImage] User said "please" in payment message - incremented pleaseRequestCount`);
         }
         const senderJson = await (0,_conversation_sender__WEBPACK_IMPORTED_MODULE_7__.getSenderJson)(event);
         const broadcastName = senderJson.username
             ? `@${senderJson.username}`
             : [senderJson.firstName, senderJson.lastName].filter(Boolean).join(" ");
-        const userChatState = _conversation_state_user_state__WEBPACK_IMPORTED_MODULE_23__.stateManager.getUserState(chatId);
-        const invalidPhotoCount = _conversation_state_user_state__WEBPACK_IMPORTED_MODULE_23__.stateManager.getInvalidPhotoCount(chatId);
+        const userChatState = _conversation_state_user_state__WEBPACK_IMPORTED_MODULE_25__.stateManager.getUserState(chatId);
+        const invalidPhotoCount = _conversation_state_user_state__WEBPACK_IMPORTED_MODULE_25__.stateManager.getInvalidPhotoCount(chatId);
         // 5-6 invalid photos used to get "I will BLOCK You if u send random pics again" here, before the photo was judged
         // (a payment screenshot got it too) and the block never followed (abuse detection only mutes 10 min and resets the
         // count). Removed 2026-10-22: these photos are deleted without a reply (replyToNonPaymentPicture).
@@ -78179,10 +78316,10 @@ async function processImage(event) {
         const callOwed = !blockedAnswering && (0,_payments_service_eligibility__WEBPACK_IMPORTED_MODULE_3__.canProceedWithService)(userDetails);
         // A resend of a payment credited in this chat was answered from the chat's state (call requested / "call soon").
         let resendAnswered = false;
-        const judgePaymentFirst = callOwed && amount > 11 && (0,_tg_vision__WEBPACK_IMPORTED_MODULE_45__.isCreditableAmount)(amount)
+        const judgePaymentFirst = callOwed && amount > 11 && (0,_tg_vision__WEBPACK_IMPORTED_MODULE_47__.isCreditableAmount)(amount)
             && reachesPaymentGate(imageDetails, sanitizedData, event.message?.text);
         if (callOwed && !judgePaymentFirst) {
-            const callRequested = await (0,_calls_call_initiation__WEBPACK_IMPORTED_MODULE_27__.proceedWithCall)(userDetails, chatId, "Image Processed");
+            const callRequested = await (0,_calls_call_initiation__WEBPACK_IMPORTED_MODULE_29__.proceedWithCall)(userDetails, chatId, "Image Processed");
             if (callRequested) {
                 return true;
             }
@@ -78197,7 +78334,8 @@ async function processImage(event) {
                         "That's a failed screenshot baby, pay properly!!"
                     ]),
                 });
-                await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_29__.notifyChat)(chatId, { title: 'Scam attempt' });
+                await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_31__.notifyChat)(chatId, { title: 'Scam attempt' });
+                proof.outcome("fake_blocked", ["FAILED_PAYMENT_TO_SCREEN"]);
             }
             else if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text.toLowerCase(), [
                 `${process.env.name} connecting`,
@@ -78210,44 +78348,47 @@ async function processImage(event) {
                         "Connection problem...\ngive me a sec darling"
                     ]),
                 });
+                proof.outcome("other", ["CALL_CONNECTING_SCREEN"]);
             }
             else {
                 const isLocalFailedImg = (0,_payments_screenshot_parse_image__WEBPACK_IMPORTED_MODULE_14__.isLocalFailed)(imageDetails);
                 logger.log("isLocalFailedImg: ", isLocalFailedImg);
                 if ((sanitizedData.isFinishedPayment ||
                     (!sanitizedData.isFinishedPayment && isLocalFailedImg)) &&
-                    (0,_payments_screenshot_helpers__WEBPACK_IMPORTED_MODULE_30__.isNotQuestionable)(event.message?.text?.toLowerCase())) {
+                    (0,_payments_screenshot_helpers__WEBPACK_IMPORTED_MODULE_32__.isNotQuestionable)(event.message?.text?.toLowerCase())) {
                     if (sanitizedData.isFailedPayment ||
                         (isLocalFailedImg && !sanitizedData.isFinishedPayment)) {
+                        proof.outcome("not_receipt", ["FAILED_PAYMENT"]);
                         await rejectFailedPaymentScreenshot(event, chatId, imageDetails, photoBuffer, broadcastName);
                     }
                     else {
                         // Who it was paid to is decided in one place (paid-to-us.ts payeeVerdict); this is its context.
                         const payeeCtx = {
-                            ownUpiIds: (0,_payments_proof_check_upi_ownership__WEBPACK_IMPORTED_MODULE_17__.ourUpiIds)(_payments_upi__WEBPACK_IMPORTED_MODULE_44__.UpiIds),
-                            upiListLoaded: (0,_payments_proof_check_upi_ownership__WEBPACK_IMPORTED_MODULE_17__.ownIdsFrom)(_payments_upi__WEBPACK_IMPORTED_MODULE_44__.UpiIds).length > 0,
+                            ownUpiIds: (0,_payments_proof_check_upi_ownership__WEBPACK_IMPORTED_MODULE_19__.ourUpiIds)(_payments_upi__WEBPACK_IMPORTED_MODULE_46__.UpiIds),
+                            upiListLoaded: (0,_payments_proof_check_upi_ownership__WEBPACK_IMPORTED_MODULE_19__.ownIdsFrom)(_payments_upi__WEBPACK_IMPORTED_MODULE_46__.UpiIds).length > 0,
                             personaNames: [...db.getOwnClientNames(), ...db.getClientFirstNames()],
                         };
                         const fraudReasons = [
-                            ...((0,_payments_screenshot_detect_fake__WEBPACK_IMPORTED_MODULE_35__.detectFakeScreenshot)(imageDetails.text) ? ["FAKE_TEXT"] : []),
-                            ...(0,_payments_proof_gate_signals__WEBPACK_IMPORTED_MODULE_42__.fabricatedTextReasons)(imageDetails.text),
+                            ...((0,_payments_screenshot_detect_fake__WEBPACK_IMPORTED_MODULE_37__.detectFakeScreenshot)(imageDetails.text) ? ["FAKE_TEXT"] : []),
+                            ...(0,_payments_proof_gate_signals__WEBPACK_IMPORTED_MODULE_44__.fabricatedTextReasons)(imageDetails.text),
                             // Who it was paid to (paid-to-us.ts payeeVerdict): only a TAMPERED payee is a fraud reason. Someone else's
                             // payment (NOT_OURS) falls through to the "not my payment" branch below. Foreign ids are judged only
                             // against the fetched /upi-ids list: without it our shared ids are unknown.
-                            ...tamperedPayeeReasons((0,_payments_screenshot_paid_to_us__WEBPACK_IMPORTED_MODULE_43__.payeeVerdict)(imageDetails, payeeCtx)),
+                            ...tamperedPayeeReasons((0,_payments_screenshot_paid_to_us__WEBPACK_IMPORTED_MODULE_45__.payeeVerdict)(imageDetails, payeeCtx)),
                             // Owner 2026-10-22 "future dates are fake!": a payment time after the picture arrived (beyond the clock tolerance).
-                            ...(0,_payments_proof_gate_signals__WEBPACK_IMPORTED_MODULE_42__.futurePaymentTimeReasons)(imageDetails, pictureArrivalMs(event)),
+                            ...(0,_payments_proof_gate_signals__WEBPACK_IMPORTED_MODULE_44__.futurePaymentTimeReasons)(imageDetails, pictureArrivalMs(event)),
                         ];
                         if (fraudReasons.length > 0) {
-                            await blockFakePaymentScreenshot(event, chatId, db, imageDetails, photoBuffer, userDetails, fraudReasons);
+                            await blockFakePaymentScreenshot(event, chatId, db, imageDetails, photoBuffer, userDetails, fraudReasons, proof);
                         }
                         else if (sanitizedData.isPaymentMine && imageDetails.isSuccess) {
                             // Owner 2026-10-25: a receipt of ₹1,000 or more is never credited, with or without UTR (the one threshold,
                             // @tg/vision isCreditableAmount). Same reply as the old 15,000 ceiling; no cheat / fraud mark (a misread of a
                             // genuine receipt must not punish the payer).
-                            if (!(0,_tg_vision__WEBPACK_IMPORTED_MODULE_45__.isCreditableAmount)(amount)) {
+                            if (!(0,_tg_vision__WEBPACK_IMPORTED_MODULE_47__.isCreditableAmount)(amount)) {
+                                proof.outcome("over_limit", ["OVER_1000"]);
                                 await (0,_telegram_delete_messages__WEBPACK_IMPORTED_MODULE_6__.deleteMessage)(event);
-                                await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_29__.notifyChat)(chatId, { title: 'Amount rejected', summary: 'Told user it seems fake.' });
+                                await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_31__.notifyChat)(chatId, { title: 'Amount rejected', summary: 'Told user it seems fake.' });
                                 await scheduleImageFollowup(event, chatId, 'amountOutOfRangeReminder', 10000);
                             }
                             else {
@@ -78259,23 +78400,29 @@ async function processImage(event) {
                                     const arrivalMs = pictureArrivalMs(event);
                                     // The same-day rule (payment-time.ts paymentDay, the one place recency is judged); a PhonePe transaction id
                                     // in the text is the payment's machine time and decides whatever the printed time says.
-                                    const isWithinPastTenMinutesImage = (0,_payments_payment_time__WEBPACK_IMPORTED_MODULE_18__["default"])(imageDetails.time, userDetails, arrivalMs, { text: imageDetails.text, reference: (0,_payments_proof_gate_decide__WEBPACK_IMPORTED_MODULE_40__.isRealReference)((0,_payments_proof_gate_decide__WEBPACK_IMPORTED_MODULE_40__.normalizeUtr)(imageDetails.utr)) });
+                                    const isWithinPastTenMinutesImage = (0,_payments_payment_time__WEBPACK_IMPORTED_MODULE_20__["default"])(imageDetails.time, userDetails, arrivalMs, { text: imageDetails.text, reference: (0,_payments_proof_gate_decide__WEBPACK_IMPORTED_MODULE_42__.isRealReference)((0,_payments_proof_gate_decide__WEBPACK_IMPORTED_MODULE_42__.normalizeUtr)(imageDetails.utr)) });
                                     // The gate (repeat / fake-edited / credit claim) runs around handleMyPayment; when it handled the
                                     // screenshot it has already replied and nothing below runs.
-                                    const flow = paymentFlowFor(event, chatId, db, imageDetails);
+                                    const flow = paymentFlowFor(event, chatId, db, imageDetails, proof);
                                     const paymentMs = isWithinPastTenMinutesImage.isValid ? (isWithinPastTenMinutesImage.paymentMs ?? null) : null;
                                     const session = await flow.begin({ ...screenshotRef(event, chatId, photoBuffer, imageDetails, paymentMs), creditAmount: amount, arrivalMs });
                                     const judged = await flow.judge({
                                         session,
                                         canReply: userDetails.canReply,
                                         // No store (outage): no re-send check, so the credit rules judge on the old 10-minute view.
-                                        creditRules: () => (0,_payments_screenshot_helpers__WEBPACK_IMPORTED_MODULE_30__.handleMyPayment)(imageDetails, userDetails, session ? isWithinPastTenMinutesImage : (0,_payments_payment_time__WEBPACK_IMPORTED_MODULE_18__.withoutProofStore)(isWithinPastTenMinutesImage, arrivalMs), didPayOthers, arrivalMs),
+                                        creditRules: () => (0,_payments_screenshot_helpers__WEBPACK_IMPORTED_MODULE_32__.handleMyPayment)(imageDetails, userDetails, session ? isWithinPastTenMinutesImage : (0,_payments_payment_time__WEBPACK_IMPORTED_MODULE_20__.withoutProofStore)(isWithinPastTenMinutesImage, arrivalMs), didPayOthers, arrivalMs),
                                         answerResend: async () => (resendAnswered = await answerResendFor(event, chatId, db)()),
                                     });
                                     const isPaymentProperlyMine = "verdict" in judged ? judged.verdict : null;
                                     releaseClaim = "verdict" in judged ? judged.release : undefined;
                                     // The gate claimed this payment's own identity (UTR / picture hash): its full amount is new revenue.
                                     const gateIdentified = Boolean(session && releaseClaim && (session.facts.utr || session.facts.dHash));
+                                    if (isPaymentProperlyMine?.isvalid)
+                                        proof.outcome("credited");
+                                    else if (isPaymentProperlyMine) {
+                                        const [outcome, code] = rejectOutcome(isPaymentProperlyMine.title);
+                                        proof.outcome(outcome, blockedAnswering ? [code, "BLOCKED_IGNORED"] : [code]);
+                                    }
                                     if (blockedAnswering && !isPaymentProperlyMine?.isvalid) {
                                         logger.warn(`[ProcessImage] blocked user ${chatId}: payment not accepted, ignored silently`);
                                         return;
@@ -78292,16 +78439,16 @@ async function processImage(event) {
                                         endedUnserved.delete(chatId); // only this payment's own outcome may arm the next sum
                                         if (tierAmount !== amount) {
                                             logger.log(`[ProcessImage] ${chatId}: unserved payments add up: routing ${amount} as ${tierAmount}`);
-                                            await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_29__.notifyChat)(chatId, { title: 'Payments added up', fields: [fact('This payment', amount), fact('Routed as', tierAmount)] });
+                                            await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_31__.notifyChat)(chatId, { title: 'Payments added up', fields: [fact('This payment', amount), fact('Routed as', tierAmount)] });
                                         }
-                                        (0,_conversation_state_state_reset__WEBPACK_IMPORTED_MODULE_34__.resetStatesOnPayment)(chatId, userDetails, tierAmount);
+                                        (0,_conversation_state_state_reset__WEBPACK_IMPORTED_MODULE_36__.resetStatesOnPayment)(chatId, userDetails, tierAmount);
                                         // The free complaint show is once per chat for NON-payers (graceFlag): one given before this payment
                                         // must not deny this payer the complaint re-show of the show they now paid for (journey CS7).
                                         if (userDetails.graceFlag)
                                             userDetails = await db.update(chatId, { graceFlag: false });
                                         // Check if this is an upgrade
                                         if (tierAmount > oldPayAmount && oldPayAmount > 0) {
-                                            (0,_conversation_state_state_reset__WEBPACK_IMPORTED_MODULE_34__.resetStatesOnUpgrade)(chatId, userDetails, oldPayAmount, tierAmount);
+                                            (0,_conversation_state_state_reset__WEBPACK_IMPORTED_MODULE_36__.resetStatesOnUpgrade)(chatId, userDetails, oldPayAmount, tierAmount);
                                         }
                                         // What this payment buys on top of the tier (paymentShowsUpdate), read before the credit raises
                                         // highestPayAmount.
@@ -78314,7 +78461,7 @@ async function processImage(event) {
                                         if (tierAmount !== payAmount && tierAmount < _payments_ladder__WEBPACK_IMPORTED_MODULE_4__.PAID_MIN) {
                                             await handleLowAmountPayment(event, chatId, db, imageDetails, userDetails, tierAmount, payAmount, isWithinPastTenMinutesImage, userChatState, initiateCallKeepingClaim);
                                         }
-                                        else if (tierAmount >= _payments_ladder__WEBPACK_IMPORTED_MODULE_4__.DEMO_GRANT_MIN && tierAmount <= _tg_vision__WEBPACK_IMPORTED_MODULE_45__.MAX_PAYMENT_AMOUNT) {
+                                        else if (tierAmount >= _payments_ladder__WEBPACK_IMPORTED_MODULE_4__.DEMO_GRANT_MIN && tierAmount <= _tg_vision__WEBPACK_IMPORTED_MODULE_47__.MAX_PAYMENT_AMOUNT) {
                                             if (usedUpBeforeCredit) {
                                                 logger.log(`[used-up-credit] ${chatId}: new service cycle at ₹${tierAmount}`);
                                                 userDetails = await (0,_payments_service_cycle__WEBPACK_IMPORTED_MODULE_5__.startServiceCycle)(chatId, tierAmount);
@@ -78329,7 +78476,7 @@ async function processImage(event) {
                                         }
                                         else {
                                             await (0,_telegram_delete_messages__WEBPACK_IMPORTED_MODULE_6__.deleteMessage)(event);
-                                            await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_29__.notifyChat)(chatId, {
+                                            await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_31__.notifyChat)(chatId, {
                                                 title: 'Pic deleted',
                                                 summary: 'Weird case.',
                                                 fields: [fact('Previous', userDetails.payAmount), fact('Now', amount)],
@@ -78344,7 +78491,7 @@ async function processImage(event) {
                                         await scheduleImageFollowup(event, chatId, 'paymentValidationQr', 20000);
                                         // The title is the real reject reason (old payment, time unreadable, ...); "Not my payment" only
                                         // for a payment to someone else. The judged time carries its year, the model's raw time is shown.
-                                        await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_29__.notifyChat)(chatId, {
+                                        await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_31__.notifyChat)(chatId, {
                                             title: isPaymentProperlyMine.title ?? 'Payment rejected',
                                             fields: [
                                                 fact('Judged time', isWithinPastTenMinutesImage.time ?? 'unreadable'),
@@ -78361,7 +78508,8 @@ async function processImage(event) {
                                             `Sweetie... **${amount}₹** won't be enough!!  💸\n\n` + _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_13__.demo
                                         ]),
                                     });
-                                    await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_29__.notifyChat)(chatId, { title: 'Told: not just', fields: [fact('Amount', amount)] });
+                                    await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_31__.notifyChat)(chatId, { title: 'Told: not just', fields: [fact('Amount', amount)] });
+                                    proof.outcome("other", ["AMOUNT_TOO_SMALL"]);
                                 }
                             }
                         }
@@ -78369,35 +78517,40 @@ async function processImage(event) {
                             // A payment to us whose status the model left unknown (pending / unreadable, none of success / failed /
                             // finished set) is not "someone else's payment": never delete or count it, ask for the screenshot again
                             // like the no-amount branch (RCA 2026-10-21: 62 such deletes since 10-10, 3 confirmed false rejects).
+                            proof.outcome("not_receipt", ["STATUS_UNCLEAR"]);
                             await sendMessageWithTimeout(event.client, chatId, { message: (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_12__.pickOneMsg)(UNCLEAR_SCREENSHOT_MESSAGES) });
-                            await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_29__.notifyChat)(chatId, {
+                            await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_31__.notifyChat)(chatId, {
                                 title: 'Status unclear (asked again)',
                                 summary: 'Payment to us, but the payment status could not be read; asked for the full screenshot.',
                                 fields: [fact('Amount', amount)],
                             });
                         }
                         else {
+                            proof.outcome("not_ours", ["NOT_PAID_TO_US"]);
                             await (0,_telegram_delete_messages__WEBPACK_IMPORTED_MODULE_6__.deleteMessage)(event);
-                            await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_29__.notifyChat)(chatId, { title: 'Not mine deleted', summary: 'Asked to pay me.' });
+                            await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_31__.notifyChat)(chatId, { title: 'Not mine deleted', summary: 'Asked to pay me.' });
                             await scheduleImageFollowup(event, chatId, 'paymentNotMineReminder', 10000);
                             // Not counted as an invalid photo: a payment screenshot never counts toward the photo mute (notePhotoVerdict).
                         }
                     }
                 }
                 else {
-                    await (0,_payments_screenshot_helpers__WEBPACK_IMPORTED_MODULE_30__.askToFinishPayment)(event);
+                    proof.outcome("not_receipt", ["NOT_FINISHED"]);
+                    await (0,_payments_screenshot_helpers__WEBPACK_IMPORTED_MODULE_32__.askToFinishPayment)(event);
                 }
             }
         }
         else if (askFullScreenshot) {
+            proof.outcome("not_receipt", ["NO_AMOUNT"]);
             // Never a reject: one ask for the full payment screenshot plus one ops notice (the photo card above). No delete,
             // no invalid-photo count, no re-check timer: the next screenshot the user sends is judged on its own.
             await sendMessageWithTimeout(event.client, chatId, { message: (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_12__.pickOneMsg)(UNCLEAR_SCREENSHOT_MESSAGES) });
-            await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_29__.notifyChat)(chatId, { title: 'No amount read', summary: 'Payment screenshot, but no amount could be read; asked for the full screenshot.' });
+            await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_31__.notifyChat)(chatId, { title: 'No amount read', summary: 'Payment screenshot, but no amount could be read; asked for the full screenshot.' });
         }
         else {
             if (sanitizedData.isPaymentMine) {
-                await (0,_payments_screenshot_helpers__WEBPACK_IMPORTED_MODULE_30__.askToFinishPayment)(event);
+                proof.outcome("not_receipt", ["NOT_FINISHED"]);
+                await (0,_payments_screenshot_helpers__WEBPACK_IMPORTED_MODULE_32__.askToFinishPayment)(event);
             }
             else {
                 await replyToNonPaymentPicture(event, chatId, imageDetails, userDetails);
@@ -78407,19 +78560,19 @@ async function processImage(event) {
             // Rejected, held, repeat or credited without a service: the call owed before this picture still goes out.
             const latest = await db.read(chatId);
             if (latest && latest.canReply !== 0 && (0,_payments_service_eligibility__WEBPACK_IMPORTED_MODULE_3__.canProceedWithService)(latest)) {
-                await (0,_calls_call_initiation__WEBPACK_IMPORTED_MODULE_27__.proceedWithCall)(latest, chatId, "Image Processed");
+                await (0,_calls_call_initiation__WEBPACK_IMPORTED_MODULE_29__.proceedWithCall)(latest, chatId, "Image Processed");
             }
         }
         releaseClaim = undefined;
-        await _telegram_client_access__WEBPACK_IMPORTED_MODULE_31__.TelegramManager.getInstance().dialogManager.markAsRead(event.message);
+        await _telegram_client_access__WEBPACK_IMPORTED_MODULE_33__.TelegramManager.getInstance().dialogManager.markAsRead(event.message);
     }
     catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_19__.parseError)(error, "Error Processing image");
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_21__.parseError)(error, "Error Processing image");
         const failedChat = event.message?.chatId?.toString?.() ?? "";
-        await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_29__.notifyChat)(failedChat, {
+        await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_31__.notifyChat)(failedChat, {
             title: 'Pic process fail',
             summary: releaseClaim ? 'Payment was valid; credit claim released.' : undefined,
-            severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_20__.NotificationSeverity.ERROR,
+            severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_22__.NotificationSeverity.ERROR,
             fields: [fact('Error', String(error?.message ?? error).slice(0, 200))],
         });
         if (releaseClaim) {
@@ -78430,9 +78583,15 @@ async function processImage(event) {
                 logger.warn(`[ProcessImage] credit failed after the claim: claim released, a retry of this payment is judged again`);
             }
             catch (releaseError) {
-                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_19__.parseError)(releaseError, "[ProcessImage] releasing the payment claim failed", false);
+                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_21__.parseError)(releaseError, "[ProcessImage] releasing the payment claim failed", false);
             }
         }
+        proof?.fallback("other", ["PROCESSING_ERROR"]);
+    }
+    finally {
+        // After every reply / return above: never awaited, never throws (recorder.ts).
+        if (proof)
+            void proof.finish();
     }
 }
 
@@ -91647,6 +91806,807 @@ function isRecentValidPayment(input, _userDetails, atMs = Date.now(), opts = {})
 
 /***/ },
 
+/***/ "./src/payments/proof-archive/recorder.ts"
+/*!************************************************!*\
+  !*** ./src/payments/proof-archive/recorder.ts ***!
+  \************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   ProofRecord: () => (/* binding */ ProofRecord),
+/* harmony export */   RECORD_TIMEOUT_MS: () => (/* binding */ RECORD_TIMEOUT_MS)
+/* harmony export */ });
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _proof_gate_decide__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../proof-gate/decide */ "./src/payments/proof-gate/decide.ts");
+/* harmony import */ var _verdict__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./verdict */ "./src/payments/proof-archive/verdict.ts");
+/* harmony import */ var _store__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ./store */ "./src/payments/proof-archive/store.ts");
+/* harmony import */ var _sweep__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ./sweep */ "./src/payments/proof-archive/sweep.ts");
+/**
+ * One payment screenshot's review record (contract section 1): collects the outcome the payment path reached, then
+ * writes the paymentProofs review fields (`proofId`, `verdict`, `image`, `ocr`; a row of its own, mode 'record', when
+ * the gate wrote none) and the image + sidecar JSON to the VM disk.
+ *
+ * Never changes a reply: `finish()` is called fire-and-forget after the path has answered, every write is bounded in
+ * time, nothing throws, and a disk failure only leaves `image.stored` false.
+ */
+
+
+
+
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_0__.Logger('tg-aut:payment-proofs');
+/** Same bound as the proof gate's store calls (proof-gate/gate.ts STORE_TIMEOUT_MS). */
+const RECORD_TIMEOUT_MS = 4000;
+function bounded(work, fallback, what) {
+    let timer;
+    return Promise.race([
+        work.catch((error) => { logger.warn(`[payment-proofs] ${what} failed: ${String(error?.message ?? error)}`); return fallback; }),
+        new Promise((resolve) => {
+            timer = setTimeout(() => { logger.warn(`[payment-proofs] ${what} timed out after ${RECORD_TIMEOUT_MS}ms`); resolve(fallback); }, RECORD_TIMEOUT_MS);
+            timer.unref?.();
+        }),
+    ]).finally(() => { if (timer)
+        clearTimeout(timer); });
+}
+class ProofRecord {
+    constructor(input) {
+        this.result = null;
+        this.finished = null;
+        this.input = input;
+    }
+    /** The outcome the payment path reached (the last call wins: a later, more specific step overrides). */
+    outcome(outcome, reasons = []) {
+        this.result = { outcome, reasons: [...reasons] };
+    }
+    /** An outcome only when none was set yet. */
+    fallback(outcome, reasons = []) {
+        if (!this.result)
+            this.outcome(outcome, reasons);
+    }
+    get current() {
+        return this.result?.outcome ?? null;
+    }
+    /**
+     * Write the record once. Screenshots with no outcome are recorded only when the model called them a payment (or
+     * the proof check blocked them); any other picture is not a payment proof and is never stored. Never throws.
+     */
+    finish() {
+        if (!this.finished)
+            this.finished = this.write().catch((error) => {
+                logger.warn(`[payment-proofs] record failed: ${String(error?.message ?? error)}`);
+                return null;
+            });
+        return this.finished;
+    }
+    async write() {
+        const i = this.input;
+        const category = i.details.category;
+        if (!this.result) {
+            if (category !== 'payment' && !i.details.proofBlocked)
+                return null;
+            this.outcome('other', ['UNCLASSIFIED']);
+        }
+        if (!Buffer.isBuffer(i.photo) || i.photo.length === 0)
+            return null;
+        const proofId = (0,_verdict__WEBPACK_IMPORTED_MODULE_2__.proofIdOf)(i.clientId, i.chatId, i.msgId);
+        if (!proofId) {
+            (0,_store__WEBPACK_IMPORTED_MODULE_3__.warnDiskOnce)('record', new Error(`no proof id for client "${i.clientId}" chat ${i.chatId} msg ${i.msgId}`));
+            return null;
+        }
+        let payee = 'unknown';
+        try {
+            payee = i.payee?.() ?? 'unknown';
+        }
+        catch {
+            payee = 'unknown';
+        }
+        const verdict = (0,_verdict__WEBPACK_IMPORTED_MODULE_2__.buildVerdict)({ outcome: this.result.outcome, reasons: this.result.reasons, payee, vision: i.vision });
+        const { mime, ext } = (0,_verdict__WEBPACK_IMPORTED_MODULE_2__.sniffImage)(i.photo);
+        const image = { host: i.clientId, bytes: i.photo.length, mime, sha256: (0,_verdict__WEBPACK_IMPORTED_MODULE_2__.sha256Hex)(i.photo), stored: false };
+        const ocr = (0,_verdict__WEBPACK_IMPORTED_MODULE_2__.ocrFieldsOf)(i.details, i.vision, i.rawText);
+        let store = null;
+        try {
+            store = i.store();
+        }
+        catch {
+            store = null;
+        }
+        let paymentMs = null;
+        try {
+            paymentMs = i.paymentMs?.() ?? null;
+        }
+        catch {
+            paymentMs = null;
+        }
+        const utr = (0,_proof_gate_decide__WEBPACK_IMPORTED_MODULE_1__.normalizeUtr)(i.details.utr);
+        const amount = Number(i.details.amount);
+        const row = {
+            chatId: i.chatId, profile: i.profile, clientId: i.clientId, telegramMsgId: i.msgId,
+            ...(utr ? { utr } : {}),
+            ...(i.details.payeeUpiId ? { payeeUpiId: i.details.payeeUpiId } : {}),
+            ...(i.details.payeeName ? { payeeName: i.details.payeeName } : {}),
+            amount: Number.isFinite(amount) ? amount : 0,
+            time: paymentMs !== null && Number.isFinite(paymentMs) ? { state: 'known', epochMs: paymentMs } : { state: 'unknown' },
+            ...(ocr.app ? { app: ocr.app } : {}),
+            decision: 'ACCEPT', reasons: [], mode: 'record', provider: 'tg-aut', source: 'local',
+            imageSha256: image.sha256,
+            proofId, verdict, image, ocr,
+        };
+        const rowWritten = store?.recordReview
+            ? await bounded(store.recordReview(row), false, `recordReview(${proofId})`)
+            : false;
+        (0,_sweep__WEBPACK_IMPORTED_MODULE_4__.startProofSweeper)();
+        const write = i.writeFiles ?? _store__WEBPACK_IMPORTED_MODULE_3__.writeProofFiles;
+        const sidecar = (0,_verdict__WEBPACK_IMPORTED_MODULE_2__.buildSidecar)({
+            proofId, clientId: i.clientId, chatId: i.chatId, msgId: i.msgId, receivedAtMs: i.receivedAtMs,
+            image, details: i.details, rawText: i.rawText, vision: i.vision, verdict,
+        });
+        let stored = false;
+        try {
+            stored = await write({ proofId, clientId: i.clientId, receivedAtMs: i.receivedAtMs, ext, image: i.photo, sidecar });
+        }
+        catch (error) {
+            (0,_store__WEBPACK_IMPORTED_MODULE_3__.warnDiskOnce)(`write ${proofId}`, error);
+            stored = false;
+        }
+        if (stored && rowWritten && store?.markProofStored) {
+            await bounded(store.markProofStored(i.chatId, i.profile, i.msgId), false, `markProofStored(${proofId})`);
+        }
+        return { proofId, verdict, rowWritten, stored };
+    }
+}
+
+
+/***/ },
+
+/***/ "./src/payments/proof-archive/store.ts"
+/*!*********************************************!*\
+  !*** ./src/payments/proof-archive/store.ts ***!
+  \*********************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   DEFAULT_PROOF_DIR: () => (/* binding */ DEFAULT_PROOF_DIR),
+/* harmony export */   MAX_WRITES_IN_FLIGHT: () => (/* binding */ MAX_WRITES_IN_FLIGHT),
+/* harmony export */   dayFolders: () => (/* binding */ dayFolders),
+/* harmony export */   findProofFiles: () => (/* binding */ findProofFiles),
+/* harmony export */   istDay: () => (/* binding */ istDay),
+/* harmony export */   proofDir: () => (/* binding */ proofDir),
+/* harmony export */   proofWriteStats: () => (/* binding */ proofWriteStats),
+/* harmony export */   resetDiskWarnings: () => (/* binding */ resetDiskWarnings),
+/* harmony export */   warnDiskOnce: () => (/* binding */ warnDiskOnce),
+/* harmony export */   writeProofFiles: () => (/* binding */ writeProofFiles)
+/* harmony export */ });
+/* harmony import */ var node_fs__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! node:fs */ "node:fs");
+/* harmony import */ var node_fs__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(node_fs__WEBPACK_IMPORTED_MODULE_0__);
+/* harmony import */ var node_path__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! node:path */ "node:path");
+/* harmony import */ var node_path__WEBPACK_IMPORTED_MODULE_1___default = /*#__PURE__*/__webpack_require__.n(node_path__WEBPACK_IMPORTED_MODULE_1__);
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _verdict__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ./verdict */ "./src/payments/proof-archive/verdict.ts");
+/**
+ * Payment-proof files on the VM disk (contract section 1 "VM files"): the downloaded image bytes exactly as received
+ * plus a sidecar JSON, under `<PAYMENT_PROOF_DIR>/<clientId>/<YYYY-MM-DD IST>/<proofId>.<ext|json>`. The directory is
+ * shared by every client process on the VM, so any of them can serve any proof of a client on that VM.
+ *
+ * Best effort: every write is async, bounded (MAX_WRITES_IN_FLIGHT), never throws, and a failure is logged once per
+ * process per hour. The payment reply never waits on it.
+ */
+
+
+
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_2__.Logger('tg-aut:payment-proofs');
+const DEFAULT_PROOF_DIR = '/root/payment-proofs';
+const MAX_WRITES_IN_FLIGHT = 8;
+const WARN_EVERY_MS = 60 * 60000;
+const IST_OFFSET_MS = 330 * 60000;
+const DAY = /^\d{4}-\d{2}-\d{2}$/;
+const IMAGE_EXTS = ['jpg', 'png', 'webp', 'gif', 'bin'];
+const EXT_MIME = {
+    jpg: 'image/jpeg', png: 'image/png', webp: 'image/webp', gif: 'image/gif', bin: 'application/octet-stream',
+};
+function proofDir() {
+    const d = String(process.env.PAYMENT_PROOF_DIR ?? '').trim();
+    return d || DEFAULT_PROOF_DIR;
+}
+/** The IST calendar day of `ms` (fixed +05:30, no DST). */
+function istDay(ms) {
+    return new Date(ms + IST_OFFSET_MS).toISOString().slice(0, 10);
+}
+let lastWarnAt = Number.NEGATIVE_INFINITY;
+let suppressed = 0;
+/** One disk-error line per process per hour (the rest are counted into the next line). */
+function warnDiskOnce(what, error, now = Date.now()) {
+    if (now - lastWarnAt < WARN_EVERY_MS) {
+        suppressed++;
+        return;
+    }
+    lastWarnAt = now;
+    const more = suppressed > 0 ? ` (+${suppressed} more since the last warning)` : '';
+    suppressed = 0;
+    logger.warn(`[payment-proofs] ${what} failed: ${String(error?.message ?? error)}${more}`);
+}
+/** Tests. */
+function resetDiskWarnings() { lastWarnAt = Number.NEGATIVE_INFINITY; suppressed = 0; }
+let inFlight = 0;
+let dropped = 0;
+function proofWriteStats() { return { inFlight, dropped }; }
+async function ensureDir(dir) {
+    await node_fs__WEBPACK_IMPORTED_MODULE_0__.promises.mkdir(dir, { recursive: true, mode: 0o700 });
+}
+/** Write to a temp name then rename, so a reader never sees half a file. */
+async function writeAtomic(file, data) {
+    const tmp = `${file}.${process.pid}.tmp`;
+    await node_fs__WEBPACK_IMPORTED_MODULE_0__.promises.writeFile(tmp, data, { mode: 0o600 });
+    await node_fs__WEBPACK_IMPORTED_MODULE_0__.promises.rename(tmp, file);
+}
+/** Image + sidecar to disk. True when both landed; false on any error or when too many writes are in flight. */
+async function writeProofFiles(w, dir = proofDir()) {
+    if (inFlight >= MAX_WRITES_IN_FLIGHT) {
+        dropped++;
+        warnDiskOnce('write', new Error(`${inFlight} writes in flight, proof ${w.proofId} not stored (dropped ${dropped})`));
+        return false;
+    }
+    inFlight++;
+    try {
+        await ensureDir(dir);
+        const dayDir = node_path__WEBPACK_IMPORTED_MODULE_1___default().join(dir, w.clientId, istDay(w.receivedAtMs));
+        await ensureDir(dayDir);
+        await writeAtomic(node_path__WEBPACK_IMPORTED_MODULE_1___default().join(dayDir, `${w.proofId}.${w.ext}`), w.image);
+        await writeAtomic(node_path__WEBPACK_IMPORTED_MODULE_1___default().join(dayDir, `${w.proofId}.json`), JSON.stringify(w.sidecar));
+        return true;
+    }
+    catch (error) {
+        warnDiskOnce(`write ${w.proofId}`, error);
+        return false;
+    }
+    finally {
+        inFlight--;
+    }
+}
+/** Day folders of one client, newest first (names only). [] when the client has none. */
+async function dayFolders(clientDir) {
+    try {
+        const names = await node_fs__WEBPACK_IMPORTED_MODULE_0__.promises.readdir(clientDir);
+        return names.filter((n) => DAY.test(n)).sort().reverse();
+    }
+    catch {
+        return [];
+    }
+}
+async function exists(file) {
+    try {
+        await node_fs__WEBPACK_IMPORTED_MODULE_0__.promises.access(file);
+        return true;
+    }
+    catch {
+        return false;
+    }
+}
+/** Where a proof's files are (any client on this VM). Null when the id is invalid or the files are gone. */
+async function findProofFiles(proofId, dir = proofDir()) {
+    const id = (0,_verdict__WEBPACK_IMPORTED_MODULE_3__.parseProofId)(proofId);
+    if (!id)
+        return null;
+    const clientDir = node_path__WEBPACK_IMPORTED_MODULE_1___default().join(dir, id.clientId);
+    for (const day of await dayFolders(clientDir)) {
+        const dayDir = node_path__WEBPACK_IMPORTED_MODULE_1___default().join(clientDir, day);
+        const jsonPath = node_path__WEBPACK_IMPORTED_MODULE_1___default().join(dayDir, `${proofId}.json`);
+        if (!(await exists(jsonPath)))
+            continue;
+        for (const ext of IMAGE_EXTS) {
+            const imagePath = node_path__WEBPACK_IMPORTED_MODULE_1___default().join(dayDir, `${proofId}.${ext}`);
+            if (await exists(imagePath))
+                return { dayDir, imagePath, mime: EXT_MIME[ext], jsonPath };
+        }
+        return null;
+    }
+    return null;
+}
+
+
+/***/ },
+
+/***/ "./src/payments/proof-archive/sweep.ts"
+/*!*********************************************!*\
+  !*** ./src/payments/proof-archive/sweep.ts ***!
+  \*********************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   SWEEP_EVERY_MS: () => (/* binding */ SWEEP_EVERY_MS),
+/* harmony export */   SWEEP_LOCK: () => (/* binding */ SWEEP_LOCK),
+/* harmony export */   keepDays: () => (/* binding */ keepDays),
+/* harmony export */   maxBytes: () => (/* binding */ maxBytes),
+/* harmony export */   startProofSweeper: () => (/* binding */ startProofSweeper),
+/* harmony export */   stopProofSweeper: () => (/* binding */ stopProofSweeper),
+/* harmony export */   sweepProofs: () => (/* binding */ sweepProofs)
+/* harmony export */ });
+/* harmony import */ var node_fs__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! node:fs */ "node:fs");
+/* harmony import */ var node_fs__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(node_fs__WEBPACK_IMPORTED_MODULE_0__);
+/* harmony import */ var node_path__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! node:path */ "node:path");
+/* harmony import */ var node_path__WEBPACK_IMPORTED_MODULE_1___default = /*#__PURE__*/__webpack_require__.n(node_path__WEBPACK_IMPORTED_MODULE_1__);
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _store__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ./store */ "./src/payments/proof-archive/store.ts");
+/**
+ * Retention for the payment-proof files (contract section 1 "Retention"): day folders older than
+ * PAYMENT_PROOF_KEEP_DAYS (default 30) are deleted, then, while the directory is over PAYMENT_PROOF_MAX_MB (default
+ * 3072), the oldest day folders first (never today's). Every client process checks hourly; the lock file
+ * `<dir>/.sweep.lock` (its mtime = the last sweep) lets only one process per VM sweep per day. Two processes that
+ * both find a stale lock at the same moment can both sweep: harmless, the deletes are idempotent.
+ */
+
+
+
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_2__.Logger('tg-aut:payment-proofs-sweep');
+const SWEEP_LOCK = '.sweep.lock';
+/** A lock younger than this means another process (or this one) swept already. */
+const SWEEP_EVERY_MS = 23 * 60 * 60000;
+const CHECK_EVERY_MS = 60 * 60000;
+const FIRST_CHECK_MS = 5 * 60000;
+const DAY_MS = 24 * 60 * 60000;
+function keepDays() {
+    const n = Number(process.env.PAYMENT_PROOF_KEEP_DAYS);
+    return Number.isFinite(n) && n >= 1 ? Math.floor(n) : 30;
+}
+function maxBytes() {
+    const n = Number(process.env.PAYMENT_PROOF_MAX_MB);
+    return (Number.isFinite(n) && n > 0 ? n : 3072) * 1024 * 1024;
+}
+/** Take the daily lock: false when a fresh one exists or another process created it first. */
+async function takeLock(dir, now) {
+    const lock = node_path__WEBPACK_IMPORTED_MODULE_1___default().join(dir, SWEEP_LOCK);
+    try {
+        const st = await node_fs__WEBPACK_IMPORTED_MODULE_0__.promises.stat(lock);
+        if (now - st.mtimeMs < SWEEP_EVERY_MS)
+            return false;
+        await node_fs__WEBPACK_IMPORTED_MODULE_0__.promises.unlink(lock).catch(() => undefined);
+    }
+    catch { /* no lock yet */ }
+    try {
+        const fh = await node_fs__WEBPACK_IMPORTED_MODULE_0__.promises.open(lock, 'wx', 0o600);
+        try {
+            await fh.writeFile(`${process.pid} ${new Date(now).toISOString()}\n`);
+        }
+        finally {
+            await fh.close();
+        }
+        const at = new Date(now);
+        await node_fs__WEBPACK_IMPORTED_MODULE_0__.promises.utimes(lock, at, at);
+        return true;
+    }
+    catch {
+        return false; // EEXIST: another process won it
+    }
+}
+async function folderBytes(folder) {
+    let total = 0;
+    let names = [];
+    try {
+        names = await node_fs__WEBPACK_IMPORTED_MODULE_0__.promises.readdir(folder);
+    }
+    catch {
+        return 0;
+    }
+    for (const n of names) {
+        try {
+            total += (await node_fs__WEBPACK_IMPORTED_MODULE_0__.promises.stat(node_path__WEBPACK_IMPORTED_MODULE_1___default().join(folder, n))).size;
+        }
+        catch { /* gone */ }
+    }
+    return total;
+}
+async function sweepProofs(opts = {}) {
+    const dir = opts.dir ?? (0,_store__WEBPACK_IMPORTED_MODULE_3__.proofDir)();
+    const now = opts.now ?? Date.now();
+    const keep = opts.keepDays ?? keepDays();
+    const cap = opts.maxBytes ?? maxBytes();
+    try {
+        await node_fs__WEBPACK_IMPORTED_MODULE_0__.promises.access(dir);
+    }
+    catch {
+        return { skipped: 'no-dir', deleted: [], bytesBefore: 0, bytesAfter: 0 };
+    }
+    if (!(await takeLock(dir, now)))
+        return { skipped: 'locked', deleted: [], bytesBefore: 0, bytesAfter: 0 };
+    const today = (0,_store__WEBPACK_IMPORTED_MODULE_3__.istDay)(now);
+    const cutoff = (0,_store__WEBPACK_IMPORTED_MODULE_3__.istDay)(now - keep * DAY_MS);
+    const folders = [];
+    let clients = [];
+    try {
+        clients = await node_fs__WEBPACK_IMPORTED_MODULE_0__.promises.readdir(dir);
+    }
+    catch {
+        clients = [];
+    }
+    for (const client of clients) {
+        if (client.startsWith('.'))
+            continue;
+        const clientDir = node_path__WEBPACK_IMPORTED_MODULE_1___default().join(dir, client);
+        for (const day of await (0,_store__WEBPACK_IMPORTED_MODULE_3__.dayFolders)(clientDir)) {
+            const p = node_path__WEBPACK_IMPORTED_MODULE_1___default().join(clientDir, day);
+            folders.push({ day, path: p, bytes: await folderBytes(p) });
+        }
+    }
+    const bytesBefore = folders.reduce((s, f) => s + f.bytes, 0);
+    let total = bytesBefore;
+    const deleted = [];
+    const remove = async (f) => {
+        try {
+            await node_fs__WEBPACK_IMPORTED_MODULE_0__.promises.rm(f.path, { recursive: true, force: true });
+            deleted.push(f.path);
+            total -= f.bytes;
+        }
+        catch (error) {
+            (0,_store__WEBPACK_IMPORTED_MODULE_3__.warnDiskOnce)(`sweep ${f.path}`, error, now);
+        }
+    };
+    // Oldest first: age, then the size cap.
+    folders.sort((a, b) => (a.day < b.day ? -1 : a.day > b.day ? 1 : 0));
+    const kept = [];
+    for (const f of folders) {
+        if (f.day < cutoff)
+            await remove(f);
+        else
+            kept.push(f);
+    }
+    for (const f of kept) {
+        if (total <= cap)
+            break;
+        if (f.day >= today)
+            break;
+        await remove(f);
+    }
+    if (deleted.length > 0 || total > cap) {
+        logger.log(`[payment-proofs] sweep: ${deleted.length} day folder(s) deleted, ${Math.round(bytesBefore / 1048576)} MB -> ${Math.round(total / 1048576)} MB (cap ${Math.round(cap / 1048576)} MB, keep ${keep} d)`);
+    }
+    return { deleted, bytesBefore, bytesAfter: total };
+}
+let timer = null;
+/** Start the hourly "sweep if due" check once per process (unref'd: never keeps the process alive). */
+function startProofSweeper() {
+    if (timer)
+        return;
+    const run = () => { void sweepProofs().catch((error) => (0,_store__WEBPACK_IMPORTED_MODULE_3__.warnDiskOnce)('sweep', error)); };
+    const first = setTimeout(run, FIRST_CHECK_MS);
+    first.unref?.();
+    timer = setInterval(run, CHECK_EVERY_MS);
+    timer.unref?.();
+}
+/** Tests. */
+function stopProofSweeper() {
+    if (timer)
+        clearInterval(timer);
+    timer = null;
+}
+
+
+/***/ },
+
+/***/ "./src/payments/proof-archive/thumb.ts"
+/*!*********************************************!*\
+  !*** ./src/payments/proof-archive/thumb.ts ***!
+  \*********************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   THUMB_MAX_PIXELS: () => (/* binding */ THUMB_MAX_PIXELS),
+/* harmony export */   THUMB_MAX_WIDTH: () => (/* binding */ THUMB_MAX_WIDTH),
+/* harmony export */   THUMB_QUALITY: () => (/* binding */ THUMB_QUALITY),
+/* harmony export */   makeThumb: () => (/* binding */ makeThumb),
+/* harmony export */   thumbFor: () => (/* binding */ thumbFor),
+/* harmony export */   thumbPathOf: () => (/* binding */ thumbPathOf)
+/* harmony export */ });
+/* harmony import */ var node_fs__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! node:fs */ "node:fs");
+/* harmony import */ var node_fs__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(node_fs__WEBPACK_IMPORTED_MODULE_0__);
+/* harmony import */ var node_path__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! node:path */ "node:path");
+/* harmony import */ var node_path__WEBPACK_IMPORTED_MODULE_1___default = /*#__PURE__*/__webpack_require__.n(node_path__WEBPACK_IMPORTED_MODULE_1__);
+/* harmony import */ var jpeg_js__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! jpeg-js */ "../../node_modules/jpeg-js/index.js");
+/* harmony import */ var jpeg_js__WEBPACK_IMPORTED_MODULE_2___default = /*#__PURE__*/__webpack_require__.n(jpeg_js__WEBPACK_IMPORTED_MODULE_2__);
+/* harmony import */ var pngjs__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! pngjs */ "../../node_modules/pngjs/lib/png.js");
+/**
+ * Review-screen thumbnail of a stored payment proof: <= THUMB_MAX_WIDTH px wide JPEG, made once and cached beside the
+ * image as `<proofId>.thumb.jpg`. Pure JS (jpeg-js / pngjs, bundled; no native module on the VMs). Decoding is
+ * synchronous, so the route runs one at a time (thumbSlots in the handler) and refuses images above THUMB_MAX_PIXELS.
+ */
+
+
+
+
+const THUMB_MAX_WIDTH = 360;
+const THUMB_QUALITY = 70;
+/** Larger images are not decoded (memory bound: RGBA = 4 bytes per pixel). */
+const THUMB_MAX_PIXELS = 12000000;
+function decode(buf) {
+    if (buf.length >= 3 && buf[0] === 0xff && buf[1] === 0xd8) {
+        const img = (0,jpeg_js__WEBPACK_IMPORTED_MODULE_2__.decode)(buf, { useTArray: true, maxMemoryUsageInMB: 64, maxResolutionInMP: THUMB_MAX_PIXELS / 1000000 });
+        return { width: img.width, height: img.height, data: img.data };
+    }
+    if (buf.length >= 8 && buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) {
+        const png = pngjs__WEBPACK_IMPORTED_MODULE_3__.PNG.sync.read(buf);
+        return { width: png.width, height: png.height, data: png.data };
+    }
+    return null;
+}
+/** Box-average downscale to `width` (aspect kept), composited on white. */
+function downscale(r, width) {
+    const height = Math.max(1, Math.round((r.height * width) / r.width));
+    const out = new Uint8Array(width * height * 4);
+    for (let y = 0; y < height; y++) {
+        const y0 = Math.floor((y * r.height) / height);
+        const y1 = Math.max(y0 + 1, Math.floor(((y + 1) * r.height) / height));
+        for (let x = 0; x < width; x++) {
+            const x0 = Math.floor((x * r.width) / width);
+            const x1 = Math.max(x0 + 1, Math.floor(((x + 1) * r.width) / width));
+            let R = 0;
+            let G = 0;
+            let B = 0;
+            let n = 0;
+            for (let yy = y0; yy < y1; yy++) {
+                for (let xx = x0; xx < x1; xx++) {
+                    const i = (yy * r.width + xx) * 4;
+                    const a = r.data[i + 3] / 255;
+                    R += r.data[i] * a + 255 * (1 - a);
+                    G += r.data[i + 1] * a + 255 * (1 - a);
+                    B += r.data[i + 2] * a + 255 * (1 - a);
+                    n++;
+                }
+            }
+            const o = (y * width + x) * 4;
+            out[o] = Math.round(R / n);
+            out[o + 1] = Math.round(G / n);
+            out[o + 2] = Math.round(B / n);
+            out[o + 3] = 255;
+        }
+    }
+    return { width, height, data: out };
+}
+/** JPEG thumbnail bytes; null when the image cannot be decoded or is too large. */
+function makeThumb(image) {
+    let r;
+    try {
+        r = decode(image);
+    }
+    catch {
+        return null;
+    }
+    if (!r || r.width < 1 || r.height < 1 || r.width * r.height > THUMB_MAX_PIXELS)
+        return null;
+    const small = r.width > THUMB_MAX_WIDTH ? downscale(r, THUMB_MAX_WIDTH) : r;
+    try {
+        return Buffer.from((0,jpeg_js__WEBPACK_IMPORTED_MODULE_2__.encode)({ width: small.width, height: small.height, data: small.data }, THUMB_QUALITY).data);
+    }
+    catch {
+        return null;
+    }
+}
+function thumbPathOf(imagePath) {
+    const dir = node_path__WEBPACK_IMPORTED_MODULE_1___default().dirname(imagePath);
+    const base = node_path__WEBPACK_IMPORTED_MODULE_1___default().basename(imagePath).replace(/\.[a-z]+$/i, '');
+    return node_path__WEBPACK_IMPORTED_MODULE_1___default().join(dir, `${base}.thumb.jpg`);
+}
+/** The cached thumbnail, made (and cached) on first use. Null when it cannot be made; a cache write failure is ignored. */
+async function thumbFor(imagePath) {
+    const cached = thumbPathOf(imagePath);
+    try {
+        return await node_fs__WEBPACK_IMPORTED_MODULE_0__.promises.readFile(cached);
+    }
+    catch { /* not made yet */ }
+    const thumb = makeThumb(await node_fs__WEBPACK_IMPORTED_MODULE_0__.promises.readFile(imagePath));
+    if (!thumb)
+        return null;
+    try {
+        const tmp = `${cached}.${process.pid}.tmp`;
+        await node_fs__WEBPACK_IMPORTED_MODULE_0__.promises.writeFile(tmp, thumb, { mode: 0o600 });
+        await node_fs__WEBPACK_IMPORTED_MODULE_0__.promises.rename(tmp, cached);
+    }
+    catch { /* served uncached */ }
+    return thumb;
+}
+
+
+/***/ },
+
+/***/ "./src/payments/proof-archive/verdict.ts"
+/*!***********************************************!*\
+  !*** ./src/payments/proof-archive/verdict.ts ***!
+  \***********************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   MAX_FAKE_SIGNALS: () => (/* binding */ MAX_FAKE_SIGNALS),
+/* harmony export */   MAX_OCR_TEXT_BYTES: () => (/* binding */ MAX_OCR_TEXT_BYTES),
+/* harmony export */   MAX_VERDICT_REASONS: () => (/* binding */ MAX_VERDICT_REASONS),
+/* harmony export */   buildSidecar: () => (/* binding */ buildSidecar),
+/* harmony export */   buildVerdict: () => (/* binding */ buildVerdict),
+/* harmony export */   capUtf8: () => (/* binding */ capUtf8),
+/* harmony export */   ocrFieldsOf: () => (/* binding */ ocrFieldsOf),
+/* harmony export */   parseProofId: () => (/* binding */ parseProofId),
+/* harmony export */   payeeClassOf: () => (/* binding */ payeeClassOf),
+/* harmony export */   proofIdOf: () => (/* binding */ proofIdOf),
+/* harmony export */   sha256Hex: () => (/* binding */ sha256Hex),
+/* harmony export */   sniffImage: () => (/* binding */ sniffImage),
+/* harmony export */   txnIdOf: () => (/* binding */ txnIdOf)
+/* harmony export */ });
+/* harmony import */ var node_crypto__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! node:crypto */ "node:crypto");
+/* harmony import */ var node_crypto__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(node_crypto__WEBPACK_IMPORTED_MODULE_0__);
+/**
+ * Payment-proof review record (owner scope 2026-11-03, contract `pay-review-contract.md` section 1): the pure part.
+ * What one screenshot's paymentProofs row carries for the review screen (`proofId`, `verdict`, `image`, `ocr`) and the
+ * sidecar JSON stored beside the image on the VM disk. No I/O, no clock reads; recorder.ts does the writes.
+ *
+ * The verdict only DESCRIBES what the payment path already decided; nothing here feeds back into a reply or a credit.
+ */
+
+const MAX_VERDICT_REASONS = 8;
+const MAX_FAKE_SIGNALS = 8;
+/** Sidecar `ocrText` cap (bytes, UTF-8). */
+const MAX_OCR_TEXT_BYTES = 16 * 1024;
+/** Each short `ocr` field on the Mongo row. */
+const MAX_OCR_FIELD_CHARS = 80;
+const CODE = /^[A-Z0-9_]{1,40}$/;
+const CLIENT_ID = /^[A-Za-z0-9_.]{1,64}$/;
+const DIGITS = /^\d{1,20}$/;
+/** `<clientId>-<chatId>-<telegramMsgId>`; null when a part is not safe to use in a file name / URL. */
+function proofIdOf(clientId, chatId, msgId) {
+    const c = String(clientId ?? '').trim();
+    const ch = String(chatId ?? '').trim();
+    const m = String(Math.trunc(Number(msgId)));
+    if (!CLIENT_ID.test(c) || !DIGITS.test(ch) || !DIGITS.test(m) || Number(m) <= 0)
+        return null;
+    return `${c}-${ch}-${m}`;
+}
+/** Inverse of proofIdOf. The last two dash-separated parts are the numbers, so a clientId may not contain '-'. */
+function parseProofId(proofId) {
+    const m = /^([A-Za-z0-9_.]{1,64})-(\d{1,20})-(\d{1,20})$/.exec(String(proofId ?? ''));
+    if (!m || m[1] === '.' || m[1] === '..')
+        return null;
+    const msgId = Number(m[3]);
+    if (!Number.isSafeInteger(msgId) || msgId <= 0)
+        return null;
+    return { clientId: m[1], chatId: m[2], msgId };
+}
+/** Magic-byte sniff of the downloaded bytes. Telegram photos are JPEG; documents may be anything. */
+function sniffImage(buf) {
+    if (buf.length >= 3 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff)
+        return { mime: 'image/jpeg', ext: 'jpg' };
+    if (buf.length >= 8 && buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47)
+        return { mime: 'image/png', ext: 'png' };
+    if (buf.length >= 12 && buf.toString('ascii', 0, 4) === 'RIFF' && buf.toString('ascii', 8, 12) === 'WEBP')
+        return { mime: 'image/webp', ext: 'webp' };
+    if (buf.length >= 6 && buf.toString('ascii', 0, 3) === 'GIF')
+        return { mime: 'image/gif', ext: 'gif' };
+    return { mime: 'application/octet-stream', ext: 'bin' };
+}
+function sha256Hex(buf) {
+    return (0,node_crypto__WEBPACK_IMPORTED_MODULE_0__.createHash)('sha256').update(buf).digest('hex');
+}
+/** payeeVerdict (paid-to-us.ts) -> the review's payee class. Reads the result only; the rules are not touched. */
+function payeeClassOf(v) {
+    if (!v)
+        return 'unknown';
+    if (v.verdict === 'OURS')
+        return 'ours';
+    if (v.verdict === 'NOT_OURS')
+        return 'foreign';
+    if (v.verdict === 'TAMPERED')
+        return v.reasons.includes('PERSONA_PAYEE') ? 'persona' : 'foreign';
+    return 'unknown';
+}
+function codes(list, max) {
+    const out = [];
+    for (const r of list ?? []) {
+        const c = String(r ?? '').trim().toUpperCase().replace(/[^A-Z0-9_]+/g, '_').slice(0, 40);
+        if (CODE.test(c) && !out.includes(c))
+            out.push(c);
+        if (out.length >= max)
+            break;
+    }
+    return out;
+}
+function buildVerdict(v) {
+    const raw = v.vision?.fakeScore;
+    const fakeScore = typeof raw === 'number' && Number.isFinite(raw) ? Math.max(0, Math.min(100, Math.round(raw * 100))) : null;
+    return {
+        outcome: v.outcome,
+        reasons: codes(v.reasons, MAX_VERDICT_REASONS),
+        payee: v.payee ?? 'unknown',
+        fakeScore,
+        fakeSignals: codes(v.vision?.fakeSignals ?? [], MAX_FAKE_SIGNALS),
+    };
+}
+function short(s) {
+    if (typeof s !== 'string')
+        return undefined;
+    const t = s.replace(/\s+/g, ' ').trim();
+    return t ? t.slice(0, MAX_OCR_FIELD_CHARS) : undefined;
+}
+/** PhonePe transaction id ("T2410211234567890123456") as printed; the only txn id the text reliably carries. */
+function txnIdOf(text) {
+    const m = /\b(T\d{20,24})\b/i.exec(String(text ?? ''));
+    return m ? m[1].toUpperCase() : undefined;
+}
+/** The row's short `ocr` fields. payerUpiId is not read by any model today (always absent). */
+function ocrFieldsOf(details, vision, rawText) {
+    const out = {};
+    const payerName = short(vision?.payerName ?? details.payerName);
+    if (payerName)
+        out.payerName = payerName;
+    const note = short(details.note);
+    if (note)
+        out.note = note;
+    const txnId = txnIdOf(rawText);
+    if (txnId)
+        out.txnId = txnId;
+    const app = short(vision?.app);
+    if (app)
+        out.app = app;
+    const screen = short(vision?.category ?? details.category);
+    if (screen)
+        out.screen = screen;
+    return out;
+}
+/** Cut `s` to at most `max` UTF-8 bytes without splitting a character. */
+function capUtf8(s, max) {
+    if (Buffer.byteLength(s, 'utf8') <= max)
+        return s;
+    let cut = s.slice(0, max);
+    while (Buffer.byteLength(cut, 'utf8') > max)
+        cut = cut.slice(0, -1);
+    return cut;
+}
+function buildSidecar(a) {
+    const d = a.details;
+    const vision = {
+        amount: Number(d.amount) || 0,
+        payeeName: d.payeeName || null,
+        payeeBankingName: d.payeeBankingName || null,
+        payeeUpiId: d.payeeUpiId || null,
+        payerName: (a.vision?.payerName ?? d.payerName) || null,
+        payerUpiId: null,
+        note: d.note || null,
+        utr: d.utr || null,
+        txnId: txnIdOf(a.rawText) ?? null,
+        printedTime: (a.vision?.timeRaw ?? d.time) || null,
+        app: a.vision?.app || null,
+        screen: (a.vision?.category ?? d.category) || null,
+        status: a.vision?.status ?? null,
+        isSuccess: !!d.isSuccess,
+        isFailed: !!d.isFailed,
+        provider: a.vision?.provider ?? null,
+        model: a.vision?.model ?? null,
+        confidence: a.vision?.confidence ?? d.confidence ?? null,
+        proofReasons: d.proofReasons ?? [],
+    };
+    return {
+        proofId: a.proofId,
+        clientId: a.clientId,
+        chatId: a.chatId,
+        telegramMsgId: a.msgId,
+        receivedAt: new Date(a.receivedAtMs).toISOString(),
+        mime: a.image.mime,
+        bytes: a.image.bytes,
+        sha256: a.image.sha256,
+        ocrText: capUtf8(String(a.vision?.fullText || a.rawText || ''), MAX_OCR_TEXT_BYTES),
+        vision,
+        verdict: a.verdict,
+    };
+}
+
+
+/***/ },
+
 /***/ "./src/payments/proof-check/blocklist.ts"
 /*!***********************************************!*\
   !*** ./src/payments/proof-check/blocklist.ts ***!
@@ -93038,6 +93998,12 @@ class PaymentFlow {
         this.gate = gate;
         this.io = io;
     }
+    note(outcome, reasons = []) {
+        try {
+            this.io.outcome?.(outcome, [...reasons]);
+        }
+        catch { /* review record only */ }
+    }
     pick(pool) {
         return this.io.pick ? this.io.pick(pool) : pool[Math.floor(Math.random() * pool.length)];
     }
@@ -93073,10 +94039,12 @@ class PaymentFlow {
         const { chatId, profile, msgId } = session.facts;
         if (canReply === 0) {
             this.io.warn(`[payment-gate] fraud signal ${label} for ${chatId}: already blocked, ignoring silently`);
+            this.note('fake_blocked', [...reasons, 'ALREADY_BLOCKED']);
             return;
         }
         const secondFake = await session.fraudGraceOpen();
         await session.openAsk('fraud', reasons);
+        this.note('fraud_ask', reasons);
         if (secondFake) {
             this.io.warn(`[payment-gate] second fraud screenshot (${label}) inside the grace period for ${chatId}: blocking now`);
             // Record the block first: a block without the record could never be answered by the real page.
@@ -93084,6 +94052,7 @@ class PaymentFlow {
                 this.io.warn(`[payment-gate] ${chatId}: could not record the block, not blocking (fail open)`);
                 return;
             }
+            this.note('fake_blocked', [...reasons, 'SECOND_FAKE']);
             await this.io.reply(this.pick(_messages__WEBPACK_IMPORTED_MODULE_1__.FRAUD_BLOCKED_MESSAGES));
             await this.io.block();
             this.io.fraudCleared?.();
@@ -93133,6 +94102,7 @@ class PaymentFlow {
      * its service is still owed is answered by `answerResend` instead ("calling you" / "call in 1-2 minutes").
      */
     async repeat(chatId, by, where, answerResend) {
+        this.note('repeat', [`REPEAT_${by}`]);
         if (answerResend && await answerResend()) {
             this.io.warn(`[payment-gate] repeat of a credited payment for ${chatId} (by ${by}, ${where}): service still owed, answered from the chat's state, not crediting`);
             await this.io.notifyOps({ title: 'Repeat payment', summary: 'Service still owed: told the call is coming.', fields: [{ label: 'Same', value: REPEAT_BY[by] ?? by, code: false }, { label: 'Where', value: where, code: false }] });
@@ -93146,6 +94116,7 @@ class PaymentFlow {
     }
     /** Owner (2026-10-21): a payment already credited in ANOTHER chat / persona is not ours: no credit, no block. */
     async notMine(chatId, by, where) {
+        this.note('cross_client', ['CREDITED_ELSEWHERE', `SAME_${by}`]);
         this.io.warn(`[payment-gate] payment credited elsewhere for ${chatId} (by ${by}, ${where}): not my payment, not crediting`);
         await this.io.reply(_messages__WEBPACK_IMPORTED_MODULE_1__.NOT_MY_PAYMENT_MESSAGE);
         await this.io.notifyOps({ title: 'Not my payment', fields: [{ label: 'Same', value: REPEAT_BY[by] ?? by, code: false }, { label: 'Where', value: where, code: false }] });
@@ -93163,6 +94134,10 @@ class PaymentFlow {
         const gate = session ? await session.check() : { kind: 'clear' };
         if (session && blocked && (gate.kind === 'repeat' || gate.kind === 'needs-real-page')) {
             this.io.warn(`[payment-gate] blocked user ${session.facts.chatId}: ${gate.kind}, ignored silently`);
+            if (gate.kind === 'repeat')
+                this.note(gate.sameChat ? 'repeat' : 'cross_client', [`REPEAT_${gate.by}`, 'BLOCKED_IGNORED']);
+            else
+                this.note('fraud_ask', ['NO_REAL_REFERENCE', 'BLOCKED_IGNORED']);
             return { handled: true };
         }
         if (session && gate.kind === 'repeat') {
@@ -93179,12 +94154,14 @@ class PaymentFlow {
         if (session && gate.kind === 'needs-real-page' && gate.ask === 'old_time') {
             // The details page was asked for over an impossible reference: ask again, politely (it may be a misread).
             this.io.warn(`[payment-gate] ${session.facts.chatId} was asked for the details page (impossible reference) and this screenshot shows no real transaction reference: asked again, not crediting`);
+            this.note('old_time', ['NO_REAL_REFERENCE', 'DETAILS_PAGE_AWAITED']);
             await this.io.reply(this.pick(_messages__WEBPACK_IMPORTED_MODULE_1__.OLD_TIME_ASK_MESSAGES));
             await notify({ title: 'Asked pay page', summary: 'Screenshot shows no real transaction reference; the details page is still awaited.' });
             return { handled: true };
         }
         if (session && gate.kind === 'needs-real-page') {
             this.io.warn(`[payment-gate] ${session.facts.chatId} is under a fake-payment warning and this screenshot shows no real transaction reference: not crediting`);
+            this.note('fraud_ask', ['NO_REAL_REFERENCE', 'FAKE_WARNING_OPEN']);
             await this.io.reply(this.pick(_messages__WEBPACK_IMPORTED_MODULE_1__.FRAUD_WARNING_MESSAGES));
             await this.io.notifyOps({ title: 'Not credited', summary: 'Screenshot shows no real transaction reference.' });
             return { handled: true };
@@ -93206,6 +94183,7 @@ class PaymentFlow {
                 if ((0,_decide__WEBPACK_IMPORTED_MODULE_0__.isImpossibleReference)(f.utr)) {
                     // 11 / 13 digits: an edited number (7/7 this week) or a misread. Polite: the details page decides.
                     await session.openAsk('old_time', ['IMPOSSIBLE_REFERENCE']);
+                    this.note('old_time', ['IMPOSSIBLE_REFERENCE']);
                     this.io.warn(`[payment-gate] ${f.chatId}: reference ${f.utr} has an impossible length, asked for the details page, not crediting yet`);
                     await this.io.reply(this.pick(_messages__WEBPACK_IMPORTED_MODULE_1__.OLD_TIME_ASK_MESSAGES));
                     await notify({ title: 'Asked pay page', summary: `Reference ${f.utr} has ${f.utr?.length} digits (real ones have 12).` });
@@ -93216,6 +94194,7 @@ class PaymentFlow {
         if (verdict.isvalid && session) {
             const claim = await session.claim();
             if (claim === 'lost') {
+                this.note('repeat', ['CREDIT_RACE_LOST']);
                 if (!blocked) {
                     // The winner's row is served now: re-check to tell another chat/persona from this one.
                     const winner = await session.check();
@@ -93231,6 +94210,7 @@ class PaymentFlow {
             if (claim === 'again') {
                 // A duplicate Telegram update of a message that was already credited: it already got its reply/service.
                 this.io.warn(`[payment-gate] ${session.facts.chatId}/${session.facts.msgId} already credited (duplicate update): not crediting again`);
+                this.note('repeat', ['DUPLICATE_UPDATE']);
                 await notify({ title: 'Dupe ignored' });
                 return { handled: true };
             }
@@ -95048,6 +96028,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   fallbackNotPaymentVerdicts: () => (/* binding */ fallbackNotPaymentVerdicts),
 /* harmony export */   fallbackUnclearPaymentVerdicts: () => (/* binding */ fallbackUnclearPaymentVerdicts),
 /* harmony export */   getRecordStats: () => (/* binding */ getRecordStats),
+/* harmony export */   proofVisionOf: () => (/* binding */ proofVisionOf),
 /* harmony export */   setShadowDeps: () => (/* binding */ setShadowDeps),
 /* harmony export */   shadowTimeoutMs: () => (/* binding */ shadowTimeoutMs)
 /* harmony export */ });
@@ -95205,17 +96186,48 @@ async function analyzeImage(photoBuffer, ctx) {
         const blockReasons = proofBlockReasons(attempt.vision, ctx);
         if (blockReasons) {
             recordLocalMode(photoBuffer, ctx, attempt, 'block');
-            return { ...withVisionFacts(legacy, attempt.vision), proofBlocked: true, proofReasons: blockReasons };
+            return rememberProofVision({ ...withVisionFacts(legacy, attempt.vision), proofBlocked: true, proofReasons: blockReasons }, attempt.vision);
         }
         // An OCR pre-check reject (no readable text) carries error:true + the probe text and takes processImage's
         // "insufficient text" path.
         recordLocalMode(photoBuffer, ctx, attempt, (0,_vision_shadow_core__WEBPACK_IMPORTED_MODULE_7__.legacyWouldDecision)(attempt.legacy));
-        return withVisionFacts(legacy, attempt.vision);
+        return rememberProofVision(withVisionFacts(legacy, attempt.vision), attempt.vision);
     }
     // outage / error / timeout: report analysis unavailable so processImage holds the screenshot and re-checks it later
     // (never deleted, never counted invalid).
     recordLocalMode(photoBuffer, ctx, attempt, 'hold');
     return analysisUnavailableDetails(fallbackNotPaymentVerdicts(attempt.vision), fallbackUnclearPaymentVerdicts(attempt.vision));
+}
+/**
+ * The model's read the payment-proof review record needs (payments/proof-archive) and the legacy details do not carry,
+ * keyed by the analysed details object (processImage keeps that object to the end). Not on the details themselves, so
+ * no log line, ops card or hold record grows.
+ */
+const proofVision = new WeakMap();
+function proofVisionOf(details) {
+    return details ? proofVision.get(details) ?? null : null;
+}
+function rememberProofVision(details, vision) {
+    try {
+        const e = vision.extraction;
+        const auth = e?.authenticity ?? null;
+        proofVision.set(details, {
+            fullText: e?.fullText ?? '',
+            ocrText: e?.ocrText ?? '',
+            payerName: e?.payerName ?? null,
+            app: e?.app ?? null,
+            status: e?.status ?? null,
+            category: vision.category ?? null,
+            provider: e?.provider ?? null,
+            model: e?.model ?? null,
+            confidence: typeof e?.confidence === 'number' ? e.confidence : null,
+            timeRaw: e?.time?.raw ?? null,
+            fakeScore: typeof auth?.fakeScore === 'number' ? auth.fakeScore : null,
+            fakeSignals: Array.isArray(auth?.signals) ? [...auth.signals] : [],
+        });
+    }
+    catch { /* review facts only */ }
+    return details;
 }
 /**
  * The legacy details carry no UTR / payee VPA / unfolded note; the payment gate and the payee rules need them (duplicate and edited-screenshot checks).
@@ -105503,6 +106515,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _telegram_health_handlers__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ./telegram/health-handlers */ "./src/routes/telegram/health-handlers.ts");
 /* harmony import */ var _telegram_dialog_handlers__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ./telegram/dialog-handlers */ "./src/routes/telegram/dialog-handlers.ts");
 /* harmony import */ var _telegram_media_handlers__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ./telegram/media-handlers */ "./src/routes/telegram/media-handlers.ts");
+/* harmony import */ var _telegram_payment_proof_handlers__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ./telegram/payment-proof-handlers */ "./src/routes/telegram/payment-proof-handlers.ts");
+
 
 
 
@@ -105523,6 +106537,9 @@ router.get("/chat/:chatId/search", _http_middlewares_leader_middleware__WEBPACK_
 // Before /media/:chatId/:messageId, which would otherwise match /media/avatar/<id> as chatId "avatar".
 router.get("/media/avatar/:chatId", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_1__.leaderOnlyMiddleware, _telegram_media_handlers__WEBPACK_IMPORTED_MODULE_8__.handleAvatar);
 router.get("/media/:chatId/:messageId", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_1__.leaderOnlyMiddleware, _telegram_media_handlers__WEBPACK_IMPORTED_MODULE_8__.handleMedia);
+// Stored payment screenshots + their OCR sidecar (review screen; payments/proof-archive). x-api-key auth (app-wide).
+router.get("/payment-proofs/:proofId/image", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_1__.leaderOnlyMiddleware, _telegram_payment_proof_handlers__WEBPACK_IMPORTED_MODULE_9__.handlePaymentProofImage);
+router.get("/payment-proofs/:proofId/ocr", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_1__.leaderOnlyMiddleware, _telegram_payment_proof_handlers__WEBPACK_IMPORTED_MODULE_9__.handlePaymentProofOcr);
 router.get("/deletecallrequest/:chatId", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_1__.leaderOnlyMiddleware, _telegram_call_handlers__WEBPACK_IMPORTED_MODULE_3__.handleDeletecallrequest);
 router.get(["/calls/inhouse", "/calls/inhouse/:mode"], _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_1__.leaderOnlyMiddleware, _telegram_call_handlers__WEBPACK_IMPORTED_MODULE_3__.handleCallsInhouse);
 router.get("/calls/test", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_1__.leaderOnlyMiddleware, _telegram_call_handlers__WEBPACK_IMPORTED_MODULE_3__.handleTestCallInfo);
@@ -108338,6 +109355,136 @@ const handleMarkasread = async (req, res) => {
         }
     }
 };
+
+
+/***/ },
+
+/***/ "./src/routes/telegram/payment-proof-handlers.ts"
+/*!*******************************************************!*\
+  !*** ./src/routes/telegram/payment-proof-handlers.ts ***!
+  \*******************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   PROOF_BUSY_RETRY_AFTER_SECONDS: () => (/* binding */ PROOF_BUSY_RETRY_AFTER_SECONDS),
+/* harmony export */   PROOF_CACHE_CONTROL: () => (/* binding */ PROOF_CACHE_CONTROL),
+/* harmony export */   handlePaymentProofImage: () => (/* binding */ handlePaymentProofImage),
+/* harmony export */   handlePaymentProofOcr: () => (/* binding */ handlePaymentProofOcr)
+/* harmony export */ });
+/* harmony import */ var node_fs__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! node:fs */ "node:fs");
+/* harmony import */ var node_fs__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(node_fs__WEBPACK_IMPORTED_MODULE_0__);
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _http_api_response__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../../http/api-response */ "./src/http/api-response.ts");
+/* harmony import */ var _media_avatar_cache__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../../media/avatar-cache */ "./src/media/avatar-cache.ts");
+/* harmony import */ var _payments_proof_archive_store__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../../payments/proof-archive/store */ "./src/payments/proof-archive/store.ts");
+/* harmony import */ var _payments_proof_archive_thumb__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ../../payments/proof-archive/thumb */ "./src/payments/proof-archive/thumb.ts");
+/* harmony import */ var _payments_proof_archive_verdict__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ../../payments/proof-archive/verdict */ "./src/payments/proof-archive/verdict.ts");
+
+
+
+
+
+
+
+/**
+ * Stored payment proofs for the review screen (contract pay-review section 1 "HTTP"): the image (or its thumbnail)
+ * and the sidecar JSON, read from the VM's shared proof directory, so any client process on the VM serves any proof of
+ * a client on that VM. Auth is the app-wide x-api-key middleware (these paths are not in its ignore list).
+ */
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_1__.Logger("tg-aut:payment-proof-route");
+const PROOF_CACHE_CONTROL = "private, max-age=86400";
+/** Same shape as the /media guard: a few reads at once, a short queue, then 503 BUSY. */
+const MAX_CONCURRENT_READS = 2;
+const MAX_WAITING_READS = 8;
+/** Thumbnails decode synchronously: one at a time. */
+const MAX_CONCURRENT_THUMBS = 1;
+const PROOF_BUSY_RETRY_AFTER_SECONDS = 5;
+const readSlots = new _media_avatar_cache__WEBPACK_IMPORTED_MODULE_3__.ConcurrencyLimiter(MAX_CONCURRENT_READS, MAX_WAITING_READS);
+const thumbSlots = new _media_avatar_cache__WEBPACK_IMPORTED_MODULE_3__.ConcurrencyLimiter(MAX_CONCURRENT_THUMBS, MAX_WAITING_READS);
+function requestId(req) {
+    return req.requestId;
+}
+function abortSignalFor(res) {
+    const controller = new AbortController();
+    res.on?.("close", () => { if (!res.writableEnded)
+        controller.abort(); });
+    return controller.signal;
+}
+function sendBusy(res, req) {
+    res.setHeader("Retry-After", String(PROOF_BUSY_RETRY_AFTER_SECONDS));
+    (0,_http_api_response__WEBPACK_IMPORTED_MODULE_2__.sendError)(res, "Too many payment-proof reads waiting; retry shortly", 503, "BUSY", undefined, requestId(req));
+}
+function notFound(res, req) {
+    (0,_http_api_response__WEBPACK_IMPORTED_MODULE_2__.sendError)(res, "Payment proof not found", 404, "NOT_FOUND", undefined, requestId(req));
+}
+async function guarded(req, res, slots, work) {
+    try {
+        await slots.run(work, { signal: abortSignalFor(res) });
+    }
+    catch (error) {
+        if (error instanceof _media_avatar_cache__WEBPACK_IMPORTED_MODULE_3__.LimiterBusyError)
+            return sendBusy(res, req);
+        if (error instanceof _media_avatar_cache__WEBPACK_IMPORTED_MODULE_3__.LimiterAbortedError)
+            return;
+        logger.error(`[payment-proofs] ${req.path} failed: ${String(error?.message ?? error)}`);
+        (0,_http_api_response__WEBPACK_IMPORTED_MODULE_2__.sendError)(res, "Payment proof read failed", 500, "INTERNAL_ERROR", undefined, requestId(req));
+    }
+}
+/** GET /payment-proofs/:proofId/image[?thumb=1] */
+async function handlePaymentProofImage(req, res) {
+    const proofId = String(req.params.proofId ?? "");
+    if (!(0,_payments_proof_archive_verdict__WEBPACK_IMPORTED_MODULE_6__.parseProofId)(proofId)) {
+        (0,_http_api_response__WEBPACK_IMPORTED_MODULE_2__.sendError)(res, "Invalid proof id", 400, "VALIDATION_ERROR", undefined, requestId(req));
+        return;
+    }
+    const thumb = ["1", "true"].includes(String(req.query.thumb ?? ""));
+    await guarded(req, res, thumb ? thumbSlots : readSlots, async () => {
+        const files = await (0,_payments_proof_archive_store__WEBPACK_IMPORTED_MODULE_4__.findProofFiles)(proofId);
+        if (!files)
+            return notFound(res, req);
+        let body;
+        let mime = files.mime;
+        if (thumb) {
+            body = await (0,_payments_proof_archive_thumb__WEBPACK_IMPORTED_MODULE_5__.thumbFor)(files.imagePath).catch(() => null);
+            mime = "image/jpeg";
+            if (!body)
+                return notFound(res, req);
+        }
+        else {
+            body = await node_fs__WEBPACK_IMPORTED_MODULE_0__.promises.readFile(files.imagePath).catch(() => null);
+            if (!body)
+                return notFound(res, req); // swept between the lookup and the read
+        }
+        if (res.headersSent)
+            return;
+        res.setHeader("Content-Type", mime);
+        res.setHeader("Cache-Control", PROOF_CACHE_CONTROL);
+        res.setHeader("X-Content-Type-Options", "nosniff");
+        res.setHeader("Content-Length", String(body.length));
+        res.status(200).end(body);
+    });
+}
+/** GET /payment-proofs/:proofId/ocr: the sidecar JSON as stored. */
+async function handlePaymentProofOcr(req, res) {
+    const proofId = String(req.params.proofId ?? "");
+    if (!(0,_payments_proof_archive_verdict__WEBPACK_IMPORTED_MODULE_6__.parseProofId)(proofId)) {
+        (0,_http_api_response__WEBPACK_IMPORTED_MODULE_2__.sendError)(res, "Invalid proof id", 400, "VALIDATION_ERROR", undefined, requestId(req));
+        return;
+    }
+    await guarded(req, res, readSlots, async () => {
+        const files = await (0,_payments_proof_archive_store__WEBPACK_IMPORTED_MODULE_4__.findProofFiles)(proofId);
+        const raw = files ? await node_fs__WEBPACK_IMPORTED_MODULE_0__.promises.readFile(files.jsonPath, "utf8").catch(() => null) : null;
+        if (!raw)
+            return notFound(res, req);
+        if (res.headersSent)
+            return;
+        res.setHeader("Content-Type", "application/json; charset=utf-8");
+        res.setHeader("Cache-Control", PROOF_CACHE_CONTROL);
+        res.status(200).end(raw);
+    });
+}
 
 
 /***/ },
