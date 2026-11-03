@@ -1148,6 +1148,7 @@ const collection_insights_module_1 = __webpack_require__(/*! ./components/collec
 const daily_analytics_module_1 = __webpack_require__(/*! ./components/daily-analytics/daily-analytics.module */ "./src/components/daily-analytics/daily-analytics.module.ts");
 const monitor_module_1 = __webpack_require__(/*! ./components/monitor/monitor.module */ "./src/components/monitor/monitor.module.ts");
 const fake_payment_module_1 = __webpack_require__(/*! ./components/fake-payment/fake-payment.module */ "./src/components/fake-payment/fake-payment.module.ts");
+const payment_proofs_module_1 = __webpack_require__(/*! ./components/payment-proofs/payment-proofs.module */ "./src/components/payment-proofs/payment-proofs.module.ts");
 const file_module_1 = __webpack_require__(/*! ./components/files/file.module */ "./src/components/files/file.module.ts");
 const app_service_1 = __webpack_require__(/*! ./app.service */ "./src/app.service.ts");
 const runtime_config_service_1 = __webpack_require__(/*! ./control-plane/config/runtime-config.service */ "./src/control-plane/config/runtime-config.service.ts");
@@ -1184,6 +1185,7 @@ exports.AppModule = AppModule = __decorate([
             daily_analytics_module_1.DailyAnalyticsModule,
             monitor_module_1.MonitorModule,
             fake_payment_module_1.FakePaymentModule,
+            payment_proofs_module_1.PaymentProofsModule,
             stat_module_1.StatModule,
             stat2_module_1.Stat2Module,
             tg_signup_module_1.TgSignupModule,
@@ -40865,6 +40867,545 @@ exports.MonitorService = MonitorService = MonitorService_1 = __decorate([
     __metadata("design:paramtypes", [analytics_pg_reader_1.AnalyticsPgReader,
         mongoose_2.Connection, Object])
 ], MonitorService);
+
+
+/***/ },
+
+/***/ "./src/components/payment-proofs/payment-proofs.classify.ts"
+/*!******************************************************************!*\
+  !*** ./src/components/payment-proofs/payment-proofs.classify.ts ***!
+  \******************************************************************/
+(__unused_webpack_module, exports) {
+
+
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.FLAGGED_OUTCOMES = exports.REVIEW_CREDITED_AMOUNT = exports.REVIEW_FAKE_SCORE = exports.PROOF_STATES = void 0;
+exports.proofIdOf = proofIdOf;
+exports.parseProofId = parseProofId;
+exports.deriveLegacyOutcome = deriveLegacyOutcome;
+exports.classify = classify;
+exports.inState = inState;
+exports.emptyCounts = emptyCounts;
+exports.addToCounts = addToCounts;
+exports.encodeCursor = encodeCursor;
+exports.decodeCursor = decodeCursor;
+exports.isAfterCursor = isAfterCursor;
+exports.PROOF_STATES = ['review', 'flagged', 'not_credited', 'credited', 'marked', 'reviewed', 'all'];
+exports.REVIEW_FAKE_SCORE = 40;
+exports.REVIEW_CREDITED_AMOUNT = 300;
+exports.FLAGGED_OUTCOMES = new Set(['fraud_ask', 'fake_blocked', 'cross_client']);
+function proofIdOf(row) {
+    if (typeof row.proofId === 'string' && row.proofId)
+        return row.proofId;
+    return `${row.clientId}-${row.chatId}-${row.telegramMsgId}`;
+}
+function parseProofId(proofId) {
+    if (typeof proofId !== 'string' || proofId.length > 120)
+        return null;
+    const m = /^([A-Za-z0-9_.]+?)-(-?\d{1,20})-(\d{1,12})$/.exec(proofId.trim());
+    if (!m)
+        return null;
+    return { clientId: m[1], chatId: m[2], telegramMsgId: Number(m[3]) };
+}
+function deriveLegacyOutcome(row) {
+    if (row.servedAt)
+        return 'credited';
+    const ask = row.ask;
+    if (ask?.kind === 'fraud')
+        return ask.blockedAt ? 'fake_blocked' : 'fraud_ask';
+    if (ask?.kind === 'old_time')
+        return 'old_time';
+    switch (row.decision) {
+        case 'REJECT_DUPLICATE': return 'repeat';
+        case 'BLOCK': return 'fake_blocked';
+        case 'ASK_PROOF': return 'fraud_ask';
+        default: return 'other';
+    }
+}
+function strings(v) {
+    return Array.isArray(v) ? v.filter((x) => typeof x === 'string' && x.length > 0) : [];
+}
+function num(v) {
+    return typeof v === 'number' && Number.isFinite(v) ? v : null;
+}
+function classify(row) {
+    const verdict = row.verdict && typeof row.verdict === 'object' ? row.verdict : null;
+    const legacy = !verdict || typeof verdict.outcome !== 'string' || !verdict.outcome;
+    const outcome = legacy ? deriveLegacyOutcome(row) : verdict.outcome;
+    const reasons = legacy
+        ? [...new Set([...strings(row.reasons), ...strings(row.ask?.reasons)])]
+        : strings(verdict.reasons);
+    const fakeScore = legacy ? null : num(verdict.fakeScore);
+    const amount = num(row.creditAmount) ?? num(row.amount);
+    const credited = outcome === 'credited';
+    const reviewed = row.review?.state === 'ok';
+    const needsLook = !credited || (fakeScore !== null && fakeScore >= exports.REVIEW_FAKE_SCORE) || reasons.length > 0;
+    const bigCredit = credited && amount !== null && amount >= exports.REVIEW_CREDITED_AMOUNT;
+    return {
+        proofId: proofIdOf(row),
+        outcome,
+        legacy,
+        reasons,
+        fakeScore,
+        amount,
+        reviewed,
+        review: !reviewed && (needsLook || bigCredit),
+        flagged: exports.FLAGGED_OUTCOMES.has(outcome),
+        credited,
+    };
+}
+function inState(c, marked, state) {
+    switch (state) {
+        case 'review': return c.review;
+        case 'flagged': return c.flagged;
+        case 'not_credited': return !c.credited;
+        case 'credited': return c.credited;
+        case 'marked': return marked;
+        case 'reviewed': return c.reviewed;
+        case 'all': return true;
+    }
+}
+function emptyCounts() {
+    return { review: 0, flagged: 0, not_credited: 0, credited: 0, marked: 0, reviewed: 0, all: 0 };
+}
+function addToCounts(counts, c, marked) {
+    for (const s of exports.PROOF_STATES)
+        if (inState(c, marked, s))
+            counts[s]++;
+}
+function encodeCursor(c) {
+    return Buffer.from(JSON.stringify(c), 'utf8').toString('base64url');
+}
+function decodeCursor(raw) {
+    if (typeof raw !== 'string' || !raw || raw.length > 200)
+        return null;
+    try {
+        const v = JSON.parse(Buffer.from(raw, 'base64url').toString('utf8'));
+        if (v && typeof v.t === 'number' && Number.isFinite(v.t) && typeof v.id === 'string' && /^[0-9a-f]{24}$/i.test(v.id)) {
+            return { t: v.t, id: v.id.toLowerCase() };
+        }
+    }
+    catch { }
+    return null;
+}
+function isAfterCursor(t, id, cursor) {
+    return t < cursor.t || (t === cursor.t && id < cursor.id);
+}
+
+
+/***/ },
+
+/***/ "./src/components/payment-proofs/payment-proofs.controller.ts"
+/*!********************************************************************!*\
+  !*** ./src/components/payment-proofs/payment-proofs.controller.ts ***!
+  \********************************************************************/
+(__unused_webpack_module, exports, __webpack_require__) {
+
+
+var __decorate = (this && this.__decorate) || function (decorators, target, key, desc) {
+    var c = arguments.length, r = c < 3 ? target : desc === null ? desc = Object.getOwnPropertyDescriptor(target, key) : desc, d;
+    if (typeof Reflect === "object" && typeof Reflect.decorate === "function") r = Reflect.decorate(decorators, target, key, desc);
+    else for (var i = decorators.length - 1; i >= 0; i--) if (d = decorators[i]) r = (c < 3 ? d(r) : c > 3 ? d(target, key, r) : d(target, key)) || r;
+    return c > 3 && r && Object.defineProperty(target, key, r), r;
+};
+var __metadata = (this && this.__metadata) || function (k, v) {
+    if (typeof Reflect === "object" && typeof Reflect.metadata === "function") return Reflect.metadata(k, v);
+};
+var __param = (this && this.__param) || function (paramIndex, decorator) {
+    return function (target, key) { decorator(target, key, paramIndex); }
+};
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.PaymentProofsController = void 0;
+const common_1 = __webpack_require__(/*! @nestjs/common */ "@nestjs/common");
+const swagger_1 = __webpack_require__(/*! @nestjs/swagger */ "@nestjs/swagger");
+const payment_proofs_classify_1 = __webpack_require__(/*! ./payment-proofs.classify */ "./src/components/payment-proofs/payment-proofs.classify.ts");
+const payment_proofs_service_1 = __webpack_require__(/*! ./payment-proofs.service */ "./src/components/payment-proofs/payment-proofs.service.ts");
+let PaymentProofsController = class PaymentProofsController {
+    constructor(service) {
+        this.service = service;
+    }
+    list(query) {
+        return this.service.list(query ?? {});
+    }
+    review(proofId, body) {
+        return this.service.review(proofId, body ?? {});
+    }
+};
+exports.PaymentProofsController = PaymentProofsController;
+__decorate([
+    (0, common_1.Get)(),
+    (0, swagger_1.ApiOperation)({
+        summary: 'Payment screenshots for review: filtered, cursor-paged, with counts per state and userData/client join',
+        description: 'review = not reviewed AND (outcome != credited OR fakeScore >= 40 OR reasons non-empty), plus every unreviewed credited proof >= ₹300; ' +
+            'flagged = outcome fraud_ask|fake_blocked|cross_client; marked = chat has userData.fakePaymentAt; reviewed = review.state ok. ' +
+            'Rows without verdict (before tg-aut wrote one) get an outcome derived from servedAt / ask / decision (legacy: true). ' +
+            'Items are newest first; counts cover since/client/minAmount (not state/cursor).',
+    }),
+    (0, swagger_1.ApiQuery)({ name: 'since', required: false, description: 'ISO date; default now - 7 days (the TTL)' }),
+    (0, swagger_1.ApiQuery)({ name: 'client', required: false, description: 'clientId' }),
+    (0, swagger_1.ApiQuery)({ name: 'state', required: false, enum: payment_proofs_classify_1.PROOF_STATES, description: 'default review' }),
+    (0, swagger_1.ApiQuery)({ name: 'minAmount', required: false, description: 'creditAmount (else amount read) >= n' }),
+    (0, swagger_1.ApiQuery)({ name: 'limit', required: false, description: `default 50, max ${payment_proofs_service_1.MAX_LIMIT}` }),
+    (0, swagger_1.ApiQuery)({ name: 'cursor', required: false, description: 'nextCursor from the previous page' }),
+    __param(0, (0, common_1.Query)()),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [Object]),
+    __metadata("design:returntype", void 0)
+], PaymentProofsController.prototype, "list", null);
+__decorate([
+    (0, common_1.Post)(':proofId/review'),
+    (0, common_1.HttpCode)(200),
+    (0, swagger_1.ApiOperation)({ summary: "Set (state 'ok') or clear the operator review of one proof (idempotent)" }),
+    (0, swagger_1.ApiParam)({ name: 'proofId', description: '<clientId>-<chatId>-<telegramMsgId>' }),
+    (0, swagger_1.ApiBody)({ schema: { type: 'object', required: ['state'], properties: { state: { type: 'string', enum: ['ok', 'clear'] }, by: { type: 'string', description: "required for 'ok'" } } } }),
+    __param(0, (0, common_1.Param)('proofId')),
+    __param(1, (0, common_1.Body)()),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [String, Object]),
+    __metadata("design:returntype", void 0)
+], PaymentProofsController.prototype, "review", null);
+exports.PaymentProofsController = PaymentProofsController = __decorate([
+    (0, swagger_1.ApiTags)('payment-proofs'),
+    (0, common_1.Controller)('payment-proofs'),
+    __metadata("design:paramtypes", [payment_proofs_service_1.PaymentProofsService])
+], PaymentProofsController);
+
+
+/***/ },
+
+/***/ "./src/components/payment-proofs/payment-proofs.module.ts"
+/*!****************************************************************!*\
+  !*** ./src/components/payment-proofs/payment-proofs.module.ts ***!
+  \****************************************************************/
+(__unused_webpack_module, exports, __webpack_require__) {
+
+
+var __decorate = (this && this.__decorate) || function (decorators, target, key, desc) {
+    var c = arguments.length, r = c < 3 ? target : desc === null ? desc = Object.getOwnPropertyDescriptor(target, key) : desc, d;
+    if (typeof Reflect === "object" && typeof Reflect.decorate === "function") r = Reflect.decorate(decorators, target, key, desc);
+    else for (var i = decorators.length - 1; i >= 0; i--) if (d = decorators[i]) r = (c < 3 ? d(r) : c > 3 ? d(target, key, r) : d(target, key)) || r;
+    return c > 3 && r && Object.defineProperty(target, key, r), r;
+};
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.PaymentProofsModule = void 0;
+const common_1 = __webpack_require__(/*! @nestjs/common */ "@nestjs/common");
+const mongoose_1 = __webpack_require__(/*! @nestjs/mongoose */ "@nestjs/mongoose");
+const user_data_schema_1 = __webpack_require__(/*! ../user-data/schemas/user-data.schema */ "./src/components/user-data/schemas/user-data.schema.ts");
+const payment_proof_schema_1 = __webpack_require__(/*! ./schemas/payment-proof.schema */ "./src/components/payment-proofs/schemas/payment-proof.schema.ts");
+const payment_proofs_controller_1 = __webpack_require__(/*! ./payment-proofs.controller */ "./src/components/payment-proofs/payment-proofs.controller.ts");
+const payment_proofs_service_1 = __webpack_require__(/*! ./payment-proofs.service */ "./src/components/payment-proofs/payment-proofs.service.ts");
+let PaymentProofsModule = class PaymentProofsModule {
+};
+exports.PaymentProofsModule = PaymentProofsModule;
+exports.PaymentProofsModule = PaymentProofsModule = __decorate([
+    (0, common_1.Module)({
+        imports: [
+            mongoose_1.MongooseModule.forFeature([
+                { name: payment_proof_schema_1.PAYMENT_PROOF_MODEL, schema: payment_proof_schema_1.PaymentProofSchema, collection: payment_proof_schema_1.PAYMENT_PROOF_COLLECTION },
+                { name: user_data_schema_1.UserData.name, schema: user_data_schema_1.UserDataSchema, collection: 'userData' },
+            ]),
+        ],
+        controllers: [payment_proofs_controller_1.PaymentProofsController],
+        providers: [payment_proofs_service_1.PaymentProofsService],
+    })
+], PaymentProofsModule);
+
+
+/***/ },
+
+/***/ "./src/components/payment-proofs/payment-proofs.service.ts"
+/*!*****************************************************************!*\
+  !*** ./src/components/payment-proofs/payment-proofs.service.ts ***!
+  \*****************************************************************/
+(__unused_webpack_module, exports, __webpack_require__) {
+
+
+var __decorate = (this && this.__decorate) || function (decorators, target, key, desc) {
+    var c = arguments.length, r = c < 3 ? target : desc === null ? desc = Object.getOwnPropertyDescriptor(target, key) : desc, d;
+    if (typeof Reflect === "object" && typeof Reflect.decorate === "function") r = Reflect.decorate(decorators, target, key, desc);
+    else for (var i = decorators.length - 1; i >= 0; i--) if (d = decorators[i]) r = (c < 3 ? d(r) : c > 3 ? d(target, key, r) : d(target, key)) || r;
+    return c > 3 && r && Object.defineProperty(target, key, r), r;
+};
+var __metadata = (this && this.__metadata) || function (k, v) {
+    if (typeof Reflect === "object" && typeof Reflect.metadata === "function") return Reflect.metadata(k, v);
+};
+var __param = (this && this.__param) || function (paramIndex, decorator) {
+    return function (target, key) { decorator(target, key, paramIndex); }
+};
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.PaymentProofsService = exports.MAX_WINDOW_ROWS = exports.DEFAULT_WINDOW_MS = exports.MAX_LIMIT = exports.DEFAULT_LIMIT = void 0;
+const common_1 = __webpack_require__(/*! @nestjs/common */ "@nestjs/common");
+const mongoose_1 = __webpack_require__(/*! @nestjs/mongoose */ "@nestjs/mongoose");
+const mongoose_2 = __webpack_require__(/*! mongoose */ "mongoose");
+const user_data_schema_1 = __webpack_require__(/*! ../user-data/schemas/user-data.schema */ "./src/components/user-data/schemas/user-data.schema.ts");
+const payment_proof_schema_1 = __webpack_require__(/*! ./schemas/payment-proof.schema */ "./src/components/payment-proofs/schemas/payment-proof.schema.ts");
+const payment_proofs_classify_1 = __webpack_require__(/*! ./payment-proofs.classify */ "./src/components/payment-proofs/payment-proofs.classify.ts");
+exports.DEFAULT_LIMIT = 50;
+exports.MAX_LIMIT = 100;
+exports.DEFAULT_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+exports.MAX_WINDOW_ROWS = 20_000;
+const USERDATA_IN_CHUNK = 1_000;
+const CLIENT_HOST_TTL_MS = 5 * 60 * 1000;
+const CLIENT_ID_RE = /^[A-Za-z0-9_.-]{1,40}$/;
+const MAX_BY = 60;
+const ROW_PROJECTION = { shadow: 0, imageHash: 0, servedUtr: 0, servedSha: 0 };
+const CLASSIFY_PROJECTION = {
+    _id: 1, chatId: 1, profile: 1, clientId: 1, telegramMsgId: 1, createdAt: 1, amount: 1, creditAmount: 1, decision: 1,
+    reasons: 1, servedAt: 1, 'ask.kind': 1, 'ask.blockedAt': 1, 'ask.reasons': 1, proofId: 1,
+    'verdict.outcome': 1, 'verdict.reasons': 1, 'verdict.fakeScore': 1, 'review.state': 1,
+};
+let PaymentProofsService = class PaymentProofsService {
+    constructor(proofModel, userDataModel) {
+        this.proofModel = proofModel;
+        this.userDataModel = userDataModel;
+        this.clientHosts = null;
+    }
+    parseQuery(q, now = Date.now()) {
+        let since = now - exports.DEFAULT_WINDOW_MS;
+        if (q.since !== undefined && q.since !== '') {
+            const t = Date.parse(String(q.since));
+            if (!Number.isFinite(t))
+                throw new common_1.BadRequestException('since must be an ISO date');
+            since = t;
+        }
+        let client;
+        if (q.client !== undefined && q.client !== '') {
+            if (!CLIENT_ID_RE.test(String(q.client)))
+                throw new common_1.BadRequestException('client must be a clientId');
+            client = String(q.client);
+        }
+        const state = (q.state === undefined || q.state === '' ? 'review' : String(q.state));
+        if (!payment_proofs_classify_1.PROOF_STATES.includes(state))
+            throw new common_1.BadRequestException(`state must be one of ${payment_proofs_classify_1.PROOF_STATES.join('|')}`);
+        let minAmount = null;
+        if (q.minAmount !== undefined && q.minAmount !== '') {
+            minAmount = Number(q.minAmount);
+            if (!Number.isFinite(minAmount) || minAmount < 0)
+                throw new common_1.BadRequestException('minAmount must be a number >= 0');
+        }
+        let limit = exports.DEFAULT_LIMIT;
+        if (q.limit !== undefined && q.limit !== '') {
+            limit = Number(q.limit);
+            if (!Number.isInteger(limit) || limit < 1)
+                throw new common_1.BadRequestException('limit must be an integer >= 1');
+            limit = Math.min(limit, exports.MAX_LIMIT);
+        }
+        let cursor = null;
+        if (q.cursor !== undefined && q.cursor !== '') {
+            cursor = (0, payment_proofs_classify_1.decodeCursor)(q.cursor);
+            if (!cursor)
+                throw new common_1.BadRequestException('invalid cursor');
+        }
+        return { since, client, state, minAmount, limit, cursor };
+    }
+    async list(q, now = Date.now()) {
+        const p = this.parseQuery(q, now);
+        const filter = { createdAt: { $gte: new Date(p.since) } };
+        if (p.client)
+            filter.clientId = p.client;
+        const rows = await this.proofModel
+            .find(filter, CLASSIFY_PROJECTION)
+            .sort({ createdAt: -1, _id: -1 })
+            .limit(exports.MAX_WINDOW_ROWS + 1)
+            .lean()
+            .exec();
+        const truncated = rows.length > exports.MAX_WINDOW_ROWS;
+        if (truncated)
+            rows.length = exports.MAX_WINDOW_ROWS;
+        const classified = [];
+        for (const row of rows) {
+            const c = (0, payment_proofs_classify_1.classify)(row);
+            if (p.minAmount !== null && (c.amount === null || c.amount < p.minAmount))
+                continue;
+            classified.push({ row, c });
+        }
+        const chats = await this.chatInfo([...new Set(classified.map((x) => String(x.row.chatId)))]);
+        const counts = (0, payment_proofs_classify_1.emptyCounts)();
+        const page = [];
+        let more = false;
+        for (const x of classified) {
+            const marked = !!chats.get(String(x.row.chatId))?.marked;
+            (0, payment_proofs_classify_1.addToCounts)(counts, x.c, marked);
+            if (more || !(0, payment_proofs_classify_1.inState)(x.c, marked, p.state))
+                continue;
+            const t = new Date(x.row.createdAt).getTime();
+            if (p.cursor && !(0, payment_proofs_classify_1.isAfterCursor)(t, String(x.row._id), p.cursor))
+                continue;
+            if (page.length < p.limit)
+                page.push({ ...x, marked });
+            else
+                more = true;
+        }
+        const hosts = page.length ? await this.clientHostMap(now) : new Map();
+        const full = new Map();
+        if (page.length) {
+            const docs = await this.proofModel
+                .find({ _id: { $in: page.map((x) => x.row._id) } }, ROW_PROJECTION)
+                .lean()
+                .exec();
+            for (const d of docs)
+                full.set(String(d._id), d);
+        }
+        const items = page.map(({ row: slim, c }) => {
+            const row = full.get(String(slim._id)) ?? slim;
+            const chat = chats.get(String(row.chatId));
+            const ud = chat?.rows.get(String(row.profile));
+            return {
+                ...row,
+                _id: String(row._id),
+                proofId: c.proofId,
+                outcome: c.outcome,
+                legacy: c.legacy,
+                reasons: c.reasons,
+                fakeScore: c.fakeScore,
+                amountValue: c.amount,
+                inReview: c.review,
+                flagged: c.flagged,
+                persona: ud?.profile ?? row.profile,
+                username: ud?.username || null,
+                complaintScore: typeof ud?.cheatCount === 'number' ? ud.cheatCount : null,
+                fakePaymentAt: chat?.fakePaymentAt ?? null,
+                clientHost: hosts.get(String(row.clientId)) ?? null,
+            };
+        });
+        const last = page[page.length - 1];
+        const nextCursor = more && last
+            ? (0, payment_proofs_classify_1.encodeCursor)({ t: new Date(last.row.createdAt).getTime(), id: String(last.row._id) })
+            : null;
+        return { items, nextCursor, counts, truncated };
+    }
+    async chatInfo(chatIds) {
+        const out = new Map();
+        for (let i = 0; i < chatIds.length; i += USERDATA_IN_CHUNK) {
+            const chunk = chatIds.slice(i, i + USERDATA_IN_CHUNK);
+            const docs = await this.userDataModel
+                .find({ chatId: { $in: chunk } }, { _id: 0, chatId: 1, profile: 1, username: 1, cheatCount: 1, fakePaymentAt: 1 })
+                .lean()
+                .exec();
+            for (const d of docs) {
+                const key = String(d.chatId);
+                let e = out.get(key);
+                if (!e) {
+                    e = { rows: new Map(), marked: false, fakePaymentAt: null };
+                    out.set(key, e);
+                }
+                e.rows.set(String(d.profile), d);
+                if (d.fakePaymentAt) {
+                    e.marked = true;
+                    const at = new Date(d.fakePaymentAt);
+                    if (!e.fakePaymentAt || at < e.fakePaymentAt)
+                        e.fakePaymentAt = at;
+                }
+            }
+        }
+        return out;
+    }
+    async clientHostMap(now) {
+        if (this.clientHosts && now - this.clientHosts.at < CLIENT_HOST_TTL_MS)
+            return this.clientHosts.map;
+        const docs = await this.proofModel.db.collection('clients')
+            .find({}, { projection: { _id: 0, clientId: 1, repl: 1 } })
+            .toArray();
+        const map = new Map();
+        for (const d of docs)
+            if (typeof d.clientId === 'string' && typeof d.repl === 'string' && d.repl)
+                map.set(d.clientId, d.repl);
+        this.clientHosts = { at: now, map };
+        return map;
+    }
+    async review(proofId, body, now = new Date()) {
+        const key = (0, payment_proofs_classify_1.parseProofId)(proofId);
+        if (!key)
+            throw new common_1.BadRequestException('proofId must be <clientId>-<chatId>-<telegramMsgId>');
+        const state = body?.state;
+        if (state !== 'ok' && state !== 'clear')
+            throw new common_1.BadRequestException("state must be 'ok' or 'clear'");
+        const by = typeof body?.by === 'string' ? body.by.trim().slice(0, MAX_BY) : '';
+        if (state === 'ok' && !by)
+            throw new common_1.BadRequestException('by is required');
+        const filter = { chatId: key.chatId, clientId: key.clientId, telegramMsgId: key.telegramMsgId };
+        const review = state === 'ok' ? { state: 'ok', by, at: now } : null;
+        const update = review ? { $set: { review } } : { $unset: { review: 1 } };
+        const res = await this.proofModel.updateOne(filter, update).exec();
+        if (!res.matchedCount)
+            throw new common_1.NotFoundException('payment proof not found (gone after the 7-day TTL?)');
+        return { proofId, review };
+    }
+};
+exports.PaymentProofsService = PaymentProofsService;
+exports.PaymentProofsService = PaymentProofsService = __decorate([
+    (0, common_1.Injectable)(),
+    __param(0, (0, mongoose_1.InjectModel)(payment_proof_schema_1.PAYMENT_PROOF_MODEL)),
+    __param(1, (0, mongoose_1.InjectModel)(user_data_schema_1.UserData.name)),
+    __metadata("design:paramtypes", [mongoose_2.Model,
+        mongoose_2.Model])
+], PaymentProofsService);
+
+
+/***/ },
+
+/***/ "./src/components/payment-proofs/schemas/payment-proof.schema.ts"
+/*!***********************************************************************!*\
+  !*** ./src/components/payment-proofs/schemas/payment-proof.schema.ts ***!
+  \***********************************************************************/
+(__unused_webpack_module, exports, __webpack_require__) {
+
+
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.PaymentProofSchema = exports.PAYMENT_PROOF_MODEL = exports.PAYMENT_PROOF_COLLECTION = void 0;
+const mongoose = __importStar(__webpack_require__(/*! mongoose */ "mongoose"));
+exports.PAYMENT_PROOF_COLLECTION = 'paymentProofs';
+exports.PAYMENT_PROOF_MODEL = 'PaymentProof';
+exports.PaymentProofSchema = new mongoose.Schema({
+    chatId: String,
+    profile: String,
+    clientId: String,
+    telegramMsgId: Number,
+    createdAt: Date,
+    proofId: String,
+    review: mongoose.Schema.Types.Mixed,
+}, {
+    collection: exports.PAYMENT_PROOF_COLLECTION,
+    strict: false,
+    versionKey: false,
+    autoIndex: false,
+    autoCreate: false,
+    timestamps: false,
+    _id: true,
+});
 
 
 /***/ },
