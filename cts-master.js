@@ -25988,6 +25988,9 @@ let ClientController = class ClientController {
     async findOneMasked(clientId) {
         return await this.clientService.findOneMasked(clientId);
     }
+    async findDirectory() {
+        return await this.clientService.findDirectory();
+    }
     async findAll() {
         return await this.clientService.findAll();
     }
@@ -26063,6 +26066,16 @@ __decorate([
     __metadata("design:paramtypes", [String]),
     __metadata("design:returntype", Promise)
 ], ClientController.prototype, "findOneMasked", null);
+__decorate([
+    (0, common_1.Get)('directory'),
+    (0, common_1.UseInterceptors)(interceptors_1.CloudflareCacheInterceptor),
+    (0, decorators_1.NoCache)(),
+    (0, swagger_1.ApiOperation)({ summary: 'Client directory for tg-chats: clientId, full mobile, last swap time only' }),
+    (0, swagger_1.ApiOkResponse)({ description: '{ items: [{ clientId, mobile, lastSwapAt }] } sorted by clientId' }),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", []),
+    __metadata("design:returntype", Promise)
+], ClientController.prototype, "findDirectory", null);
 __decorate([
     (0, common_1.Get)(),
     (0, common_1.UseInterceptors)(interceptors_1.CloudflareCacheInterceptor),
@@ -26317,6 +26330,7 @@ let ClientService = ClientService_1 = class ClientService {
         this.isInitialized = false;
         this.isShuttingDown = false;
         this.refreshPromise = null;
+        this.directoryCache = null;
     }
     async onModuleInit() {
         try {
@@ -26442,6 +26456,30 @@ let ClientService = ClientService_1 = class ClientService {
     async findAllMasked() {
         const clients = await this.findAll();
         return clients.map(({ session, mobile, password, degraded, swapRetry, deadMain, swapLease, swappedAt, sessionChangedAt, ...maskedClient }) => maskedClient);
+    }
+    async findDirectory() {
+        const now = Date.now();
+        if (this.directoryCache && now - this.directoryCache.at < ClientService_1.DIRECTORY_CACHE_MS) {
+            return this.directoryCache.value;
+        }
+        const rows = await this.clientModel
+            .find({}, { _id: 0, clientId: 1, mobile: 1, swappedAt: 1 })
+            .sort({ clientId: 1 })
+            .lean()
+            .exec();
+        const items = rows
+            .map((r) => {
+            const t = r.swappedAt ? new Date(r.swappedAt) : null;
+            return {
+                clientId: String(r.clientId),
+                mobile: r.mobile ? String(r.mobile) : null,
+                lastSwapAt: t && !Number.isNaN(t.getTime()) ? t.toISOString() : null,
+            };
+        })
+            .sort((a, b) => (a.clientId < b.clientId ? -1 : a.clientId > b.clientId ? 1 : 0));
+        const value = { items };
+        this.directoryCache = { at: now, value };
+        return value;
     }
     async findOneMasked(clientId) {
         const client = await this.findOne(clientId, true);
@@ -28338,6 +28376,7 @@ let ClientService = ClientService_1 = class ClientService {
     }
 };
 exports.ClientService = ClientService;
+ClientService.DIRECTORY_CACHE_MS = 30_000;
 exports.ClientService = ClientService = ClientService_1 = __decorate([
     (0, common_1.Injectable)(),
     __param(0, (0, mongoose_1.InjectModel)(client_schema_1.Client.name)),
