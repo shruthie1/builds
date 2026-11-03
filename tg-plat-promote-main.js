@@ -28037,9 +28037,14 @@ __webpack_require__.r(__webpack_exports__);
  * `paymentProofs`: one small row per analysed payment screenshot, used only for fraud lookups
  * (cross-chat UTR reuse, near-duplicate images). Design: docs/design/2026-10-10-tg-vision-payment-proof.md section 7.
  *
- * Not stored (PII / size): image bytes, OCR text, payer and payee names. Budget is about 30 MB, so
- * rows stay ~500 B and the TTL index (7 days) is what keeps the collection bounded.
+ * Not stored here (size): image bytes and the full OCR text; those live on the VM disk (tg-aut payments/proof-archive,
+ * owner scope 2026-11-03). Rows carry short review fields (`proofId`, `verdict`, `image`, `ocr`, about 0.5 KB more) and
+ * the TTL index (7 days) is what keeps the collection bounded.
  * Never write rows before ensureIndexes() has created the TTL index (registered in ensureAllIndexes).
+ *
+ * `mode: 'record'` rows are written only for the review screen (recordReview: a screenshot the proof gate wrote no row
+ * for, e.g. not ours / not a receipt / over the credit limit). The gate's reads (recentForChat, findReuse) skip them, so
+ * the gate sees exactly the rows it saw before they existed; insert() upgrades one to the gate's row.
  */
 const PAYMENT_PROOF_TTL_SECONDS = 7 * 24 * 60 * 60; // 604_800 (was 45 days; see ensureTtlIndex migration)
 const PAYMENT_PROOF_TTL_INDEX = 'createdAt_ttl';
@@ -28048,6 +28053,10 @@ const PAYMENT_PROOF_MAX_REASONS = 6;
 const NEAR_HASH_SCAN_LIMIT = 200;
 /** Default Hamming radius (of 256 bits) for "same image, re-encoded". */
 const NEAR_HASH_MAX_DISTANCE = 4;
+/** Not one of the gate's rows: the gate's reads skip it. */
+const NOT_RECORD_ONLY = { mode: { $ne: 'record' } };
+/** The review fields recordReview sets (always $set: they describe the final outcome). */
+const REVIEW_FIELDS = ['proofId', 'verdict', 'image', 'ocr'];
 /** Served rows scanned for a near picture (any chat). ~200 credits/day fleet-wide, so this covers a few days. */
 const SERVED_NEAR_SCAN_LIMIT = 600;
 /** The near-picture scan gives up after this (the exact UTR / file lookups still answer). */
@@ -28108,15 +28117,79 @@ class PaymentProofsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_
         delete doc.servedUtr;
         delete doc.servedSha;
         delete doc.creditAmount; // credit state too: only markServed writes it (at the credit decision)
+        for (const k of REVIEW_FIELDS)
+            delete doc[k]; // review fields: recordReview only
+        const key = { chatId, profile: input.profile, telegramMsgId: input.telegramMsgId };
         return this.guardWrite(`insert(${chatId})`, async () => {
+            let upserted = false;
             try {
-                await this.collection.updateOne({ chatId, profile: input.profile, telegramMsgId: input.telegramMsgId }, { $setOnInsert: doc }, { upsert: true });
+                const res = await this.collection.updateOne(key, { $setOnInsert: doc }, { upsert: true });
+                upserted = (res?.upsertedCount ?? 0) > 0;
             }
             catch (error) {
                 // A concurrent insert of the same screenshot won the unique key: the row exists, which is the goal.
                 if (!isDuplicateKey(error))
                     throw error;
             }
+            // A review-only row of this screenshot exists (it was judged before, e.g. re-processed after a restart):
+            // it becomes the gate's row. createdAt stays (TTL from the first sight).
+            if (!upserted && doc.mode !== 'record') {
+                const gateFields = { ...doc };
+                delete gateFields.createdAt;
+                await this.collection.updateOne({ ...key, mode: 'record' }, { $set: gateFields });
+            }
+        });
+    }
+    /**
+     * The review fields of one screenshot (`proofId`, `verdict`, `image`, `ocr`): set on the gate's row when it exists,
+     * else a review-only row (mode 'record') is created from the other fields of `input`. Idempotent per screenshot;
+     * the last call's review fields win. Never touches served / ask state.
+     */
+    async recordReview(input) {
+        const chatId = String(input.chatId || '').trim();
+        if (!chatId || !input.profile || !input.proofId)
+            return false;
+        const review = {};
+        const base = {};
+        for (const [k, v] of Object.entries(input)) {
+            if (v === undefined || v === null || k === '_id')
+                continue;
+            if (REVIEW_FIELDS.includes(k))
+                review[k] = v;
+            else
+                base[k] = v;
+        }
+        base.chatId = chatId;
+        base.mode = 'record';
+        base.reasons = (input.reasons ?? []).slice(0, PAYMENT_PROOF_MAX_REASONS);
+        base.createdAt = input.createdAt ?? new Date();
+        if (typeof base.imageHash === 'string' && !HEX64.test(base.imageHash))
+            delete base.imageHash;
+        if (typeof base.imageSha256 === 'string' && !HEX64.test(base.imageSha256))
+            delete base.imageSha256;
+        for (const k of ['servedAt', 'servedService', 'servedUtr', 'servedSha', 'creditAmount', 'ask', 'proof'])
+            delete base[k];
+        const key = { chatId, profile: input.profile, telegramMsgId: input.telegramMsgId };
+        return this.guardWrite(`recordReview(${chatId})`, async () => {
+            try {
+                await this.collection.updateOne(key, { $set: review, $setOnInsert: base }, { upsert: true });
+            }
+            catch (error) {
+                if (!isDuplicateKey(error))
+                    throw error;
+                // Lost the insert race to the gate's insert: the row exists now, set the review fields on it.
+                await this.collection.updateOne(key, { $set: review });
+            }
+        });
+    }
+    /** The image + sidecar of this screenshot landed on the VM disk. */
+    async markProofStored(chatId, profile, telegramMsgId) {
+        const id = String(chatId || '').trim();
+        if (!id || !profile)
+            return false;
+        return this.guard(`markProofStored(${id})`, false, async () => {
+            const res = await this.collection.updateOne({ chatId: id, profile, telegramMsgId, image: { $exists: true } }, { $set: { 'image.stored': true } });
+            return res.matchedCount > 0;
         });
     }
     /**
@@ -28129,10 +28202,11 @@ class PaymentProofsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_
         if (!chatId)
             return null;
         const elsewhere = [{ chatId: { $ne: chatId } }, { profile: { $ne: profile } }];
+        // NOT_RECORD_ONLY rides along in every lookup below (review-only rows are not proofs the gate knows).
         return this.guard(`findReuse(${chatId})`, null, async () => {
             if (query.utr) {
                 const doc = await this.collection
-                    .find({ utr: query.utr, $or: elsewhere })
+                    .find({ utr: query.utr, $or: elsewhere, ...NOT_RECORD_ONLY })
                     .limit(1)
                     .next();
                 if (doc)
@@ -28140,7 +28214,7 @@ class PaymentProofsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_
             }
             if (query.imageHash && HEX64.test(query.imageHash)) {
                 const max = query.maxHamming ?? NEAR_HASH_MAX_DISTANCE;
-                const near = await this.nearHashRows({ imageHash: { $exists: true }, $or: elsewhere }, query.imageHash, max, NEAR_HASH_SCAN_LIMIT);
+                const near = await this.nearHashRows({ imageHash: { $exists: true }, $or: elsewhere, ...NOT_RECORD_ONLY }, query.imageHash, max, NEAR_HASH_SCAN_LIMIT);
                 let best = null;
                 for (const { distance, doc } of near) {
                     if (!best || distance < best.distance)
@@ -28151,14 +28225,14 @@ class PaymentProofsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_
             return null;
         });
     }
-    /** Newest first; backs the per-chat near-duplicate scan (default last 20). */
+    /** Newest first; backs the per-chat near-duplicate scan (default last 20). Review-only rows are not counted. */
     async recentForChat(chatId, limit = 20) {
         const id = String(chatId || '').trim();
         if (!id)
             return [];
         const n = Math.max(1, Math.min(100, Math.floor(limit)));
         return this.guard(`recentForChat(${id})`, [], () => this.collection
-            .find({ chatId: id })
+            .find({ chatId: id, ...NOT_RECORD_ONLY })
             .sort({ createdAt: -1 })
             .limit(n)
             .toArray());
@@ -40274,8 +40348,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "ee45d608d4e7db7c4123feea0d4a2c27a3f79689" : 0;
-    const builtAt =  true ? "2026-11-02T17:35:52.708Z" : 0;
+    const sha =  true ? "c4442d6a174193cba1a1ee0aef8b84d745838315" : 0;
+    const builtAt =  true ? "2026-11-03T05:43:53.221Z" : 0;
     return { sha, builtAt };
 }
 
