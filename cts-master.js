@@ -40918,7 +40918,8 @@ exports.MonitorService = MonitorService = MonitorService_1 = __decorate([
 
 
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.FLAGGED_OUTCOMES = exports.REVIEW_CREDITED_AMOUNT = exports.REVIEW_FAKE_SCORE = exports.PROOF_STATES = void 0;
+exports.RISK = exports.MIN_CLIENT_CREDITS = exports.DEFAULT_REVIEW_OPTIONS = exports.FAKE_REASON_CODES = exports.FAKE_OUTCOMES = exports.FLAGGED_OUTCOMES = exports.REVIEW_FAKE_SCORE = exports.PROOF_STATES = void 0;
+exports.isFakeReason = isFakeReason;
 exports.proofIdOf = proofIdOf;
 exports.parseProofId = parseProofId;
 exports.deriveLegacyOutcome = deriveLegacyOutcome;
@@ -40926,13 +40927,27 @@ exports.classify = classify;
 exports.inState = inState;
 exports.emptyCounts = emptyCounts;
 exports.addToCounts = addToCounts;
+exports.reviewOptionsFromEnv = reviewOptionsFromEnv;
+exports.istDay = istDay;
+exports.buildReviewModel = buildReviewModel;
+exports.priorityOf = priorityOf;
 exports.encodeCursor = encodeCursor;
 exports.decodeCursor = decodeCursor;
 exports.isAfterCursor = isAfterCursor;
 exports.PROOF_STATES = ['review', 'flagged', 'not_credited', 'credited', 'marked', 'reviewed', 'all'];
 exports.REVIEW_FAKE_SCORE = 40;
-exports.REVIEW_CREDITED_AMOUNT = 300;
 exports.FLAGGED_OUTCOMES = new Set(['fraud_ask', 'fake_blocked', 'cross_client']);
+exports.FAKE_OUTCOMES = new Set(['fraud_ask', 'fake_blocked', 'cross_client', 'model_blocked']);
+exports.FAKE_REASON_CODES = new Set([
+    'PERSONA_PAYEE', 'UPI_NOT_OURS', 'LAXMI_PAYEE', 'FAKE_TEXT', 'FUTURE_TIME', 'FUTURE_DATE', 'DATE_IN_FUTURE',
+    'UTR_REUSED', 'UTR_REUSED_OTHER_AMOUNT', 'UTR_MALFORMED', 'EDITED_PICTURE', 'AI_WATERMARK', 'GENERATOR_SUCCESS_TEXT',
+    'IMPOSSIBLE_REFERENCE', 'MASKED_TRANSACTION_ID', 'SAMPLE_PAYMENT', 'VISION_AUTHENTICITY', 'SECOND_FAKE',
+    'LLM_SECOND_OPINION_SUSPICIOUS', 'IMAGE_NEAR_DUPLICATE_OTHER_CHAT', 'DISCLAIMER_SHORT', 'DISCLAIMER_LONG',
+    'DISCLAIMER_MODEL_ONLY', 'BLOCKLIST_A', 'FAILED_PAYMENT_TO_SCREEN',
+]);
+function isFakeReason(code) {
+    return exports.FAKE_REASON_CODES.has(code) || code.startsWith('LLM_FAKE_');
+}
 function proofIdOf(row) {
     if (typeof row.proofId === 'string' && row.proofId)
         return row.proofId;
@@ -40978,8 +40993,6 @@ function classify(row) {
     const amount = num(row.creditAmount) ?? num(row.amount);
     const credited = outcome === 'credited';
     const reviewed = row.review?.state === 'ok';
-    const needsLook = !credited || (fakeScore !== null && fakeScore >= exports.REVIEW_FAKE_SCORE) || reasons.length > 0;
-    const bigCredit = credited && amount !== null && amount >= exports.REVIEW_CREDITED_AMOUNT;
     return {
         proofId: proofIdOf(row),
         outcome,
@@ -40988,9 +41001,14 @@ function classify(row) {
         fakeScore,
         amount,
         reviewed,
-        review: !reviewed && (needsLook || bigCredit),
+        review: false,
         flagged: exports.FLAGGED_OUTCOMES.has(outcome),
         credited,
+        risk: 0,
+        riskReasons: [],
+        atRiskAmount: credited ? amount ?? 0 : 0,
+        strong: false,
+        repeat: outcome === 'repeat',
     };
 }
 function inState(c, marked, state) {
@@ -41012,6 +41030,216 @@ function addToCounts(counts, c, marked) {
         if (inState(c, marked, s))
             counts[s]++;
 }
+exports.DEFAULT_REVIEW_OPTIONS = { dailyTarget: 20, riskFloor: 25, minAmount: 100, alwaysAmount: 200 };
+function envNum(v, dflt) {
+    if (v === undefined || v.trim() === '')
+        return dflt;
+    const n = Number(v);
+    return Number.isFinite(n) && n >= 0 ? n : dflt;
+}
+function reviewOptionsFromEnv(env = process.env) {
+    return {
+        dailyTarget: Math.floor(envNum(env.REVIEW_DAILY_TARGET, exports.DEFAULT_REVIEW_OPTIONS.dailyTarget)),
+        riskFloor: envNum(env.REVIEW_RISK_FLOOR, exports.DEFAULT_REVIEW_OPTIONS.riskFloor),
+        minAmount: envNum(env.REVIEW_MIN_AMOUNT, exports.DEFAULT_REVIEW_OPTIONS.minAmount),
+        alwaysAmount: envNum(env.REVIEW_ALWAYS_AMOUNT, exports.DEFAULT_REVIEW_OPTIONS.alwaysAmount),
+    };
+}
+exports.MIN_CLIENT_CREDITS = 30;
+const MIN_MS = 60_000;
+const DAY_MS = 24 * 60 * MIN_MS;
+const IST_OFFSET_MS = 330 * MIN_MS;
+const OLD_RECEIPT_MS = 30 * MIN_MS;
+exports.RISK = {
+    fakeReason: 70, fakeScore: 60, fakeSignal: 60, chatSentFake: 60, imageOtherChat: 70, creditedBefore: 60,
+    markedPayer: 60, amountP95: 40, amountP90: 30, amountP75: 15, burst: 15, personas: 15, oldReceipt: 15, timeUnknown: 10,
+};
+function istDay(ms) {
+    return new Date(ms + IST_OFFSET_MS).toISOString().slice(0, 10);
+}
+function shaOf(r) {
+    const s = r.imageSha256 || r.image?.sha256;
+    return typeof s === 'string' && s ? s : null;
+}
+function norm(v) {
+    return typeof v === 'string' ? v.toLowerCase().replace(/\s+/g, '') : '';
+}
+function printedMs(r) {
+    return r.time?.state === 'known' && typeof r.time.epochMs === 'number' && Number.isFinite(r.time.epochMs) ? r.time.epochMs : null;
+}
+function paymentKey(r, amount) {
+    const payee = norm(r.payeeUpiId) || norm(r.payeeName);
+    const ms = printedMs(r);
+    return amount !== null && payee && ms !== null ? `${amount}|${payee}|${Math.floor(ms / MIN_MS)}` : null;
+}
+function msOf(r) {
+    return new Date(r.createdAt).getTime();
+}
+function pct(sorted, p) {
+    return sorted[Math.max(0, Math.ceil(p * sorted.length) - 1)];
+}
+function ordinal(n) {
+    return n === 2 ? '2nd' : n === 3 ? '3rd' : `${n}th`;
+}
+function buildReviewModel(items, isMarked, options = exports.DEFAULT_REVIEW_OPTIONS) {
+    const asc = [...items].sort((a, b) => msOf(a.row) - msOf(b.row) || (String(a.row._id) < String(b.row._id) ? -1 : 1));
+    const byChat = new Map();
+    const shaChats = new Map();
+    const markedPayers = new Map();
+    const fakeRows = new Map();
+    const overAlways = new Set();
+    for (const x of asc) {
+        const chat = String(x.row.chatId);
+        let list = byChat.get(chat);
+        if (!list)
+            byChat.set(chat, (list = []));
+        list.push(x);
+        const sha = shaOf(x.row);
+        if (sha) {
+            if (!shaChats.has(sha))
+                shaChats.set(sha, new Set());
+            shaChats.get(sha).add(chat);
+        }
+        const payer = norm(x.row.ocr?.payerName);
+        if (payer && isMarked(chat)) {
+            if (!markedPayers.has(payer))
+                markedPayers.set(payer, new Set());
+            markedPayers.get(payer).add(chat);
+        }
+        if (exports.FAKE_OUTCOMES.has(String(x.c.outcome)) || x.c.reasons.some(isFakeReason)) {
+            if (!fakeRows.has(chat))
+                fakeRows.set(chat, new Set());
+            fakeRows.get(chat).add(x);
+        }
+    }
+    const amounts = new Map();
+    const all = [];
+    for (const x of asc) {
+        if (!x.c.credited || x.c.amount === null)
+            continue;
+        all.push(x.c.amount);
+        const k = String(x.row.clientId);
+        if (!amounts.has(k))
+            amounts.set(k, []);
+        amounts.get(k).push(x.c.amount);
+    }
+    const sortNum = (a, b) => a - b;
+    all.sort(sortNum);
+    for (const v of amounts.values())
+        v.sort(sortNum);
+    const distOf = (clientId) => {
+        const own = amounts.get(clientId);
+        return own && own.length >= exports.MIN_CLIENT_CREDITS ? { list: own, scope: clientId } : { list: all, scope: 'all clients' };
+    };
+    for (const [chat, list] of byChat) {
+        const seenSha = new Set();
+        const seenKey = new Set();
+        const creditedSha = new Set();
+        const creditedKey = new Set();
+        for (let i = 0; i < list.length; i++) {
+            const x = list[i];
+            const r = x.row;
+            const sha = shaOf(r);
+            const key = paymentKey(r, num(r.amount) ?? x.c.amount);
+            x.c.repeat = x.c.outcome === 'repeat' || (!!sha && seenSha.has(sha)) || (!!key && seenKey.has(key));
+            const creditedBefore = (!!sha && creditedSha.has(sha)) || (!!key && creditedKey.has(key));
+            if (sha)
+                seenSha.add(sha);
+            if (key)
+                seenKey.add(key);
+            if (!x.c.credited)
+                continue;
+            if (sha)
+                creditedSha.add(sha);
+            if (key)
+                creditedKey.add(key);
+            const reasons = [];
+            let risk = 0;
+            let strong = false;
+            const add = (pts, label, isStrong = false) => { risk += pts; reasons.push(label); strong ||= isStrong; };
+            const fakeCodes = x.c.reasons.filter(isFakeReason);
+            if (fakeCodes.length)
+                add(exports.RISK.fakeReason, `Fake sign: ${fakeCodes.join(', ')}`, true);
+            if (x.c.fakeScore !== null && x.c.fakeScore >= exports.REVIEW_FAKE_SCORE)
+                add(exports.RISK.fakeScore, `Fake score ${x.c.fakeScore}`, true);
+            const signals = strings(r.verdict?.fakeSignals);
+            if (signals.length)
+                add(exports.RISK.fakeSignal, `Image model: ${signals.slice(0, 3).join(', ')}`, true);
+            const fakes = fakeRows.get(chat);
+            if (fakes && [...fakes].some((f) => f !== x))
+                add(exports.RISK.chatSentFake, 'Chat sent a fake receipt', true);
+            if (sha && (shaChats.get(sha)?.size ?? 0) > 1)
+                add(exports.RISK.imageOtherChat, 'Same image used by another chat', true);
+            if (creditedBefore)
+                add(exports.RISK.creditedBefore, 'Same receipt credited before', true);
+            const payer = norm(r.ocr?.payerName);
+            if (payer && [...(markedPayers.get(payer) ?? [])].some((c) => c !== chat))
+                add(exports.RISK.markedPayer, 'Payer of a marked-fake chat', true);
+            const amount = x.c.amount;
+            if (!x.c.repeat && amount !== null && amount > options.alwaysAmount) {
+                reasons.push(`Over ₹${options.alwaysAmount}`);
+                overAlways.add(x);
+            }
+            if (amount !== null) {
+                const d = distOf(String(r.clientId));
+                if (d.list.length) {
+                    const [p75, p90, p95] = [pct(d.list, 0.75), pct(d.list, 0.9), pct(d.list, 0.95)];
+                    if (amount > p95)
+                        add(exports.RISK.amountP95, `Top 5% amount for ${d.scope} (> ₹${p95})`);
+                    else if (amount > p90)
+                        add(exports.RISK.amountP90, `Top 10% amount for ${d.scope} (> ₹${p90})`);
+                    else if (amount > p75)
+                        add(exports.RISK.amountP75, `Top 25% amount for ${d.scope} (> ₹${p75})`);
+                }
+            }
+            const t = msOf(r);
+            const day = list.slice(0, i + 1).filter((y) => y.c.credited && t - msOf(y.row) <= DAY_MS);
+            if (day.length >= 3)
+                add(exports.RISK.burst, `${ordinal(day.length)} credit in 24 h`);
+            const personas = new Set(day.map((y) => String(y.row.profile)));
+            if (personas.size >= 2)
+                add(exports.RISK.personas, `Paid on ${personas.size} personas in 24 h`);
+            const printed = printedMs(r);
+            if (printed === null)
+                add(exports.RISK.timeUnknown, 'Payment time not read');
+            else if (t - printed > OLD_RECEIPT_MS)
+                add(exports.RISK.oldReceipt, `Receipt ${Math.round((t - printed) / MIN_MS)} min old`);
+            x.c.risk = Math.min(100, risk);
+            x.c.riskReasons = reasons;
+            x.c.strong = strong;
+        }
+    }
+    const days = new Map();
+    for (const x of asc) {
+        if (!x.c.credited)
+            continue;
+        const d = istDay(msOf(x.row));
+        if (!days.has(d))
+            days.set(d, []);
+        days.get(d).push(x);
+    }
+    const thresholds = {};
+    for (const [d, list] of days) {
+        const strongN = list.filter((x) => x.c.strong).length;
+        const slots = Math.max(0, options.dailyTarget - strongN);
+        const ranked = list
+            .filter((x) => !x.c.strong && !overAlways.has(x) && (x.c.amount ?? 0) >= options.minAmount && x.c.risk >= options.riskFloor)
+            .sort((a, b) => b.c.risk - a.c.risk || (b.c.amount ?? 0) - (a.c.amount ?? 0) || (String(b.row._id) < String(a.row._id) ? -1 : 1))
+            .slice(0, slots);
+        thresholds[d] = ranked.length ? ranked[ranked.length - 1].c.risk : null;
+        const picked = new Set(ranked);
+        for (const x of list) {
+            x.c.review = !x.c.reviewed && !isMarked(String(x.row.chatId)) && (x.c.strong || overAlways.has(x) || picked.has(x));
+        }
+    }
+    for (const x of asc)
+        if (!x.c.credited)
+            x.c.review = false;
+    return { options, thresholds };
+}
+function priorityOf(c) {
+    return c.risk * c.atRiskAmount;
+}
 function encodeCursor(c) {
     return Buffer.from(JSON.stringify(c), 'utf8').toString('base64url');
 }
@@ -41021,7 +41249,9 @@ function decodeCursor(raw) {
     try {
         const v = JSON.parse(Buffer.from(raw, 'base64url').toString('utf8'));
         if (v && typeof v.t === 'number' && Number.isFinite(v.t) && typeof v.id === 'string' && /^[0-9a-f]{24}$/i.test(v.id)) {
-            return { t: v.t, id: v.id.toLowerCase() };
+            if (v.s !== undefined && v.s !== 'r')
+                return null;
+            return v.s === 'r' ? { t: v.t, id: v.id.toLowerCase(), s: 'r' } : { t: v.t, id: v.id.toLowerCase() };
         }
     }
     catch { }
@@ -41075,17 +41305,25 @@ __decorate([
     (0, common_1.Get)(),
     (0, swagger_1.ApiOperation)({
         summary: 'Payment screenshots for review: filtered, cursor-paged, with counts per state and userData/client join',
-        description: 'review = not reviewed AND (outcome != credited OR fakeScore >= 40 OR reasons non-empty), plus every unreviewed credited proof >= ₹300; ' +
+        description: 'review (revenue + long-term blocking, post-hoc; nothing in tg-aut reads it) = CREDITED AND not reviewed AND chat not ' +
+            'marked fake AND (strong fake signal OR (credited ₹ >= REVIEW_MIN_AMOUNT (100) AND among the IST day\'s top ' +
+            'REVIEW_DAILY_TARGET (20) minus strong, by risk, with risk >= REVIEW_RISK_FLOOR (25))). Strong: fake reason code, ' +
+            'fakeScore >= 40, fakeSignals, chat sent a fake receipt, same image in another chat, same receipt credited before, ' +
+            'payer of a marked-fake chat. Uncredited proofs (repeats, not_ours, not_receipt, old_time, over_limit, uncredited ' +
+            'fakes) never enter review. Items carry risk (0-100), riskReasons, atRiskAmount, strong, repeat; ' +
+            'counts.reviewAmount = credited ₹ in review. ' +
             'flagged = outcome fraud_ask|fake_blocked|cross_client; marked = chat has userData.fakePaymentAt; reviewed = review.state ok. ' +
             'Rows without verdict (before tg-aut wrote one) get an outcome derived from servedAt / ask / decision (legacy: true). ' +
-            'Items are newest first; counts cover since/client/minAmount (not state/cursor).',
+            'state=review defaults to sort=risk (risk x atRiskAmount), other states to newest first; counts cover ' +
+            'since/client/minAmount (not state/cursor); the review model always uses the whole 7-day collection.',
     }),
     (0, swagger_1.ApiQuery)({ name: 'since', required: false, description: 'ISO date; default now - 7 days (the TTL)' }),
     (0, swagger_1.ApiQuery)({ name: 'client', required: false, description: 'clientId' }),
     (0, swagger_1.ApiQuery)({ name: 'state', required: false, enum: payment_proofs_classify_1.PROOF_STATES, description: 'default review' }),
     (0, swagger_1.ApiQuery)({ name: 'minAmount', required: false, description: 'creditAmount (else amount read) >= n' }),
     (0, swagger_1.ApiQuery)({ name: 'limit', required: false, description: `default 50, max ${payment_proofs_service_1.MAX_LIMIT}` }),
-    (0, swagger_1.ApiQuery)({ name: 'cursor', required: false, description: 'nextCursor from the previous page' }),
+    (0, swagger_1.ApiQuery)({ name: 'cursor', required: false, description: 'nextCursor from the previous page (same sort)' }),
+    (0, swagger_1.ApiQuery)({ name: 'sort', required: false, enum: payment_proofs_service_1.PROOF_SORTS, description: 'default risk for state=review, else time' }),
     __param(0, (0, common_1.Query)()),
     __metadata("design:type", Function),
     __metadata("design:paramtypes", [Object]),
@@ -41172,7 +41410,7 @@ var __param = (this && this.__param) || function (paramIndex, decorator) {
     return function (target, key) { decorator(target, key, paramIndex); }
 };
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.PaymentProofsService = exports.MAX_WINDOW_ROWS = exports.DEFAULT_WINDOW_MS = exports.MAX_LIMIT = exports.DEFAULT_LIMIT = void 0;
+exports.PaymentProofsService = exports.PROOF_SORTS = exports.MAX_WINDOW_ROWS = exports.DEFAULT_WINDOW_MS = exports.MAX_LIMIT = exports.DEFAULT_LIMIT = void 0;
 const common_1 = __webpack_require__(/*! @nestjs/common */ "@nestjs/common");
 const mongoose_1 = __webpack_require__(/*! @nestjs/mongoose */ "@nestjs/mongoose");
 const mongoose_2 = __webpack_require__(/*! mongoose */ "mongoose");
@@ -41192,7 +41430,10 @@ const CLASSIFY_PROJECTION = {
     _id: 1, chatId: 1, profile: 1, clientId: 1, telegramMsgId: 1, createdAt: 1, amount: 1, creditAmount: 1, decision: 1,
     reasons: 1, servedAt: 1, 'ask.kind': 1, 'ask.blockedAt': 1, 'ask.reasons': 1, proofId: 1,
     'verdict.outcome': 1, 'verdict.reasons': 1, 'verdict.fakeScore': 1, 'review.state': 1,
+    imageSha256: 1, 'image.sha256': 1, payeeUpiId: 1, payeeName: 1, 'time.state': 1, 'time.epochMs': 1,
+    'verdict.fakeSignals': 1, 'ocr.payerName': 1,
 };
+exports.PROOF_SORTS = ['risk', 'time'];
 let PaymentProofsService = class PaymentProofsService {
     constructor(proofModel, userDataModel) {
         this.proofModel = proofModel;
@@ -41229,21 +41470,22 @@ let PaymentProofsService = class PaymentProofsService {
                 throw new common_1.BadRequestException('limit must be an integer >= 1');
             limit = Math.min(limit, exports.MAX_LIMIT);
         }
+        const sort = (q.sort === undefined || q.sort === '' ? (state === 'review' ? 'risk' : 'time') : String(q.sort));
+        if (!exports.PROOF_SORTS.includes(sort))
+            throw new common_1.BadRequestException(`sort must be one of ${exports.PROOF_SORTS.join('|')}`);
         let cursor = null;
         if (q.cursor !== undefined && q.cursor !== '') {
             cursor = (0, payment_proofs_classify_1.decodeCursor)(q.cursor);
-            if (!cursor)
+            if (!cursor || (cursor.s === 'r') !== (sort === 'risk'))
                 throw new common_1.BadRequestException('invalid cursor');
         }
-        return { since, client, state, minAmount, limit, cursor };
+        return { since, client, state, minAmount, limit, cursor, sort };
     }
     async list(q, now = Date.now()) {
         const p = this.parseQuery(q, now);
-        const filter = { createdAt: { $gte: new Date(p.since) } };
-        if (p.client)
-            filter.clientId = p.client;
+        const from = Math.min(p.since, now - exports.DEFAULT_WINDOW_MS);
         const rows = await this.proofModel
-            .find(filter, CLASSIFY_PROJECTION)
+            .find({ createdAt: { $gte: new Date(from) } }, CLASSIFY_PROJECTION)
             .sort({ createdAt: -1, _id: -1 })
             .limit(exports.MAX_WINDOW_ROWS + 1)
             .lean()
@@ -41251,30 +41493,31 @@ let PaymentProofsService = class PaymentProofsService {
         const truncated = rows.length > exports.MAX_WINDOW_ROWS;
         if (truncated)
             rows.length = exports.MAX_WINDOW_ROWS;
-        const classified = [];
-        for (const row of rows) {
-            const c = (0, payment_proofs_classify_1.classify)(row);
-            if (p.minAmount !== null && (c.amount === null || c.amount < p.minAmount))
-                continue;
-            classified.push({ row, c });
-        }
-        const chats = await this.chatInfo([...new Set(classified.map((x) => String(x.row.chatId)))]);
-        const counts = (0, payment_proofs_classify_1.emptyCounts)();
-        const page = [];
-        let more = false;
+        const everything = rows.map((row) => ({ row, c: (0, payment_proofs_classify_1.classify)(row) }));
+        const chats = await this.chatInfo([...new Set(everything.map((x) => String(x.row.chatId)))]);
+        const isMarked = (chatId) => !!chats.get(chatId)?.marked;
+        const reviewModel = (0, payment_proofs_classify_1.buildReviewModel)(everything, isMarked, (0, payment_proofs_classify_1.reviewOptionsFromEnv)());
+        const classified = everything.filter(({ row, c }) => new Date(row.createdAt).getTime() >= p.since
+            && (!p.client || row.clientId === p.client)
+            && (p.minAmount === null || (c.amount !== null && c.amount >= p.minAmount)));
+        const counts = { ...(0, payment_proofs_classify_1.emptyCounts)(), reviewAmount: 0 };
+        const inPage = [];
         for (const x of classified) {
-            const marked = !!chats.get(String(x.row.chatId))?.marked;
+            const marked = isMarked(String(x.row.chatId));
             (0, payment_proofs_classify_1.addToCounts)(counts, x.c, marked);
-            if (more || !(0, payment_proofs_classify_1.inState)(x.c, marked, p.state))
+            if (x.c.review)
+                counts.reviewAmount += x.c.atRiskAmount;
+            if (!(0, payment_proofs_classify_1.inState)(x.c, marked, p.state))
                 continue;
-            const t = new Date(x.row.createdAt).getTime();
+            const t = p.sort === 'risk' ? (0, payment_proofs_classify_1.priorityOf)(x.c) : new Date(x.row.createdAt).getTime();
             if (p.cursor && !(0, payment_proofs_classify_1.isAfterCursor)(t, String(x.row._id), p.cursor))
                 continue;
-            if (page.length < p.limit)
-                page.push({ ...x, marked });
-            else
-                more = true;
+            inPage.push({ ...x, marked, t });
         }
+        if (p.sort === 'risk')
+            inPage.sort((a, b) => b.t - a.t || (String(b.row._id) < String(a.row._id) ? -1 : 1));
+        const more = inPage.length > p.limit;
+        const page = inPage.slice(0, p.limit);
         const hosts = page.length ? await this.clientHostMap(now) : new Map();
         const full = new Map();
         if (page.length) {
@@ -41300,6 +41543,11 @@ let PaymentProofsService = class PaymentProofsService {
                 amountValue: c.amount,
                 inReview: c.review,
                 flagged: c.flagged,
+                risk: c.risk,
+                riskReasons: c.riskReasons,
+                atRiskAmount: c.atRiskAmount,
+                strong: c.strong,
+                repeat: c.repeat,
                 persona: ud?.profile ?? row.profile,
                 username: ud?.username || null,
                 complaintScore: typeof ud?.cheatCount === 'number' ? ud.cheatCount : null,
@@ -41309,9 +41557,9 @@ let PaymentProofsService = class PaymentProofsService {
         });
         const last = page[page.length - 1];
         const nextCursor = more && last
-            ? (0, payment_proofs_classify_1.encodeCursor)({ t: new Date(last.row.createdAt).getTime(), id: String(last.row._id) })
+            ? (0, payment_proofs_classify_1.encodeCursor)(p.sort === 'risk' ? { t: last.t, id: String(last.row._id), s: 'r' } : { t: last.t, id: String(last.row._id) })
             : null;
-        return { items, nextCursor, counts, truncated };
+        return { items, nextCursor, counts, reviewModel, truncated };
     }
     async chatInfo(chatIds) {
         const out = new Map();
