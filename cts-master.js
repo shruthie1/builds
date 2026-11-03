@@ -31899,23 +31899,10 @@ var __param = (this && this.__param) || function (paramIndex, decorator) {
     return function (target, key) { decorator(target, key, paramIndex); }
 };
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.FakePaymentController = exports.OPS_WRITE_KEY_HEADER = void 0;
-exports.assertOpsWriteKey = assertOpsWriteKey;
+exports.FakePaymentController = void 0;
 const common_1 = __webpack_require__(/*! @nestjs/common */ "@nestjs/common");
 const swagger_1 = __webpack_require__(/*! @nestjs/swagger */ "@nestjs/swagger");
-const crypto_1 = __webpack_require__(/*! crypto */ "crypto");
 const fake_payment_service_1 = __webpack_require__(/*! ./fake-payment.service */ "./src/components/fake-payment/fake-payment.service.ts");
-exports.OPS_WRITE_KEY_HEADER = 'x-ops-write-key';
-function assertOpsWriteKey(provided, env = process.env) {
-    const expected = (env.OPS_WRITE_KEY || '').trim();
-    if (!expected)
-        throw new common_1.ServiceUnavailableException('OPS_WRITE_KEY is not configured: fake-payment writes are disabled');
-    const got = typeof provided === 'string' ? provided : '';
-    const a = (0, crypto_1.createHash)('sha256').update(got).digest();
-    const b = (0, crypto_1.createHash)('sha256').update(expected).digest();
-    if (!got || !(0, crypto_1.timingSafeEqual)(a, b))
-        throw new common_1.UnauthorizedException('invalid x-ops-write-key');
-}
 let FakePaymentController = class FakePaymentController {
     constructor(service) {
         this.service = service;
@@ -31923,12 +31910,10 @@ let FakePaymentController = class FakePaymentController {
     status(chatId) {
         return this.service.status(chatId);
     }
-    mark(chatId, body, writeKey) {
-        assertOpsWriteKey(writeKey);
+    mark(chatId, body) {
         return this.service.mark(chatId, body ?? {});
     }
-    unmark(chatId, body, writeKey) {
-        assertOpsWriteKey(writeKey);
+    unmark(chatId, body) {
         return this.service.unmark(chatId, body ?? {});
     }
 };
@@ -31947,13 +31932,11 @@ __decorate([
     (0, common_1.HttpCode)(200),
     (0, swagger_1.ApiOperation)({ summary: 'Mark ALL payments of the chat fake: no revenue, blocked, owed nothing (idempotent)' }),
     (0, swagger_1.ApiParam)({ name: 'chatId' }),
-    (0, swagger_1.ApiHeader)({ name: exports.OPS_WRITE_KEY_HEADER, required: true }),
     (0, swagger_1.ApiBody)({ schema: { type: 'object', required: ['by', 'reason'], properties: { by: { type: 'string' }, reason: { type: 'string' } } } }),
     __param(0, (0, common_1.Param)('chatId')),
     __param(1, (0, common_1.Body)()),
-    __param(2, (0, common_1.Headers)(exports.OPS_WRITE_KEY_HEADER)),
     __metadata("design:type", Function),
-    __metadata("design:paramtypes", [String, Object, String]),
+    __metadata("design:paramtypes", [String, Object]),
     __metadata("design:returntype", void 0)
 ], FakePaymentController.prototype, "mark", null);
 __decorate([
@@ -31961,13 +31944,11 @@ __decorate([
     (0, common_1.HttpCode)(200),
     (0, swagger_1.ApiOperation)({ summary: 'Remove the fake-payment mark: restore payAmount / canReply and revenue (idempotent)' }),
     (0, swagger_1.ApiParam)({ name: 'chatId' }),
-    (0, swagger_1.ApiHeader)({ name: exports.OPS_WRITE_KEY_HEADER, required: true }),
     (0, swagger_1.ApiBody)({ schema: { type: 'object', required: ['by'], properties: { by: { type: 'string' }, reason: { type: 'string' } } } }),
     __param(0, (0, common_1.Param)('chatId')),
     __param(1, (0, common_1.Body)()),
-    __param(2, (0, common_1.Headers)(exports.OPS_WRITE_KEY_HEADER)),
     __metadata("design:type", Function),
-    __metadata("design:paramtypes", [String, Object, String]),
+    __metadata("design:paramtypes", [String, Object]),
     __metadata("design:returntype", void 0)
 ], FakePaymentController.prototype, "unmark", null);
 exports.FakePaymentController = FakePaymentController = __decorate([
