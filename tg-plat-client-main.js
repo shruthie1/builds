@@ -51156,8 +51156,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "1bf3baf5a3624af1781f83d7527a156d16c9e802" : 0;
-    const builtAt =  true ? "2026-11-02T18:27:20.099Z" : 0;
+    const sha =  true ? "3e1f82b62c5c8d39c5a90e1b4c982d5a72ebbfe7" : 0;
+    const builtAt =  true ? "2026-11-03T04:33:44.023Z" : 0;
     return { sha, builtAt };
 }
 
@@ -94338,6 +94338,29 @@ function showsLaxmi(e) {
 function personaAsPayee(e, names) {
     return showsPersona(e.payeeName, names) || showsPersona(e.toLine, names);
 }
+/** Where the payer's half of a receipt ends: its reference labels (UPI Ref, UTR, Transaction / Txn ID, Ref No). */
+const PAYER_PART_END = /\b(?:upi\s*ref|utr|transaction\s*id|txn\s*id|ref(?:erence)?\.?\s*no)\b/i;
+const UPI_TOKEN_IN_TEXT = /[a-z0-9][a-z0-9._-]*@[a-z][a-z0-9.]*/gi;
+/**
+ * Rule 1 on the payer side (live ramya2 chat ..1197, 2026-11-03, credited ₹50): "To BharatPe UPI-BHARATPE.8000073302@fbpe
+ * From Reethu Reddy UPI ID: <our Paytm QR id>". A persona paying FROM one of our own UPI ids is never the customer's
+ * payment. Only when the payer part (from the payer label to the reference labels) prints one of our ids: a customer
+ * named like a persona pays from their own id and stays a payer, not a persona payee.
+ */
+function personaPaysFromOurId(e, names, ownUpiIds) {
+    if (names.length === 0)
+        return false;
+    const payerAt = e.text.search(PAYER_LABEL);
+    if (payerAt < 0)
+        return false;
+    const rest = e.text.slice(payerAt);
+    const end = rest.search(PAYER_PART_END);
+    const payerPart = end > 0 ? rest.slice(0, end) : rest;
+    const ids = payerPart.match(UPI_TOKEN_IN_TEXT) ?? [];
+    if (!ids.some((id) => isOurUpiIdToken(id, ownUpiIds)))
+        return false;
+    return showsPersona(payerPart.replace(UPI_TOKEN_IN_TEXT, ' '), names);
+}
 /** Rule 3 / cross-client: a persona anywhere the payment is described (payee name, note, text), never in a UPI id or the payer line. */
 function showsPersonaAnywhere(e, names) {
     return showsPersona((0,_receipt_entities__WEBPACK_IMPORTED_MODULE_1__.personaSearchText)(e), personaList(names));
@@ -94411,7 +94434,7 @@ function payeeVerdictOf(e, ctx) {
     const bankingName = showsOurBankingName(e);
     const oursShown = entitiesShowOurs(e, ctx.ownUpiIds);
     const laxmi = showsLaxmi(e);
-    const persona = personaAsPayee(e, names) && !bankingName;
+    const persona = (personaAsPayee(e, names) || personaPaysFromOurId(e, names, ctx.ownUpiIds)) && !bankingName;
     // rule 9: a payee "UPI ID: <plain word>" (no id read) is a payee id that is not ours (owner 2026-10-25)
     const foreignUpi = ctx.upiListLoaded !== false
         && ((0,_proof_check_upi_ownership__WEBPACK_IMPORTED_MODULE_0__.isForeignPayeeUpi)(e.payeeUpiId, ctx.ownUpiIds) || labelledUpiNotAnId(e, ctx.ownUpiIds));
