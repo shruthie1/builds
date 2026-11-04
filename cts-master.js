@@ -40932,7 +40932,7 @@ exports.MonitorService = MonitorService = MonitorService_1 = __decorate([
 
 
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.RISK = exports.MIN_CLIENT_CREDITS = exports.DEFAULT_REVIEW_OPTIONS = exports.FAKE_REASON_CODES = exports.FAKE_OUTCOMES = exports.FLAGGED_OUTCOMES = exports.REVIEW_FAKE_SCORE = exports.PROOF_STATES = void 0;
+exports.MIN_UTR_LENGTH = exports.RISK = exports.MIN_CLIENT_CREDITS = exports.DEFAULT_REVIEW_OPTIONS = exports.FAKE_REASON_CODES = exports.FAKE_OUTCOMES = exports.FLAGGED_OUTCOMES = exports.REVIEW_FAKE_SCORE = exports.PROOF_STATES = void 0;
 exports.isFakeReason = isFakeReason;
 exports.proofIdOf = proofIdOf;
 exports.parseProofId = parseProofId;
@@ -40943,6 +40943,7 @@ exports.emptyCounts = emptyCounts;
 exports.addToCounts = addToCounts;
 exports.reviewOptionsFromEnv = reviewOptionsFromEnv;
 exports.istDay = istDay;
+exports.normUtr = normUtr;
 exports.buildReviewModel = buildReviewModel;
 exports.priorityOf = priorityOf;
 exports.encodeCursor = encodeCursor;
@@ -41023,6 +41024,7 @@ function classify(row) {
         atRiskAmount: credited ? amount ?? 0 : 0,
         strong: false,
         repeat: outcome === 'repeat',
+        reusedFrom: null,
     };
 }
 function inState(c, marked, state) {
@@ -41065,7 +41067,7 @@ const DAY_MS = 24 * 60 * MIN_MS;
 const IST_OFFSET_MS = 330 * MIN_MS;
 const OLD_RECEIPT_MS = 30 * MIN_MS;
 exports.RISK = {
-    fakeReason: 70, fakeScore: 60, fakeSignal: 60, chatSentFake: 60, imageOtherChat: 70, creditedBefore: 60,
+    fakeReason: 70, fakeScore: 60, fakeSignal: 60, chatSentFake: 60, imageOtherChat: 70, creditedBefore: 60, utrReused: 70,
     markedPayer: 60, amountP95: 40, amountP90: 30, amountP75: 15, burst: 15, personas: 15, oldReceipt: 15, timeUnknown: 10,
 };
 function istDay(ms) {
@@ -41074,6 +41076,13 @@ function istDay(ms) {
 function shaOf(r) {
     const s = r.imageSha256 || r.image?.sha256;
     return typeof s === 'string' && s ? s : null;
+}
+exports.MIN_UTR_LENGTH = 6;
+function normUtr(v) {
+    if (typeof v !== 'string')
+        return null;
+    const u = v.trim().toUpperCase().replace(/\s+/g, '');
+    return u.length >= exports.MIN_UTR_LENGTH ? u : null;
 }
 function norm(v) {
     return typeof v === 'string' ? v.toLowerCase().replace(/\s+/g, '') : '';
@@ -41102,6 +41111,10 @@ function buildReviewModel(items, isMarked, options = exports.DEFAULT_REVIEW_OPTI
     const markedPayers = new Map();
     const fakeRows = new Map();
     const overAlways = new Set();
+    const utrOriginal = new Map();
+    const utrCopies = new Set();
+    const shaFirstChat = new Map();
+    const readAmount = (x) => num(x.row.amount) ?? x.c.amount;
     for (const x of asc) {
         const chat = String(x.row.chatId);
         let list = byChat.get(chat);
@@ -41113,6 +41126,16 @@ function buildReviewModel(items, isMarked, options = exports.DEFAULT_REVIEW_OPTI
             if (!shaChats.has(sha))
                 shaChats.set(sha, new Set());
             shaChats.get(sha).add(chat);
+            if (!shaFirstChat.has(sha))
+                shaFirstChat.set(sha, chat);
+        }
+        const utr = normUtr(x.row.utr);
+        if (utr) {
+            const orig = utrOriginal.get(utr);
+            if (!orig)
+                utrOriginal.set(utr, x);
+            else if (String(orig.row.chatId) !== chat || readAmount(orig) !== readAmount(x))
+                utrCopies.add(x);
         }
         const payer = norm(x.row.ocr?.payerName);
         if (payer && isMarked(chat)) {
@@ -41154,19 +41177,32 @@ function buildReviewModel(items, isMarked, options = exports.DEFAULT_REVIEW_OPTI
             const x = list[i];
             const r = x.row;
             const sha = shaOf(r);
+            const utr = normUtr(r.utr);
+            const copy = utrCopies.has(x);
+            if (copy) {
+                const orig = utrOriginal.get(utr);
+                x.c.reusedFrom = { proofId: orig.c.proofId, chatId: String(orig.row.chatId), createdAt: new Date(orig.row.createdAt).toISOString(), amount: readAmount(orig) };
+            }
+            const utrKey = utr && !copy ? `utr|${utr}` : null;
             const key = paymentKey(r, num(r.amount) ?? x.c.amount);
-            x.c.repeat = x.c.outcome === 'repeat' || (!!sha && seenSha.has(sha)) || (!!key && seenKey.has(key));
-            const creditedBefore = (!!sha && creditedSha.has(sha)) || (!!key && creditedKey.has(key));
+            x.c.repeat = x.c.outcome === 'repeat' || (!!sha && seenSha.has(sha)) || (!!key && seenKey.has(key))
+                || (!!utrKey && seenKey.has(utrKey));
+            const creditedBefore = (!!sha && creditedSha.has(sha)) || (!!key && creditedKey.has(key))
+                || (!!utrKey && creditedKey.has(utrKey));
             if (sha)
                 seenSha.add(sha);
             if (key)
                 seenKey.add(key);
+            if (utrKey)
+                seenKey.add(utrKey);
             if (!x.c.credited)
                 continue;
             if (sha)
                 creditedSha.add(sha);
             if (key)
                 creditedKey.add(key);
+            if (utrKey)
+                creditedKey.add(utrKey);
             const reasons = [];
             let risk = 0;
             let strong = false;
@@ -41180,10 +41216,17 @@ function buildReviewModel(items, isMarked, options = exports.DEFAULT_REVIEW_OPTI
             if (signals.length)
                 add(exports.RISK.fakeSignal, `Image model: ${signals.slice(0, 3).join(', ')}`, true);
             const fakes = fakeRows.get(chat);
-            if (fakes && [...fakes].some((f) => f !== x))
+            const ownCopy = (f) => !copy && !!utr && utrCopies.has(f)
+                && String(utrOriginal.get(normUtr(f.row.utr)).row.chatId) === chat;
+            if (fakes && [...fakes].some((f) => f !== x && !ownCopy(f)))
                 add(exports.RISK.chatSentFake, 'Chat sent a fake receipt', true);
-            if (sha && (shaChats.get(sha)?.size ?? 0) > 1)
+            if (sha && (shaChats.get(sha)?.size ?? 0) > 1 && shaFirstChat.get(sha) !== chat)
                 add(exports.RISK.imageOtherChat, 'Same image used by another chat', true);
+            if (copy) {
+                const before = x.c.reusedFrom.amount;
+                const now = readAmount(x);
+                add(exports.RISK.utrReused, `Reused UTR of an earlier receipt${before !== null && before !== now ? ` (₹${before} before)` : ''}`, true);
+            }
             if (creditedBefore)
                 add(exports.RISK.creditedBefore, 'Same receipt credited before', true);
             const payer = norm(r.ocr?.payerName);
@@ -41322,9 +41365,10 @@ __decorate([
         description: 'review (revenue + long-term blocking, post-hoc; nothing in tg-aut reads it) = CREDITED AND not reviewed AND chat not ' +
             'marked fake AND (strong fake signal OR (credited ₹ >= REVIEW_MIN_AMOUNT (100) AND among the IST day\'s top ' +
             'REVIEW_DAILY_TARGET (20) minus strong, by risk, with risk >= REVIEW_RISK_FLOOR (25))). Strong: fake reason code, ' +
-            'fakeScore >= 40, fakeSignals, chat sent a fake receipt, same image in another chat, same receipt credited before, ' +
+            'fakeScore >= 40, fakeSignals, chat sent a fake receipt, same image in another chat (not the first chat), reused UTR of an ' +
+            'earlier receipt (another chat or amount; the earliest proof with a UTR is the original), same receipt credited before, ' +
             'payer of a marked-fake chat. Uncredited proofs (repeats, not_ours, not_receipt, old_time, over_limit, uncredited ' +
-            'fakes) never enter review. Items carry risk (0-100), riskReasons, atRiskAmount, strong, repeat; ' +
+            'fakes) never enter review. Items carry risk (0-100), riskReasons, atRiskAmount, strong, repeat, reusedFrom; ' +
             'counts.reviewAmount = credited ₹ in review. ' +
             'flagged = outcome fraud_ask|fake_blocked|cross_client; marked = chat has userData.fakePaymentAt; reviewed = review.state ok. ' +
             'Rows without verdict (before tg-aut wrote one) get an outcome derived from servedAt / ask / decision (legacy: true). ' +
@@ -41333,6 +41377,7 @@ __decorate([
     }),
     (0, swagger_1.ApiQuery)({ name: 'since', required: false, description: 'ISO date; default now - 7 days (the TTL)' }),
     (0, swagger_1.ApiQuery)({ name: 'client', required: false, description: 'clientId' }),
+    (0, swagger_1.ApiQuery)({ name: 'chat', required: false, description: 'chatId: only this chat (counts too)' }),
     (0, swagger_1.ApiQuery)({ name: 'state', required: false, enum: payment_proofs_classify_1.PROOF_STATES, description: 'default review' }),
     (0, swagger_1.ApiQuery)({ name: 'minAmount', required: false, description: 'creditAmount (else amount read) >= n' }),
     (0, swagger_1.ApiQuery)({ name: 'limit', required: false, description: `default 50, max ${payment_proofs_service_1.MAX_LIMIT}` }),
@@ -41457,7 +41502,7 @@ const CLASSIFY_PROJECTION = {
     _id: 1, chatId: 1, profile: 1, clientId: 1, telegramMsgId: 1, createdAt: 1, amount: 1, creditAmount: 1, decision: 1,
     reasons: 1, servedAt: 1, 'ask.kind': 1, 'ask.blockedAt': 1, 'ask.reasons': 1, proofId: 1,
     'verdict.outcome': 1, 'verdict.reasons': 1, 'verdict.fakeScore': 1, 'review.state': 1,
-    imageSha256: 1, 'image.sha256': 1, payeeUpiId: 1, payeeName: 1, 'time.state': 1, 'time.epochMs': 1,
+    imageSha256: 1, 'image.sha256': 1, utr: 1, payeeUpiId: 1, payeeName: 1, 'time.state': 1, 'time.epochMs': 1,
     'verdict.fakeSignals': 1, 'ocr.payerName': 1,
 };
 exports.PROOF_SORTS = ['risk', 'time'];
@@ -41485,6 +41530,12 @@ let PaymentProofsService = PaymentProofsService_1 = class PaymentProofsService {
                 throw new common_1.BadRequestException('client must be a clientId');
             client = String(q.client);
         }
+        let chat;
+        if (q.chat !== undefined && q.chat !== '') {
+            if (!/^-?\d{1,20}$/.test(String(q.chat)))
+                throw new common_1.BadRequestException('chat must be a chatId');
+            chat = String(q.chat);
+        }
         const state = (q.state === undefined || q.state === '' ? 'review' : String(q.state));
         if (!payment_proofs_classify_1.PROOF_STATES.includes(state))
             throw new common_1.BadRequestException(`state must be one of ${payment_proofs_classify_1.PROOF_STATES.join('|')}`);
@@ -41510,7 +41561,7 @@ let PaymentProofsService = PaymentProofsService_1 = class PaymentProofsService {
             if (!cursor || (cursor.s === 'r') !== (sort === 'risk'))
                 throw new common_1.BadRequestException('invalid cursor');
         }
-        return { since, client, state, minAmount, limit, cursor, sort };
+        return { since, client, chat, state, minAmount, limit, cursor, sort };
     }
     async list(q, now = Date.now()) {
         const p = this.parseQuery(q, now);
@@ -41518,6 +41569,7 @@ let PaymentProofsService = PaymentProofsService_1 = class PaymentProofsService {
         const isMarked = (chatId) => !!chats.get(chatId)?.marked;
         const classified = everything.filter(({ row, c }) => new Date(row.createdAt).getTime() >= p.since
             && (!p.client || row.clientId === p.client)
+            && (!p.chat || String(row.chatId) === p.chat)
             && (p.minAmount === null || (c.amount !== null && c.amount >= p.minAmount)));
         const counts = { ...(0, payment_proofs_classify_1.emptyCounts)(), reviewAmount: 0 };
         const inPage = [];
@@ -41567,6 +41619,7 @@ let PaymentProofsService = PaymentProofsService_1 = class PaymentProofsService {
                 atRiskAmount: c.atRiskAmount,
                 strong: c.strong,
                 repeat: c.repeat,
+                reusedFrom: c.reusedFrom,
                 persona: ud?.profile ?? row.profile,
                 username: ud?.username || null,
                 complaintScore: typeof ud?.cheatCount === 'number' ? ud.cheatCount : null,
