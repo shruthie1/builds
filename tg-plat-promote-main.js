@@ -2485,6 +2485,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _media__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ./media */ "../../packages/tg-calls/src/media.ts");
 /* harmony import */ var _audio_feeder__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ./audio-feeder */ "../../packages/tg-calls/src/audio-feeder.ts");
 /* harmony import */ var _native_log__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ./native-log */ "../../packages/tg-calls/src/native-log.ts");
+/* harmony import */ var _sigchld_hold__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ./sigchld-hold */ "../../packages/tg-calls/src/sigchld-hold.ts");
+
 
 
 
@@ -2556,6 +2558,22 @@ class CallEngine extends events__WEBPACK_IMPORTED_MODULE_0__.EventEmitter {
         if (options.nativeLogs && options.nativeLogs !== 'off')
             this.tap.install(this.ntgLib, options.nativeLogs);
         this.wireNtgCallbacks();
+        // Before any call opens a SHELL source: see sigchld-hold.ts. Deferred to the first call when a child is alive now.
+        void this.holdSigchld(false);
+    }
+    /**
+     * Opens the process-wide SIGCHLD hold (sigchld-hold.ts) if it is not open yet. A failure never blocks a call; it is
+     * logged, because without the hold this call's SHELL sources can leave every later child process a zombie.
+     */
+    async holdSigchld(beforeCall) {
+        try {
+            const held = await (0,_sigchld_hold__WEBPACK_IMPORTED_MODULE_9__.holdSigchld)(this.ntgLib);
+            if (!held && beforeCall)
+                this.logger.warn('[tg-calls] SIGCHLD hold not open (Node has a live child process); this call may break child reaping');
+        }
+        catch (error) {
+            this.logger.warn('[tg-calls] SIGCHLD hold failed; this call may break child reaping', error?.message ?? error);
+        }
     }
     /** True when the native ntgcalls binary loads on this host. */
     static isSupported() {
@@ -2826,6 +2844,7 @@ class CallEngine extends events__WEBPACK_IMPORTED_MODULE_0__.EventEmitter {
         const dhc = await this.client.invoke(new telegram__WEBPACK_IMPORTED_MODULE_3__.Api.messages.GetDhConfig({ version: 0, randomLength: 256 }));
         if (!(dhc instanceof telegram__WEBPACK_IMPORTED_MODULE_3__.Api.messages.DhConfig))
             throw new Error('Unexpected DH config response');
+        await this.holdSigchld(true);
         await this.ntg.createP2pCall(call.userId);
         call.tap = this.tap.open();
         const { MediaSource, StreamMode } = this.ntgLib;
@@ -3851,6 +3870,92 @@ function emptyStats(status, level) {
 }
 /** One per process: the binding's log level and console are process-wide. */
 const nativeLogTap = new NativeLogTap();
+
+
+/***/ },
+
+/***/ "../../packages/tg-calls/src/sigchld-hold.ts"
+/*!***************************************************!*\
+  !*** ../../packages/tg-calls/src/sigchld-hold.ts ***!
+  \***************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   HOLD_CHAT_ID: () => (/* binding */ HOLD_CHAT_ID),
+/* harmony export */   holdShellCommand: () => (/* binding */ holdShellCommand),
+/* harmony export */   holdSigchld: () => (/* binding */ holdSigchld)
+/* harmony export */ });
+/**
+ * Keeps Node's SIGCHLD handler alive next to ntgcalls SHELL sources.
+ *
+ * ntgcalls (3.0.5) runs each SHELL source (our camera, the plain-audio microphone) as its own child through
+ * Boost.Process v2, and every such process handle owns a boost::asio signal_set on SIGCHLD. asio installs its own
+ * SIGCHLD handler when the first set in the process opens, and resets SIGCHLD to SIG_DFL when the last one closes
+ * (call end). libuv re-installs its handler only when its child watcher starts from zero children. So when either
+ * step happens while Node has a live child (audio feeder, ffprobe, a system command), libuv's watcher stays active
+ * with nothing behind it and every later child becomes a zombie until restart. Reproduced in a Linux container
+ * with ntgcalls 3.0.5 on Node 20 (2026-11-04): stop() with a Node child alive → SIGCHLD SIG_DFL, no exit events.
+ *
+ * The hold opens one SHELL source on its own never-connected ntgcalls instance at a moment Node has no child, and
+ * keeps it for the life of the process. asio then makes its one sigaction while no Node child can be lost, and never
+ * closes its last set, so SIGCHLD is never reset. The next Node spawn re-installs libuv's handler over asio's and
+ * keeps it (asio installs only for its first set). The held shell sleeps in a loop and exits once this process is
+ * gone, so a crash leaves nothing behind.
+ */
+/** Chat id of the held instance's only call. It is never connected, so no peer ever sees it. */
+const HOLD_CHAT_ID = 1n;
+/** Per loaded ntgcalls module (one per process in production): the hold, or the attempt in flight. */
+const holds = new WeakMap();
+function liveNodeChildren() {
+    return process.getActiveResourcesInfo().filter((name) => name === 'ProcessWrap').length;
+}
+/**
+ * The held process: no output, sleeps, exits when the watched process is gone (also after a SIGKILL of Node).
+ * ntgcalls splits SHELL input with wordexp(), not /bin/sh: unquoted ; | & < > are refused, so the loop is one quoted word.
+ */
+function holdShellCommand(pid) {
+    return `sh -c 'while kill -0 ${Math.trunc(pid)} 2>/dev/null; do sleep 30; done'`;
+}
+/**
+ * Opens the hold once per process. Resolves true when held (now or earlier); false when Node had a live child,
+ * in which case nothing was opened and the caller may try again later. Rejects when ntgcalls refused.
+ */
+function holdSigchld(ntgLib, options = {}) {
+    if (process.platform === 'win32')
+        return Promise.resolve(true);
+    let state = holds.get(ntgLib);
+    if (!state) {
+        state = { held: false, pending: null };
+        holds.set(ntgLib, state);
+    }
+    if (state.held)
+        return Promise.resolve(true);
+    if (state.pending)
+        return state.pending;
+    if ((options.liveChildren ?? liveNodeChildren)() > 0)
+        return Promise.resolve(false);
+    const current = state;
+    const instance = new ntgLib.NTgCalls();
+    current.pending = (async () => {
+        try {
+            await instance.createP2pCall(HOLD_CHAT_ID);
+            await instance.setStreamSources(HOLD_CHAT_ID, ntgLib.StreamMode.CAPTURE, {
+                microphone: {
+                    mediaSource: ntgLib.MediaSource.SHELL, input: holdShellCommand(options.pid ?? process.pid),
+                    sampleRate: 48000, channelCount: 1, keepOpen: true,
+                },
+            });
+            current.instance = instance; // referenced for the process's life: its sources must never close
+            current.held = true;
+            return true;
+        }
+        finally {
+            current.pending = null;
+        }
+    })();
+    return current.pending;
+}
 
 
 /***/ },
@@ -16178,13 +16283,17 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   HeartbeatPublisher: () => (/* binding */ HeartbeatPublisher),
 /* harmony export */   heartbeatKey: () => (/* binding */ heartbeatKey),
 /* harmony export */   maskMobile: () => (/* binding */ maskMobile),
+/* harmony export */   readSigchldHealth: () => (/* binding */ readSigchldHealth),
 /* harmony export */   startHeartbeat: () => (/* binding */ startHeartbeat),
 /* harmony export */   stopHeartbeat: () => (/* binding */ stopHeartbeat)
 /* harmony export */ });
-/* harmony import */ var node_os__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! node:os */ "node:os");
-/* harmony import */ var node_os__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(node_os__WEBPACK_IMPORTED_MODULE_0__);
-/* harmony import */ var _state_state_redis__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../state/state-redis */ "../../packages/tg-core/src/state/state-redis.ts");
-/* harmony import */ var _last_error__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./last-error */ "../../packages/tg-core/src/monitoring/last-error.ts");
+/* harmony import */ var node_fs__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! node:fs */ "node:fs");
+/* harmony import */ var node_fs__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(node_fs__WEBPACK_IMPORTED_MODULE_0__);
+/* harmony import */ var node_os__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! node:os */ "node:os");
+/* harmony import */ var node_os__WEBPACK_IMPORTED_MODULE_1___default = /*#__PURE__*/__webpack_require__.n(node_os__WEBPACK_IMPORTED_MODULE_1__);
+/* harmony import */ var _utils_logger__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _state_state_redis__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../state/state-redis */ "../../packages/tg-core/src/state/state-redis.ts");
+/* harmony import */ var _last_error__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ./last-error */ "../../packages/tg-core/src/monitoring/last-error.ts");
 // Process heartbeat: every tg-aut / promote-clients process publishes a small JSON snapshot of its in-memory state to
 // Redis so CMS can show live per-process state without probing processes.
 //
@@ -16199,9 +16308,50 @@ __webpack_require__.r(__webpack_exports__);
 //    beat. Collectors must be pure memory reads (no Telegram, no Mongo).
 //  - Payload ≤ 4 KB: over the cap, sections in `dropOrder` are nulled first, then all sections are removed.
 //  - Mobiles are published masked (`maskMobile`) so raw numbers never reach Redis.
+//  - `sigchld` (Linux): whether this process still reaps its children (see readSigchldHealth); logged once on breakage.
 
 
 
+
+
+const SIGCHLD_BIT = 1n << 16n; // signal 17 → bit 16 of the SigCgt mask
+function liveNodeChildren() {
+    return process.getActiveResourcesInfo().filter((name) => name === "ProcessWrap").length;
+}
+/** Linux only (null elsewhere or when /proc is unreadable). Reads two to a few small /proc files; no syscalls beyond. */
+function readSigchldHealth(readFile = (file) => node_fs__WEBPACK_IMPORTED_MODULE_0__.readFileSync(file, "utf8"), platform = process.platform, liveChildren = liveNodeChildren) {
+    if (platform !== "linux")
+        return null;
+    let caught;
+    try {
+        const mask = /^SigCgt:\s*([0-9a-f]+)/im.exec(readFile("/proc/self/status"))?.[1];
+        if (!mask)
+            return null;
+        caught = (BigInt(`0x${mask}`) & SIGCHLD_BIT) !== 0n;
+    }
+    catch {
+        return null;
+    }
+    let zombies = null;
+    try {
+        const pids = readFile(`/proc/self/task/${process.pid}/children`).trim().split(/\s+/).filter(Boolean);
+        zombies = 0;
+        for (const pid of pids) {
+            try {
+                const stat = readFile(`/proc/${pid}/stat`);
+                if (stat.slice(stat.lastIndexOf(")") + 2, stat.lastIndexOf(")") + 3) === "Z")
+                    zombies += 1;
+            }
+            catch { /* exited and reaped meanwhile */ }
+        }
+    }
+    catch {
+        zombies = null;
+    }
+    const children = liveChildren();
+    return { caught, children, zombies, broken: children > 0 && (!caught || (zombies ?? 0) > 0) };
+}
+const logger = new _utils_logger__WEBPACK_IMPORTED_MODULE_2__.Logger("heartbeat");
 const HEARTBEAT_INDEX_KEY = "heartbeat::index";
 const HEARTBEAT_INTERVAL_MS = 30000;
 const HEARTBEAT_JITTER_MS = 3000;
@@ -16214,7 +16364,7 @@ const SECTION_TIMEOUT_MS = 1000;
 const MB = 1024 * 1024;
 /** `heartbeat::<svc>::<clientId>`, or null when the clientId is missing. */
 function heartbeatKey(svc, clientId) {
-    return (0,_state_state_redis__WEBPACK_IMPORTED_MODULE_1__.stateKey)("heartbeat", svc, clientId);
+    return (0,_state_state_redis__WEBPACK_IMPORTED_MODULE_3__.stateKey)("heartbeat", svc, clientId);
 }
 /** Last 4 digits only: `••••1234`. Null for a missing mobile. */
 function maskMobile(mobile) {
@@ -16244,6 +16394,9 @@ class HeartbeatPublisher {
         this.started = false;
         this.seq = 0;
         this.lastIndexAt = 0;
+        /** Broken on the previous beat (a child can sit unreaped for a moment); logged once per process when it holds. */
+        this.sigchldBrokenBefore = false;
+        this.sigchldLogged = false;
         this.opts = opts;
         this.timers = opts.timers ?? defaultTimers;
         this.random = opts.random ?? Math.random;
@@ -16292,7 +16445,7 @@ class HeartbeatPublisher {
         this.timers.clearTimeout(this.timer);
         this.timer = undefined;
         try {
-            return await (0,_state_state_redis__WEBPACK_IMPORTED_MODULE_1__.withDeadline)(this.publish("stopping"), boundMs, "heartbeat stop");
+            return await (0,_state_state_redis__WEBPACK_IMPORTED_MODULE_3__.withDeadline)(this.publish("stopping"), boundMs, "heartbeat stop");
         }
         catch {
             return false;
@@ -16324,7 +16477,7 @@ class HeartbeatPublisher {
             try {
                 const prepared = this.opts.collector.prepare();
                 if (prepared && typeof prepared.then === "function") {
-                    await (0,_state_state_redis__WEBPACK_IMPORTED_MODULE_1__.withDeadline)(prepared, timeoutMs, "heartbeat prepare");
+                    await (0,_state_state_redis__WEBPACK_IMPORTED_MODULE_3__.withDeadline)(prepared, timeoutMs, "heartbeat prepare");
                 }
             }
             catch {
@@ -16335,7 +16488,7 @@ class HeartbeatPublisher {
             try {
                 let value = section();
                 if (value && typeof value.then === "function") {
-                    value = await (0,_state_state_redis__WEBPACK_IMPORTED_MODULE_1__.withDeadline)(value, timeoutMs, `heartbeat section ${name}`);
+                    value = await (0,_state_state_redis__WEBPACK_IMPORTED_MODULE_3__.withDeadline)(value, timeoutMs, `heartbeat section ${name}`);
                 }
                 values[name] = value === undefined ? null : value;
             }
@@ -16345,6 +16498,22 @@ class HeartbeatPublisher {
             }
         }
         return { values, errors };
+    }
+    sigchldHealth() {
+        let health;
+        try {
+            health = (this.opts.sigchld ?? readSigchldHealth)();
+        }
+        catch {
+            return null;
+        }
+        const broken = health?.broken === true;
+        if (broken && this.sigchldBrokenBefore && !this.sigchldLogged) {
+            this.sigchldLogged = true;
+            logger.error(`child reaping broken: SIGCHLD ${health?.caught ? "caught" : "at default"}, ${health?.children} child handle(s), ${health?.zombies ?? "?"} zombie(s); every later child process stays a zombie until restart`);
+        }
+        this.sigchldBrokenBefore = broken;
+        return health;
     }
     /** Builds the payload JSON (size-guarded). Exposed for tests and size measurement. */
     async buildJson(clientId, statusOverride) {
@@ -16362,7 +16531,7 @@ class HeartbeatPublisher {
             v: 1,
             svc: this.opts.svc,
             clientId,
-            host: node_os__WEBPACK_IMPORTED_MODULE_0__.hostname(),
+            host: node_os__WEBPACK_IMPORTED_MODULE_1__.hostname(),
             pmId: envNumber("pm_id"),
             pid: process.pid,
             restarts: envNumber("restart_time"),
@@ -16372,7 +16541,8 @@ class HeartbeatPublisher {
             status,
             build,
             memMb: { rss: Math.round(mem.rss / MB), heapUsed: Math.round(mem.heapUsed / MB) },
-            lastError: (0,_last_error__WEBPACK_IMPORTED_MODULE_2__.getLastError)(),
+            lastError: (0,_last_error__WEBPACK_IMPORTED_MODULE_4__.getLastError)(),
+            sigchld: this.sigchldHealth(),
         };
         const payload = { ...envelope, ...values };
         if (errors.length)
@@ -16408,7 +16578,7 @@ class HeartbeatPublisher {
         const now = Date.now();
         const indexDue = statusOverride !== "stopping"
             && now - this.lastIndexAt >= (this.opts.indexEveryMs ?? HEARTBEAT_INDEX_EVERY_MS);
-        const ok = await (0,_state_state_redis__WEBPACK_IMPORTED_MODULE_1__.writeOnce)("heartbeat", (multi) => {
+        const ok = await (0,_state_state_redis__WEBPACK_IMPORTED_MODULE_3__.writeOnce)("heartbeat", (multi) => {
             multi.set(key, json, "EX", ttlSec);
             if (indexDue) {
                 multi.sadd(HEARTBEAT_INDEX_KEY, `${this.opts.svc}::${clientId}`);
@@ -40775,8 +40945,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "6412eb6188088e1767fc5513a3628177e7cd0395" : 0;
-    const builtAt =  true ? "2026-11-04T18:45:15.562Z" : 0;
+    const sha =  true ? "37fcba4494fc8145fb6dd2059d81a1f90d46a105" : 0;
+    const builtAt =  true ? "2026-11-04T18:50:56.319Z" : 0;
     return { sha, builtAt };
 }
 
@@ -45845,6 +46015,7 @@ const handleDebugTimers = async (req, res) => {
 
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   EXEC_ROUTE_TIMEOUT_MS: () => (/* binding */ EXEC_ROUTE_TIMEOUT_MS),
 /* harmony export */   exitAfterResponse: () => (/* binding */ exitAfterResponse),
 /* harmony export */   findClientRestartCheck: () => (/* binding */ findClientRestartCheck),
 /* harmony export */   handleExec: () => (/* binding */ handleExec),
@@ -45853,8 +46024,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   handleIp: () => (/* binding */ handleIp),
 /* harmony export */   handleRestart: () => (/* binding */ handleRestart)
 /* harmony export */ });
-/* harmony import */ var child_process__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! child_process */ "child_process");
-/* harmony import */ var child_process__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(child_process__WEBPACK_IMPORTED_MODULE_0__);
+/* harmony import */ var _run_command__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./run-command */ "./src/server/route-handlers/run-command.ts");
 /* harmony import */ var _bootstrap_app_service__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../../bootstrap/app-service */ "./src/bootstrap/app-service.ts");
 /* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
 /* harmony import */ var _bootstrap_process_info__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../../bootstrap/process-info */ "./src/bootstrap/process-info.ts");
@@ -45873,6 +46043,8 @@ __webpack_require__.r(__webpack_exports__);
 
 
 const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_7__.Logger("routes");
+/** /exec runs operator commands (pm2, git, npm); bounded like tg-aut's /exec so a hung child cannot pin the request. */
+const EXEC_ROUTE_TIMEOUT_MS = 120000;
 function findClientRestartCheck(snapshot, clientId) {
     return (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_4__.findHealthCheck)(snapshot, `telegram.connection.${clientId}`)
         ?? (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_4__.findHealthCheck)(snapshot, "telegram.manager-map")
@@ -45904,7 +46076,8 @@ const handleExec = async (req, res) => {
     let cmd = req.params.cmd;
     logger.info(`executing: `, cmd);
     try {
-        const result = (0,child_process__WEBPACK_IMPORTED_MODULE_0__.execSync)(cmd).toString();
+        // Was execSync with no timeout: one hung command (or a lost SIGCHLD) froze the whole process for good.
+        const result = await (0,_run_command__WEBPACK_IMPORTED_MODULE_0__.runCommand)(cmd, { timeoutMs: EXEC_ROUTE_TIMEOUT_MS });
         logger.info(result);
         res.send(result);
     }
@@ -46074,6 +46247,114 @@ function sendHealthRouteFailure(req, res, error, options) {
         evidence,
         requestId: evidence.health.requestId,
         extra: { timestamp: new Date().toISOString() },
+    });
+}
+
+
+/***/ },
+
+/***/ "./src/server/route-handlers/run-command.ts"
+/*!**************************************************!*\
+  !*** ./src/server/route-handlers/run-command.ts ***!
+  \**************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   RUN_COMMAND_EXIT_WAIT_MS: () => (/* binding */ RUN_COMMAND_EXIT_WAIT_MS),
+/* harmony export */   RUN_COMMAND_MAX_OUTPUT_BYTES: () => (/* binding */ RUN_COMMAND_MAX_OUTPUT_BYTES),
+/* harmony export */   RUN_COMMAND_TIMEOUT_MS: () => (/* binding */ RUN_COMMAND_TIMEOUT_MS),
+/* harmony export */   runCommand: () => (/* binding */ runCommand)
+/* harmony export */ });
+/* harmony import */ var child_process__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! child_process */ "child_process");
+/* harmony import */ var child_process__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(child_process__WEBPACK_IMPORTED_MODULE_0__);
+// Same runner as apps/tg-aut/src/routes/system/run-command.ts (apps do not import each other); keep the two in step.
+
+const RUN_COMMAND_TIMEOUT_MS = 30000;
+/** After the command's stdout and stderr close, how long to wait for its exit status before trusting the output. */
+const RUN_COMMAND_EXIT_WAIT_MS = 1000;
+/** Same cap as execSync's default maxBuffer. */
+const RUN_COMMAND_MAX_OUTPUT_BYTES = 1024 * 1024;
+/**
+ * Runs `cmd` through /bin/sh (as execSync did) and resolves with its stdout; rejects when it fails, prints
+ * more than RUN_COMMAND_MAX_OUTPUT_BYTES, or is not done within timeoutMs (its whole process group is then SIGKILLed).
+ *
+ * Async and never waits on the exit event alone: once ntgcalls replaces libuv's SIGCHLD handler no child
+ * exit is reported in this process (packages/tg-calls/src/sigchld-hold.ts), and an execSync then blocks the event
+ * loop for good. When both output pipes have closed but no exit follows within exitWaitMs, the output is
+ * used as is.
+ */
+function runCommand(cmd, opts = {}) {
+    const timeoutMs = opts.timeoutMs ?? RUN_COMMAND_TIMEOUT_MS;
+    const exitWaitMs = opts.exitWaitMs ?? RUN_COMMAND_EXIT_WAIT_MS;
+    return new Promise((resolve, reject) => {
+        let settled = false;
+        let deadline;
+        let exitWait;
+        const out = [];
+        const err = [];
+        let bytes = 0;
+        let openPipes = 2;
+        const done = (error) => {
+            if (settled)
+                return;
+            settled = true;
+            clearTimeout(deadline);
+            clearTimeout(exitWait);
+            if (error)
+                reject(error);
+            else
+                resolve(Buffer.concat(out).toString());
+        };
+        let child;
+        try {
+            // detached = its own process group, led by the shell: a timeout kills the shell and everything it started
+            // (killing only the shell left its children running, reparented to init).
+            child = (0,child_process__WEBPACK_IMPORTED_MODULE_0__.spawn)('/bin/sh', ['-c', cmd], { stdio: ['ignore', 'pipe', 'pipe'], detached: true });
+        }
+        catch (error) {
+            done(error instanceof Error ? error : new Error(String(error)));
+            return;
+        }
+        const kill = () => {
+            try {
+                if (child.pid)
+                    process.kill(-child.pid, 'SIGKILL');
+                else
+                    child.kill('SIGKILL');
+            }
+            catch { /* already gone */ }
+        };
+        const collect = (into) => (chunk) => {
+            bytes += chunk.length;
+            if (bytes > RUN_COMMAND_MAX_OUTPUT_BYTES) {
+                kill();
+                done(new Error(`Command output over ${RUN_COMMAND_MAX_OUTPUT_BYTES} bytes: ${cmd}`));
+                return;
+            }
+            into.push(chunk);
+        };
+        const pipeClosed = () => {
+            openPipes -= 1;
+            if (openPipes > 0 || settled)
+                return;
+            exitWait = setTimeout(() => done(null), exitWaitMs);
+        };
+        child.on('error', (error) => done(error));
+        child.on('close', (code, signal) => {
+            if (code === 0 && !signal)
+                return done(null);
+            const stderr = Buffer.concat(err).toString().trim();
+            done(new Error(`Command failed: ${cmd}${signal ? ` (signal ${signal})` : ` (exit ${code})`}${stderr ? `\n${stderr}` : ''}`));
+        });
+        child.stdout?.on('data', collect(out));
+        child.stderr?.on('data', collect(err));
+        child.stdout?.on('end', pipeClosed);
+        child.stderr?.on('end', pipeClosed);
+        deadline = setTimeout(() => {
+            kill();
+            done(new Error(`Command timed out after ${Math.round(timeoutMs / 1000)}s: ${cmd}`));
+        }, timeoutMs);
     });
 }
 
@@ -50666,26 +50947,23 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildClientConfigUrl: () => (/* binding */ buildClientConfigUrl),
 /* harmony export */   buildSharedConfigUrl: () => (/* binding */ buildSharedConfigUrl),
 /* harmony export */   getRuntimeConfigBase: () => (/* binding */ getRuntimeConfigBase),
-/* harmony export */   installPackage: () => (/* binding */ installPackage),
 /* harmony export */   modifyPackageJson: () => (/* binding */ modifyPackageJson),
 /* harmony export */   readPackageJson: () => (/* binding */ readPackageJson),
 /* harmony export */   setEnv: () => (/* binding */ setEnv),
 /* harmony export */   writePackageJson: () => (/* binding */ writePackageJson)
 /* harmony export */ });
-/* harmony import */ var child_process__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! child_process */ "child_process");
-/* harmony import */ var child_process__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(child_process__WEBPACK_IMPORTED_MODULE_0__);
-/* harmony import */ var dotenv__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! dotenv */ "dotenv");
-/* harmony import */ var dotenv__WEBPACK_IMPORTED_MODULE_1___default = /*#__PURE__*/__webpack_require__.n(dotenv__WEBPACK_IMPORTED_MODULE_1__);
-/* harmony import */ var fs__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! fs */ "fs");
-/* harmony import */ var fs__WEBPACK_IMPORTED_MODULE_2___default = /*#__PURE__*/__webpack_require__.n(fs__WEBPACK_IMPORTED_MODULE_2__);
-/* harmony import */ var path__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! path */ "path");
-/* harmony import */ var path__WEBPACK_IMPORTED_MODULE_3___default = /*#__PURE__*/__webpack_require__.n(path__WEBPACK_IMPORTED_MODULE_3__);
-/* harmony import */ var url__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! url */ "url");
-/* harmony import */ var url__WEBPACK_IMPORTED_MODULE_4___default = /*#__PURE__*/__webpack_require__.n(url__WEBPACK_IMPORTED_MODULE_4__);
-/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
-/* harmony import */ var _tg_core_utils_apiKey__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! @tg/core/utils/apiKey */ "../../packages/tg-core/src/utils/apiKey.ts");
-/* harmony import */ var _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! @tg/core/utils/TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
-/* harmony import */ var _tg_core_utils_runtime_config__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! @tg/core/utils/runtime-config */ "../../packages/tg-core/src/utils/runtime-config.ts");
+/* harmony import */ var dotenv__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! dotenv */ "dotenv");
+/* harmony import */ var dotenv__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(dotenv__WEBPACK_IMPORTED_MODULE_0__);
+/* harmony import */ var fs__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! fs */ "fs");
+/* harmony import */ var fs__WEBPACK_IMPORTED_MODULE_1___default = /*#__PURE__*/__webpack_require__.n(fs__WEBPACK_IMPORTED_MODULE_1__);
+/* harmony import */ var path__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! path */ "path");
+/* harmony import */ var path__WEBPACK_IMPORTED_MODULE_2___default = /*#__PURE__*/__webpack_require__.n(path__WEBPACK_IMPORTED_MODULE_2__);
+/* harmony import */ var url__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! url */ "url");
+/* harmony import */ var url__WEBPACK_IMPORTED_MODULE_3___default = /*#__PURE__*/__webpack_require__.n(url__WEBPACK_IMPORTED_MODULE_3__);
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _tg_core_utils_apiKey__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! @tg/core/utils/apiKey */ "../../packages/tg-core/src/utils/apiKey.ts");
+/* harmony import */ var _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! @tg/core/utils/TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
+/* harmony import */ var _tg_core_utils_runtime_config__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! @tg/core/utils/runtime-config */ "../../packages/tg-core/src/utils/runtime-config.ts");
 
 
 
@@ -50694,21 +50972,20 @@ __webpack_require__.r(__webpack_exports__);
 
 
 
-
-const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_5__.Logger("index");
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_4__.Logger("index");
 // GramJS logs expected RPC refusals (CHANNEL_INVALID, ...) via console.error: route those to warn.
-_tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_5__.Logger.downgradeExpectedConsoleErrors();
-dotenv__WEBPACK_IMPORTED_MODULE_1___default().config();
-const __filename = (0,url__WEBPACK_IMPORTED_MODULE_4__.fileURLToPath)("file:///home/runner/work/tg-plat/tg-plat/apps/promote-clients/src/main.ts");
-const __dirname = path__WEBPACK_IMPORTED_MODULE_3___default().dirname(__filename);
+_tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_4__.Logger.downgradeExpectedConsoleErrors();
+dotenv__WEBPACK_IMPORTED_MODULE_0___default().config();
+const __filename = (0,url__WEBPACK_IMPORTED_MODULE_3__.fileURLToPath)("file:///home/runner/work/tg-plat/tg-plat/apps/promote-clients/src/main.ts");
+const __dirname = path__WEBPACK_IMPORTED_MODULE_2___default().dirname(__filename);
 // Enable garbage collection for heapdump functionality
 if (typeof global.gc !== 'function') {
     logger.warn('⚠️  Garbage collection not exposed. Run with --expose-gc flag for full heapdump functionality');
 }
 const readPackageJson = () => {
     try {
-        const packageJsonPath = path__WEBPACK_IMPORTED_MODULE_3___default().resolve(__dirname, '../package.json');
-        const packageJsonContent = fs__WEBPACK_IMPORTED_MODULE_2___default().readFileSync(packageJsonPath, 'utf-8');
+        const packageJsonPath = path__WEBPACK_IMPORTED_MODULE_2___default().resolve(__dirname, '../package.json');
+        const packageJsonContent = fs__WEBPACK_IMPORTED_MODULE_1___default().readFileSync(packageJsonPath, 'utf-8');
         return JSON.parse(packageJsonContent);
     }
     catch (error) {
@@ -50719,9 +50996,9 @@ const readPackageJson = () => {
 // Function to write package.json
 const writePackageJson = (data) => {
     try {
-        const packageJsonPath = path__WEBPACK_IMPORTED_MODULE_3___default().resolve(__dirname, '../package.json');
+        const packageJsonPath = path__WEBPACK_IMPORTED_MODULE_2___default().resolve(__dirname, '../package.json');
         const packageJsonContent = JSON.stringify(data, null, 2);
-        fs__WEBPACK_IMPORTED_MODULE_2___default().writeFileSync(packageJsonPath, packageJsonContent, 'utf-8');
+        fs__WEBPACK_IMPORTED_MODULE_1___default().writeFileSync(packageJsonPath, packageJsonContent, 'utf-8');
     }
     catch (error) {
         logger.error('Error writing package.json:', error.message);
@@ -50787,17 +51064,8 @@ const modifyPackageJson = (action, packageName, version, dev = false) => {
 // modifyPackageJson('remove', 'lodash');
 // modifyPackageJson('change', 'telegram', '2.18.26');
 // modifyPackageJson('add', 'cors', '^2.8.5');
-// installPackage()
-async function installPackage() {
-    logger.info(" executing npm i");
-    (0,child_process__WEBPACK_IMPORTED_MODULE_0__.execSync)("npm i");
-    // const installProcess = spawn('npm', ['install']);
-    // installProcess.stdout.on('data', (data) => logger.info(data.toString()));
-    // installProcess.stderr.on('data', (data) => logger.error(data.toString()));
-    // await new Promise((resolve) => installProcess.on('close', resolve));
-}
 function getRuntimeConfigBase() {
-    const [base] = (0,_tg_core_utils_runtime_config__WEBPACK_IMPORTED_MODULE_8__.runtimeConfigBases)();
+    const [base] = (0,_tg_core_utils_runtime_config__WEBPACK_IMPORTED_MODULE_7__.runtimeConfigBases)();
     if (!base) {
         throw new Error('Missing runtime config base. Set RUNTIME_CONFIG_BASE, tgcms, cms or tgmanager.');
     }
@@ -50817,13 +51085,13 @@ function runtimeConfigOptions() {
     return {
         service: SERVICE_NAME,
         clientId: process.env.clientId,
-        apiKey: (0,_tg_core_utils_apiKey__WEBPACK_IMPORTED_MODULE_6__.getApiKey)(),
+        apiKey: (0,_tg_core_utils_apiKey__WEBPACK_IMPORTED_MODULE_5__.getApiKey)(),
         log: (message) => logger.warn(`[runtime-config] ${message}`),
     };
 }
 async function alertOperators(notice) {
     try {
-        await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_7__.BotConfig.getInstance().sendMessage(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_7__.ChannelCategory.CLIENT_UPDATES, notice);
+        await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_6__.BotConfig.getInstance().sendMessage(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_6__.ChannelCategory.CLIENT_UPDATES, notice);
     }
     catch (error) {
         logger.error('Failed to send runtime-config alert:', error);
@@ -50836,15 +51104,15 @@ async function alertOperators(notice) {
  */
 async function setEnv() {
     const options = runtimeConfigOptions();
-    const result = await (0,_tg_core_utils_runtime_config__WEBPACK_IMPORTED_MODULE_8__.loadRuntimeConfig)(options);
-    (0,_tg_core_utils_runtime_config__WEBPACK_IMPORTED_MODULE_8__.applyRuntimeConfig)(result.config);
+    const result = await (0,_tg_core_utils_runtime_config__WEBPACK_IMPORTED_MODULE_7__.loadRuntimeConfig)(options);
+    (0,_tg_core_utils_runtime_config__WEBPACK_IMPORTED_MODULE_7__.applyRuntimeConfig)(result.config);
     logger.info(`Runtime config applied from ${result.source}${result.base ? ` (${result.base})` : ''}; ${Object.keys(result.config).length} keys`);
     logger.info("Env Mobile : ", process.env.mobile);
-    for (const notice of (0,_tg_core_utils_runtime_config__WEBPACK_IMPORTED_MODULE_8__.runtimeConfigBootNotices)(result, SERVICE_NAME))
+    for (const notice of (0,_tg_core_utils_runtime_config__WEBPACK_IMPORTED_MODULE_7__.runtimeConfigBootNotices)(result, SERVICE_NAME))
         void alertOperators(notice);
     if (result.source === 'cache') {
-        (0,_tg_core_utils_runtime_config__WEBPACK_IMPORTED_MODULE_8__.startRuntimeConfigRefresh)(options, () => {
-            void alertOperators((0,_tg_core_utils_runtime_config__WEBPACK_IMPORTED_MODULE_8__.runtimeConfigRefreshedNotice)(SERVICE_NAME));
+        (0,_tg_core_utils_runtime_config__WEBPACK_IMPORTED_MODULE_7__.startRuntimeConfigRefresh)(options, () => {
+            void alertOperators((0,_tg_core_utils_runtime_config__WEBPACK_IMPORTED_MODULE_7__.runtimeConfigRefreshedNotice)(SERVICE_NAME));
         });
     }
     await Promise.resolve(/*! import() */).then(__webpack_require__.bind(__webpack_require__, /*! ./bootstrap/express */ "./src/bootstrap/express.ts"));
