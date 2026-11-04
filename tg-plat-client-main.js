@@ -27249,18 +27249,25 @@ function containsAll(str, arr) {
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
-/* harmony export */   DECISION_TTL_MS: () => (/* binding */ DECISION_TTL_MS),
+/* harmony export */   EXPORTED_SENDER_CLOSE_WAIT_MS: () => (/* binding */ EXPORTED_SENDER_CLOSE_WAIT_MS),
 /* harmony export */   PROBE_ATTEMPTS: () => (/* binding */ PROBE_ATTEMPTS),
 /* harmony export */   PROBE_DEADLINE_MS: () => (/* binding */ PROBE_DEADLINE_MS),
+/* harmony export */   SENDER_CLOSED_MESSAGE: () => (/* binding */ SENDER_CLOSED_MESSAGE),
 /* harmony export */   SLOW_CONNECT_MS: () => (/* binding */ SLOW_CONNECT_MS),
 /* harmony export */   TELEGRAM_DC_ADDRESSES: () => (/* binding */ TELEGRAM_DC_ADDRESSES),
+/* harmony export */   V4_BAD_MIN: () => (/* binding */ V4_BAD_MIN),
+/* harmony export */   V6_MIN_OK: () => (/* binding */ V6_MIN_OK),
 /* harmony export */   __resetDcIpFamilyForTests: () => (/* binding */ __resetDcIpFamilyForTests),
 /* harmony export */   __setDcIpFamilyProbeForTests: () => (/* binding */ __setDcIpFamilyProbeForTests),
 /* harmony export */   applyDcIpFamily: () => (/* binding */ applyDcIpFamily),
+/* harmony export */   closeExportedSenders: () => (/* binding */ closeExportedSenders),
 /* harmony export */   decideIpFamily: () => (/* binding */ decideIpFamily),
-/* harmony export */   isFamilyBad: () => (/* binding */ isFamilyBad),
-/* harmony export */   isFamilyGood: () => (/* binding */ isFamilyGood),
+/* harmony export */   isV4Bad: () => (/* binding */ isV4Bad),
+/* harmony export */   isV6Good: () => (/* binding */ isV6Good),
+/* harmony export */   isV6Reachable: () => (/* binding */ isV6Reachable),
+/* harmony export */   maskMobile: () => (/* binding */ maskMobile),
 /* harmony export */   readIpFamilyMode: () => (/* binding */ readIpFamilyMode),
+/* harmony export */   rejectPendingRequests: () => (/* binding */ rejectPendingRequests),
 /* harmony export */   resolveDcIpFamily: () => (/* binding */ resolveDcIpFamily),
 /* harmony export */   summarizeProbe: () => (/* binding */ summarizeProbe),
 /* harmony export */   tcpConnectProbe: () => (/* binding */ tcpConnectProbe)
@@ -27283,10 +27290,15 @@ const TELEGRAM_DC_ADDRESSES = Object.freeze({
     4: { ipv4: "149.154.167.91", ipv6: "2001:67c:4e8:f004::a" },
     5: { ipv4: "91.108.56.130", ipv6: "2001:b28:f23f:f005::a" },
 });
-const PROBE_ATTEMPTS = 4;
+/** TCP connects per family per DC. */
+const PROBE_ATTEMPTS = 6;
 const PROBE_DEADLINE_MS = 3000;
+/** A connect slower than this counts as bad; also the IPv6 home-DC median ceiling. */
 const SLOW_CONNECT_MS = 1000;
-const DECISION_TTL_MS = 10 * 60000;
+/** IPv4 is bad when at least this many of PROBE_ATTEMPTS failed or were slow. */
+const V4_BAD_MIN = 2;
+/** IPv6 to a DC is reachable when at least this many of PROBE_ATTEMPTS connected. */
+const V6_MIN_OK = 5;
 const NO_ROUTE_CODES = new Set(["ENETUNREACH", "EHOSTUNREACH", "EADDRNOTAVAIL", "EAFNOSUPPORT", "EPROTONOSUPPORT"]);
 function summarizeProbe(results, slowMs = SLOW_CONNECT_MS) {
     const okTimes = results.filter((r) => r.ok).map((r) => r.ms).sort((a, b) => a - b);
@@ -27304,25 +27316,33 @@ function summarizeProbe(results, slowMs = SLOW_CONNECT_MS) {
         noRoute: results.length > 0 && results.every((r) => !r.ok && !!r.code && NO_ROUTE_CODES.has(r.code)),
     };
 }
-/** Failures or slow connects in at least 2 attempts. */
-function isFamilyBad(stats) {
-    return stats.attempts === 0 || stats.noRoute || stats.bad >= 2;
+/** IPv4 bad: no attempts, no route, or >= V4_BAD_MIN attempts failed or slower than SLOW_CONNECT_MS. */
+function isV4Bad(stats) {
+    return stats.attempts === 0 || stats.noRoute || stats.bad >= V4_BAD_MIN;
 }
-/** Every attempt connected and the median is under SLOW_CONNECT_MS. */
-function isFamilyGood(stats, slowMs = SLOW_CONNECT_MS) {
-    return stats.attempts > 0 && stats.successes === stats.attempts && stats.medianMs !== null && stats.medianMs < slowMs;
+/** IPv6 reachable for one DC: >= V6_MIN_OK of the attempts connected. */
+function isV6Reachable(stats) {
+    return !!stats && stats.attempts > 0 && !stats.noRoute && stats.successes >= V6_MIN_OK;
 }
 /**
- * Pure decision. IPv4 unless IPv4 is clearly bad and IPv6 clearly good. Once on IPv6, stay until
- * IPv6 itself becomes bad (hysteresis, so a flapping IPv4 path does not flip accounts back and forth).
+ * IPv6 good: every DC in TELEGRAM_DC_ADDRESSES reachable over IPv6 (file and other-DC senders follow
+ * `_useIPV6` too) and the home DC's IPv6 median under SLOW_CONNECT_MS.
  */
+function isV6Good(homeDc, v6ByDc) {
+    for (const dc of Object.keys(TELEGRAM_DC_ADDRESSES)) {
+        if (!isV6Reachable(v6ByDc[Number(dc)]))
+            return false;
+    }
+    const home = v6ByDc[homeDc];
+    return !!home && home.medianMs !== null && home.medianMs < SLOW_CONNECT_MS;
+}
+/** Pure auto-mode rule: IPv6 only if IPv4 is bad AND IPv6 is good; otherwise IPv4. */
 function decideIpFamily(input) {
-    const { previous, v4, v6 } = input;
-    if (v6.noRoute)
-        return "ipv4";
-    if (previous === "ipv6")
-        return isFamilyBad(v6) ? "ipv4" : "ipv6";
-    return isFamilyBad(v4) && isFamilyGood(v6) ? "ipv6" : "ipv4";
+    return isV4Bad(input.v4) && isV6Good(input.homeDc, input.v6ByDc) ? "ipv6" : "ipv4";
+}
+function maskMobile(mobile) {
+    const digits = String(mobile ?? "");
+    return digits.length > 4 ? `***${digits.slice(-4)}` : digits ? "***" : "-";
 }
 function readIpFamilyMode(env = process.env) {
     const raw = (env.TG_IP_FAMILY || "").trim().toLowerCase();
@@ -27354,60 +27374,86 @@ async function probeFamily(probe, host, port, family) {
     return summarizeProbe(attempts);
 }
 const logger = new _logger__WEBPACK_IMPORTED_MODULE_1__.Logger("tg-core:dc-ip-family");
-// Bounded: keys are only the DC ids in TELEGRAM_DC_ADDRESSES (at most 5 entries each).
+// Bounded: keys are only the DC ids in TELEGRAM_DC_ADDRESSES (at most 5 entries each). No eviction on
+// purpose: an entry is the process-lifetime decision.
 const decisions = new Map();
-const lastFamily = new Map();
 const inflight = new Map();
-const probeErrorLogged = new Set();
+// Auto mode probes IPv6 to all five DCs ONCE per process (per port; in practice one port) and shares the
+// result across every DC's decision. Bounded: one entry per port used (80 / 443).
+const sharedV6Probe = new Map();
 let probeImpl = tcpConnectProbe;
-let now = () => Date.now();
+function probeAllDcsV6(port) {
+    const cached = sharedV6Probe.get(port);
+    if (cached)
+        return cached;
+    const dcIds = Object.keys(TELEGRAM_DC_ADDRESSES).map(Number);
+    const run = Promise.all(dcIds.map((dc) => probeFamily(probeImpl, TELEGRAM_DC_ADDRESSES[dc].ipv6, port, 6))).then((list) => {
+        const v6 = {};
+        dcIds.forEach((dc, i) => { v6[dc] = list[i]; });
+        return v6;
+    });
+    // A failed probe is not cached, so the next DC's decision probes again.
+    run.catch(() => sharedV6Probe.delete(port));
+    sharedV6Probe.set(port, run);
+    return run;
+}
 function fmt(stats) {
+    if (!stats)
+        return "-";
     return `${stats.successes}/${stats.attempts} ok, bad ${stats.bad}, median ${stats.medianMs ?? "-"}ms${stats.noRoute ? ", no route" : ""}`;
 }
-/**
- * Choose the family for a DC. Cached per DC for DECISION_TTL_MS; concurrent callers share one probe.
- * Any probe error resolves to IPv4 (the old behaviour).
- */
-async function resolveDcIpFamily(opts) {
-    const mode = readIpFamilyMode(opts.env);
+function fmtV6(homeDc, v6) {
+    if (!v6)
+        return "-";
+    const others = Object.keys(v6).map(Number).filter((dc) => dc !== homeDc);
+    const minOk = others.length ? Math.min(...others.map((dc) => v6[dc].successes)) : null;
+    return `home ${fmt(v6[homeDc])}${others.length ? ` | other dcs min ${minOk}/${PROBE_ATTEMPTS} ok (${others.map((dc) => `${dc}:${v6[dc].successes}`).join(" ")})` : ""}`;
+}
+async function decide(dcId, port, v4Host, env) {
+    const table = TELEGRAM_DC_ADDRESSES[dcId];
+    const mode = readIpFamilyMode(env);
     if (mode === "ipv4")
         return { family: "ipv4", reason: "override" };
+    try {
+        if (mode === "ipv6") {
+            const home = await probeFamily(probeImpl, table.ipv6, port, 6);
+            const ok = isV6Reachable(home);
+            return { family: ok ? "ipv6" : "ipv4", reason: ok ? "override" : "override-fallback", v6: { [dcId]: home } };
+        }
+        const [v4, v6] = await Promise.all([probeFamily(probeImpl, v4Host, port, 4), probeAllDcsV6(port)]);
+        return { family: decideIpFamily({ homeDc: dcId, v4, v6ByDc: v6 }), reason: "probe", v4, v6 };
+    }
+    catch (error) {
+        logger.warn(`dc ${dcId} probe failed, using ipv4 for this process: ${error?.message || error}`);
+        return { family: "ipv4", reason: "probe-error" };
+    }
+}
+/**
+ * The process-lifetime family for a DC. The first caller probes (single-flight: concurrent callers
+ * share that probe); every later caller gets the same decision without probing, whatever the network
+ * or TG_IP_FAMILY looks like by then. Any probe error resolves to IPv4.
+ */
+async function resolveDcIpFamily(opts) {
     // SOCKS proxies are configured and tested for IPv4 only (useIPV6 must stay false with a proxy).
     if (opts.hasProxy)
         return { family: "ipv4", reason: "proxy" };
     const table = TELEGRAM_DC_ADDRESSES[opts.dcId];
     if (!table)
         return { family: "ipv4", reason: "unknown-dc" };
-    if (mode === "ipv6")
-        return { family: "ipv6", reason: "override" };
-    const cached = decisions.get(opts.dcId);
-    if (cached && now() - cached.at < DECISION_TTL_MS) {
-        return { family: cached.family, reason: "cached", v4: cached.v4, v6: cached.v6 };
-    }
-    const pending = inflight.get(opts.dcId);
+    const dcId = opts.dcId;
+    const fixed = decisions.get(dcId);
+    if (fixed)
+        return fixed;
+    const pending = inflight.get(dcId);
     if (pending)
         return pending;
-    const dcId = opts.dcId;
     const v4Host = opts.ipv4Address && net__WEBPACK_IMPORTED_MODULE_0__.isIPv4(opts.ipv4Address) ? opts.ipv4Address : table.ipv4;
     const run = (async () => {
         try {
-            const [v4, v6] = await Promise.all([
-                probeFamily(probeImpl, v4Host, opts.port, 4),
-                probeFamily(probeImpl, table.ipv6, opts.port, 6),
-            ]);
-            const family = decideIpFamily({ previous: lastFamily.get(dcId) ?? null, v4, v6 });
-            decisions.set(dcId, { family, at: now(), v4, v6 });
-            lastFamily.set(dcId, family);
-            probeErrorLogged.delete(dcId);
-            logger.log(`dc ${dcId} -> ${family} | v4 ${v4Host}:${opts.port} ${fmt(v4)} | v6 ${table.ipv6}:${opts.port} ${fmt(v6)}`);
-            return { family, reason: "probe", v4, v6 };
-        }
-        catch (error) {
-            if (!probeErrorLogged.has(dcId)) {
-                probeErrorLogged.add(dcId);
-                logger.warn(`dc ${dcId} probe failed, using ipv4: ${error?.message || error}`);
-            }
-            return { family: "ipv4", reason: "probe-error" };
+            const decision = await decide(dcId, opts.port, v4Host, opts.env);
+            decisions.set(dcId, decision);
+            logger.log(`dc ${dcId} -> ${decision.family} for this process (${decision.reason}) | v4 ${v4Host}:${opts.port} ${fmt(decision.v4)} | v6 ${fmtV6(dcId, decision.v6)}`);
+            return decision;
         }
         finally {
             inflight.delete(dcId);
@@ -27419,7 +27465,7 @@ async function resolveDcIpFamily(opts) {
 // The address each session object was loaded with, so an ipv4 decision restores exactly that.
 const originalAddress = new WeakMap();
 /**
- * Decide the family for this session's home DC and point the in-memory session at it, before
+ * Point the in-memory session at this process's family for its home DC, before
  * `new TelegramClient(...)`. Returns `params` with `useIPV6` matching. Call on client creation /
  * rebuild only; it never touches a connected client. The saved session string is never written.
  */
@@ -27443,37 +27489,170 @@ async function applyDcIpFamily(session, params, label = "") {
             hasProxy: !!params.proxy,
             ipv4Address: original.serverAddress,
         });
+        // TG_IP_FAMILY=ipv4 at decision time: exact pre-5e552d4 behaviour (params and session untouched).
+        if (decision.family === "ipv4" && decision.reason === "override")
+            return { params, decision };
         const table = TELEGRAM_DC_ADDRESSES[original.dcId];
-        if (decision.family === "ipv6" && table) {
+        const useIPV6 = decision.family === "ipv6" && !!table;
+        if (useIPV6) {
             if (session.serverAddress !== table.ipv6)
                 session.setDC(original.dcId, table.ipv6, original.port);
         }
         else if (session.serverAddress !== original.serverAddress || session.port !== original.port) {
             session.setDC(original.dcId, original.serverAddress, original.port);
         }
-        const useIPV6 = decision.family === "ipv6" && !!table;
-        if (decision.reason !== "override" || useIPV6) {
-            logger.debug(`${label} dc ${original.dcId} ${useIPV6 ? "ipv6" : "ipv4"} (${decision.reason})`);
-        }
+        logger.debug(`${maskMobile(label)} dc ${original.dcId} ${useIPV6 ? "ipv6" : "ipv4"} (${decision.reason})`);
         return { params: { ...params, useIPV6 }, decision };
     }
     catch (error) {
-        logger.warn(`${label} apply failed, keeping saved address: ${error?.message || error}`);
+        logger.warn(`${maskMobile(label)} apply failed, keeping saved address: ${error?.message || error}`);
         return { params, decision: null };
     }
 }
+const EXPORTED_SENDER_CLOSE_WAIT_MS = 2000;
+const SENDER_CLOSED_MESSAGE = "SENDER_CLOSED";
+/**
+ * Reject every request still waiting on a sender we just disconnected. GramJS 2.26.22
+ * `MTProtoSender.disconnect()` leaves `_pendingState` (sent, awaiting a reply) and `_sendQueue`
+ * (queued, `_pendingStates` / `_queue`) untouched, so an awaiting caller (e.g. a downloadMedia chunk)
+ * would never settle. Rejecting with a plain Error makes GramJS `invoke` / downloads rethrow it.
+ * Defensive: every field is optional, never throws. Returns how many requests were rejected.
+ */
+function rejectPendingRequests(sender, message = SENDER_CLOSED_MESSAGE) {
+    const seen = new Set();
+    const reject = (state) => {
+        if (!state || seen.has(state) || typeof state.reject !== "function")
+            return;
+        seen.add(state);
+        try {
+            // Mark the rejection handled first: some states (MsgsAck) have no awaiting caller, and an
+            // unhandled rejection would crash the process. A real caller still gets the rejection.
+            if (state.promise && typeof state.promise.catch === "function")
+                state.promise.catch(() => undefined);
+            state.reject(new Error(message));
+        }
+        catch {
+            /* ignore */
+        }
+    };
+    try {
+        const s = sender;
+        if (!s)
+            return 0;
+        const pending = s._pendingState;
+        if (pending && typeof pending.values === "function") {
+            try {
+                for (const st of pending.values())
+                    reject(st);
+            }
+            catch { /* ignore */ }
+            try {
+                if (typeof pending.clear === "function")
+                    pending.clear();
+            }
+            catch { /* ignore */ }
+        }
+        const queue = s._sendQueue;
+        if (queue) {
+            for (const list of [queue._pendingStates, queue._queue]) {
+                if (Array.isArray(list))
+                    for (const st of [...list])
+                        reject(st);
+            }
+            try {
+                if (typeof queue.clear === "function")
+                    queue.clear();
+            }
+            catch { /* ignore */ }
+        }
+    }
+    catch {
+        /* ignore */
+    }
+    return seen.size;
+}
+/**
+ * Disconnect every exported sender of a client that is about to be destroyed, clear their release
+ * timers, and reject requests still waiting on them (SENDER_CLOSED). Call BEFORE `client.destroy()`.
+ *
+ * Why: GramJS 2.26.22 `disconnect()` iterates `Object.values(this._exportedSenderPromises)`, but the
+ * field is a Map, so it disconnects nothing and then `.clear()`s the Map (the handles are lost); the
+ * 30 s release timer can then `_reconnect()` a sender with pending requests on the destroyed client.
+ *
+ * This is cleanup, NOT a guarantee that the account's key is never on two connections:
+ *  - GramJS can create new exported senders on a destroyed client (`getSender` from a download chunk,
+ *    FILE_MIGRATE, `invoke(req, dcId)`, upload retry; `_borrowExportedSender` / `_connectSender` never
+ *    check `_destroyed`).
+ *  - A foreign-DC sender still inside `_connectSender` when the client is destroyed can loop forever
+ *    (ExportAuthorization fails on the disconnected main sender, sleep 1 s, reconnect); its promise
+ *    never resolves, so it is never disconnected here and is only reported as pending after `waitMs`.
+ * Those leftovers use the process family (fixed per process), so they share the source address of the
+ * replacement client; that fixed family, not this helper, is the safety property. Never throws.
+ */
+async function closeExportedSenders(
+// A GramJS TelegramClient (its fields are private in the .d.ts, so typed loosely here).
+client, label = "", waitMs = EXPORTED_SENDER_CLOSE_WAIT_MS) {
+    const result = { closed: 0, pending: 0 };
+    try {
+        if (!client)
+            return result;
+        const host = client;
+        const timers = host._exportedSenderReleaseTimeouts;
+        if (timers instanceof Map) {
+            for (const t of timers.values())
+                clearTimeout(t);
+            timers.clear();
+        }
+        const promises = host._exportedSenderPromises;
+        if (!(promises instanceof Map) || promises.size === 0)
+            return result;
+        const entries = [...promises.values()];
+        promises.clear();
+        const settled = new Array(entries.length).fill(false);
+        const tasks = entries.map((p, i) => Promise.resolve(p)
+            .then(async (sender) => {
+            if (sender && typeof sender.disconnect === "function") {
+                try {
+                    await sender.disconnect();
+                }
+                finally {
+                    rejectPendingRequests(sender);
+                }
+                result.closed += 1;
+            }
+        })
+            .catch(() => undefined)
+            .finally(() => { settled[i] = true; }));
+        let timer;
+        await Promise.race([
+            Promise.all(tasks),
+            new Promise((resolve) => {
+                timer = setTimeout(resolve, waitMs);
+                timer?.unref?.();
+            }),
+        ]);
+        if (timer)
+            clearTimeout(timer);
+        result.pending = settled.filter((s) => !s).length;
+        if (result.closed || result.pending) {
+            logger.debug(`${maskMobile(label)} exported senders closed ${result.closed}, still connecting ${result.pending}`);
+        }
+        return result;
+    }
+    catch (error) {
+        logger.warn(`${maskMobile(label)} closing exported senders failed: ${error?.message || error}`);
+        return result;
+    }
+}
 /** Test hooks. */
-function __setDcIpFamilyProbeForTests(probe, clock) {
+function __setDcIpFamilyProbeForTests(probe) {
     probeImpl = probe ?? tcpConnectProbe;
-    now = clock ?? (() => Date.now());
 }
 function __resetDcIpFamilyForTests() {
     decisions.clear();
-    lastFamily.clear();
     inflight.clear();
-    probeErrorLogged.clear();
+    sharedV6Probe.clear();
     probeImpl = tcpConnectProbe;
-    now = () => Date.now();
 }
 
 
@@ -51469,8 +51648,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "76ec5215722a773f9ec7246f98204aaaf3fa7970" : 0;
-    const builtAt =  true ? "2026-11-04T17:25:08.139Z" : 0;
+    const sha =  true ? "6412eb6188088e1767fc5513a3628177e7cd0395" : 0;
+    const builtAt =  true ? "2026-11-04T18:45:15.475Z" : 0;
     return { sha, builtAt };
 }
 
@@ -93845,6 +94024,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   fraudAskAnswerable: () => (/* binding */ fraudAskAnswerable),
 /* harmony export */   fraudGraceOpen: () => (/* binding */ fraudGraceOpen),
 /* harmony export */   gateBlockAnswerable: () => (/* binding */ gateBlockAnswerable),
+/* harmony export */   heldSameFile: () => (/* binding */ heldSameFile),
 /* harmony export */   impossibleReferenceAskOpen: () => (/* binding */ impossibleReferenceAskOpen),
 /* harmony export */   isDifferentPicture: () => (/* binding */ isDifferentPicture),
 /* harmony export */   isImpossibleReference: () => (/* binding */ isImpossibleReference),
@@ -93856,6 +94036,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   referenceFormat: () => (/* binding */ referenceFormat),
 /* harmony export */   sameAmount: () => (/* binding */ sameAmount),
 /* harmony export */   samePayee: () => (/* binding */ samePayee),
+/* harmony export */   sameUpiId: () => (/* binding */ sameUpiId),
 /* harmony export */   utrOneDigitOff: () => (/* binding */ utrOneDigitOff)
 /* harmony export */ });
 /* harmony import */ var _payment_time__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../payment-time */ "./src/payments/payment-time.ts");
@@ -93981,22 +94162,68 @@ function normalizePayeeName(raw) {
     const n = raw.toLowerCase().replace(/^\s*(?:mrs|mr|ms)\.?\s+/, '').replace(/[^a-z]/g, '');
     return n.length >= 3 ? n : null;
 }
-/** Same payee: both UPI ids read and equal; else (no UPI id on one side) both names read and equal. Else not known. */
+/** Below this many characters a UPI id's local part is never compared with typo tolerance. */
+const FUZZY_UPI_MIN = 15;
+/** A long id read twice can differ by this many characters (OCR drops / adds a glyph or two). */
+const FUZZY_UPI_EDITS = 2;
+function editDistanceAtMost(a, b, max) {
+    if (Math.abs(a.length - b.length) > max)
+        return false;
+    let prev = Array.from({ length: b.length + 1 }, (_, j) => j);
+    for (let i = 1; i <= a.length; i++) {
+        const cur = [i];
+        let rowMin = i;
+        for (let j = 1; j <= b.length; j++) {
+            cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+            rowMin = Math.min(rowMin, cur[j]);
+        }
+        if (rowMin > max)
+            return false;
+        prev = cur;
+    }
+    return prev[b.length] <= max;
+}
+/**
+ * One payee UPI id as two reads of one receipt can print it (both already normalizePayeeUpi'd). The same id reads as
+ * `BHARATPE.8000073302@fbpe`, `.8000073302@fbpe` or `8000073302@fbp` (a phone-number id: the number decides), and a
+ * long QR id loses or gains a glyph or two (`…0214m` / `…0214rm`, `…2810050501abon…` / `…281005050101abon…`).
+ * Live 2026-10-30..11-03: 6 of 7 same-chat, same-amount, same-printed-minute double credits were one payee read two ways.
+ */
+function sameUpiId(a, b) {
+    if (a === b)
+        return true;
+    const split = (u) => {
+        const at = u.lastIndexOf('@');
+        const local = (at >= 0 ? u.slice(0, at) : u).replace(/^bharatpe\./, '').replace(/^[.\-_]+/, '').replace(/rn/g, 'm');
+        return { local, handle: at >= 0 ? u.slice(at + 1) : '' };
+    };
+    const x = split(a);
+    const y = split(b);
+    const phone = /^\d{10}$/;
+    if (phone.test(x.local) || phone.test(y.local))
+        return x.local === y.local;
+    if (x.local === y.local && (x.handle === y.handle || !x.handle || !y.handle))
+        return true;
+    if (x.handle !== y.handle || x.local.length < FUZZY_UPI_MIN || y.local.length < FUZZY_UPI_MIN)
+        return false;
+    return editDistanceAtMost(x.local, y.local, FUZZY_UPI_EDITS);
+}
+/** Same payee: both UPI ids read and the same id (sameUpiId); else (no UPI id on one side) both names read and equal. Else not known. */
 function samePayee(a, b) {
     const ua = normalizePayeeUpi(a.payeeUpiId);
     const ub = normalizePayeeUpi(b.payeeUpiId);
     if (ua && ub)
-        return ua === ub;
+        return sameUpiId(ua, ub);
     const na = normalizePayeeName(a.payeeName);
     const nb = normalizePayeeName(b.payeeName);
     return !!na && !!nb && na === nb;
 }
-/** Both payees read and different: both UPI ids read and unequal, else (no UPI id on a side) both names read and unequal. */
+/** Both payees read and different: both UPI ids read and not the same id (sameUpiId), else (no UPI id on a side) both names read and unequal. */
 function otherPayee(a, b) {
     const ua = normalizePayeeUpi(a.payeeUpiId);
     const ub = normalizePayeeUpi(b.payeeUpiId);
     if (ua && ub)
-        return ua !== ub;
+        return !sameUpiId(ua, ub);
     const na = normalizePayeeName(a.payeeName);
     const nb = normalizePayeeName(b.payeeName);
     return !!na && !!nb && na !== nb;
@@ -94204,6 +94431,29 @@ function confirmsAsk(facts, asked) {
         return askedTime !== null && facts.timeMs !== null && Math.abs(askedTime - facts.timeMs) <= CONFIRM_TIME_MS;
     }
     return true;
+}
+/**
+ * An earlier screenshot of this user (any persona) with the very same file (sha256) that the gate held with a request
+ * (details page over an impossible reference, or a fake warning) and did not credit. Identical bytes are the same
+ * screenshot whatever the model reads this time: an open request still holds it, a resolved one (answered by another
+ * screen, which was credited) makes it a repeat. Live kavya2 2026-11-04: one ₹50 picture read with the 11-digit
+ * reference …3936 (asked for the details page), sent again (asked again), then a third time read as a 12-digit
+ * reference and credited. Rows already credited are classifyAgainstServed's (same file = repeat).
+ */
+function heldSameFile(facts, rows) {
+    if (!facts.sha256)
+        return null;
+    let resolved = null;
+    for (const row of rows) {
+        if (row.imageSha256 !== facts.sha256 || row.servedAt || !row.ask)
+            continue;
+        if (row.profile === facts.profile && row.telegramMsgId === facts.msgId)
+            continue;
+        if (row.ask.state === 'open')
+            return row;
+        resolved ?? (resolved = row);
+    }
+    return resolved;
 }
 /** The newest open request (within ASK_ANSWER_WINDOW_MS) this screenshot confirms, if any. */
 function findConfirmedAsk(facts, open, nowMs) {
@@ -94559,6 +94809,7 @@ class PaymentFlow {
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   CHAT_SERVED_SCAN: () => (/* binding */ CHAT_SERVED_SCAN),
 /* harmony export */   GateSession: () => (/* binding */ GateSession),
 /* harmony export */   ProofGate: () => (/* binding */ ProofGate),
 /* harmony export */   STORE_TIMEOUT_MS: () => (/* binding */ STORE_TIMEOUT_MS),
@@ -94578,8 +94829,13 @@ __webpack_require__.r(__webpack_exports__);
 const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_0__.Logger('tg-aut:proof-gate');
 /** A payment reply must not wait on a slow database. */
 const STORE_TIMEOUT_MS = 4000;
-/** This chat's newest rows scanned for a credited screenshot of the same payment (no UTR on either). */
-const CHAT_SERVED_SCAN = 20;
+/**
+ * This chat's newest rows (every persona) scanned for a credited screenshot of the same payment (rule 4) and for a held
+ * copy of the same file. Was 20: live chat …1231 (2026-10-30/31) had 19-20 rows between a no-UTR ₹100 / ₹150 credit and
+ * the same payment's details page at the same printed minute, so the credit was out of reach and both were credited.
+ * The repository caps a read at 100.
+ */
+const CHAT_SERVED_SCAN = 50;
 function withTimeout(work, ms, fallback, what) {
     let timer;
     return Promise.race([
@@ -94610,19 +94866,28 @@ class GateSession {
         const payment = !f.utr && minuteMs !== null && f.amount > 0
             ? { amount: f.amount, sinceMs: (0,_payment_time__WEBPACK_IMPORTED_MODULE_2__.istDayStartMs)(f.arrivalMs ?? this.deps.now()), fromMs: minuteMs, toMs: minuteMs + 60000 }
             : null;
-        const [served, chatServed] = await Promise.all([
+        const [served, recent] = await Promise.all([
             this.bound(this.store.servedCandidates({
                 chatId: f.chatId, profile: f.profile, telegramMsgId: f.msgId,
                 ...(f.utr ? { utr: f.utr } : {}), imageSha256: f.sha256, ...(f.dHash ? { imageHash: f.dHash } : {}),
                 ...(payment ? { payment } : {}),
             }), null, 'servedCandidates'),
-            this.chatServed(),
+            this.recentRows(),
         ]);
+        const chatServed = this.chatServed(recent);
         const verdict = served || chatServed.length > 0 ? (0,_decide__WEBPACK_IMPORTED_MODULE_1__.classifyAgainstServed)(f, served ?? [], chatServed, this.deps.now()) : { kind: 'clear' };
         if (verdict.kind !== 'clear')
             return verdict;
         const open = await this.openAsks();
         const now = this.deps.now();
+        // The very same file was held with a request (any persona of this user) and not credited: whatever this read
+        // says (a 12-digit reference now), it is that screenshot again (decide.ts heldSameFile, kavya2 2026-11-04).
+        const held = (0,_decide__WEBPACK_IMPORTED_MODULE_1__.heldSameFile)(f, [...open, ...recent]);
+        if (held?.ask) {
+            return held.ask.state === 'open'
+                ? { kind: 'needs-real-page', ask: held.ask.kind }
+                : { kind: 'repeat', by: 'file', sameChat: held.chatId === f.chatId && held.profile === f.profile, matched: held };
+        }
         const asked = (0,_decide__WEBPACK_IMPORTED_MODULE_1__.findConfirmedAsk)(f, open, now);
         if (asked)
             return { kind: 'confirms', asked };
@@ -94640,16 +94905,21 @@ class GateSession {
         }
         return verdict;
     }
+    /** This user's newest rows (every persona, served or not), newest first. [] on failure or without the read. */
+    async recentRows() {
+        if (!this.store.recentForChat)
+            return [];
+        return this.bound(this.store.recentForChat(this.facts.chatId, CHAT_SERVED_SCAN), [], 'recentForChat');
+    }
     /**
      * This user's own credited rows (every persona), for a different screenshot of a credited payment, with or without a
-     * UTR (classifyAgainstServed, same-day rule 4). Read only when that rule can apply: payment time readable. [] on failure.
+     * UTR (classifyAgainstServed, same-day rule 4). Only when that rule can apply: payment time readable.
      */
-    async chatServed() {
+    chatServed(recent) {
         const f = this.facts;
-        if (f.timeMs === null || !this.store.recentForChat)
+        if (f.timeMs === null)
             return [];
-        const rows = await this.bound(this.store.recentForChat(f.chatId, CHAT_SERVED_SCAN), [], 'recentForChat');
-        return rows.filter((r) => !!r.servedAt && !(r.profile === f.profile && r.telegramMsgId === f.msgId));
+        return recent.filter((r) => !!r.servedAt && !(r.profile === f.profile && r.telegramMsgId === f.msgId));
     }
     /** Open requests of this chat (answer window), newest first; [] on failure. */
     async openAsks() {
@@ -95009,11 +95279,31 @@ function detectFakeScreenshot(text) {
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   DOWNLOAD_MEDIA_DEADLINE_MS: () => (/* binding */ DOWNLOAD_MEDIA_DEADLINE_MS),
 /* harmony export */   downloadMedia: () => (/* binding */ downloadMedia)
 /* harmony export */ });
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
 
 const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_0__.Logger("tg-aut:download-media");
+/**
+ * Hard deadline for the whole download (all attempts). GramJS never settles a request whose sender was
+ * closed without rejecting it, so without a deadline a screenshot could hang forever; on expiry we throw
+ * like any other failed download (the GramJS request itself cannot be cancelled and is left to finish).
+ */
+const DOWNLOAD_MEDIA_DEADLINE_MS = 60000;
+class DownloadDeadlineError extends Error {
+}
+function raceDeadline(task, remainingMs) {
+    return new Promise((resolve, reject) => {
+        let timer;
+        // Attach to the task first so an already-settled download wins over the timer.
+        task.then((value) => { if (timer)
+            clearTimeout(timer); resolve(value); }, (error) => { if (timer)
+            clearTimeout(timer); reject(error); });
+        timer = setTimeout(() => reject(new DownloadDeadlineError(`media download timed out after ${DOWNLOAD_MEDIA_DEADLINE_MS}ms`)), Math.max(0, remainingMs));
+        timer?.unref?.();
+    });
+}
 async function downloadMedia(event) {
     if (!event || !event.client || !event.message) {
         logger.error(`[EDGE CASE] Invalid event object provided to downloadMedia - event: ${!!event}, client: ${!!event?.client}, message: ${!!event?.message}`);
@@ -95024,11 +95314,12 @@ async function downloadMedia(event) {
     let lastError = null;
     const chatId = event.message.chatId?.toString() || "unknown";
     logger.log(`[DOWNLOAD] Starting media download - chatId: ${chatId}, maxRetries: ${maxRetries}`);
+    const deadline = Date.now() + DOWNLOAD_MEDIA_DEADLINE_MS;
     while (retries > 0) {
         const attempt = maxRetries - retries + 1;
         try {
             logger.log(`[DOWNLOAD] Attempt ${attempt}/${maxRetries} - downloading media for chatId: ${chatId}`);
-            const photoBuffer = await event.client.downloadMedia(event.message);
+            const photoBuffer = await raceDeadline(Promise.resolve(event.client.downloadMedia(event.message)), deadline - Date.now());
             if (Buffer.isBuffer(photoBuffer) && photoBuffer.length > 0) {
                 logger.log(`[DOWNLOAD] Success - downloaded ${photoBuffer.length} bytes on attempt ${attempt}`);
                 return photoBuffer;
@@ -95046,6 +95337,9 @@ async function downloadMedia(event) {
         catch (error) {
             lastError = error instanceof Error ? error : new Error(String(error));
             logger.error(`[EDGE CASE] Error downloading media (attempt ${attempt}/${maxRetries}, chatId: ${chatId}):`, lastError);
+            if (error instanceof DownloadDeadlineError || Date.now() >= deadline) {
+                break; // deadline spent: no further attempts
+            }
             // Exponential backoff: wait before retrying (except on last attempt)
             if (retries > 1) {
                 const delayMs = Math.pow(2, maxRetries - retries) * 500; // 500ms, 1000ms, 2000ms
@@ -115365,8 +115659,8 @@ class TelegramManager {
                 if (!this.session) {
                     this.session = new _deduplicating_session__WEBPACK_IMPORTED_MODULE_4__.DeduplicatingSession(process.env.session || "");
                 }
-                // Home-DC address family (IPv4 unless IPv4 to this DC is degraded and IPv6 is clean; TG_IP_FAMILY
-                // overrides). Changes only the in-memory session address; the saved session string is untouched.
+                // Home-DC address family: decided once per process per DC and reused by every rebuild (never
+                // changes in-process). Changes only the in-memory session address; the saved session string is untouched.
                 const { params: clientParams } = await (0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_9__.applyDcIpFamily)(this.session, tgConfig, this.mobile);
                 // NOTE: Session string should match the API ID it was created with. If not, GramJS will throw and we fall back to re-setup.
                 this.client = new telegram__WEBPACK_IMPORTED_MODULE_0__.TelegramClient(this.session, apiId, apiHash, clientParams);
@@ -115796,6 +116090,10 @@ class TelegramManager {
                 }
             }
             this.eventHandlers = [];
+            // GramJS destroy() leaves exported (upload/download) senders connected: close them and reject their
+            // in-flight requests. Cleanup only, not a guarantee (GramJS can re-create senders on a destroyed client);
+            // the per-process IP family (dc-ip-family.ts) is what keeps every connection on one source address.
+            await (0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_9__.closeExportedSenders)(this.client, this.mobile);
             try {
                 await this.client?.destroy();
                 this.client._eventBuilders = [];
