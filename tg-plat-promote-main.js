@@ -20833,18 +20833,25 @@ function containsAll(str, arr) {
 
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
-/* harmony export */   DECISION_TTL_MS: () => (/* binding */ DECISION_TTL_MS),
+/* harmony export */   EXPORTED_SENDER_CLOSE_WAIT_MS: () => (/* binding */ EXPORTED_SENDER_CLOSE_WAIT_MS),
 /* harmony export */   PROBE_ATTEMPTS: () => (/* binding */ PROBE_ATTEMPTS),
 /* harmony export */   PROBE_DEADLINE_MS: () => (/* binding */ PROBE_DEADLINE_MS),
+/* harmony export */   SENDER_CLOSED_MESSAGE: () => (/* binding */ SENDER_CLOSED_MESSAGE),
 /* harmony export */   SLOW_CONNECT_MS: () => (/* binding */ SLOW_CONNECT_MS),
 /* harmony export */   TELEGRAM_DC_ADDRESSES: () => (/* binding */ TELEGRAM_DC_ADDRESSES),
+/* harmony export */   V4_BAD_MIN: () => (/* binding */ V4_BAD_MIN),
+/* harmony export */   V6_MIN_OK: () => (/* binding */ V6_MIN_OK),
 /* harmony export */   __resetDcIpFamilyForTests: () => (/* binding */ __resetDcIpFamilyForTests),
 /* harmony export */   __setDcIpFamilyProbeForTests: () => (/* binding */ __setDcIpFamilyProbeForTests),
 /* harmony export */   applyDcIpFamily: () => (/* binding */ applyDcIpFamily),
+/* harmony export */   closeExportedSenders: () => (/* binding */ closeExportedSenders),
 /* harmony export */   decideIpFamily: () => (/* binding */ decideIpFamily),
-/* harmony export */   isFamilyBad: () => (/* binding */ isFamilyBad),
-/* harmony export */   isFamilyGood: () => (/* binding */ isFamilyGood),
+/* harmony export */   isV4Bad: () => (/* binding */ isV4Bad),
+/* harmony export */   isV6Good: () => (/* binding */ isV6Good),
+/* harmony export */   isV6Reachable: () => (/* binding */ isV6Reachable),
+/* harmony export */   maskMobile: () => (/* binding */ maskMobile),
 /* harmony export */   readIpFamilyMode: () => (/* binding */ readIpFamilyMode),
+/* harmony export */   rejectPendingRequests: () => (/* binding */ rejectPendingRequests),
 /* harmony export */   resolveDcIpFamily: () => (/* binding */ resolveDcIpFamily),
 /* harmony export */   summarizeProbe: () => (/* binding */ summarizeProbe),
 /* harmony export */   tcpConnectProbe: () => (/* binding */ tcpConnectProbe)
@@ -20867,10 +20874,15 @@ const TELEGRAM_DC_ADDRESSES = Object.freeze({
     4: { ipv4: "149.154.167.91", ipv6: "2001:67c:4e8:f004::a" },
     5: { ipv4: "91.108.56.130", ipv6: "2001:b28:f23f:f005::a" },
 });
-const PROBE_ATTEMPTS = 4;
+/** TCP connects per family per DC. */
+const PROBE_ATTEMPTS = 6;
 const PROBE_DEADLINE_MS = 3000;
+/** A connect slower than this counts as bad; also the IPv6 home-DC median ceiling. */
 const SLOW_CONNECT_MS = 1000;
-const DECISION_TTL_MS = 10 * 60000;
+/** IPv4 is bad when at least this many of PROBE_ATTEMPTS failed or were slow. */
+const V4_BAD_MIN = 2;
+/** IPv6 to a DC is reachable when at least this many of PROBE_ATTEMPTS connected. */
+const V6_MIN_OK = 5;
 const NO_ROUTE_CODES = new Set(["ENETUNREACH", "EHOSTUNREACH", "EADDRNOTAVAIL", "EAFNOSUPPORT", "EPROTONOSUPPORT"]);
 function summarizeProbe(results, slowMs = SLOW_CONNECT_MS) {
     const okTimes = results.filter((r) => r.ok).map((r) => r.ms).sort((a, b) => a - b);
@@ -20888,25 +20900,33 @@ function summarizeProbe(results, slowMs = SLOW_CONNECT_MS) {
         noRoute: results.length > 0 && results.every((r) => !r.ok && !!r.code && NO_ROUTE_CODES.has(r.code)),
     };
 }
-/** Failures or slow connects in at least 2 attempts. */
-function isFamilyBad(stats) {
-    return stats.attempts === 0 || stats.noRoute || stats.bad >= 2;
+/** IPv4 bad: no attempts, no route, or >= V4_BAD_MIN attempts failed or slower than SLOW_CONNECT_MS. */
+function isV4Bad(stats) {
+    return stats.attempts === 0 || stats.noRoute || stats.bad >= V4_BAD_MIN;
 }
-/** Every attempt connected and the median is under SLOW_CONNECT_MS. */
-function isFamilyGood(stats, slowMs = SLOW_CONNECT_MS) {
-    return stats.attempts > 0 && stats.successes === stats.attempts && stats.medianMs !== null && stats.medianMs < slowMs;
+/** IPv6 reachable for one DC: >= V6_MIN_OK of the attempts connected. */
+function isV6Reachable(stats) {
+    return !!stats && stats.attempts > 0 && !stats.noRoute && stats.successes >= V6_MIN_OK;
 }
 /**
- * Pure decision. IPv4 unless IPv4 is clearly bad and IPv6 clearly good. Once on IPv6, stay until
- * IPv6 itself becomes bad (hysteresis, so a flapping IPv4 path does not flip accounts back and forth).
+ * IPv6 good: every DC in TELEGRAM_DC_ADDRESSES reachable over IPv6 (file and other-DC senders follow
+ * `_useIPV6` too) and the home DC's IPv6 median under SLOW_CONNECT_MS.
  */
+function isV6Good(homeDc, v6ByDc) {
+    for (const dc of Object.keys(TELEGRAM_DC_ADDRESSES)) {
+        if (!isV6Reachable(v6ByDc[Number(dc)]))
+            return false;
+    }
+    const home = v6ByDc[homeDc];
+    return !!home && home.medianMs !== null && home.medianMs < SLOW_CONNECT_MS;
+}
+/** Pure auto-mode rule: IPv6 only if IPv4 is bad AND IPv6 is good; otherwise IPv4. */
 function decideIpFamily(input) {
-    const { previous, v4, v6 } = input;
-    if (v6.noRoute)
-        return "ipv4";
-    if (previous === "ipv6")
-        return isFamilyBad(v6) ? "ipv4" : "ipv6";
-    return isFamilyBad(v4) && isFamilyGood(v6) ? "ipv6" : "ipv4";
+    return isV4Bad(input.v4) && isV6Good(input.homeDc, input.v6ByDc) ? "ipv6" : "ipv4";
+}
+function maskMobile(mobile) {
+    const digits = String(mobile ?? "");
+    return digits.length > 4 ? `***${digits.slice(-4)}` : digits ? "***" : "-";
 }
 function readIpFamilyMode(env = process.env) {
     const raw = (env.TG_IP_FAMILY || "").trim().toLowerCase();
@@ -20938,60 +20958,86 @@ async function probeFamily(probe, host, port, family) {
     return summarizeProbe(attempts);
 }
 const logger = new _logger__WEBPACK_IMPORTED_MODULE_1__.Logger("tg-core:dc-ip-family");
-// Bounded: keys are only the DC ids in TELEGRAM_DC_ADDRESSES (at most 5 entries each).
+// Bounded: keys are only the DC ids in TELEGRAM_DC_ADDRESSES (at most 5 entries each). No eviction on
+// purpose: an entry is the process-lifetime decision.
 const decisions = new Map();
-const lastFamily = new Map();
 const inflight = new Map();
-const probeErrorLogged = new Set();
+// Auto mode probes IPv6 to all five DCs ONCE per process (per port; in practice one port) and shares the
+// result across every DC's decision. Bounded: one entry per port used (80 / 443).
+const sharedV6Probe = new Map();
 let probeImpl = tcpConnectProbe;
-let now = () => Date.now();
+function probeAllDcsV6(port) {
+    const cached = sharedV6Probe.get(port);
+    if (cached)
+        return cached;
+    const dcIds = Object.keys(TELEGRAM_DC_ADDRESSES).map(Number);
+    const run = Promise.all(dcIds.map((dc) => probeFamily(probeImpl, TELEGRAM_DC_ADDRESSES[dc].ipv6, port, 6))).then((list) => {
+        const v6 = {};
+        dcIds.forEach((dc, i) => { v6[dc] = list[i]; });
+        return v6;
+    });
+    // A failed probe is not cached, so the next DC's decision probes again.
+    run.catch(() => sharedV6Probe.delete(port));
+    sharedV6Probe.set(port, run);
+    return run;
+}
 function fmt(stats) {
+    if (!stats)
+        return "-";
     return `${stats.successes}/${stats.attempts} ok, bad ${stats.bad}, median ${stats.medianMs ?? "-"}ms${stats.noRoute ? ", no route" : ""}`;
 }
-/**
- * Choose the family for a DC. Cached per DC for DECISION_TTL_MS; concurrent callers share one probe.
- * Any probe error resolves to IPv4 (the old behaviour).
- */
-async function resolveDcIpFamily(opts) {
-    const mode = readIpFamilyMode(opts.env);
+function fmtV6(homeDc, v6) {
+    if (!v6)
+        return "-";
+    const others = Object.keys(v6).map(Number).filter((dc) => dc !== homeDc);
+    const minOk = others.length ? Math.min(...others.map((dc) => v6[dc].successes)) : null;
+    return `home ${fmt(v6[homeDc])}${others.length ? ` | other dcs min ${minOk}/${PROBE_ATTEMPTS} ok (${others.map((dc) => `${dc}:${v6[dc].successes}`).join(" ")})` : ""}`;
+}
+async function decide(dcId, port, v4Host, env) {
+    const table = TELEGRAM_DC_ADDRESSES[dcId];
+    const mode = readIpFamilyMode(env);
     if (mode === "ipv4")
         return { family: "ipv4", reason: "override" };
+    try {
+        if (mode === "ipv6") {
+            const home = await probeFamily(probeImpl, table.ipv6, port, 6);
+            const ok = isV6Reachable(home);
+            return { family: ok ? "ipv6" : "ipv4", reason: ok ? "override" : "override-fallback", v6: { [dcId]: home } };
+        }
+        const [v4, v6] = await Promise.all([probeFamily(probeImpl, v4Host, port, 4), probeAllDcsV6(port)]);
+        return { family: decideIpFamily({ homeDc: dcId, v4, v6ByDc: v6 }), reason: "probe", v4, v6 };
+    }
+    catch (error) {
+        logger.warn(`dc ${dcId} probe failed, using ipv4 for this process: ${error?.message || error}`);
+        return { family: "ipv4", reason: "probe-error" };
+    }
+}
+/**
+ * The process-lifetime family for a DC. The first caller probes (single-flight: concurrent callers
+ * share that probe); every later caller gets the same decision without probing, whatever the network
+ * or TG_IP_FAMILY looks like by then. Any probe error resolves to IPv4.
+ */
+async function resolveDcIpFamily(opts) {
     // SOCKS proxies are configured and tested for IPv4 only (useIPV6 must stay false with a proxy).
     if (opts.hasProxy)
         return { family: "ipv4", reason: "proxy" };
     const table = TELEGRAM_DC_ADDRESSES[opts.dcId];
     if (!table)
         return { family: "ipv4", reason: "unknown-dc" };
-    if (mode === "ipv6")
-        return { family: "ipv6", reason: "override" };
-    const cached = decisions.get(opts.dcId);
-    if (cached && now() - cached.at < DECISION_TTL_MS) {
-        return { family: cached.family, reason: "cached", v4: cached.v4, v6: cached.v6 };
-    }
-    const pending = inflight.get(opts.dcId);
+    const dcId = opts.dcId;
+    const fixed = decisions.get(dcId);
+    if (fixed)
+        return fixed;
+    const pending = inflight.get(dcId);
     if (pending)
         return pending;
-    const dcId = opts.dcId;
     const v4Host = opts.ipv4Address && net__WEBPACK_IMPORTED_MODULE_0__.isIPv4(opts.ipv4Address) ? opts.ipv4Address : table.ipv4;
     const run = (async () => {
         try {
-            const [v4, v6] = await Promise.all([
-                probeFamily(probeImpl, v4Host, opts.port, 4),
-                probeFamily(probeImpl, table.ipv6, opts.port, 6),
-            ]);
-            const family = decideIpFamily({ previous: lastFamily.get(dcId) ?? null, v4, v6 });
-            decisions.set(dcId, { family, at: now(), v4, v6 });
-            lastFamily.set(dcId, family);
-            probeErrorLogged.delete(dcId);
-            logger.log(`dc ${dcId} -> ${family} | v4 ${v4Host}:${opts.port} ${fmt(v4)} | v6 ${table.ipv6}:${opts.port} ${fmt(v6)}`);
-            return { family, reason: "probe", v4, v6 };
-        }
-        catch (error) {
-            if (!probeErrorLogged.has(dcId)) {
-                probeErrorLogged.add(dcId);
-                logger.warn(`dc ${dcId} probe failed, using ipv4: ${error?.message || error}`);
-            }
-            return { family: "ipv4", reason: "probe-error" };
+            const decision = await decide(dcId, opts.port, v4Host, opts.env);
+            decisions.set(dcId, decision);
+            logger.log(`dc ${dcId} -> ${decision.family} for this process (${decision.reason}) | v4 ${v4Host}:${opts.port} ${fmt(decision.v4)} | v6 ${fmtV6(dcId, decision.v6)}`);
+            return decision;
         }
         finally {
             inflight.delete(dcId);
@@ -21003,7 +21049,7 @@ async function resolveDcIpFamily(opts) {
 // The address each session object was loaded with, so an ipv4 decision restores exactly that.
 const originalAddress = new WeakMap();
 /**
- * Decide the family for this session's home DC and point the in-memory session at it, before
+ * Point the in-memory session at this process's family for its home DC, before
  * `new TelegramClient(...)`. Returns `params` with `useIPV6` matching. Call on client creation /
  * rebuild only; it never touches a connected client. The saved session string is never written.
  */
@@ -21027,37 +21073,170 @@ async function applyDcIpFamily(session, params, label = "") {
             hasProxy: !!params.proxy,
             ipv4Address: original.serverAddress,
         });
+        // TG_IP_FAMILY=ipv4 at decision time: exact pre-5e552d4 behaviour (params and session untouched).
+        if (decision.family === "ipv4" && decision.reason === "override")
+            return { params, decision };
         const table = TELEGRAM_DC_ADDRESSES[original.dcId];
-        if (decision.family === "ipv6" && table) {
+        const useIPV6 = decision.family === "ipv6" && !!table;
+        if (useIPV6) {
             if (session.serverAddress !== table.ipv6)
                 session.setDC(original.dcId, table.ipv6, original.port);
         }
         else if (session.serverAddress !== original.serverAddress || session.port !== original.port) {
             session.setDC(original.dcId, original.serverAddress, original.port);
         }
-        const useIPV6 = decision.family === "ipv6" && !!table;
-        if (decision.reason !== "override" || useIPV6) {
-            logger.debug(`${label} dc ${original.dcId} ${useIPV6 ? "ipv6" : "ipv4"} (${decision.reason})`);
-        }
+        logger.debug(`${maskMobile(label)} dc ${original.dcId} ${useIPV6 ? "ipv6" : "ipv4"} (${decision.reason})`);
         return { params: { ...params, useIPV6 }, decision };
     }
     catch (error) {
-        logger.warn(`${label} apply failed, keeping saved address: ${error?.message || error}`);
+        logger.warn(`${maskMobile(label)} apply failed, keeping saved address: ${error?.message || error}`);
         return { params, decision: null };
     }
 }
+const EXPORTED_SENDER_CLOSE_WAIT_MS = 2000;
+const SENDER_CLOSED_MESSAGE = "SENDER_CLOSED";
+/**
+ * Reject every request still waiting on a sender we just disconnected. GramJS 2.26.22
+ * `MTProtoSender.disconnect()` leaves `_pendingState` (sent, awaiting a reply) and `_sendQueue`
+ * (queued, `_pendingStates` / `_queue`) untouched, so an awaiting caller (e.g. a downloadMedia chunk)
+ * would never settle. Rejecting with a plain Error makes GramJS `invoke` / downloads rethrow it.
+ * Defensive: every field is optional, never throws. Returns how many requests were rejected.
+ */
+function rejectPendingRequests(sender, message = SENDER_CLOSED_MESSAGE) {
+    const seen = new Set();
+    const reject = (state) => {
+        if (!state || seen.has(state) || typeof state.reject !== "function")
+            return;
+        seen.add(state);
+        try {
+            // Mark the rejection handled first: some states (MsgsAck) have no awaiting caller, and an
+            // unhandled rejection would crash the process. A real caller still gets the rejection.
+            if (state.promise && typeof state.promise.catch === "function")
+                state.promise.catch(() => undefined);
+            state.reject(new Error(message));
+        }
+        catch {
+            /* ignore */
+        }
+    };
+    try {
+        const s = sender;
+        if (!s)
+            return 0;
+        const pending = s._pendingState;
+        if (pending && typeof pending.values === "function") {
+            try {
+                for (const st of pending.values())
+                    reject(st);
+            }
+            catch { /* ignore */ }
+            try {
+                if (typeof pending.clear === "function")
+                    pending.clear();
+            }
+            catch { /* ignore */ }
+        }
+        const queue = s._sendQueue;
+        if (queue) {
+            for (const list of [queue._pendingStates, queue._queue]) {
+                if (Array.isArray(list))
+                    for (const st of [...list])
+                        reject(st);
+            }
+            try {
+                if (typeof queue.clear === "function")
+                    queue.clear();
+            }
+            catch { /* ignore */ }
+        }
+    }
+    catch {
+        /* ignore */
+    }
+    return seen.size;
+}
+/**
+ * Disconnect every exported sender of a client that is about to be destroyed, clear their release
+ * timers, and reject requests still waiting on them (SENDER_CLOSED). Call BEFORE `client.destroy()`.
+ *
+ * Why: GramJS 2.26.22 `disconnect()` iterates `Object.values(this._exportedSenderPromises)`, but the
+ * field is a Map, so it disconnects nothing and then `.clear()`s the Map (the handles are lost); the
+ * 30 s release timer can then `_reconnect()` a sender with pending requests on the destroyed client.
+ *
+ * This is cleanup, NOT a guarantee that the account's key is never on two connections:
+ *  - GramJS can create new exported senders on a destroyed client (`getSender` from a download chunk,
+ *    FILE_MIGRATE, `invoke(req, dcId)`, upload retry; `_borrowExportedSender` / `_connectSender` never
+ *    check `_destroyed`).
+ *  - A foreign-DC sender still inside `_connectSender` when the client is destroyed can loop forever
+ *    (ExportAuthorization fails on the disconnected main sender, sleep 1 s, reconnect); its promise
+ *    never resolves, so it is never disconnected here and is only reported as pending after `waitMs`.
+ * Those leftovers use the process family (fixed per process), so they share the source address of the
+ * replacement client; that fixed family, not this helper, is the safety property. Never throws.
+ */
+async function closeExportedSenders(
+// A GramJS TelegramClient (its fields are private in the .d.ts, so typed loosely here).
+client, label = "", waitMs = EXPORTED_SENDER_CLOSE_WAIT_MS) {
+    const result = { closed: 0, pending: 0 };
+    try {
+        if (!client)
+            return result;
+        const host = client;
+        const timers = host._exportedSenderReleaseTimeouts;
+        if (timers instanceof Map) {
+            for (const t of timers.values())
+                clearTimeout(t);
+            timers.clear();
+        }
+        const promises = host._exportedSenderPromises;
+        if (!(promises instanceof Map) || promises.size === 0)
+            return result;
+        const entries = [...promises.values()];
+        promises.clear();
+        const settled = new Array(entries.length).fill(false);
+        const tasks = entries.map((p, i) => Promise.resolve(p)
+            .then(async (sender) => {
+            if (sender && typeof sender.disconnect === "function") {
+                try {
+                    await sender.disconnect();
+                }
+                finally {
+                    rejectPendingRequests(sender);
+                }
+                result.closed += 1;
+            }
+        })
+            .catch(() => undefined)
+            .finally(() => { settled[i] = true; }));
+        let timer;
+        await Promise.race([
+            Promise.all(tasks),
+            new Promise((resolve) => {
+                timer = setTimeout(resolve, waitMs);
+                timer?.unref?.();
+            }),
+        ]);
+        if (timer)
+            clearTimeout(timer);
+        result.pending = settled.filter((s) => !s).length;
+        if (result.closed || result.pending) {
+            logger.debug(`${maskMobile(label)} exported senders closed ${result.closed}, still connecting ${result.pending}`);
+        }
+        return result;
+    }
+    catch (error) {
+        logger.warn(`${maskMobile(label)} closing exported senders failed: ${error?.message || error}`);
+        return result;
+    }
+}
 /** Test hooks. */
-function __setDcIpFamilyProbeForTests(probe, clock) {
+function __setDcIpFamilyProbeForTests(probe) {
     probeImpl = probe ?? tcpConnectProbe;
-    now = clock ?? (() => Date.now());
 }
 function __resetDcIpFamilyForTests() {
     decisions.clear();
-    lastFamily.clear();
     inflight.clear();
-    probeErrorLogged.clear();
+    sharedV6Probe.clear();
     probeImpl = tcpConnectProbe;
-    now = () => Date.now();
 }
 
 
@@ -38778,9 +38957,10 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! @tg/core/utils/TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
 /* harmony import */ var _tg_core_telegram_utils_isPermanentError__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! @tg/core/telegram-utils/isPermanentError */ "../../packages/tg-core/src/telegram-utils/isPermanentError.ts");
 /* harmony import */ var _tg_core_utils_generateTGConfig__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! @tg/core/utils/generateTGConfig */ "../../packages/tg-core/src/utils/generateTGConfig.ts");
-/* harmony import */ var _tg_core_utils_fetchWithTimeout__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! @tg/core/utils/fetchWithTimeout */ "../../packages/tg-core/src/utils/fetchWithTimeout.ts");
-/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
-/* harmony import */ var _tg_core_utils_apiKey__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! @tg/core/utils/apiKey */ "../../packages/tg-core/src/utils/apiKey.ts");
+/* harmony import */ var _tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! @tg/core/utils/dc-ip-family */ "../../packages/tg-core/src/utils/dc-ip-family.ts");
+/* harmony import */ var _tg_core_utils_fetchWithTimeout__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! @tg/core/utils/fetchWithTimeout */ "../../packages/tg-core/src/utils/fetchWithTimeout.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _tg_core_utils_apiKey__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! @tg/core/utils/apiKey */ "../../packages/tg-core/src/utils/apiKey.ts");
 
 
 
@@ -38796,7 +38976,8 @@ __webpack_require__.r(__webpack_exports__);
 
 
 
-const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_13__.Logger("inactive-mobile-scraper");
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_14__.Logger("inactive-mobile-scraper");
 const SCRAPE_COOLDOWN_HOURS = 5;
 const RECENT_USAGE_HOURS = 24;
 const SCRAPE_CLIENT_CONNECT_TIMEOUT_MS = 60000;
@@ -39121,7 +39302,11 @@ class InactiveMobileScraper {
             const session = await this.resolvePromoteSessionString(mobile);
             // Use the same cached config (credentials + fingerprint + proxy) as TelegramManager
             const config = await (0,_tg_core_utils_generateTGConfig__WEBPACK_IMPORTED_MODULE_11__.generateTGConfig)(mobile);
-            client = new telegram__WEBPACK_IMPORTED_MODULE_0__.TelegramClient(new telegram_sessions__WEBPACK_IMPORTED_MODULE_1__.StringSession(session), config.apiId, config.apiHash, config.params);
+            // Same process DC IP family as TelegramManager.createClient: this account may also be (or soon be)
+            // live in a manager of this process, so it must use the same source address family.
+            const stringSession = new telegram_sessions__WEBPACK_IMPORTED_MODULE_1__.StringSession(session);
+            const { params } = await (0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_12__.applyDcIpFamily)(stringSession, config.params, mobile);
+            client = new telegram__WEBPACK_IMPORTED_MODULE_0__.TelegramClient(stringSession, config.apiId, config.apiHash, params);
             // Connect to Telegram with timeout to prevent indefinite hang
             let connectTimeout = null;
             try {
@@ -39144,6 +39329,7 @@ class InactiveMobileScraper {
             // Destroy client if it was created but connection/setup failed
             if (client) {
                 try {
+                    await (0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_12__.closeExportedSenders)(client, mobile);
                     await client.destroy();
                 }
                 catch (destroyError) {
@@ -39179,11 +39365,11 @@ class InactiveMobileScraper {
             logger.warn(`Cannot fetch oldest session for ${mobile}: no runtime config base configured`);
             return null;
         }
-        const response = await (0,_tg_core_utils_fetchWithTimeout__WEBPACK_IMPORTED_MODULE_12__.fetchWithTimeout)(`${runtimeBase}/telegram/session/oldest`, {
+        const response = await (0,_tg_core_utils_fetchWithTimeout__WEBPACK_IMPORTED_MODULE_13__.fetchWithTimeout)(`${runtimeBase}/telegram/session/oldest`, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
-                'x-api-key': (0,_tg_core_utils_apiKey__WEBPACK_IMPORTED_MODULE_14__.getApiKey)(),
+                'x-api-key': (0,_tg_core_utils_apiKey__WEBPACK_IMPORTED_MODULE_15__.getApiKey)(),
             },
             data: {
                 mobile,
@@ -39350,6 +39536,9 @@ class InactiveMobileScraper {
                             logger.warn(`⚠️ Error disconnecting sender for ${mobile}:`, (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, "Sender disconnect failed"));
                         }
                     }
+                    // Close exported (file / other-DC) senders and reject their in-flight requests:
+                    // GramJS destroy() leaves them connected.
+                    await (0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_12__.closeExportedSenders)(client, mobile);
                     // Then destroy the client
                     await client?.destroy();
                     await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_7__.sleep)(1000);
@@ -40586,8 +40775,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "76ec5215722a773f9ec7246f98204aaaf3fa7970" : 0;
-    const builtAt =  true ? "2026-11-04T17:25:11.669Z" : 0;
+    const sha =  true ? "6412eb6188088e1767fc5513a3628177e7cd0395" : 0;
+    const builtAt =  true ? "2026-11-04T18:45:15.562Z" : 0;
     return { sha, builtAt };
 }
 
@@ -48044,8 +48233,8 @@ class TelegramManager {
             const config = await (0,_tg_core_utils_generateTGConfig__WEBPACK_IMPORTED_MODULE_26__.generateTGConfig)(this.clientDetails.mobile);
             this.apiId = config.apiId;
             this.apiHash = config.apiHash;
-            // Home-DC address family (IPv4 unless IPv4 to this DC is degraded and IPv6 is clean; TG_IP_FAMILY
-            // overrides). Re-decided on every createClient (boot + reconnect); never on a connected client.
+            // Home-DC address family: decided once per process per DC (first build) and reused by every
+            // createClient (boot + reconnect), so a rebuild never changes the family. TG_IP_FAMILY overrides.
             const { params: clientParams } = await (0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_27__.applyDcIpFamily)(this.stringSession, config.params, this.clientDetails.mobile);
             // Create new client with reused session
             this.client = new telegram__WEBPACK_IMPORTED_MODULE_0__.TelegramClient(this.stringSession, this.apiId, this.apiHash, clientParams);
@@ -48432,6 +48621,10 @@ class TelegramManager {
             catch (error) {
                 logger.warn(`Failed to cleanup MessageQueue:`, error);
             }
+            // GramJS destroy() leaves exported (upload/download) senders connected: close them and reject their
+            // in-flight requests. Cleanup only, not a guarantee (GramJS can re-create senders on a destroyed client);
+            // the per-process IP family (dc-ip-family.ts) is what keeps every connection on one source address.
+            await (0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_27__.closeExportedSenders)(this.client, this.clientDetails?.mobile);
             // Destroy client (but keep session and DialogManager for reuse)
             try {
                 await this.client?.destroy();
