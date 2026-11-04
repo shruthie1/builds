@@ -27240,6 +27240,245 @@ function containsAll(str, arr) {
 
 /***/ },
 
+/***/ "../../packages/tg-core/src/utils/dc-ip-family.ts"
+/*!********************************************************!*\
+  !*** ../../packages/tg-core/src/utils/dc-ip-family.ts ***!
+  \********************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   DECISION_TTL_MS: () => (/* binding */ DECISION_TTL_MS),
+/* harmony export */   PROBE_ATTEMPTS: () => (/* binding */ PROBE_ATTEMPTS),
+/* harmony export */   PROBE_DEADLINE_MS: () => (/* binding */ PROBE_DEADLINE_MS),
+/* harmony export */   SLOW_CONNECT_MS: () => (/* binding */ SLOW_CONNECT_MS),
+/* harmony export */   TELEGRAM_DC_ADDRESSES: () => (/* binding */ TELEGRAM_DC_ADDRESSES),
+/* harmony export */   __resetDcIpFamilyForTests: () => (/* binding */ __resetDcIpFamilyForTests),
+/* harmony export */   __setDcIpFamilyProbeForTests: () => (/* binding */ __setDcIpFamilyProbeForTests),
+/* harmony export */   applyDcIpFamily: () => (/* binding */ applyDcIpFamily),
+/* harmony export */   decideIpFamily: () => (/* binding */ decideIpFamily),
+/* harmony export */   isFamilyBad: () => (/* binding */ isFamilyBad),
+/* harmony export */   isFamilyGood: () => (/* binding */ isFamilyGood),
+/* harmony export */   readIpFamilyMode: () => (/* binding */ readIpFamilyMode),
+/* harmony export */   resolveDcIpFamily: () => (/* binding */ resolveDcIpFamily),
+/* harmony export */   summarizeProbe: () => (/* binding */ summarizeProbe),
+/* harmony export */   tcpConnectProbe: () => (/* binding */ tcpConnectProbe)
+/* harmony export */ });
+/* harmony import */ var net__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! net */ "net");
+/* harmony import */ var net__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(net__WEBPACK_IMPORTED_MODULE_0__);
+/* harmony import */ var _logger__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./logger */ "../../packages/tg-core/src/utils/logger.ts");
+
+
+/**
+ * Production DC addresses. GramJS ships no IPv4/IPv6 table for Node (getDC asks help.getConfig;
+ * only DC4's DEFAULT_IPV4_IP 149.154.167.91 / DEFAULT_IPV6_IP 2001:67c:4e8:f004::a are hard-coded in
+ * telegramBaseClient.js). Values are Telegram Desktop's built-in list (mtproto_dc_options.cpp); DC5 v6
+ * matches the address measured clean on the VMs 2026-11-04.
+ */
+const TELEGRAM_DC_ADDRESSES = Object.freeze({
+    1: { ipv4: "149.154.175.53", ipv6: "2001:b28:f23d:f001::a" },
+    2: { ipv4: "149.154.167.51", ipv6: "2001:67c:4e8:f002::a" },
+    3: { ipv4: "149.154.175.100", ipv6: "2001:b28:f23d:f003::a" },
+    4: { ipv4: "149.154.167.91", ipv6: "2001:67c:4e8:f004::a" },
+    5: { ipv4: "91.108.56.130", ipv6: "2001:b28:f23f:f005::a" },
+});
+const PROBE_ATTEMPTS = 4;
+const PROBE_DEADLINE_MS = 3000;
+const SLOW_CONNECT_MS = 1000;
+const DECISION_TTL_MS = 10 * 60000;
+const NO_ROUTE_CODES = new Set(["ENETUNREACH", "EHOSTUNREACH", "EADDRNOTAVAIL", "EAFNOSUPPORT", "EPROTONOSUPPORT"]);
+function summarizeProbe(results, slowMs = SLOW_CONNECT_MS) {
+    const okTimes = results.filter((r) => r.ok).map((r) => r.ms).sort((a, b) => a - b);
+    const bad = results.filter((r) => !r.ok || r.ms > slowMs).length;
+    let medianMs = null;
+    if (okTimes.length) {
+        const mid = Math.floor(okTimes.length / 2);
+        medianMs = okTimes.length % 2 ? okTimes[mid] : Math.round((okTimes[mid - 1] + okTimes[mid]) / 2);
+    }
+    return {
+        attempts: results.length,
+        successes: okTimes.length,
+        bad,
+        medianMs,
+        noRoute: results.length > 0 && results.every((r) => !r.ok && !!r.code && NO_ROUTE_CODES.has(r.code)),
+    };
+}
+/** Failures or slow connects in at least 2 attempts. */
+function isFamilyBad(stats) {
+    return stats.attempts === 0 || stats.noRoute || stats.bad >= 2;
+}
+/** Every attempt connected and the median is under SLOW_CONNECT_MS. */
+function isFamilyGood(stats, slowMs = SLOW_CONNECT_MS) {
+    return stats.attempts > 0 && stats.successes === stats.attempts && stats.medianMs !== null && stats.medianMs < slowMs;
+}
+/**
+ * Pure decision. IPv4 unless IPv4 is clearly bad and IPv6 clearly good. Once on IPv6, stay until
+ * IPv6 itself becomes bad (hysteresis, so a flapping IPv4 path does not flip accounts back and forth).
+ */
+function decideIpFamily(input) {
+    const { previous, v4, v6 } = input;
+    if (v6.noRoute)
+        return "ipv4";
+    if (previous === "ipv6")
+        return isFamilyBad(v6) ? "ipv4" : "ipv6";
+    return isFamilyBad(v4) && isFamilyGood(v6) ? "ipv6" : "ipv4";
+}
+function readIpFamilyMode(env = process.env) {
+    const raw = (env.TG_IP_FAMILY || "").trim().toLowerCase();
+    if (raw === "ipv4" || raw === "ipv6")
+        return raw;
+    return "auto";
+}
+/** One async TCP connect with an explicit family; never spawns a process. */
+const tcpConnectProbe = (host, port, family, deadlineMs) => new Promise((resolve) => {
+    const started = Date.now();
+    let settled = false;
+    const socket = net__WEBPACK_IMPORTED_MODULE_0__.connect({ host, port, family });
+    const finish = (attempt) => {
+        if (settled)
+            return;
+        settled = true;
+        clearTimeout(timer);
+        socket.removeAllListeners();
+        socket.on("error", () => undefined);
+        socket.destroy();
+        resolve(attempt);
+    };
+    const timer = setTimeout(() => finish({ ok: false, ms: Date.now() - started, code: "ETIMEDOUT" }), deadlineMs);
+    socket.once("connect", () => finish({ ok: true, ms: Date.now() - started }));
+    socket.once("error", (err) => finish({ ok: false, ms: Date.now() - started, code: err?.code || "ERROR" }));
+});
+async function probeFamily(probe, host, port, family) {
+    const attempts = await Promise.all(Array.from({ length: PROBE_ATTEMPTS }, () => probe(host, port, family, PROBE_DEADLINE_MS).catch((err) => ({ ok: false, ms: PROBE_DEADLINE_MS, code: err?.code || "ERROR" }))));
+    return summarizeProbe(attempts);
+}
+const logger = new _logger__WEBPACK_IMPORTED_MODULE_1__.Logger("tg-core:dc-ip-family");
+// Bounded: keys are only the DC ids in TELEGRAM_DC_ADDRESSES (at most 5 entries each).
+const decisions = new Map();
+const lastFamily = new Map();
+const inflight = new Map();
+const probeErrorLogged = new Set();
+let probeImpl = tcpConnectProbe;
+let now = () => Date.now();
+function fmt(stats) {
+    return `${stats.successes}/${stats.attempts} ok, bad ${stats.bad}, median ${stats.medianMs ?? "-"}ms${stats.noRoute ? ", no route" : ""}`;
+}
+/**
+ * Choose the family for a DC. Cached per DC for DECISION_TTL_MS; concurrent callers share one probe.
+ * Any probe error resolves to IPv4 (the old behaviour).
+ */
+async function resolveDcIpFamily(opts) {
+    const mode = readIpFamilyMode(opts.env);
+    if (mode === "ipv4")
+        return { family: "ipv4", reason: "override" };
+    // SOCKS proxies are configured and tested for IPv4 only (useIPV6 must stay false with a proxy).
+    if (opts.hasProxy)
+        return { family: "ipv4", reason: "proxy" };
+    const table = TELEGRAM_DC_ADDRESSES[opts.dcId];
+    if (!table)
+        return { family: "ipv4", reason: "unknown-dc" };
+    if (mode === "ipv6")
+        return { family: "ipv6", reason: "override" };
+    const cached = decisions.get(opts.dcId);
+    if (cached && now() - cached.at < DECISION_TTL_MS) {
+        return { family: cached.family, reason: "cached", v4: cached.v4, v6: cached.v6 };
+    }
+    const pending = inflight.get(opts.dcId);
+    if (pending)
+        return pending;
+    const dcId = opts.dcId;
+    const v4Host = opts.ipv4Address && net__WEBPACK_IMPORTED_MODULE_0__.isIPv4(opts.ipv4Address) ? opts.ipv4Address : table.ipv4;
+    const run = (async () => {
+        try {
+            const [v4, v6] = await Promise.all([
+                probeFamily(probeImpl, v4Host, opts.port, 4),
+                probeFamily(probeImpl, table.ipv6, opts.port, 6),
+            ]);
+            const family = decideIpFamily({ previous: lastFamily.get(dcId) ?? null, v4, v6 });
+            decisions.set(dcId, { family, at: now(), v4, v6 });
+            lastFamily.set(dcId, family);
+            probeErrorLogged.delete(dcId);
+            logger.log(`dc ${dcId} -> ${family} | v4 ${v4Host}:${opts.port} ${fmt(v4)} | v6 ${table.ipv6}:${opts.port} ${fmt(v6)}`);
+            return { family, reason: "probe", v4, v6 };
+        }
+        catch (error) {
+            if (!probeErrorLogged.has(dcId)) {
+                probeErrorLogged.add(dcId);
+                logger.warn(`dc ${dcId} probe failed, using ipv4: ${error?.message || error}`);
+            }
+            return { family: "ipv4", reason: "probe-error" };
+        }
+        finally {
+            inflight.delete(dcId);
+        }
+    })();
+    inflight.set(dcId, run);
+    return run;
+}
+// The address each session object was loaded with, so an ipv4 decision restores exactly that.
+const originalAddress = new WeakMap();
+/**
+ * Decide the family for this session's home DC and point the in-memory session at it, before
+ * `new TelegramClient(...)`. Returns `params` with `useIPV6` matching. Call on client creation /
+ * rebuild only; it never touches a connected client. The saved session string is never written.
+ */
+async function applyDcIpFamily(session, params, label = "") {
+    try {
+        if (!session || typeof session.setDC !== "function" || !session.dcId || !session.serverAddress || !session.port) {
+            return { params, decision: null };
+        }
+        let original = originalAddress.get(session);
+        if (!original || original.dcId !== session.dcId) {
+            if (session.serverAddress.includes(":")) {
+                // Session already saved with an IPv6 address: leave it exactly as GramJS would use it.
+                return { params, decision: null };
+            }
+            original = { dcId: session.dcId, serverAddress: session.serverAddress, port: session.port };
+            originalAddress.set(session, original);
+        }
+        const decision = await resolveDcIpFamily({
+            dcId: original.dcId,
+            port: params.useWSS ? 443 : 80, // the port GramJS connect() really uses for the home DC
+            hasProxy: !!params.proxy,
+            ipv4Address: original.serverAddress,
+        });
+        const table = TELEGRAM_DC_ADDRESSES[original.dcId];
+        if (decision.family === "ipv6" && table) {
+            if (session.serverAddress !== table.ipv6)
+                session.setDC(original.dcId, table.ipv6, original.port);
+        }
+        else if (session.serverAddress !== original.serverAddress || session.port !== original.port) {
+            session.setDC(original.dcId, original.serverAddress, original.port);
+        }
+        const useIPV6 = decision.family === "ipv6" && !!table;
+        if (decision.reason !== "override" || useIPV6) {
+            logger.debug(`${label} dc ${original.dcId} ${useIPV6 ? "ipv6" : "ipv4"} (${decision.reason})`);
+        }
+        return { params: { ...params, useIPV6 }, decision };
+    }
+    catch (error) {
+        logger.warn(`${label} apply failed, keeping saved address: ${error?.message || error}`);
+        return { params, decision: null };
+    }
+}
+/** Test hooks. */
+function __setDcIpFamilyProbeForTests(probe, clock) {
+    probeImpl = probe ?? tcpConnectProbe;
+    now = clock ?? (() => Date.now());
+}
+function __resetDcIpFamilyForTests() {
+    decisions.clear();
+    lastFamily.clear();
+    inflight.clear();
+    probeErrorLogged.clear();
+    probeImpl = tcpConnectProbe;
+    now = () => Date.now();
+}
+
+
+/***/ },
+
 /***/ "../../packages/tg-core/src/utils/emoji.ts"
 /*!*************************************************!*\
   !*** ../../packages/tg-core/src/utils/emoji.ts ***!
@@ -51230,8 +51469,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "ef06d5d6cb9e835c51ad4bc0dcc4e3924bbd64e8" : 0;
-    const builtAt =  true ? "2026-11-03T17:57:45.705Z" : 0;
+    const sha =  true ? "76ec5215722a773f9ec7246f98204aaaf3fa7970" : 0;
+    const builtAt =  true ? "2026-11-04T17:25:08.139Z" : 0;
     return { sha, builtAt };
 }
 
@@ -114594,27 +114833,28 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var telegram_events_Raw__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! telegram/events/Raw */ "telegram/events/Raw");
 /* harmony import */ var telegram_events_Raw__WEBPACK_IMPORTED_MODULE_7___default = /*#__PURE__*/__webpack_require__.n(telegram_events_Raw__WEBPACK_IMPORTED_MODULE_7__);
 /* harmony import */ var _tg_core_utils_generateTGConfig__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! @tg/core/utils/generateTGConfig */ "../../packages/tg-core/src/utils/generateTGConfig.ts");
-/* harmony import */ var _promotion__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ../promotion */ "./src/promotion/index.ts");
-/* harmony import */ var _tg_dialogs__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! @tg/dialogs */ "../../packages/tg-dialogs/src/index.ts");
-/* harmony import */ var _calls_call_manager__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ../calls/call-manager */ "./src/calls/call-manager.ts");
-/* harmony import */ var _tg_reactions_ReactionService__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! @tg/reactions/ReactionService */ "../../packages/tg-reactions/src/ReactionService.ts");
-/* harmony import */ var _data_user_data_crud__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! ../data/user-data-crud */ "./src/data/user-data-crud.ts");
-/* harmony import */ var _data_db__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! ../data/db */ "./src/data/db.ts");
-/* harmony import */ var _entity_cache__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! ./entity-cache */ "./src/telegram/entity-cache.ts");
-/* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
-/* harmony import */ var _tg_core_utils_fetchWithTimeout__WEBPACK_IMPORTED_MODULE_17__ = __webpack_require__(/*! @tg/core/utils/fetchWithTimeout */ "../../packages/tg-core/src/utils/fetchWithTimeout.ts");
-/* harmony import */ var _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_18__ = __webpack_require__(/*! @tg/core/utils/TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
-/* harmony import */ var _conversation_respond_to_msgs__WEBPACK_IMPORTED_MODULE_19__ = __webpack_require__(/*! ../conversation/respond-to-msgs */ "./src/conversation/respond-to-msgs.ts");
-/* harmony import */ var _index__WEBPACK_IMPORTED_MODULE_20__ = __webpack_require__(/*! ../index */ "./src/index.ts");
-/* harmony import */ var _handlers_outhandler__WEBPACK_IMPORTED_MODULE_21__ = __webpack_require__(/*! ../handlers/outhandler */ "./src/handlers/outhandler.ts");
-/* harmony import */ var _permanent_failure__WEBPACK_IMPORTED_MODULE_22__ = __webpack_require__(/*! ./permanent-failure */ "./src/telegram/permanent-failure/index.ts");
-/* harmony import */ var _tg_core_telegram_utils_isPermanentError__WEBPACK_IMPORTED_MODULE_23__ = __webpack_require__(/*! @tg/core/telegram-utils/isPermanentError */ "../../packages/tg-core/src/telegram-utils/isPermanentError.ts");
-/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_24__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
-/* harmony import */ var _tg_persona_persona_verifier__WEBPACK_IMPORTED_MODULE_25__ = __webpack_require__(/*! @tg/persona/persona-verifier */ "../../packages/tg-persona/src/persona-verifier.ts");
-/* harmony import */ var _tg_persona_persona_timestamps__WEBPACK_IMPORTED_MODULE_26__ = __webpack_require__(/*! @tg/persona/persona-timestamps */ "../../packages/tg-persona/src/persona-timestamps.ts");
-/* harmony import */ var _config_runtime_config__WEBPACK_IMPORTED_MODULE_27__ = __webpack_require__(/*! ../config/runtime-config */ "./src/config/runtime-config.ts");
-/* harmony import */ var _tg_core_utils_apiKey__WEBPACK_IMPORTED_MODULE_28__ = __webpack_require__(/*! @tg/core/utils/apiKey */ "../../packages/tg-core/src/utils/apiKey.ts");
-/* harmony import */ var _shared_deadline__WEBPACK_IMPORTED_MODULE_29__ = __webpack_require__(/*! ../shared/deadline */ "./src/shared/deadline.ts");
+/* harmony import */ var _tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! @tg/core/utils/dc-ip-family */ "../../packages/tg-core/src/utils/dc-ip-family.ts");
+/* harmony import */ var _promotion__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ../promotion */ "./src/promotion/index.ts");
+/* harmony import */ var _tg_dialogs__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! @tg/dialogs */ "../../packages/tg-dialogs/src/index.ts");
+/* harmony import */ var _calls_call_manager__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! ../calls/call-manager */ "./src/calls/call-manager.ts");
+/* harmony import */ var _tg_reactions_ReactionService__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! @tg/reactions/ReactionService */ "../../packages/tg-reactions/src/ReactionService.ts");
+/* harmony import */ var _data_user_data_crud__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! ../data/user-data-crud */ "./src/data/user-data-crud.ts");
+/* harmony import */ var _data_db__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! ../data/db */ "./src/data/db.ts");
+/* harmony import */ var _entity_cache__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! ./entity-cache */ "./src/telegram/entity-cache.ts");
+/* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_17__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
+/* harmony import */ var _tg_core_utils_fetchWithTimeout__WEBPACK_IMPORTED_MODULE_18__ = __webpack_require__(/*! @tg/core/utils/fetchWithTimeout */ "../../packages/tg-core/src/utils/fetchWithTimeout.ts");
+/* harmony import */ var _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_19__ = __webpack_require__(/*! @tg/core/utils/TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
+/* harmony import */ var _conversation_respond_to_msgs__WEBPACK_IMPORTED_MODULE_20__ = __webpack_require__(/*! ../conversation/respond-to-msgs */ "./src/conversation/respond-to-msgs.ts");
+/* harmony import */ var _index__WEBPACK_IMPORTED_MODULE_21__ = __webpack_require__(/*! ../index */ "./src/index.ts");
+/* harmony import */ var _handlers_outhandler__WEBPACK_IMPORTED_MODULE_22__ = __webpack_require__(/*! ../handlers/outhandler */ "./src/handlers/outhandler.ts");
+/* harmony import */ var _permanent_failure__WEBPACK_IMPORTED_MODULE_23__ = __webpack_require__(/*! ./permanent-failure */ "./src/telegram/permanent-failure/index.ts");
+/* harmony import */ var _tg_core_telegram_utils_isPermanentError__WEBPACK_IMPORTED_MODULE_24__ = __webpack_require__(/*! @tg/core/telegram-utils/isPermanentError */ "../../packages/tg-core/src/telegram-utils/isPermanentError.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_25__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _tg_persona_persona_verifier__WEBPACK_IMPORTED_MODULE_26__ = __webpack_require__(/*! @tg/persona/persona-verifier */ "../../packages/tg-persona/src/persona-verifier.ts");
+/* harmony import */ var _tg_persona_persona_timestamps__WEBPACK_IMPORTED_MODULE_27__ = __webpack_require__(/*! @tg/persona/persona-timestamps */ "../../packages/tg-persona/src/persona-timestamps.ts");
+/* harmony import */ var _config_runtime_config__WEBPACK_IMPORTED_MODULE_28__ = __webpack_require__(/*! ../config/runtime-config */ "./src/config/runtime-config.ts");
+/* harmony import */ var _tg_core_utils_apiKey__WEBPACK_IMPORTED_MODULE_29__ = __webpack_require__(/*! @tg/core/utils/apiKey */ "../../packages/tg-core/src/utils/apiKey.ts");
+/* harmony import */ var _shared_deadline__WEBPACK_IMPORTED_MODULE_30__ = __webpack_require__(/*! ../shared/deadline */ "./src/shared/deadline.ts");
 
 
 
@@ -114646,15 +114886,16 @@ __webpack_require__.r(__webpack_exports__);
 
 
 
+
 const require = /* createRequire() */ undefined;
-const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_24__.Logger("tg-aut:TelegramManager");
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_25__.Logger("tg-aut:TelegramManager");
 async function sendTelegramManagerNotification(category, notification, context) {
     try {
-        const sent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_18__.BotConfig.getInstance().sendMessage(category, notification);
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_16__.logUnsentNotification)(sent, "TelegramManager notification returned false", context);
+        const sent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_19__.BotConfig.getInstance().sendMessage(category, notification);
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_17__.logUnsentNotification)(sent, "TelegramManager notification returned false", context);
     }
     catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_16__.parseError)(error, context, false);
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_17__.parseError)(error, context, false);
     }
 }
 const localEntityCacheHelpers = {
@@ -114732,23 +114973,23 @@ async function triggerBufferProfilePhotoRefresh(client, mobile, clientId, profil
         logger.debug(`[Persona] Skipping CMS profile pic refresh for ${mobile}: assigned profile pic URLs are missing or too small`);
         return;
     }
-    logger.debug(`🧍 PERSONA photo-refresh gate | ${mobile} | photos ${(0,_tg_persona_persona_timestamps__WEBPACK_IMPORTED_MODULE_26__.formatPersonaTimestampShort)(profilePicsUpdatedAt)} | assigned ${assignedPhotoCount} | pool ${poolPhotoCount}`);
+    logger.debug(`🧍 PERSONA photo-refresh gate | ${mobile} | photos ${(0,_tg_persona_persona_timestamps__WEBPACK_IMPORTED_MODULE_27__.formatPersonaTimestampShort)(profilePicsUpdatedAt)} | assigned ${assignedPhotoCount} | pool ${poolPhotoCount}`);
     const currentPhotoCount = await getCurrentProfilePhotoCount(client, mobile);
     if (currentPhotoCount >= 2) {
         logger.debug(`🧍 PERSONA photo-refresh skip | ${mobile} | telegram photos ${currentPhotoCount}`);
         return;
     }
-    const tgCmsBase = (0,_config_runtime_config__WEBPACK_IMPORTED_MODULE_27__.getRuntimeConfigBaseOrNull)();
+    const tgCmsBase = (0,_config_runtime_config__WEBPACK_IMPORTED_MODULE_28__.getRuntimeConfigBaseOrNull)();
     if (!tgCmsBase) {
         logger.warn(`[Persona] Cannot trigger CMS profile pic refresh for ${mobile}: no CMS base URL configured`);
         return;
     }
     logger.info(`🧍 PERSONA photo-refresh trigger | ${clientId} | ${mobile} | telegram ${currentPhotoCount} | pool ${poolPhotoCount}`);
-    const response = await (0,_tg_core_utils_fetchWithTimeout__WEBPACK_IMPORTED_MODULE_17__.fetchWithTimeout)(`${tgCmsBase}/bufferclients/profile-pics/refresh/${encodeURIComponent(mobile)}`, {
+    const response = await (0,_tg_core_utils_fetchWithTimeout__WEBPACK_IMPORTED_MODULE_18__.fetchWithTimeout)(`${tgCmsBase}/bufferclients/profile-pics/refresh/${encodeURIComponent(mobile)}`, {
         method: 'POST',
         headers: {
             'Content-Type': 'application/json',
-            'x-api-key': (0,_tg_core_utils_apiKey__WEBPACK_IMPORTED_MODULE_28__.getApiKey)(),
+            'x-api-key': (0,_tg_core_utils_apiKey__WEBPACK_IMPORTED_MODULE_29__.getApiKey)(),
         },
         data: {},
         timeout: 15000,
@@ -114831,7 +115072,7 @@ class TelegramManager {
                     .finally(() => { TelegramManager.pendingConnect = null; });
             }
             try {
-                await (0,_shared_deadline__WEBPACK_IMPORTED_MODULE_29__.settleWithin)(TelegramManager.pendingConnect, TelegramManager.CONNECT_DEADLINE_MS, `[${mobile}] Telegram connect`);
+                await (0,_shared_deadline__WEBPACK_IMPORTED_MODULE_30__.settleWithin)(TelegramManager.pendingConnect, TelegramManager.CONNECT_DEADLINE_MS, `[${mobile}] Telegram connect`);
             }
             catch (error) {
                 logger.error(`[${mobile}] Failed to reconnect:`, error);
@@ -114867,7 +115108,7 @@ class TelegramManager {
                 return true;
             }
             catch (error) {
-                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_16__.parseError)(error, `${mobile}: Telegram runtime recovery failed`);
+                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_17__.parseError)(error, `${mobile}: Telegram runtime recovery failed`);
                 return false;
             }
             finally {
@@ -114970,17 +115211,17 @@ class TelegramManager {
             return false;
         }
         try {
-            this.reactorInstance = _tg_reactions_ReactionService__WEBPACK_IMPORTED_MODULE_12__.ReactionService.getOrCreate(this.client, this.dialogManager, {
+            this.reactorInstance = _tg_reactions_ReactionService__WEBPACK_IMPORTED_MODULE_13__.ReactionService.getOrCreate(this.client, this.dialogManager, {
                 instanceId: this.mobile,
                 instanceName: this.clientId,
-                store: _data_db__WEBPACK_IMPORTED_MODULE_14__.channelsStore,
-                onAccountError: (error) => (0,_permanent_failure__WEBPACK_IMPORTED_MODULE_22__.startNewUserProcess)(error, `Reactions:${this.clientId}`),
+                store: _data_db__WEBPACK_IMPORTED_MODULE_15__.channelsStore,
+                onAccountError: (error) => (0,_permanent_failure__WEBPACK_IMPORTED_MODULE_23__.startNewUserProcess)(error, `Reactions:${this.clientId}`),
                 onTelegramRuntimeFailure: async () => { await TelegramManager.recoverRuntime(this.mobile); },
                 // Per-mobile daily reaction analytics (best-effort). tg-aut previously left
                 // reaction counters empty. Mirrors promote-clients: record
                 // success/failed/restricted/floods (Postgres daily_client/daily_mobile reactions*).
                 onReactionOutcome: (outcome) => {
-                    void _data_user_data_crud__WEBPACK_IMPORTED_MODULE_13__.UserDataDtoCrud.getInstance().recordDailyReaction(this.mobile, {
+                    void _data_user_data_crud__WEBPACK_IMPORTED_MODULE_14__.UserDataDtoCrud.getInstance().recordDailyReaction(this.mobile, {
                         success: outcome === 'success' ? 1 : 0,
                         failed: outcome === 'failed' ? 1 : 0,
                         restricted: outcome === 'restricted' ? 1 : 0,
@@ -114992,7 +115233,7 @@ class TelegramManager {
             return true;
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_16__.parseError)(error, `${this.mobile}: ReactionService recovery failed`, false);
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_17__.parseError)(error, `${this.mobile}: ReactionService recovery failed`, false);
             return false;
         }
     }
@@ -115005,7 +115246,7 @@ class TelegramManager {
             return false;
         }
         try {
-            this.promotorInstance = new _promotion__WEBPACK_IMPORTED_MODULE_9__.PromotionEngine(this.client, this.dialogManager, {
+            this.promotorInstance = new _promotion__WEBPACK_IMPORTED_MODULE_10__.PromotionEngine(this.client, this.dialogManager, {
                 instanceId: this.mobile,
                 instanceName: this.clientId,
                 onTelegramRuntimeFailure: async () => { await TelegramManager.recoverRuntime(this.mobile); },
@@ -115014,7 +115255,7 @@ class TelegramManager {
             return true;
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_16__.parseError)(error, `${this.mobile}: PromotionEngine recovery failed`, false);
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_17__.parseError)(error, `${this.mobile}: PromotionEngine recovery failed`, false);
             return false;
         }
     }
@@ -115124,8 +115365,11 @@ class TelegramManager {
                 if (!this.session) {
                     this.session = new _deduplicating_session__WEBPACK_IMPORTED_MODULE_4__.DeduplicatingSession(process.env.session || "");
                 }
+                // Home-DC address family (IPv4 unless IPv4 to this DC is degraded and IPv6 is clean; TG_IP_FAMILY
+                // overrides). Changes only the in-memory session address; the saved session string is untouched.
+                const { params: clientParams } = await (0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_9__.applyDcIpFamily)(this.session, tgConfig, this.mobile);
                 // NOTE: Session string should match the API ID it was created with. If not, GramJS will throw and we fall back to re-setup.
-                this.client = new telegram__WEBPACK_IMPORTED_MODULE_0__.TelegramClient(this.session, apiId, apiHash, tgConfig);
+                this.client = new telegram__WEBPACK_IMPORTED_MODULE_0__.TelegramClient(this.session, apiId, apiHash, clientParams);
                 // DC override: only when explicitly requested (e.g. for IPv6 workaround)
                 // if (process.env.FORCE_DC5 === 'true') {
                 //     await this.client.session.setDC(5, '91.108.56.194', 80);
@@ -115155,12 +115399,12 @@ class TelegramManager {
                 // MEMORY FIX: Only create child instances if they don't already exist
                 // This prevents creating duplicate instances if startTg() is called multiple times
                 if (!this.dialogManager) {
-                    this.dialogManager = _tg_dialogs__WEBPACK_IMPORTED_MODULE_10__.DialogManager.getOrCreate(this.client, {
+                    this.dialogManager = _tg_dialogs__WEBPACK_IMPORTED_MODULE_11__.DialogManager.getOrCreate(this.client, {
                         instanceId: this.clientId,
                         instanceName: this.mobile,
                         callbacks: {
-                            onIsPermanentError: (errorDetails) => (0,_tg_core_telegram_utils_isPermanentError__WEBPACK_IMPORTED_MODULE_23__["default"])(errorDetails),
-                            onPermanentFailure: (error) => (0,_permanent_failure__WEBPACK_IMPORTED_MODULE_22__.handlePermanentTelegramFailure)(error, `DialogManager:${this.clientId}`),
+                            onIsPermanentError: (errorDetails) => (0,_tg_core_telegram_utils_isPermanentError__WEBPACK_IMPORTED_MODULE_24__["default"])(errorDetails),
+                            onPermanentFailure: (error) => (0,_permanent_failure__WEBPACK_IMPORTED_MODULE_23__.handlePermanentTelegramFailure)(error, `DialogManager:${this.clientId}`),
                         },
                     });
                     await this.dialogManager.initialize();
@@ -115178,7 +115422,7 @@ class TelegramManager {
                     }
                 }
                 if (!this.callManager) {
-                    this.callManager = new _calls_call_manager__WEBPACK_IMPORTED_MODULE_11__.CallManager(this.client, {
+                    this.callManager = new _calls_call_manager__WEBPACK_IMPORTED_MODULE_12__.CallManager(this.client, {
                         instanceId: this.mobile,
                         instanceName: this.clientId,
                     });
@@ -115193,7 +115437,7 @@ class TelegramManager {
                     logger.error(`${this.mobile}: in-house call startup failed:`, error);
                 });
                 const me = (await this.client.getMe());
-                const db = _data_user_data_crud__WEBPACK_IMPORTED_MODULE_13__.UserDataDtoCrud.getInstance();
+                const db = _data_user_data_crud__WEBPACK_IMPORTED_MODULE_14__.UserDataDtoCrud.getInstance();
                 await db.updateClient(this.clientId, { mobile: me?.phone, username: me?.username }); // Small sanity ping
                 // Persona verification and photo fallback run in background so startup is not blocked
                 void (async () => {
@@ -115205,8 +115449,8 @@ class TelegramManager {
                             const activeMobile = me?.phone || this.mobile;
                             const bufferDoc = await db.getBufferClientDoc(activeMobile);
                             if (bufferDoc) {
-                                logger.debug(`🧍 PERSONA buffer-doc | ${this.clientId} | ${bufferDoc.mobile} | first ${!!bufferDoc.assignedFirstName} | last ${!!bufferDoc.assignedLastName} | bio ${!!bufferDoc.assignedBio} | pics ${bufferDoc.assignedProfilePics?.length || 0} | nameBio ${(0,_tg_persona_persona_timestamps__WEBPACK_IMPORTED_MODULE_26__.formatPersonaTimestampShort)(bufferDoc.nameBioUpdatedAt)} | privacy ${(0,_tg_persona_persona_timestamps__WEBPACK_IMPORTED_MODULE_26__.formatPersonaTimestampShort)(bufferDoc.privacyUpdatedAt)} | photos ${(0,_tg_persona_persona_timestamps__WEBPACK_IMPORTED_MODULE_26__.formatPersonaTimestampShort)(bufferDoc.profilePicsUpdatedAt)}`);
-                                const result = await (0,_tg_persona_persona_verifier__WEBPACK_IMPORTED_MODULE_25__.verifyAndCorrectPersona)(this.client, bufferDoc.mobile, pool, {
+                                logger.debug(`🧍 PERSONA buffer-doc | ${this.clientId} | ${bufferDoc.mobile} | first ${!!bufferDoc.assignedFirstName} | last ${!!bufferDoc.assignedLastName} | bio ${!!bufferDoc.assignedBio} | pics ${bufferDoc.assignedProfilePics?.length || 0} | nameBio ${(0,_tg_persona_persona_timestamps__WEBPACK_IMPORTED_MODULE_27__.formatPersonaTimestampShort)(bufferDoc.nameBioUpdatedAt)} | privacy ${(0,_tg_persona_persona_timestamps__WEBPACK_IMPORTED_MODULE_27__.formatPersonaTimestampShort)(bufferDoc.privacyUpdatedAt)} | photos ${(0,_tg_persona_persona_timestamps__WEBPACK_IMPORTED_MODULE_27__.formatPersonaTimestampShort)(bufferDoc.profilePicsUpdatedAt)}`);
+                                const result = await (0,_tg_persona_persona_verifier__WEBPACK_IMPORTED_MODULE_26__.verifyAndCorrectPersona)(this.client, bufferDoc.mobile, pool, {
                                     mobile: bufferDoc.mobile,
                                     assignedFirstName: bufferDoc.assignedFirstName || null,
                                     assignedLastName: bufferDoc.assignedLastName || null,
@@ -115272,7 +115516,7 @@ class TelegramManager {
                         logger.error(`${this.mobile}: Error stopping stale PromotionEngine:`, error);
                     });
                     await this.promotorInstance.cleanup();
-                    this.promotorInstance = new _promotion__WEBPACK_IMPORTED_MODULE_9__.PromotionEngine(this.client, this.dialogManager, {
+                    this.promotorInstance = new _promotion__WEBPACK_IMPORTED_MODULE_10__.PromotionEngine(this.client, this.dialogManager, {
                         instanceId: this.mobile,
                         instanceName: this.clientId,
                         onTelegramRuntimeFailure: async () => { await TelegramManager.recoverRuntime(this.mobile); },
@@ -115281,8 +115525,8 @@ class TelegramManager {
                 // Phone from Telegram is normally our own mobile, so it's redundant — only surface
                 // it when it actually differs (a mismatch is worth seeing).
                 const connectedPhone = me?.phone && me.phone !== this.mobile ? me.phone : null;
-                await sendTelegramManagerNotification(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_18__.ChannelCategory.CLIENT_UPDATES, {
-                    severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_18__.NotificationSeverity.SUCCESS,
+                await sendTelegramManagerNotification(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_19__.ChannelCategory.CLIENT_UPDATES, {
+                    severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_19__.NotificationSeverity.SUCCESS,
                     title: "TG connected",
                     fields: [
                         { label: "Mobile", value: this.mobile },
@@ -115299,17 +115543,17 @@ class TelegramManager {
                     this.registerHandler((event) => this.callManager.handlePhoneCallEvent(event), undefined);
                     this.handlersRegistered = true;
                 }
-                void Promise.resolve((0,_conversation_respond_to_msgs__WEBPACK_IMPORTED_MODULE_19__.replier)()).catch((error) => {
-                    (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_16__.parseError)(error, "TelegramManager.replierStartup");
+                void Promise.resolve((0,_conversation_respond_to_msgs__WEBPACK_IMPORTED_MODULE_20__.replier)()).catch((error) => {
+                    (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_17__.parseError)(error, "TelegramManager.replierStartup");
                 });
                 this.started = true;
                 const setupClient = this.client;
-                void (0,_index__WEBPACK_IMPORTED_MODULE_20__.initSetup)(setupClient).catch((error) => {
-                    (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_16__.parseError)(error, "TelegramManager.initSetup", false);
+                void (0,_index__WEBPACK_IMPORTED_MODULE_21__.initSetup)(setupClient).catch((error) => {
+                    (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_17__.parseError)(error, "TelegramManager.initSetup", false);
                 });
             }
             catch (error) {
-                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_16__.parseError)(error, "Error in startTg");
+                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_17__.parseError)(error, "Error in startTg");
                 let sideEffectError = null;
                 try {
                     await this.client.invoke(new telegram__WEBPACK_IMPORTED_MODULE_0__.Api.account.SetPrivacy({
@@ -115321,7 +115565,7 @@ class TelegramManager {
                 }
                 catch (inner) {
                     sideEffectError = inner;
-                    (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_16__.parseError)(inner, "Error while handling startTg failure side-effects");
+                    (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_17__.parseError)(inner, "Error while handling startTg failure side-effects");
                     logger.warn(`[PermanentFailure] TelegramManager.startTg:${this.clientId}: side-effect privacy update failed`, {
                         error: inner instanceof Error ? inner.message : String(inner),
                     });
@@ -115329,9 +115573,9 @@ class TelegramManager {
                 // Check original error first, then side-effect error (e.g. FROZEN_METHOD_INVALID
                 // from SetPrivacy reveals the account is frozen even when the original error was
                 // a non-permanent PEER_ID_INVALID from SendMessage)
-                const handled = await (0,_permanent_failure__WEBPACK_IMPORTED_MODULE_22__.handlePermanentTelegramFailure)(error, `TelegramManager.startTg:${this.clientId}`);
+                const handled = await (0,_permanent_failure__WEBPACK_IMPORTED_MODULE_23__.handlePermanentTelegramFailure)(error, `TelegramManager.startTg:${this.clientId}`);
                 if (!handled && sideEffectError) {
-                    await (0,_permanent_failure__WEBPACK_IMPORTED_MODULE_22__.handlePermanentTelegramFailure)(sideEffectError, `TelegramManager.startTg:${this.clientId}:side-effect`);
+                    await (0,_permanent_failure__WEBPACK_IMPORTED_MODULE_23__.handlePermanentTelegramFailure)(sideEffectError, `TelegramManager.startTg:${this.clientId}:side-effect`);
                 }
                 throw error; // surface to callers if needed
             }
@@ -115382,10 +115626,10 @@ class TelegramManager {
         this.eventHandlers.push([filter, handler]);
     }
     async handleIncoming(event) {
-        return _index__WEBPACK_IMPORTED_MODULE_20__.handleEvents.call(this, event);
+        return _index__WEBPACK_IMPORTED_MODULE_21__.handleEvents.call(this, event);
     }
     async handleOutgoing(event) {
-        return _handlers_outhandler__WEBPACK_IMPORTED_MODULE_21__.OutEventPrint.call(this, event);
+        return _handlers_outhandler__WEBPACK_IMPORTED_MODULE_22__.OutEventPrint.call(this, event);
     }
     /**
      * Public teardown. Idempotent and race-safe.
@@ -115451,7 +115695,7 @@ class TelegramManager {
                 logger.log(`${name}: Instance successfully destroyed.`);
             }
             catch (error) {
-                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_16__.parseError)(error, `${this.mobile}: Error during instance destruction`);
+                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_17__.parseError)(error, `${this.mobile}: Error during instance destruction`);
                 logger.error(`${this.mobile}: Error during instance destruction:`, error);
             }
             finally {
@@ -115474,7 +115718,7 @@ class TelegramManager {
                 return;
             const cacheMap = entityCacheObj.cacheMap;
             const { getPeerId, getInputPeer, isArrayLike } = resolveEntityCacheHelpers();
-            const maxEntities = _entity_cache__WEBPACK_IMPORTED_MODULE_15__.ENTITY_CACHE_MAX;
+            const maxEntities = _entity_cache__WEBPACK_IMPORTED_MODULE_16__.ENTITY_CACHE_MAX;
             // Replace the add method with last-seen wins + bounded LRU cap.
             entityCacheObj.add = (entities) => {
                 const temp = [];
@@ -115498,7 +115742,7 @@ class TelegramManager {
                     try {
                         const pid = getPeerId(entity);
                         // Last-seen wins + LRU cap + age tracking (for idle sweep -> GC reclaim).
-                        (0,_entity_cache__WEBPACK_IMPORTED_MODULE_15__.boundedEntityCacheSet)(cacheMap, pid.toString(), getInputPeer(entity), maxEntities, this.entityCacheLastSeen, Date.now());
+                        (0,_entity_cache__WEBPACK_IMPORTED_MODULE_16__.boundedEntityCacheSet)(cacheMap, pid.toString(), getInputPeer(entity), maxEntities, this.entityCacheLastSeen, Date.now());
                     }
                     catch {
                         // Skip invalid entities
@@ -115507,13 +115751,13 @@ class TelegramManager {
             };
             logger.debug(`${this.mobile}: Patched _entityCache.add() — last-seen wins, LRU cap ${maxEntities}`);
             // Proactive age sweep so idle entries become GC-collectable (not just capped).
-            const idleMs = _entity_cache__WEBPACK_IMPORTED_MODULE_15__.ENTITY_CACHE_IDLE_MS;
+            const idleMs = _entity_cache__WEBPACK_IMPORTED_MODULE_16__.ENTITY_CACHE_IDLE_MS;
             const sweepMs = 5 * 60000; // sweep every 5 min
             if (this.entityCacheSweeper)
                 clearInterval(this.entityCacheSweeper);
             this.entityCacheSweeper = setInterval(() => {
                 try {
-                    const removed = (0,_entity_cache__WEBPACK_IMPORTED_MODULE_15__.sweepEntityCacheByAge)(cacheMap, this.entityCacheLastSeen, Date.now(), idleMs);
+                    const removed = (0,_entity_cache__WEBPACK_IMPORTED_MODULE_16__.sweepEntityCacheByAge)(cacheMap, this.entityCacheLastSeen, Date.now(), idleMs);
                     if (removed > 0)
                         logger.debug(`${this.mobile}: entity cache swept ${removed} idle entries (size ${cacheMap.size})`);
                 }
@@ -115559,7 +115803,7 @@ class TelegramManager {
                 logger.log("Client Destroyed: ", this.mobile);
             }
             catch (error) {
-                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_16__.parseError)(error, `${this.mobile}: Error during client cleanup`);
+                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_17__.parseError)(error, `${this.mobile}: Error during client cleanup`);
             }
             finally {
                 this.client._destroyed = true;
@@ -115573,8 +115817,8 @@ class TelegramManager {
             this.session = null;
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_16__.parseError)(error, `${this.mobile}: Error during client cleanup`);
-            await (0,_permanent_failure__WEBPACK_IMPORTED_MODULE_22__.startNewUserProcess)(error);
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_17__.parseError)(error, `${this.mobile}: Error during client cleanup`);
+            await (0,_permanent_failure__WEBPACK_IMPORTED_MODULE_23__.startNewUserProcess)(error);
         }
     }
 }
@@ -116193,6 +116437,17 @@ module.exports = require("http");
 
 "use strict";
 module.exports = require("https");
+
+/***/ },
+
+/***/ "net"
+/*!**********************!*\
+  !*** external "net" ***!
+  \**********************/
+(module) {
+
+"use strict";
+module.exports = require("net");
 
 /***/ },
 
