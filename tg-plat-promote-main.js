@@ -26399,6 +26399,84 @@ function sanitizePromotionRendering(text) {
 
 /***/ },
 
+/***/ "../../packages/tg-core/src/utils/shutdown-budget.ts"
+/*!***********************************************************!*\
+  !*** ../../packages/tg-core/src/utils/shutdown-budget.ts ***!
+  \***********************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   halfOfRemaining: () => (/* binding */ halfOfRemaining),
+/* harmony export */   resolveShutdownForceExitMs: () => (/* binding */ resolveShutdownForceExitMs),
+/* harmony export */   runShutdownStep: () => (/* binding */ runShutdownStep)
+/* harmony export */ });
+/**
+ * Shutdown budget shared by tg-aut and promote-clients.
+ *
+ * server.js (the pm2 loader) force-exits SHUTDOWN_TIMEOUT ms after the signal (its own default is
+ * 10 s; the fleet ecosystem files set 8 s) and pm2 SIGKILLs at kill_timeout. Our own force-exit must
+ * fire first so the exit is ours (with the analytics 'exit' spill), and every shutdown step is
+ * bounded so state-preserving work (queues, analytics) keeps its share of that window.
+ */
+/** Upper bound on our own shutdown, whatever the loader allows. */
+const SHUTDOWN_FORCE_EXIT_CAP_MS = 15000;
+/** Exit this long before the loader's own force-exit (server.js SHUTDOWN_TIMEOUT). */
+const SHUTDOWN_LOADER_MARGIN_MS = 1000;
+/** SHUTDOWN_TIMEOUT used by the fleet ecosystem files (and the analytics sink's default kill window). */
+const DEFAULT_LOADER_SHUTDOWN_TIMEOUT_MS = 8000;
+const SHUTDOWN_FORCE_EXIT_MIN_MS = 250;
+/**
+ * Our force-exit deadline: min(15 s, SHUTDOWN_TIMEOUT - 1 s), SHUTDOWN_TIMEOUT defaulting to 8 s when
+ * unset/invalid (shorter than the loader's own 10 s default, so it is safe either way).
+ */
+function resolveShutdownForceExitMs(env = process.env) {
+    const raw = Number(env.SHUTDOWN_TIMEOUT);
+    const loaderMs = Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_LOADER_SHUTDOWN_TIMEOUT_MS;
+    return Math.max(SHUTDOWN_FORCE_EXIT_MIN_MS, Math.min(SHUTDOWN_FORCE_EXIT_CAP_MS, loaderMs - SHUTDOWN_LOADER_MARGIN_MS));
+}
+/**
+ * Runs one shutdown step, waiting at most min(capMs, time left before deadlineAt - reserveMs) so the
+ * steps after it keep their share of the budget. A step that runs out is left running in the
+ * background (logged); a step with no budget left is still started but not awaited. Failures are
+ * logged, never thrown.
+ */
+async function runShutdownStep(logger, name, task, deadlineAt, capMs, reserveMs = 0) {
+    const budgetMs = Math.min(capMs, deadlineAt - reserveMs - Date.now());
+    let result;
+    try {
+        result = task();
+    }
+    catch (error) {
+        logger.error(`[CLEANUP] ${name} failed:`, error);
+        return;
+    }
+    if (!result || typeof result.then !== "function")
+        return;
+    const work = Promise.resolve(result).then(() => true, (error) => { logger.error(`[CLEANUP] ${name} failed:`, error); return true; });
+    if (budgetMs <= 0) {
+        logger.warn(`[SHUTDOWN] ${name}: no budget left, not waiting for it`);
+        return;
+    }
+    let timer = null;
+    const timedOut = new Promise((resolve) => {
+        timer = setTimeout(() => resolve(false), budgetMs);
+        timer?.unref?.();
+    });
+    const finished = await Promise.race([work, timedOut]);
+    if (timer)
+        clearTimeout(timer);
+    if (!finished)
+        logger.warn(`[SHUTDOWN] ${name} still running after ${budgetMs}ms; continuing shutdown`);
+}
+/** min(capMs, half of the time left before deadlineAt): a reserve that still leaves room under a short budget. */
+function halfOfRemaining(deadlineAt, capMs) {
+    return Math.max(0, Math.min(capMs, Math.floor((deadlineAt - Date.now()) / 2)));
+}
+
+
+/***/ },
+
 /***/ "../../packages/tg-core/src/utils/spam-limit.ts"
 /*!******************************************************!*\
   !*** ../../packages/tg-core/src/utils/spam-limit.ts ***!
@@ -40945,8 +41023,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "940ee14de8bd27b20c05ddf68069f0dfdfc8c35f" : 0;
-    const builtAt =  true ? "2026-11-05T05:56:54.397Z" : 0;
+    const sha =  true ? "3e55be514bfc6ef3e45eaebaf225c3e008a8d55c" : 0;
+    const builtAt =  true ? "2026-11-05T19:48:41.509Z" : 0;
     return { sha, builtAt };
 }
 
@@ -43733,7 +43811,11 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _tg_dialogs__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! @tg/dialogs */ "../../packages/tg-dialogs/src/index.ts");
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
 /* harmony import */ var _tg_analytics__WEBPACK_IMPORTED_MODULE_17__ = __webpack_require__(/*! @tg/analytics */ "../../packages/tg-analytics/src/index.ts");
-/* harmony import */ var _monitoring_heartbeat__WEBPACK_IMPORTED_MODULE_18__ = __webpack_require__(/*! ../monitoring/heartbeat */ "./src/monitoring/heartbeat.ts");
+/* harmony import */ var _tg_core_state_durable_queue__WEBPACK_IMPORTED_MODULE_18__ = __webpack_require__(/*! @tg/core/state/durable-queue */ "../../packages/tg-core/src/state/durable-queue.ts");
+/* harmony import */ var _tg_core_utils_shutdown_budget__WEBPACK_IMPORTED_MODULE_19__ = __webpack_require__(/*! @tg/core/utils/shutdown-budget */ "../../packages/tg-core/src/utils/shutdown-budget.ts");
+/* harmony import */ var _monitoring_heartbeat__WEBPACK_IMPORTED_MODULE_20__ = __webpack_require__(/*! ../monitoring/heartbeat */ "./src/monitoring/heartbeat.ts");
+
+
 
 
 
@@ -43847,10 +43929,18 @@ async function runScheduledHealthRecovery() {
 }
 /**
  * Setup process exit handlers
+ *
+ * Bounded like tg-aut's shutdown (apps/tg-aut/src/bootstrap/shutdown.ts): our force-exit fires
+ * before the loader's (server.js SHUTDOWN_TIMEOUT, 10 s default / 8 s in the ecosystem files), and
+ * state-preserving work runs first, while the process is healthy:
+ *   1. stop the connection loop, then in parallel: durable-queue flush, analytics pre-flush, final heartbeat.
+ *   2. Telegram teardown (privacy, dialogs, mobiles, disconnect, Mongo close), bounded.
+ *   3. Analytics stop (drains rows recorded since step 1, spills the rest to disk), then exit.
+ * Previously the unbounded teardown ran first and used the whole grace window, so the analytics
+ * drain never ran and the loader force-exited every promote process.
  */
 function setupExitHandlers() {
     let isShuttingDown = false;
-    const SHUTDOWN_TIMEOUT = 25000; // 25 seconds (less than PM2's kill_timeout)
     async function exitHandler(options, exitCode) {
         // Prevent multiple shutdown attempts
         if (isShuttingDown) {
@@ -43858,52 +43948,35 @@ function setupExitHandlers() {
             return;
         }
         isShuttingDown = true;
-        logger.info("🛑 Received shutdown signal:", options);
-        // Set a hard timeout for graceful shutdown
+        const forceExitMs = (0,_tg_core_utils_shutdown_budget__WEBPACK_IMPORTED_MODULE_19__.resolveShutdownForceExitMs)();
+        const deadlineAt = Date.now() + forceExitMs;
+        logger.info(`🛑 Received shutdown signal (force exit in ${forceExitMs}ms):`, options);
+        // Hard deadline, before the loader's own force-exit.
         const shutdownTimer = setTimeout(() => {
-            logger.error("❌ Graceful shutdown timeout exceeded, forcing exit");
+            logger.error(`❌ Graceful shutdown timeout exceeded after ${forceExitMs}ms, forcing exit`);
             process.exit(1);
-        }, SHUTDOWN_TIMEOUT);
+        }, forceExitMs);
         try {
-            // Final 'stopping' heartbeat (bounded 1 s, never throws); runs alongside the cleanup, awaited below.
-            const heartbeatStopped = (0,_monitoring_heartbeat__WEBPACK_IMPORTED_MODULE_18__.stopPromoteHeartbeat)();
-            (0,_telegram_connection_state__WEBPACK_IMPORTED_MODULE_7__.stopConnection)();
             try {
-                const appService = _bootstrap_app_service__WEBPACK_IMPORTED_MODULE_10__.AppService.getInstance();
-                await appService.gracefulShutdown(`Exit handler: ${JSON.stringify(options)}`);
-                // Stop inactive mobile scraper
-                const inactiveMobileScraper = _accounts_inactive_mobile_scraper__WEBPACK_IMPORTED_MODULE_11__.InactiveMobileScraper.getInstance();
-                inactiveMobileScraper.stopHourlyScraping();
-                logger.info("🛑 Inactive mobile scraper stopped during graceful shutdown");
+                (0,_telegram_connection_state__WEBPACK_IMPORTED_MODULE_7__.stopConnection)();
             }
-            catch (gracefulError) {
-                logger.warn("⚠️ Graceful shutdown failed, falling back to manual cleanup:", gracefulError);
-                try {
-                    await _data_user_data_crud__WEBPACK_IMPORTED_MODULE_3__.UserDataDtoCrud.getInstance().closeConnection();
-                }
-                catch (err) {
-                    logger.error("Error closing DB connection:", err);
-                }
-                try {
-                    await _telegram_telegram_service__WEBPACK_IMPORTED_MODULE_6__.TelegramService.getInstance().disconnectAll();
-                }
-                catch (err) {
-                    logger.error("Error disconnecting Telegram clients:", err);
-                }
-                try {
-                    await _tg_dialogs__WEBPACK_IMPORTED_MODULE_15__.DialogManager.cleanupAllInstances();
-                }
-                catch (err) {
-                    logger.error("Error closing DialogManager connection:", err);
-                }
+            catch (error) {
+                logger.error("Error stopping connection loop during shutdown:", error);
             }
-            await heartbeatStopped;
-            // Drain whatever analytics rows are still buffered. Best-effort; a dead sink must not hold
-            // up shutdown (the hard SHUTDOWN_TIMEOUT above still applies regardless).
-            try {
-                await (0,_tg_analytics__WEBPACK_IMPORTED_MODULE_17__.shutdownAnalytics)();
-            }
-            catch { /* analytics is optional */ }
+            // Keep up to 3 s (at most half of what is left) for the teardown and analytics stop.
+            const flushReserveMs = (0,_tg_core_utils_shutdown_budget__WEBPACK_IMPORTED_MODULE_19__.halfOfRemaining)(deadlineAt, 3000);
+            const queueFlushMs = Math.max(0, Math.min(3000, deadlineAt - flushReserveMs - Date.now()));
+            await Promise.all([
+                (0,_tg_core_utils_shutdown_budget__WEBPACK_IMPORTED_MODULE_19__.runShutdownStep)(logger, "durable queue flush", () => (0,_tg_core_state_durable_queue__WEBPACK_IMPORTED_MODULE_18__.shutdownDurableQueues)(queueFlushMs), deadlineAt, 3000, flushReserveMs),
+                (0,_tg_core_utils_shutdown_budget__WEBPACK_IMPORTED_MODULE_19__.runShutdownStep)(logger, "analytics pre-flush", () => (0,_tg_analytics__WEBPACK_IMPORTED_MODULE_17__.flushAnalytics)(), deadlineAt, 3000, flushReserveMs),
+                // Final 'stopping' heartbeat while Redis is still connected (bounded 1 s, never throws).
+                (0,_tg_core_utils_shutdown_budget__WEBPACK_IMPORTED_MODULE_19__.runShutdownStep)(logger, "heartbeat stop", () => (0,_monitoring_heartbeat__WEBPACK_IMPORTED_MODULE_20__.stopPromoteHeartbeat)(), deadlineAt, 1000, flushReserveMs),
+            ]);
+            logger.info("State flushed (durable queues, analytics); tearing down Telegram");
+            await (0,_tg_core_utils_shutdown_budget__WEBPACK_IMPORTED_MODULE_19__.runShutdownStep)(logger, "Telegram teardown", () => teardown(options), deadlineAt, 3000, (0,_tg_core_utils_shutdown_budget__WEBPACK_IMPORTED_MODULE_19__.halfOfRemaining)(deadlineAt, 2000));
+            // Drain rows recorded since the pre-flush. If the force-exit cuts this short, the sink's
+            // 'exit' hook spills whatever is still in memory to disk synchronously.
+            await (0,_tg_core_utils_shutdown_budget__WEBPACK_IMPORTED_MODULE_19__.runShutdownStep)(logger, "analytics stop", () => (0,_tg_analytics__WEBPACK_IMPORTED_MODULE_17__.shutdownAnalytics)(), deadlineAt, 3000, 300);
             clearTimeout(shutdownTimer);
             logger.info("✅ Graceful shutdown completed");
         }
@@ -43913,6 +43986,37 @@ function setupExitHandlers() {
         }
         finally {
             process.exit(typeof exitCode === 'number' ? exitCode : 0);
+        }
+    }
+    async function teardown(options) {
+        try {
+            const appService = _bootstrap_app_service__WEBPACK_IMPORTED_MODULE_10__.AppService.getInstance();
+            await appService.gracefulShutdown(`Exit handler: ${JSON.stringify(options)}`);
+            // Stop inactive mobile scraper
+            const inactiveMobileScraper = _accounts_inactive_mobile_scraper__WEBPACK_IMPORTED_MODULE_11__.InactiveMobileScraper.getInstance();
+            inactiveMobileScraper.stopHourlyScraping();
+            logger.info("🛑 Inactive mobile scraper stopped during graceful shutdown");
+        }
+        catch (gracefulError) {
+            logger.warn("⚠️ Graceful shutdown failed, falling back to manual cleanup:", gracefulError);
+            try {
+                await _data_user_data_crud__WEBPACK_IMPORTED_MODULE_3__.UserDataDtoCrud.getInstance().closeConnection();
+            }
+            catch (err) {
+                logger.error("Error closing DB connection:", err);
+            }
+            try {
+                await _telegram_telegram_service__WEBPACK_IMPORTED_MODULE_6__.TelegramService.getInstance().disconnectAll();
+            }
+            catch (err) {
+                logger.error("Error disconnecting Telegram clients:", err);
+            }
+            try {
+                await _tg_dialogs__WEBPACK_IMPORTED_MODULE_15__.DialogManager.cleanupAllInstances();
+            }
+            catch (err) {
+                logger.error("Error closing DialogManager connection:", err);
+            }
         }
     }
     // Register exit handlers
