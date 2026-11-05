@@ -46540,7 +46540,8 @@ function normalizeWire(raw, ctx) {
             amountOutOfRange = w.amount;
         }
         else {
-            const corrected = (0,_rules_amount__WEBPACK_IMPORTED_MODULE_0__.correctNonStandardAmount)(w.amount, v2);
+            // Owner 2026-11-05: a rupee marker shown before the amount in the model text or the OCR text keeps it as read.
+            const corrected = (0,_rules_amount__WEBPACK_IMPORTED_MODULE_0__.correctNonStandardAmount)(w.amount, v2, `${fullText}\n${ctx.ocrText ?? ''}`);
             if (corrected !== w.amount)
                 rulesApplied.push('R31');
             amount = corrected > 0 ? corrected : null;
@@ -47967,7 +47968,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   getNumberFromStringLegacy: () => (/* binding */ getNumberFromStringLegacy),
 /* harmony export */   isFalsePositive: () => (/* binding */ isFalsePositive),
 /* harmony export */   isValidAmount: () => (/* binding */ isValidAmount),
-/* harmony export */   processChatGptResponseLegacy: () => (/* binding */ processChatGptResponseLegacy)
+/* harmony export */   processChatGptResponseLegacy: () => (/* binding */ processChatGptResponseLegacy),
+/* harmony export */   rupeeShownBefore: () => (/* binding */ rupeeShownBefore)
 /* harmony export */ });
 // Legacy-exact port of mySuperSever amount rules (R30-R35). Parity-pinned by the U0b goldens.
 // Sources (MSS = mySuperSever-local/src/common/services):
@@ -47975,6 +47977,8 @@ __webpack_require__.r(__webpack_exports__);
 //   payment-patterns.service.ts   (amountPatterns, isFalsePositive, bounds)
 //   text-extraction.service.ts    (extractAmount)
 // Do NOT "improve" anything here; V2 variants live in amount.ts. Return 0 means "no amount" (legacy).
+// One owner change on top of MSS (2026-11-05): an OCR_ERROR_MAP correction is skipped when the receipt text shows a
+// rupee marker right before the number (rupeeShownBefore), so a printed "₹250" is credited as 250.
 const MIN_PAYMENT_AMOUNT = 1;
 const MAX_PAYMENT_AMOUNT = 15000;
 function isValidAmount(amount) {
@@ -47990,15 +47994,33 @@ const OCR_ERROR_MAP = {
     8300: 300, 7300: 300, 2300: 300,
     8350: 350, 7350: 350, 2350: 350,
 };
-/** R31 legacy. Keys >= 1000 are unreachable (early return) exactly as in MSS. */
-function correctNonStandardAmountLegacy(amount) {
+const RUPEE_MARKED_NUMBER = /(?:₹|₨|\bRs\.?|\bINR)\s*(\d[\d,]*(?:\.\d{1,2})?)/gi;
+/**
+ * True when `text` shows a rupee marker (₹, ₨, Rs, INR) directly before `amount` ("₹250", "₹ 250", "Rs.250",
+ * "₹2,250.00"). The OCR_ERROR_MAP exists for the ₹ glyph misread as a digit ("₹50" read as "250"); when the glyph is
+ * visible in front of the number, the leading digit is real. Owner 2026-11-05.
+ */
+function rupeeShownBefore(amount, text) {
+    if (!text || typeof text !== 'string')
+        return false;
+    for (const match of text.matchAll(RUPEE_MARKED_NUMBER)) {
+        if (Math.floor(parseFloat(match[1].replace(/,/g, ''))) === amount)
+            return true;
+    }
+    return false;
+}
+/**
+ * R31 legacy. Keys >= 1000 are unreachable (early return) exactly as in MSS. The map is skipped when `text` shows a
+ * rupee marker before the amount (owner 2026-11-05); no text, or the number without a marker, keeps the MSS mapping.
+ */
+function correctNonStandardAmountLegacy(amount, text) {
     if (amount < MIN_PAYMENT_AMOUNT || amount > MAX_PAYMENT_AMOUNT) {
         return 0;
     }
     if (amount < 15 || amount >= 1000) {
         return amount;
     }
-    if (OCR_ERROR_MAP[amount]) {
+    if (OCR_ERROR_MAP[amount] && !rupeeShownBefore(amount, text)) {
         return OCR_ERROR_MAP[amount];
     }
     return amount;
@@ -48056,7 +48078,7 @@ function processChatGptResponseLegacy(text, dayOfMonth) {
         returnText.amount = 0;
         return returnText;
     }
-    returnText.amount = correctNonStandardAmountLegacy(number);
+    returnText.amount = correctNonStandardAmountLegacy(number, text);
     return returnText;
 }
 /** Ordered amount patterns (payment-patterns.service.ts:27-59). Index 3 is the labelled pattern with balance|value|sum. */
@@ -48174,9 +48196,11 @@ __webpack_require__.r(__webpack_exports__);
 // level conversion to `null` (3.2: amount 0 is never produced) happens in contract/wire-normalize.ts
 // via amountOrNull().
 //
-// V2 ids used here (owner decisions: legacy stays default; R03 stays hard; 250->50 stays):
+// V2 ids used here (owner decisions: legacy stays default; R03 stays hard). Owner 2026-11-05: an OCR_ERROR_MAP
+// correction (250->50 etc.) applies only when the receipt text does not show a rupee marker right before the
+// number; "₹250" is credited as 250 (rupeeShownBefore, legacy and V2 alike).
 //   R31-4digit  the >=1000 early return made the 4-digit OCR_ERROR_MAP entries dead; V2 lets them fire
-//               (2150->150, 2100->100, 2350->350 ...). The 3-digit map (incl. 250->50) is unchanged.
+//               (2150->150, 2100->100, 2350->350 ...) under the same rupee-marker guard.
 //   R32         text fallback: no `e`/`*` symbols, `Rs`/`INR` accepted, no day-25 special case,
 //               range-checked ladder pass.
 //   R34         label pattern drops balance|value|sum.
@@ -48200,15 +48224,15 @@ function amountOrNull(amount) {
         return null;
     return (0,_amount_compat__WEBPACK_IMPORTED_MODULE_0__.isValidAmount)(amount) ? amount : null;
 }
-/** R31. */
-function correctNonStandardAmount(amount, v2 = _v2__WEBPACK_IMPORTED_MODULE_1__.NO_RULES) {
+/** R31. `text` is the receipt text: a rupee marker shown before the amount keeps it as read (owner 2026-11-05). */
+function correctNonStandardAmount(amount, v2 = _v2__WEBPACK_IMPORTED_MODULE_1__.NO_RULES, text) {
     if (!v2.has('R31-4digit'))
-        return (0,_amount_compat__WEBPACK_IMPORTED_MODULE_0__.correctNonStandardAmountLegacy)(amount);
+        return (0,_amount_compat__WEBPACK_IMPORTED_MODULE_0__.correctNonStandardAmountLegacy)(amount, text);
     if (amount < _amount_compat__WEBPACK_IMPORTED_MODULE_0__.MIN_PAYMENT_AMOUNT || amount > _amount_compat__WEBPACK_IMPORTED_MODULE_0__.MAX_PAYMENT_AMOUNT)
         return 0;
     if (amount < 15)
         return amount;
-    return _amount_compat__WEBPACK_IMPORTED_MODULE_0__.OCR_ERROR_MAP[amount] ? _amount_compat__WEBPACK_IMPORTED_MODULE_0__.OCR_ERROR_MAP[amount] : amount;
+    return _amount_compat__WEBPACK_IMPORTED_MODULE_0__.OCR_ERROR_MAP[amount] && !(0,_amount_compat__WEBPACK_IMPORTED_MODULE_0__.rupeeShownBefore)(amount, text) ? _amount_compat__WEBPACK_IMPORTED_MODULE_0__.OCR_ERROR_MAP[amount] : amount;
 }
 const V2_SYMBOL_REGEXES = [
     /₹\s*([\d,]+(?:\.\d{2})?)/,
@@ -48258,13 +48282,13 @@ function getNumberFromString(input, v2 = _v2__WEBPACK_IMPORTED_MODULE_1__.NO_RUL
         return (0,_amount_compat__WEBPACK_IMPORTED_MODULE_0__.getNumberFromStringLegacy)(input, dayOfMonth);
     return getNumberFromStringV2(input);
 }
-/** R33: text fallback then R31. */
+/** R33: text fallback then R31 (with the same text, so a printed "₹250" stays 250). */
 function processChatGptResponse(text, v2 = _v2__WEBPACK_IMPORTED_MODULE_1__.NO_RULES, dayOfMonth) {
     const out = { amount: 0, text: text || '' };
     const number = getNumberFromString(text, v2, dayOfMonth);
     if (number < _amount_compat__WEBPACK_IMPORTED_MODULE_0__.MIN_PAYMENT_AMOUNT || number > _amount_compat__WEBPACK_IMPORTED_MODULE_0__.MAX_PAYMENT_AMOUNT)
         return out;
-    out.amount = correctNonStandardAmount(number, v2);
+    out.amount = correctNonStandardAmount(number, v2, text);
     return out;
 }
 const V2_PATTERNS = _amount_compat__WEBPACK_IMPORTED_MODULE_0__.AMOUNT_PATTERNS_LEGACY.map((pattern, index) => index === 3
@@ -51819,8 +51843,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "37fcba4494fc8145fb6dd2059d81a1f90d46a105" : 0;
-    const builtAt =  true ? "2026-11-04T18:50:52.560Z" : 0;
+    const sha =  true ? "940ee14de8bd27b20c05ddf68069f0dfdfc8c35f" : 0;
+    const builtAt =  true ? "2026-11-05T05:56:56.420Z" : 0;
     return { sha, builtAt };
 }
 
@@ -95805,7 +95829,7 @@ __webpack_require__.r(__webpack_exports__);
 
 const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_0__.Logger( true ? __webpack_filename__ : 0);
 /** Real price points (INR) users are charged; used to tell a genuine amount from a misread one. */
-const KNOWN_PRICE_POINTS = [15, 20, 25, 30, 40, 50, 100, 150, 200, 300, 350, 400, 500, 600];
+const KNOWN_PRICE_POINTS = [15, 20, 25, 30, 40, 50, 100, 150, 200, 250, 300, 350, 400, 500, 600];
 /** Leading digits the rupee glyph is commonly misread as. */
 const GLYPH_PREFIXES = new Set(["1", "2", "7", "8"]);
 /** For a 4-digit amount, returns the price point left after dropping a glyph prefix digit, else null. */
@@ -95840,8 +95864,9 @@ function normalizeAmount(amount, payAmount) {
             logger.log(`[SPECIAL CASE] Amount ends with 50: ${amount}, payAmount: ${payAmount}, length: ${strAmount.length}`);
             if (amount > payAmount) {
                 const stripped = stripGlyphPrefix(strAmount);
-                // A first payer's 3-digit "x50" that is not one of our prices (250, 450, 750, ...) is the ₹ glyph read
-                // as a digit in front of ₹50 (owner: 250 -> 50). A real price (150, 350) is trusted as read: a genuine
+                // A first payer's 3-digit "x50" that is not one of our prices (450, 750, 850, ...) is the ₹ glyph read
+                // as a digit in front of ₹50. A real price (150, 250, 350) is trusted as read (owner 2026-11-05 added 250, a
+                // ladder tier; tg-vision already maps an unmarked "250" to 50 before this point): a genuine
                 // ₹150 / ₹350 must be served and booked as paid (fleet logs 2026-10-10: 23 first payers' correctly read
                 // 150/350 were booked as 50; live sneha1 2026-10-21: a ₹350 booked as 50, re-read as 350).
                 if (payAmount < 30 && strAmount.length <= 3 && !KNOWN_PRICE_POINTS.includes(amount)) {
