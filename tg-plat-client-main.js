@@ -32901,6 +32901,85 @@ function sanitizePromotionRendering(text) {
 
 /***/ },
 
+/***/ "../../packages/tg-core/src/utils/shutdown-budget.ts"
+/*!***********************************************************!*\
+  !*** ../../packages/tg-core/src/utils/shutdown-budget.ts ***!
+  \***********************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   halfOfRemaining: () => (/* binding */ halfOfRemaining),
+/* harmony export */   resolveShutdownForceExitMs: () => (/* binding */ resolveShutdownForceExitMs),
+/* harmony export */   runShutdownStep: () => (/* binding */ runShutdownStep)
+/* harmony export */ });
+/**
+ * Shutdown budget shared by tg-aut and promote-clients.
+ *
+ * server.js (the pm2 loader) force-exits SHUTDOWN_TIMEOUT ms after the signal (its own default is
+ * 10 s; the fleet ecosystem files set 8 s) and pm2 SIGKILLs at kill_timeout. Our own force-exit must
+ * fire first so the exit is ours (with the analytics 'exit' spill), and every shutdown step is
+ * bounded so state-preserving work (queues, analytics) keeps its share of that window.
+ */
+/** Upper bound on our own shutdown, whatever the loader allows. */
+const SHUTDOWN_FORCE_EXIT_CAP_MS = 15000;
+/** Exit this long before the loader's own force-exit (server.js SHUTDOWN_TIMEOUT). */
+const SHUTDOWN_LOADER_MARGIN_MS = 1000;
+/** SHUTDOWN_TIMEOUT used by the fleet ecosystem files (and the analytics sink's default kill window). */
+const DEFAULT_LOADER_SHUTDOWN_TIMEOUT_MS = 8000;
+const SHUTDOWN_FORCE_EXIT_MIN_MS = 250;
+/**
+ * Our force-exit deadline: min(15 s, SHUTDOWN_TIMEOUT - 1 s), SHUTDOWN_TIMEOUT defaulting to 8 s when
+ * unset/invalid (shorter than the loader's own 10 s default, so it is safe either way).
+ */
+function resolveShutdownForceExitMs(env = process.env) {
+    const raw = Number(env.SHUTDOWN_TIMEOUT);
+    const loaderMs = Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_LOADER_SHUTDOWN_TIMEOUT_MS;
+    return Math.max(SHUTDOWN_FORCE_EXIT_MIN_MS, Math.min(SHUTDOWN_FORCE_EXIT_CAP_MS, loaderMs - SHUTDOWN_LOADER_MARGIN_MS));
+}
+/**
+ * Runs one shutdown step, waiting at most min(capMs, time left before deadlineAt - reserveMs) so the
+ * steps after it keep their share of the budget. A step that runs out is left running in the
+ * background (logged); a step with no budget left is still started but not awaited. Failures are
+ * logged, never thrown.
+ */
+async function runShutdownStep(logger, name, task, deadlineAt, capMs, reserveMs = 0) {
+    const budgetMs = Math.min(capMs, deadlineAt - reserveMs - Date.now());
+    let result;
+    try {
+        result = task();
+    }
+    catch (error) {
+        logger.error(`[CLEANUP] ${name} failed:`, error);
+        return;
+    }
+    if (!result || typeof result.then !== "function")
+        return;
+    const work = Promise.resolve(result).then(() => true, (error) => { logger.error(`[CLEANUP] ${name} failed:`, error); return true; });
+    if (budgetMs <= 0) {
+        logger.warn(`[SHUTDOWN] ${name}: no budget left, not waiting for it`);
+        return;
+    }
+    let timer = null;
+    const timedOut = new Promise((resolve) => {
+        timer = setTimeout(() => resolve(false), budgetMs);
+        timer?.unref?.();
+    });
+    const finished = await Promise.race([work, timedOut]);
+    if (timer)
+        clearTimeout(timer);
+    if (!finished)
+        logger.warn(`[SHUTDOWN] ${name} still running after ${budgetMs}ms; continuing shutdown`);
+}
+/** min(capMs, half of the time left before deadlineAt): a reserve that still leaves room under a short budget. */
+function halfOfRemaining(deadlineAt, capMs) {
+    return Math.max(0, Math.min(capMs, Math.floor((deadlineAt - Date.now()) / 2)));
+}
+
+
+/***/ },
+
 /***/ "../../packages/tg-core/src/utils/spam-limit.ts"
 /*!******************************************************!*\
   !*** ../../packages/tg-core/src/utils/spam-limit.ts ***!
@@ -51395,7 +51474,7 @@ const shutdown = (...args) => {
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
-/* harmony export */   resolveShutdownForceExitMs: () => (/* binding */ resolveShutdownForceExitMs),
+/* harmony export */   resolveShutdownForceExitMs: () => (/* reexport safe */ _tg_core_utils_shutdown_budget__WEBPACK_IMPORTED_MODULE_29__.resolveShutdownForceExitMs),
 /* harmony export */   shutdown: () => (/* binding */ shutdown)
 /* harmony export */ });
 /* harmony import */ var _data_user_data_crud__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../data/user-data-crud */ "./src/data/user-data-crud.ts");
@@ -51427,6 +51506,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _server_startup__WEBPACK_IMPORTED_MODULE_26__ = __webpack_require__(/*! ./server-startup */ "./src/bootstrap/server-startup.ts");
 /* harmony import */ var _memory_monitor__WEBPACK_IMPORTED_MODULE_27__ = __webpack_require__(/*! ./memory-monitor */ "./src/bootstrap/memory-monitor.ts");
 /* harmony import */ var _monitoring_heartbeat__WEBPACK_IMPORTED_MODULE_28__ = __webpack_require__(/*! ../monitoring/heartbeat */ "./src/monitoring/heartbeat.ts");
+/* harmony import */ var _tg_core_utils_shutdown_budget__WEBPACK_IMPORTED_MODULE_29__ = __webpack_require__(/*! @tg/core/utils/shutdown-budget */ "../../packages/tg-core/src/utils/shutdown-budget.ts");
+
 
 
 
@@ -51460,24 +51541,8 @@ const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_22__.Logger("t
 let isShuttingDown = false;
 let mongoReconnectTimeout = null;
 let shutdownForceExitTimeout = null;
-/** Upper bound on our own shutdown, whatever the loader allows. */
-const SHUTDOWN_FORCE_EXIT_CAP_MS = 15000;
-/** Exit this long before the loader's own force-exit (server.js SHUTDOWN_TIMEOUT). */
-const SHUTDOWN_LOADER_MARGIN_MS = 1000;
-/** SHUTDOWN_TIMEOUT used by the fleet ecosystem files (and the analytics sink's default kill window). */
-const DEFAULT_LOADER_SHUTDOWN_TIMEOUT_MS = 8000;
-const SHUTDOWN_FORCE_EXIT_MIN_MS = 250;
-/**
- * Our force-exit deadline. server.js (the pm2 loader) force-exits SHUTDOWN_TIMEOUT ms after the
- * signal and pm2 SIGKILLs at kill_timeout (12 s); ours must fire first so the exit is ours (with the
- * analytics 'exit' spill) and not a kill: min(15 s, SHUTDOWN_TIMEOUT - 1 s), SHUTDOWN_TIMEOUT
- * defaulting to 8 s when unset/invalid.
- */
-function resolveShutdownForceExitMs(env = process.env) {
-    const raw = Number(env.SHUTDOWN_TIMEOUT);
-    const loaderMs = Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_LOADER_SHUTDOWN_TIMEOUT_MS;
-    return Math.max(SHUTDOWN_FORCE_EXIT_MIN_MS, Math.min(SHUTDOWN_FORCE_EXIT_CAP_MS, loaderMs - SHUTDOWN_LOADER_MARGIN_MS));
-}
+/** Shared with promote-clients: force-exit deadline (min(15 s, SHUTDOWN_TIMEOUT - 1 s)) and bounded steps. */
+
 /**
  * Main shutdown handler
  */
@@ -51487,7 +51552,7 @@ const shutdown = async (signal, exitCode = 0) => {
         return;
     }
     isShuttingDown = true;
-    const forceExitMs = resolveShutdownForceExitMs();
+    const forceExitMs = (0,_tg_core_utils_shutdown_budget__WEBPACK_IMPORTED_MODULE_29__.resolveShutdownForceExitMs)();
     const deadlineAt = Date.now() + forceExitMs;
     logger.log(`[SHUTDOWN] Received ${signal}, starting cleanup (force exit in ${forceExitMs}ms)...`);
     shutdownForceExitTimeout = setTimeout(() => {
@@ -51664,42 +51729,9 @@ async function handleError(err, context) {
         }, "Failed to send timeout notification");
     }
 }
-/**
- * Runs one shutdown step, waiting at most min(capMs, time left before deadlineAt - reserveMs) so the
- * steps after it keep their share of the budget. A step that runs out is left running in the
- * background (logged); a step with no budget left is still started but not awaited. Never throws.
- */
-async function runStep(name, task, deadlineAt, capMs, reserveMs = 0) {
-    const budgetMs = Math.min(capMs, deadlineAt - reserveMs - Date.now());
-    let result;
-    try {
-        result = task();
-    }
-    catch (error) {
-        logger.error(`[CLEANUP] ${name} failed:`, error);
-        return;
-    }
-    if (!result || typeof result.then !== "function")
-        return;
-    const work = Promise.resolve(result).then(() => true, (error) => { logger.error(`[CLEANUP] ${name} failed:`, error); return true; });
-    if (budgetMs <= 0) {
-        logger.warn(`[SHUTDOWN] ${name}: no budget left, not waiting for it`);
-        return;
-    }
-    let timer = null;
-    const timedOut = new Promise((resolve) => {
-        timer = setTimeout(() => resolve(false), budgetMs);
-        timer.unref?.();
-    });
-    const finished = await Promise.race([work, timedOut]);
-    if (timer)
-        clearTimeout(timer);
-    if (!finished)
-        logger.warn(`[SHUTDOWN] ${name} still running after ${budgetMs}ms; continuing shutdown`);
-}
-/** min(capMs, half of the time left before deadlineAt): a reserve that still leaves room under a short budget. */
-function halfOfRemaining(deadlineAt, capMs) {
-    return Math.max(0, Math.min(capMs, Math.floor((deadlineAt - Date.now()) / 2)));
+/** One bounded shutdown step (shared helper), logging through this module's logger. */
+function runStep(name, task, deadlineAt, capMs, reserveMs = 0) {
+    return (0,_tg_core_utils_shutdown_budget__WEBPACK_IMPORTED_MODULE_29__.runShutdownStep)(logger, name, task, deadlineAt, capMs, reserveMs);
 }
 /**
  * Cleanup routine for graceful shutdown. Everything is bounded by deadlineAt (our force-exit, which
@@ -51732,7 +51764,7 @@ async function cleanupResources(signal, deadlineAt) {
         // resumes them, and nothing is sent after the flush (it would be sent again).
         _outbound_outbound_queue__WEBPACK_IMPORTED_MODULE_7__.outboundQueue.stop();
         // Keep up to 3 s (at most half of what is left) for the steps after the flushes.
-        const flushReserveMs = halfOfRemaining(deadlineAt, 3000);
+        const flushReserveMs = (0,_tg_core_utils_shutdown_budget__WEBPACK_IMPORTED_MODULE_29__.halfOfRemaining)(deadlineAt, 3000);
         const queueFlushMs = Math.max(0, Math.min(3000, deadlineAt - flushReserveMs - Date.now()));
         await Promise.all([
             runStep("durable queue flush", () => (0,_tg_core_state_durable_queue__WEBPACK_IMPORTED_MODULE_6__.shutdownDurableQueues)(queueFlushMs), deadlineAt, 3000, flushReserveMs),
@@ -51741,7 +51773,7 @@ async function cleanupResources(signal, deadlineAt) {
             runStep("heartbeat stop", () => (0,_monitoring_heartbeat__WEBPACK_IMPORTED_MODULE_28__.stopTgAutHeartbeat)(), deadlineAt, 1000, flushReserveMs),
         ]);
         logger.log("[SHUTDOWN] State flushed (durable queues, analytics); tearing down Telegram");
-        await runStep("Telegram teardown", () => _telegram_telegram_manager__WEBPACK_IMPORTED_MODULE_1__.TelegramManager.deleteInstance(), deadlineAt, 2500, halfOfRemaining(deadlineAt, 2000));
+        await runStep("Telegram teardown", () => _telegram_telegram_manager__WEBPACK_IMPORTED_MODULE_1__.TelegramManager.deleteInstance(), deadlineAt, 2500, (0,_tg_core_utils_shutdown_budget__WEBPACK_IMPORTED_MODULE_29__.halfOfRemaining)(deadlineAt, 2000));
         await runStep("Mongo close", () => _data_user_data_crud__WEBPACK_IMPORTED_MODULE_0__.UserDataDtoCrud.getInstance()?.closeConnection(), deadlineAt, 1000, 1500);
         await runStep("dialog cleanup", () => _tg_dialogs__WEBPACK_IMPORTED_MODULE_3__.DialogManager.cleanupAllInstances?.(), deadlineAt, 500, 1500);
         await runStep("greetings cleanup", () => (0,_greetings_send_greetings__WEBPACK_IMPORTED_MODULE_5__.cleanup)?.(), deadlineAt, 500, 1500);
@@ -51843,8 +51875,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "940ee14de8bd27b20c05ddf68069f0dfdfc8c35f" : 0;
-    const builtAt =  true ? "2026-11-05T05:56:56.420Z" : 0;
+    const sha =  true ? "3e55be514bfc6ef3e45eaebaf225c3e008a8d55c" : 0;
+    const builtAt =  true ? "2026-11-05T19:48:41.725Z" : 0;
     return { sha, builtAt };
 }
 
