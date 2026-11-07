@@ -23008,7 +23008,7 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
         }
         return normalized;
     }
-    async create(bufferClient) {
+    async create(bufferClient, opts) {
         const canonicalMobile = this.canonicalMobile(bufferClient.mobile);
         const status = bufferClient.status || 'active';
         const session = this.normalizeSessionForWrite(bufferClient.session);
@@ -23032,6 +23032,12 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
             };
             return this.bufferClientModel.create({ ...createData });
         }));
+        if (!opts?.suppressEnrolledEvent) {
+            this.recordRoleEvent({
+                mobile: canonicalMobile, clientId: bufferClient.clientId ?? null, event: 'enrolled', pool: 'buffer', by: 'cms:buffer-create',
+                reasonCode: 'enrolment', details: { availableDate: bufferClient.availableDate ?? null, status },
+            });
+        }
         this.logger.log(`Buffer Client Created:\n\nMobile: ${canonicalMobile}`);
         await this.sendAccountNotice({
             severity: 'success',
@@ -23091,7 +23097,7 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
         }
         return updatedBufferClient;
     }
-    async createOrUpdate(mobile, createorUpdateBufferClientDto) {
+    async createOrUpdate(mobile, createorUpdateBufferClientDto, opts) {
         const canonicalMobile = this.canonicalMobile(mobile);
         if (await this.existsByMobile(canonicalMobile)) {
             const updateDto = {
@@ -23106,7 +23112,7 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
                 mobile: canonicalMobile,
                 status: createorUpdateBufferClientDto.status || 'active',
             };
-            return this.create(createDto);
+            return this.create(createDto, opts);
         }
     }
     async remove(mobile, message) {
@@ -23273,6 +23279,7 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
             withPoolClaimOrRefuse: (m, fn) => this.withPoolClaimOrRefuse(m, fn),
             safeUnregisterClient: (m) => this.safeUnregisterClient(m),
             enrolmentInactiveSince: () => client_helper_utils_1.ClientHelperUtils.getDateStringDaysAgo(this.INACTIVE_USER_CUTOFF_DAYS, this.ONE_DAY_MS),
+            logger: this.logger,
         };
     }
     async diagnoseEnrollmentDecision() {
@@ -25933,6 +25940,178 @@ __exportStar(__webpack_require__(/*! ./channel.schema */ "./src/components/chann
 
 /***/ },
 
+/***/ "./src/components/clients/account-role-events.ts"
+/*!*******************************************************!*\
+  !*** ./src/components/clients/account-role-events.ts ***!
+  \*******************************************************/
+(__unused_webpack_module, exports, __webpack_require__) {
+
+
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.ACCOUNT_ROLE_REASON_CODES = exports.ACCOUNT_ROLE_EVENT_DEADLINE_MS = exports.ACCOUNT_ROLE_EVENT_VERSION = exports.ACCOUNT_ROLE_EVENTS_COLLECTION = void 0;
+exports.classifyRoleEventReason = classifyRoleEventReason;
+exports.unparkedReasonCode = unparkedReasonCode;
+exports.buildAccountRoleEvent = buildAccountRoleEvent;
+exports.recordAccountRoleEvent = recordAccountRoleEvent;
+exports.recordAccountRoleEventSoon = recordAccountRoleEventSoon;
+exports.accountRoleEventsCollectionOf = accountRoleEventsCollectionOf;
+const monitor_util_1 = __webpack_require__(/*! ../monitor/monitor-util */ "./src/components/monitor/monitor-util.ts");
+const mobile_utils_1 = __webpack_require__(/*! ../shared/mobile-utils */ "./src/components/shared/mobile-utils.ts");
+exports.ACCOUNT_ROLE_EVENTS_COLLECTION = 'accountRoleEvents';
+exports.ACCOUNT_ROLE_EVENT_VERSION = 1;
+exports.ACCOUNT_ROLE_EVENT_DEADLINE_MS = 3_000;
+const REASON_MAX = 200;
+const DETAIL_STRING_MAX = 120;
+const OP_ID_MAX = 100;
+exports.ACCOUNT_ROLE_REASON_CODES = [
+    'spam_harsh', 'spam_limited', 'deactivated_user', 'auth_error', 'refill', 'rescue', 'manual', 'warmup', 'enrolment',
+    'status_change', 'other',
+];
+const REASON_CODE_SET = new Set(exports.ACCOUNT_ROLE_REASON_CODES);
+function classifyRoleEventReason(reason, fallback = 'other') {
+    const text = typeof reason === 'string' ? reason : '';
+    if (/DEAD_MAIN_RESCUE/i.test(text))
+        return 'rescue';
+    if (/POOL_REFILL/i.test(text))
+        return 'refill';
+    if (/harsh/i.test(text))
+        return 'spam_harsh';
+    if (/\blimited\b|limited until|spam.?limit/i.test(text))
+        return 'spam_limited';
+    if (/USER_DEACTIVATED|PHONE_NUMBER_BANNED|USER_DELETED|account (?:is )?(?:deleted|banned)/i.test(text))
+        return 'deactivated_user';
+    if (/AUTH_KEY|SESSION_REVOKED|SESSION_EXPIRED|SESSION_PASSWORD_NEEDED|UNAUTHORIZED/i.test(text))
+        return 'auth_error';
+    return fallback;
+}
+function unparkedReasonCode(stopReason) {
+    switch (stopReason) {
+        case 'harsh': return 'spam_harsh';
+        case 'peer_flood': return 'spam_limited';
+        case 'session_missing': return 'auth_error';
+        case 'inactive': return 'status_change';
+        default: return 'other';
+    }
+}
+const FORBIDDEN_DETAIL_KEY = /session|password|token|secret|2fa/i;
+function cleanString(value, max) {
+    if (typeof value !== 'string')
+        return null;
+    const trimmed = value.trim();
+    return trimmed ? trimmed.substring(0, max) : null;
+}
+function cleanMobile(value) {
+    if (typeof value !== 'string' && typeof value !== 'number')
+        return null;
+    const normalized = (0, mobile_utils_1.normalizeMobileInput)(String(value));
+    return normalized || null;
+}
+function cleanDetails(details) {
+    if (!details || typeof details !== 'object')
+        return null;
+    const out = {};
+    for (const [key, value] of Object.entries(details)) {
+        if (FORBIDDEN_DETAIL_KEY.test(key))
+            continue;
+        if (value === null || typeof value === 'boolean')
+            out[key] = value;
+        else if (typeof value === 'number') {
+            if (Number.isFinite(value))
+                out[key] = value;
+        }
+        else if (typeof value === 'string')
+            out[key] = value.substring(0, DETAIL_STRING_MAX);
+    }
+    return Object.keys(out).length ? out : null;
+}
+function buildAccountRoleEvent(input, at) {
+    const mobile = cleanMobile(input?.mobile);
+    const by = cleanString(input?.by, 60);
+    if (!mobile || !input?.event || !by)
+        return null;
+    const doc = {
+        v: exports.ACCOUNT_ROLE_EVENT_VERSION,
+        mobile,
+        clientId: cleanString(input.clientId, 80),
+        event: input.event,
+        pool: input.pool ?? null,
+        at,
+        by,
+        reason: cleanString(input.reason, REASON_MAX),
+        reasonCode: input.reasonCode && REASON_CODE_SET.has(input.reasonCode) ? input.reasonCode : classifyRoleEventReason(input.reason),
+    };
+    const opId = cleanString(input.opId, OP_ID_MAX);
+    if (opId)
+        doc.opId = opId;
+    const fromMobile = cleanMobile(input.fromMobile);
+    const toMobile = cleanMobile(input.toMobile);
+    const fromClientId = cleanString(input.fromClientId, 80);
+    const details = cleanDetails(input.details);
+    if (fromMobile)
+        doc.fromMobile = fromMobile;
+    if (toMobile)
+        doc.toMobile = toMobile;
+    if (fromClientId)
+        doc.fromClientId = fromClientId;
+    if (details)
+        doc.details = details;
+    return doc;
+}
+function isDuplicateKey(error) {
+    if (!error || typeof error !== 'object')
+        return false;
+    const e = error;
+    return e.code === 11000 || e.code === '11000' || e.codeName === 'DuplicateKey' || (typeof e.message === 'string' && e.message.includes('E11000'));
+}
+function withDeadline(promise, ms, label) {
+    let timer;
+    const timeout = new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms} ms (client-side deadline)`)), ms);
+        timer.unref?.();
+    });
+    return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+async function recordAccountRoleEvent(collection, input, options = {}) {
+    try {
+        if (!collection || typeof collection.insertOne !== 'function')
+            return 'skipped';
+        const doc = buildAccountRoleEvent(input, options.now ? options.now() : new Date());
+        if (!doc)
+            return 'skipped';
+        await withDeadline(Promise.resolve().then(() => collection.insertOne(doc)), options.deadlineMs ?? exports.ACCOUNT_ROLE_EVENT_DEADLINE_MS, `${exports.ACCOUNT_ROLE_EVENTS_COLLECTION}.insertOne`);
+        return 'written';
+    }
+    catch (error) {
+        if (isDuplicateKey(error))
+            return 'duplicate';
+        try {
+            options.logger?.warn(`accountRoleEvents: ${input?.event ?? '?'} for ${(0, monitor_util_1.maskMobile)(input?.mobile) ?? '?'} not recorded (the role change itself is unaffected)`, {
+                error: error instanceof Error ? error.message : String(error),
+            });
+        }
+        catch { }
+        return 'failed';
+    }
+}
+function recordAccountRoleEventSoon(collection, input, options = {}) {
+    void recordAccountRoleEvent(collection, input, options).catch(() => undefined);
+}
+function accountRoleEventsCollectionOf(model) {
+    try {
+        const db = model?.db;
+        if (!db || typeof db.collection !== 'function')
+            return null;
+        const collection = db.collection(exports.ACCOUNT_ROLE_EVENTS_COLLECTION);
+        return collection && typeof collection.insertOne === 'function' ? collection : null;
+    }
+    catch {
+        return null;
+    }
+}
+
+
+/***/ },
+
 /***/ "./src/components/clients/client.controller.ts"
 /*!*****************************************************!*\
   !*** ./src/components/clients/client.controller.ts ***!
@@ -26292,6 +26471,11 @@ const warmup_phases_1 = __webpack_require__(/*! ../shared/warmup-phases */ "./sr
 const client_helper_utils_1 = __webpack_require__(/*! ../shared/client-helper.utils */ "./src/components/shared/client-helper.utils.ts");
 const helpers_1 = __webpack_require__(/*! ../Telegram/manager/helpers */ "./src/components/Telegram/manager/helpers.ts");
 const mobile_utils_1 = __webpack_require__(/*! ../shared/mobile-utils */ "./src/components/shared/mobile-utils.ts");
+const parked_cutover_1 = __webpack_require__(/*! ./parked-cutover */ "./src/components/clients/parked-cutover.ts");
+const parked_swap_episode_1 = __webpack_require__(/*! ./parked-swap-episode */ "./src/components/clients/parked-swap-episode.ts");
+const parked_session_guard_1 = __webpack_require__(/*! ./parked-session-guard */ "./src/components/clients/parked-session-guard.ts");
+const monitor_util_1 = __webpack_require__(/*! ../monitor/monitor-util */ "./src/components/monitor/monitor-util.ts");
+const account_role_events_1 = __webpack_require__(/*! ./account-role-events */ "./src/components/clients/account-role-events.ts");
 const buffer_client_schema_1 = __webpack_require__(/*! ../buffer-clients/schemas/buffer-client.schema */ "./src/components/buffer-clients/schemas/buffer-client.schema.ts");
 const spambot_probe_1 = __webpack_require__(/*! ../Telegram/utils/spambot-probe */ "./src/components/Telegram/utils/spambot-probe.ts");
 const degraded_swap_1 = __webpack_require__(/*! ./degraded-swap */ "./src/components/clients/degraded-swap.ts");
@@ -26435,6 +26619,10 @@ let ClientService = ClientService_1 = class ClientService {
                 return client.save();
             });
             this.clientsMap.set(createdClient.clientId, createdClient.toObject());
+            this.recordRoleEvent({
+                mobile: createData.mobile, clientId: createdClient.clientId, event: 'became_main', pool: 'main', by: 'cms:create',
+                reason: 'client created', reasonCode: 'manual',
+            });
             this.logger.log(`Client created: ${createdClient.clientId}`);
             return createdClient;
         }
@@ -26531,11 +26719,17 @@ let ClientService = ClientService_1 = class ClientService {
             }
             await this.notifyClientUpdate(clientId);
             let clientUpdate = { $set: cleanUpdateDto };
+            let newMainMobile = null;
+            let oldMainMobile = null;
             if (cleanUpdateDto.mobile !== undefined || cleanUpdateDto.session !== undefined) {
                 const current = await this.clientModel.findOne({ clientId }, { mobile: 1, session: 1, degraded: 1, deadMain: 1 })
                     .lean().exec();
                 const mobileChanged = !!current && cleanUpdateDto.mobile !== undefined && this.canonicalMobile(current.mobile) !== cleanUpdateDto.mobile;
                 const sessionChanged = !!current && cleanUpdateDto.session !== undefined && current.session !== cleanUpdateDto.session;
+                if (mobileChanged) {
+                    newMainMobile = cleanUpdateDto.mobile;
+                    oldMainMobile = current.mobile ?? null;
+                }
                 const unset = {};
                 if (mobileChanged && current.degraded && cleanUpdateDto.degraded === undefined) {
                     unset.degraded = '';
@@ -26565,6 +26759,10 @@ let ClientService = ClientService_1 = class ClientService {
             }
             this.clientsMap.set(clientId, updatedClient);
             this.performPostUpdateTasks(updatedClient);
+            if (newMainMobile) {
+                void this.prepareNewMainForLive(clientId, newMainMobile).catch(() => undefined);
+                this.recordMainChangeEvents(clientId, oldMainMobile, newMainMobile, 'cms:manual-update', 'manual update', null, (0, crypto_1.randomUUID)(), 'manual');
+            }
             this.logger.log(`Client updated: ${clientId}`);
             return updatedClient;
         }
@@ -26905,8 +27103,9 @@ let ClientService = ClientService_1 = class ClientService {
                 : dead ? configuredTiers : [];
         const busyMobiles = await this.busyCandidateMobiles(clientId, existingClientMobile);
         const baseCandidateQuery = this.buildEligibleBufferQuery(clientId, setupClientQueryDto.mobile ? { $eq: setupClientQueryDto.mobile, $nin: busyMobiles } : { $nin: busyMobiles });
+        const parkedScan = {};
         const newProbeBudget = () => ({
-            clientId, remaining: MAX_SETUP_PROBES, spentMs: 0, skipped: [],
+            clientId, remaining: MAX_SETUP_PROBES, spentMs: 0, skipped: [], parkedScan,
             ...(internal.leaseOwner ? { leaseOwner: internal.leaseOwner } : {}),
             ...(internal.jobPass ? { jobPass: true } : {}),
         });
@@ -26927,7 +27126,7 @@ let ClientService = ClientService_1 = class ClientService {
             };
             const futureCandidateBufferClients = await this.bufferClientService.executeQuery(futureCandidateQuery, { availableDate: 1, createdAt: 1 }, 10);
             fallbackBudget = newProbeBudget();
-            newBufferClient = await this.findSafeSetupBufferCandidate(futureCandidateBufferClients, existingClient.session, fallbackBudget);
+            newBufferClient = await this.findSafeSetupBufferCandidate(futureCandidateBufferClients, existingClient.session, fallbackBudget, {}, 'allow');
             usedFutureAvailableFallback = !!newBufferClient;
             this.logger.warn(`[${clientId}] Permanent replacement fallback scan completed`, {
                 existingMobile: existingClientMobile,
@@ -27188,13 +27387,15 @@ let ClientService = ClientService_1 = class ClientService {
                 throw new common_1.BadRequestException(`Invalid replacement session for ${newMobile}`);
             }
             const mirroredActiveName = this.buildMirroredActiveName(bufferDoc, existingClient.name);
-            await this.commitClientCutover(clientId, existingMobile, {
+            const degradedPlan = this.degradedPlanFor(clientId, newMobile);
+            const committedClient = await this.commitClientCutover(clientId, existingMobile, {
                 mobile: newMobile,
                 username: updatedUsername,
                 session: newSession,
                 name: mirroredActiveName,
-            }, this.degradedPlanFor(clientId, newMobile));
+            }, degradedPlan);
             cutoverCommitted = true;
+            this.recordMainChangeEvents(clientId, existingMobile, newMobile, 'cms:cutover', reason, degradedPlan, this.cutoverRoleEventOpId(clientId, committedClient?.swappedAt) ?? (0, crypto_1.randomUUID)());
             this.logger.info(`[${clientId}] Cutover committed`, {
                 existingMobile,
                 newMobile,
@@ -27203,6 +27404,7 @@ let ClientService = ClientService_1 = class ClientService {
             });
             this.logger.debug(`[${clientId}] Marked replacement buffer doc as the sole active/in-use primary`, { newMobile });
             this.logger.debug(`[${clientId}] Skipping delayed profile refresh — tg-aut handles on startup`);
+            await this.prepareNewMainForLive(clientId, newMobile);
             try {
                 if (existingClient.deployKey) {
                     this.logger.info(`[${clientId}] Triggering deploy restart after cutover`, { deployKeyPresent: true });
@@ -27221,7 +27423,10 @@ let ClientService = ClientService_1 = class ClientService {
                 formalities,
                 days,
             });
-            await this.handleReplacedClient(existingClient, existingMobile, formalities, returnOldToPool, days, reason);
+            await this.handleReplacedClient(existingClient, existingMobile, formalities, returnOldToPool, days, reason, {
+                swappedAt: committedClient?.swappedAt ? new Date(committedClient.swappedAt) : null,
+                persona: existingClient.dbcoll || '',
+            });
             this.logger.info(`[${clientId}] Client session cutover finished`, { existingMobile, newMobile });
             await this.notify({ severity: 'success', title: 'Swap complete', fields: [{ label: 'Client ID', value: clientId }, { label: 'Old mobile', value: existingMobile }, { label: 'New mobile', value: newMobile }] });
         }
@@ -27240,6 +27445,18 @@ let ClientService = ClientService_1 = class ClientService {
             await connection_manager_1.connectionManager.unregisterClient(newMobile);
             this.telegramService.clearActiveClientSetup(newMobile);
             this.logger.debug(`[${clientId}] Cleared active setup state`, { newMobile });
+        }
+    }
+    async prepareNewMainForLive(clientId, newMobile) {
+        try {
+            const db = this.clientModel.db;
+            await (0, parked_cutover_1.prepareParkedCutover)({
+                episodes: db.collection('parkedAccounts'),
+                leases: db.collection('accountLeases'),
+            }, { mobile: this.canonicalMobile(newMobile), clientId }, { logger: this.logger, roleEvents: (0, account_role_events_1.accountRoleEventsCollectionOf)(this.clientModel) });
+        }
+        catch (error) {
+            this.logger.warn(`[${clientId}] Parked cutover hook failed; continuing the cutover`, { newMobile: (0, monitor_util_1.maskMobile)(newMobile), error: error instanceof Error ? error.message : String(error) });
         }
     }
     async commitClientCutover(clientId, expectedExistingMobile, updateClientDto, degradedPlan = null) {
@@ -27290,17 +27507,18 @@ let ClientService = ClientService_1 = class ClientService {
         this.performPostUpdateTasks(updatedClient);
         return updatedClient;
     }
-    async handleReplacedClient(existingClient, existingMobile, formalities, returnOldToPool, days, reason) {
+    async handleReplacedClient(existingClient, existingMobile, formalities, returnOldToPool, days, reason, swap) {
+        const roleOpId = this.cutoverRoleEventOpId(existingClient.clientId, swap?.swappedAt);
         try {
             if (this.isPermanentReplacementReason(reason)) {
-                await this.retireReplacedMobile(existingMobile, reason);
+                await this.retireReplacedMobile(existingMobile, reason, roleOpId);
                 return;
             }
             const existingClientUser = (await this.usersService.search({ mobile: existingMobile }))[0];
             if (!existingClientUser) {
                 const reasonMessage = `Pool return failed: user document missing for replaced mobile ${existingMobile}`;
                 this.logger.warn(reasonMessage);
-                await this.retireReplacedMobile(existingMobile, reasonMessage);
+                await this.retireReplacedMobile(existingMobile, reasonMessage, roleOpId);
                 await this.notify({ severity: 'warning', title: 'Pool return', summary: 'User doc missing, buffer inactivated', fields: [{ label: 'Mobile', value: existingMobile }] });
                 return;
             }
@@ -27311,7 +27529,13 @@ let ClientService = ClientService_1 = class ClientService {
                 this.logger.log('Formalities skipped');
             }
             if (returnOldToPool) {
-                await this.returnOldClientToBufferPool(existingClient, existingClientUser, existingMobile, days);
+                const returnedActive = await this.returnOldClientToBufferPool(existingClient, existingClientUser, existingMobile, days, reason, roleOpId);
+                if (returnedActive && swap?.swappedAt) {
+                    void this.openParkedSwapEpisode(existingClient.clientId, existingMobile, swap.swappedAt, swap.persona, reason, days)
+                        .catch((error) => this.logger.warn(`[${existingClient.clientId}] Parked swap episode hook rejected; the swap is unaffected`, {
+                        oldMobile: (0, monitor_util_1.maskMobile)(existingMobile), error: error instanceof Error ? error.message : String(error),
+                    }));
+                }
             }
             else {
                 await this.bufferClientService.update(existingMobile, {
@@ -27319,6 +27543,10 @@ let ClientService = ClientService_1 = class ClientService {
                     lastUsed: new Date(),
                     status: 'inactive',
                     message: reason || 'Deactivated during client swap (pool return skipped)',
+                });
+                this.recordRoleEvent({
+                    mobile: existingMobile, clientId: existingClient.clientId, event: 'retired', pool: 'buffer', by: 'cms:pool-return-skipped',
+                    reason: reason || 'pool return skipped', opId: roleOpId, details: { permanent: false },
                 });
                 this.logger.log('Replaced-client pool return skipped');
                 await this.notify({ title: 'Return skipped', summary: 'Account is inactivated', fields: [{ label: 'Mobile', value: existingMobile }] });
@@ -27328,21 +27556,82 @@ let ClientService = ClientService_1 = class ClientService {
             const errorDetails = (0, parseError_1.parseError)(e, `Error returning replaced client to buffer pool: ${existingMobile}`, false);
             const errorMessage = e instanceof Error ? e.message : String(e);
             if ((0, isPermanentError_1.default)(errorDetails)) {
-                await this.retireReplacedMobile(existingMobile, errorMessage);
+                await this.retireReplacedMobile(existingMobile, errorMessage, roleOpId);
             }
             await this.notify({ severity: 'error', title: 'Return failed', fields: [{ label: 'Mobile', value: existingMobile }], details: errorMessage?.substring(0, 500), detailsTitle: 'Error message' });
+        }
+    }
+    parkedOpenOnce(budget) {
+        const scan = budget.parkedScan ?? (budget.parkedScan = {});
+        if (!scan.read) {
+            scan.read = (async () => {
+                const startedAt = Date.now();
+                try {
+                    let collection = null;
+                    let control = null;
+                    try {
+                        collection = this.clientModel?.db?.collection('parkedAccounts') ?? null;
+                        control = this.clientModel?.db?.collection('parkedControl') ?? null;
+                    }
+                    catch {
+                    }
+                    const result = await (0, parked_session_guard_1.openParkedEpisodeMobiles)(collection, { control });
+                    if (result.error) {
+                        this.logger.warn(`[${budget.clientId}] Parked episode check of setup candidates failed; excluding none`, { error: result.error });
+                    }
+                    else if (result.controlError) {
+                        this.logger.warn(`[${budget.clientId}] parkedControl unreadable; every open parked episode excludes its candidate`, { error: result.controlError });
+                    }
+                    return result.open;
+                }
+                finally {
+                    budget.spentMs += Date.now() - startedAt;
+                }
+            })();
+        }
+        return scan.read;
+    }
+    recordRoleEvent(input) {
+        try {
+            (0, account_role_events_1.recordAccountRoleEventSoon)((0, account_role_events_1.accountRoleEventsCollectionOf)(this.clientModel), input, { logger: this.logger });
+        }
+        catch { }
+    }
+    cutoverRoleEventOpId(clientId, swappedAt) {
+        const ms = swappedAt ? new Date(swappedAt).getTime() : NaN;
+        return Number.isFinite(ms) ? `${clientId}:${ms}` : null;
+    }
+    recordMainChangeEvents(clientId, oldMobile, newMobile, by, reason, plan, opId, reasonCode) {
+        this.recordRoleEvent({
+            mobile: newMobile, clientId, event: 'became_main', pool: 'main', by, reason: reason ?? null, reasonCode, opId, fromMobile: oldMobile,
+            fromClientId: plan?.fromClientId ?? null,
+            details: plan ? { tier: plan.pickTier, markerTier: plan.markerTier ?? null } : undefined,
+        });
+        if (oldMobile) {
+            this.recordRoleEvent({ mobile: oldMobile, clientId, event: 'swapped_out', pool: 'main', by, reason: reason ?? null, reasonCode, opId, toMobile: newMobile });
+        }
+    }
+    async openParkedSwapEpisode(clientId, oldMobile, swappedAt, persona, reason, swapDays) {
+        try {
+            await (0, parked_swap_episode_1.openSwapEpisode)(this.clientModel.db.collection('parkedAccounts'), { mobile: this.canonicalMobile(oldMobile), clientId, persona, reason: reason || 'unspecified', swappedAt, swapDays }, { logger: this.logger, control: this.clientModel.db.collection('parkedControl'), roleEvents: (0, account_role_events_1.accountRoleEventsCollectionOf)(this.clientModel) });
+        }
+        catch (error) {
+            this.logger.warn(`[${clientId}] Parked swap episode hook failed; the swap is unaffected`, { oldMobile: (0, monitor_util_1.maskMobile)(oldMobile), error: error instanceof Error ? error.message : String(error) });
         }
     }
     isPermanentReplacementReason(reason) {
         return !!reason && ((0, isPermanentError_1.default)({ message: reason }) || (0, degraded_swap_1.isDeadSwapReason)(reason));
     }
-    async retireReplacedMobile(mobile, reason) {
+    async retireReplacedMobile(mobile, reason, roleOpId) {
         if (await this.isAlreadyRetired(mobile)) {
             this.logger.log(`Replaced account ${mobile} is already retired; not retired or announced again`);
             return;
         }
         try {
-            await this.usersService.expireAccount(mobile, reason);
+            if (roleOpId)
+                await this.usersService.expireAccount(mobile, reason, { opId: roleOpId });
+            else
+                await this.usersService.expireAccount(mobile, reason);
             this.logger.warn(`Replaced account retired (expired + pools deactivated)`, { mobile, reason: reason.substring(0, 160) });
             await this.notify({ severity: 'warning', title: 'Inactivated', fields: [{ label: 'Mobile', value: mobile }, { label: 'Reason', value: reason.substring(0, 120), code: false }] });
         }
@@ -27386,7 +27675,7 @@ let ClientService = ClientService_1 = class ClientService {
         }
         return client_helper_utils_1.ClientHelperUtils.toDateString(defaultMs);
     }
-    async returnOldClientToBufferPool(existingClient, existingClientUser, existingMobile, days) {
+    async returnOldClientToBufferPool(existingClient, existingClientUser, existingMobile, days, reason, roleOpId) {
         let existingBufferClient = null;
         try {
             await this.assertDistinctUserBackupSession(existingMobile, existingClient.session);
@@ -27405,40 +27694,66 @@ let ClientService = ClientService_1 = class ClientService {
                 warmupPhase: warmup_phases_1.WarmupPhase.SESSION_ROTATED,
                 message: 'Returned to buffer pool; channel capacity will be verified',
             };
-            const updatedBufferClient = await this.bufferClientService.createOrUpdate(existingMobile, bufferClientDto);
+            const updatedBufferClient = await this.bufferClientService.createOrUpdate(existingMobile, bufferClientDto, { suppressEnrolledEvent: true });
             this.logger.log('Client returned to buffer pool', {
                 mobile: existingMobile,
                 clientId: updatedBufferClient?.clientId ?? existingClient.clientId,
                 status: updatedBufferClient?.status,
                 availableDate,
             });
+            this.recordRoleEvent({
+                mobile: existingMobile, clientId: updatedBufferClient?.clientId ?? existingClient.clientId, event: 'returned', pool: 'buffer',
+                by: 'cms:pool-return', reason: reason ?? null, opId: roleOpId, details: { status: bufferClientDto.status ?? null, days, availableDate },
+            });
             await this.notify({ title: 'Returned to pool', fields: [{ label: 'Mobile', value: existingMobile }, { label: 'Available date', value: availableDate, code: false }] });
+            return bufferClientDto.status === 'active';
         }
         catch (error) {
             const errorDetails = (0, parseError_1.parseError)(error, `Error returning old client to buffer pool: ${existingMobile}`, true);
             await this.notify({ severity: 'error', title: 'Return error', fields: [{ label: 'Mobile', value: existingMobile }], details: errorDetails.message?.substring(0, 500), detailsTitle: 'Error message' });
             if ((0, isPermanentError_1.default)(errorDetails)) {
                 this.logger.log('Marking replaced buffer inactive:', existingMobile);
-                await this.retireReplacedMobile(existingMobile, errorDetails.message);
+                await this.retireReplacedMobile(existingMobile, errorDetails.message, roleOpId);
             }
             else {
                 const retryAvailableDate = this.resolveReturnAvailableDate(existingBufferClient, days);
-                await this.bufferClientService.update(existingMobile, {
+                const released = await this.bufferClientService.update(existingMobile, {
                     inUse: false,
                     status: 'active',
                     availableDate: retryAvailableDate,
                     message: `Pool return retry after transient error: ${errorDetails.message?.substring(0, 160)}`,
-                }).catch((updateError) => {
+                }).then(() => true).catch((updateError) => {
                     this.logger.error(`Failed to release stranded pool-return reservation for ${existingMobile}: ${(0, parseError_1.parseError)(updateError, '', false).message}`);
+                    return false;
                 });
+                if (released) {
+                    this.recordRoleEvent({
+                        mobile: existingMobile, clientId: existingClient.clientId, event: 'returned', pool: 'buffer', by: 'cms:pool-return-retry',
+                        reason: reason ?? null, opId: roleOpId, details: { status: 'active', days, availableDate: retryAvailableDate, error: errorDetails.message ?? null },
+                    });
+                }
                 this.logger.log(`Released pool-return reservation for ${existingMobile} after transient error; available ${retryAvailableDate}`);
             }
+            return false;
         }
     }
-    async findSafeSetupBufferCandidate(candidates, existingClientSession, probeBudget = { clientId: '-', remaining: MAX_SETUP_PROBES, spentMs: 0, skipped: [] }, accept = {}) {
+    async findSafeSetupBufferCandidate(candidates, existingClientSession, probeBudget = { clientId: '-', remaining: MAX_SETUP_PROBES, spentMs: 0, skipped: [] }, accept = {}, parkedPolicy = 'exclude') {
+        let parkedOpen = new Set();
+        if (parkedPolicy === 'exclude' && candidates?.length) {
+            const nonPhone = candidates.filter((c) => c?.mobile && (0, parked_session_guard_1.parkedCanonicalMobile)(c.mobile) === null).length;
+            if (nonPhone > 0) {
+                this.logger.warn(`[${probeBudget.clientId}] ${nonPhone} setup candidate(s) with a non-phone mobile were not checked for parked episodes`);
+            }
+            if (candidates.some((c) => (0, parked_session_guard_1.parkedCanonicalMobile)(c?.mobile) !== null))
+                parkedOpen = await this.parkedOpenOnce(probeBudget);
+        }
         for (const candidate of candidates) {
             if (!candidate?.mobile || !candidate?.session)
                 continue;
+            if (parkedOpen.size > 0 && parkedOpen.has((0, parked_session_guard_1.parkedCanonicalMobile)(candidate.mobile) ?? '')) {
+                this.logger.warn(`Skipping setup candidate ${(0, monitor_util_1.maskMobile)(candidate.mobile)}: open parked-responder episode`);
+                continue;
+            }
             if (candidate.session === existingClientSession) {
                 this.logger.warn(`Skipping setup candidate ${candidate.mobile}: session matches current main client`);
                 continue;
@@ -27482,6 +27797,12 @@ let ClientService = ClientService_1 = class ClientService {
                 }
                 const verdict = probeBudget.lastVerdict;
                 const storedLimitedUntil = candidate.limitedUntil ? new Date(candidate.limitedUntil) : null;
+                if (parkedPolicy === 'allow') {
+                    const canonical = (0, parked_session_guard_1.parkedCanonicalMobile)(candidate.mobile);
+                    if (canonical && (await this.parkedOpenOnce(probeBudget)).has(canonical)) {
+                        this.logger.warn(`[${probeBudget.clientId}] Rescue/degraded tier picked ${(0, monitor_util_1.maskMobile)(candidate.mobile)} with an open parked-responder episode (allowed: the cutover hook stops the parked pass)`);
+                    }
+                }
                 picked = true;
                 return {
                     mobile: candidate.mobile,
@@ -27627,7 +27948,7 @@ let ClientService = ClientService_1 = class ClientService {
                 candidateCount: candidates.length,
                 healthyCount: healthy.length,
             });
-            const candidate = await this.findSafeSetupBufferCandidate(healthy, existingClient.session, budget, (0, degraded_swap_1.probeAcceptanceForTier)(tier));
+            const candidate = await this.findSafeSetupBufferCandidate(healthy, existingClient.session, budget, (0, degraded_swap_1.probeAcceptanceForTier)(tier), 'allow');
             if (candidate)
                 return { tier, candidate };
         }
@@ -27655,7 +27976,7 @@ let ClientService = ClientService_1 = class ClientService {
         });
         for (const { siblingId, spares } of ranked) {
             const tryable = spares.slice(0, spares.length - degraded_swap_1.SIBLING_MIN_SPARES_AFTER);
-            const candidate = await this.findSafeSetupBufferCandidate(tryable, existingClient.session, budget, (0, degraded_swap_1.probeAcceptanceForTier)(2));
+            const candidate = await this.findSafeSetupBufferCandidate(tryable, existingClient.session, budget, (0, degraded_swap_1.probeAcceptanceForTier)(2), 'allow');
             if (candidate)
                 return { candidate, fromClientId: siblingId };
             if (budget.remaining <= 0)
@@ -29091,6 +29412,527 @@ var client_service_1 = __webpack_require__(/*! ./client.service */ "./src/compon
 Object.defineProperty(exports, "ClientService", ({ enumerable: true, get: function () { return client_service_1.ClientService; } }));
 __exportStar(__webpack_require__(/*! ./dto */ "./src/components/clients/dto/index.ts"), exports);
 __exportStar(__webpack_require__(/*! ./schemas */ "./src/components/clients/schemas/index.ts"), exports);
+
+
+/***/ },
+
+/***/ "./src/components/clients/parked-cutover.ts"
+/*!**************************************************!*\
+  !*** ./src/components/clients/parked-cutover.ts ***!
+  \**************************************************/
+(__unused_webpack_module, exports, __webpack_require__) {
+
+
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.PARKED_CUTOVER_OP_DEADLINE_MS = exports.PARKED_CUTOVER_OP_MAX_TIME_MS = exports.PARKED_PREEMPT_POLL_MS = exports.PARKED_PREEMPT_WAIT_MS = void 0;
+exports.becameMainStopPipeline = becameMainStopPipeline;
+exports.prepareParkedCutover = prepareParkedCutover;
+const os = __importStar(__webpack_require__(/*! os */ "os"));
+const parked_swap_episode_1 = __webpack_require__(/*! ./parked-swap-episode */ "./src/components/clients/parked-swap-episode.ts");
+const parked_session_guard_1 = __webpack_require__(/*! ./parked-session-guard */ "./src/components/clients/parked-session-guard.ts");
+const monitor_util_1 = __webpack_require__(/*! ../monitor/monitor-util */ "./src/components/monitor/monitor-util.ts");
+exports.PARKED_PREEMPT_WAIT_MS = 20_000;
+exports.PARKED_PREEMPT_POLL_MS = 2_000;
+exports.PARKED_CUTOVER_OP_MAX_TIME_MS = 5_000;
+exports.PARKED_CUTOVER_OP_DEADLINE_MS = 6_000;
+const OP = { maxTimeMS: exports.PARKED_CUTOVER_OP_MAX_TIME_MS };
+const PARKED_EPISODE_GC_MS = 30 * 24 * 60 * 60 * 1000;
+const STOP_LOOP_MAX = 10;
+function describe(error) {
+    return error instanceof Error ? error.message : String(error);
+}
+function withDeadline(promise, ms, label) {
+    let timer;
+    const timeout = new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms} ms (client-side deadline)`)), ms);
+        timer.unref?.();
+    });
+    return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+function mobileForms(mobile) {
+    const forms = (0, parked_session_guard_1.parkedMobileForms)(mobile);
+    return forms.length ? forms : [mobile];
+}
+function becameMainStopPipeline() {
+    return [
+        {
+            $set: {
+                state: 'stopped',
+                stopReason: { $literal: 'became_main' },
+                stoppedAt: '$$NOW',
+                updatedAt: '$$NOW',
+                gcAt: { $add: ['$$NOW', PARKED_EPISODE_GC_MS] },
+                runner: null,
+                version: { $add: [{ $ifNull: ['$version', 0] }, 1] },
+            },
+        },
+        { $unset: ['open'] },
+    ];
+}
+function parkedHolderFilter(forms) {
+    return { _id: { $in: forms }, 'holder.kind': 'parked', $expr: { $gt: ['$until', '$$NOW'] } };
+}
+const defaultSleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+async function prepareParkedCutover(collections, input, opts) {
+    const { mobile, clientId } = input;
+    const sleep = opts.sleep ?? defaultSleep;
+    const waitMs = opts.waitMs ?? exports.PARKED_PREEMPT_WAIT_MS;
+    const pollMs = Math.max(1, opts.pollMs ?? exports.PARKED_PREEMPT_POLL_MS);
+    const now = opts.now ?? Date.now;
+    const opDeadlineMs = opts.opDeadlineMs ?? exports.PARKED_CUTOVER_OP_DEADLINE_MS;
+    const forms = mobileForms(mobile);
+    const startedAt = now();
+    const deadline = startedAt + waitMs;
+    const result = { episodesStopped: 0, lease: 'free', waitedMs: 0, errors: [] };
+    try {
+        while (result.episodesStopped < STOP_LOOP_MAX) {
+            const stopped = await withDeadline(collections.episodes.findOneAndUpdate({ mobile: { $in: forms }, open: true }, becameMainStopPipeline(), {
+                ...OP, returnDocument: 'after', projection: { _id: 1, app: 1, mobile: 1, clientId: 1, stopReason: 1 },
+            }), opDeadlineMs, 'parkedAccounts.findOneAndUpdate');
+            if (!stopped)
+                break;
+            result.episodesStopped += 1;
+            (0, parked_swap_episode_1.recordUnparked)(opts.roleEvents, stopped, 'cms:parked-cutover', opts.logger);
+        }
+    }
+    catch (error) {
+        result.errors.push(`episode stop: ${describe(error)}`);
+    }
+    try {
+        const by = {
+            kind: 'live',
+            owner: opts.requester ?? `cms:${os.hostname()}:${process.pid}`,
+            app: 'tg-aut',
+            clientId,
+        };
+        const asked = await withDeadline(collections.leases.updateMany(parkedHolderFilter(forms), [
+            { $set: { preemptRequested: { by: { $literal: by }, at: '$$NOW' } } },
+        ], OP), opDeadlineMs, 'accountLeases.updateMany');
+        if ((asked?.matchedCount ?? 0) > 0) {
+            result.lease = 'timed_out';
+            while (now() < deadline) {
+                await sleep(Math.min(pollMs, Math.max(0, deadline - now())));
+                const still = await withDeadline(collections.leases.findOne(parkedHolderFilter(forms), { projection: { _id: 1 }, ...OP }), opDeadlineMs, 'accountLeases.findOne');
+                if (!still) {
+                    result.lease = 'waited';
+                    break;
+                }
+            }
+            result.waitedMs = Math.max(0, now() - startedAt);
+        }
+    }
+    catch (error) {
+        result.lease = 'error';
+        result.errors.push(`lease: ${describe(error)}`);
+    }
+    const summary = { mobile: (0, monitor_util_1.maskMobile)(mobile), clientId, episodesStopped: result.episodesStopped, lease: result.lease, waitedMs: result.waitedMs };
+    if (result.errors.length > 0 || result.lease === 'timed_out') {
+        opts.logger.warn(`[${clientId}] Parked cutover hook: ${result.lease}${result.errors.length ? ` (${result.errors.join('; ')})` : ''}; continuing the cutover`, summary);
+    }
+    else if (result.episodesStopped > 0 || result.lease === 'waited') {
+        opts.logger.info(`[${clientId}] Parked cutover hook: stopped ${result.episodesStopped} episode(s), lease ${result.lease}`, summary);
+    }
+    return result;
+}
+
+
+/***/ },
+
+/***/ "./src/components/clients/parked-session-guard.ts"
+/*!********************************************************!*\
+  !*** ./src/components/clients/parked-session-guard.ts ***!
+  \********************************************************/
+(__unused_webpack_module, exports) {
+
+
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.PARKED_OPEN_SCAN_LIMIT = exports.PARKED_CONTROL_APPS = exports.PARKED_SESSION_BUSY = exports.PARKED_GUARD_DEADLINE_MS = exports.PARKED_GUARD_OP_MAX_TIME_MS = void 0;
+exports.parkedEnabledEpisodeClauses = parkedEnabledEpisodeClauses;
+exports.parkedMobileForms = parkedMobileForms;
+exports.checkParkedSession = checkParkedSession;
+exports.describeParkedVerdict = describeParkedVerdict;
+exports.parkedCanonicalMobile = parkedCanonicalMobile;
+exports.openParkedEpisodeMobiles = openParkedEpisodeMobiles;
+exports.PARKED_GUARD_OP_MAX_TIME_MS = 3_000;
+exports.PARKED_GUARD_DEADLINE_MS = 4_000;
+exports.PARKED_SESSION_BUSY = 'PARKED_SESSION_BUSY';
+exports.PARKED_CONTROL_APPS = ['tg-aut', 'promote'];
+function parkedEnabledEpisodeClauses(docs) {
+    const doc = (id) => {
+        const d = docs[id];
+        return d && typeof d === 'object' ? d : null;
+    };
+    if (doc('global')?.enabled !== true)
+        return [];
+    const clauses = [];
+    for (const app of exports.PARKED_CONTROL_APPS) {
+        const d = doc(app);
+        if (d?.enabled !== true)
+            continue;
+        if (Array.isArray(d.clientIds)) {
+            clauses.push({ app, clientId: { $in: d.clientIds.filter((c) => typeof c === 'string') } });
+        }
+        else {
+            clauses.push({ app });
+        }
+    }
+    return clauses;
+}
+async function readEnabledEpisodeClauses(control) {
+    if (!control || typeof control.findOne !== 'function')
+        throw new Error('no parkedControl handle');
+    const ids = ['global', ...exports.PARKED_CONTROL_APPS];
+    const rows = await Promise.all(ids.map((id) => control.findOne({ _id: id }, { projection: { enabled: 1, clientIds: 1 }, maxTimeMS: exports.PARKED_GUARD_OP_MAX_TIME_MS })));
+    const docs = {};
+    ids.forEach((id, i) => { docs[id] = rows[i]; });
+    return parkedEnabledEpisodeClauses(docs);
+}
+function parkedMobileForms(mobile) {
+    const trimmed = typeof mobile === 'string' ? mobile.trim() : '';
+    const canonical = trimmed.startsWith('+') ? trimmed.slice(1) : trimmed;
+    if (!/^[1-9]\d{6,14}$/.test(canonical))
+        return [];
+    return [canonical, `+${canonical}`];
+}
+function withDeadline(promise, ms, label) {
+    let timer;
+    const timeout = new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms} ms`)), ms);
+        timer.unref?.();
+    });
+    return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+async function checkParkedSession(db, mobile, opts = {}) {
+    if (!db || typeof db.collection !== 'function')
+        return { busy: true, reason: 'guard_unavailable' };
+    const forms = parkedMobileForms(mobile);
+    if (forms.length === 0)
+        return { busy: true, reason: 'read_error', detail: `not a mobile: ${JSON.stringify(mobile)}` };
+    const deadline = opts.deadlineMs ?? exports.PARKED_GUARD_DEADLINE_MS;
+    const OP = { maxTimeMS: exports.PARKED_GUARD_OP_MAX_TIME_MS };
+    try {
+        const [episode, lease] = await withDeadline((async () => {
+            const [enabled, leaseDoc] = await Promise.all([
+                readEnabledEpisodeClauses(db.collection('parkedControl')),
+                db.collection('accountLeases').findOne({ _id: { $in: forms }, 'holder.kind': 'parked', $expr: { $gt: ['$until', '$$NOW'] } }, { projection: { _id: 1 }, ...OP }),
+            ]);
+            const episodeDoc = enabled.length === 0 ? null : await db.collection('parkedAccounts').findOne({ mobile: { $in: forms }, open: true, $expr: { $gt: ['$expiresAt', '$$NOW'] }, $or: enabled }, { projection: { _id: 1 }, ...OP });
+            return [episodeDoc, leaseDoc];
+        })(), deadline, 'parked session guard');
+        if (episode)
+            return { busy: true, reason: 'open_episode' };
+        if (lease)
+            return { busy: true, reason: 'parked_lease' };
+        return { busy: false };
+    }
+    catch (error) {
+        return { busy: true, reason: 'read_error', detail: error instanceof Error ? error.message : String(error) };
+    }
+}
+function describeParkedVerdict(v) {
+    return v.busy ? `parked responder guard: ${v.reason}${v.detail ? ` (${v.detail})` : ''}` : 'free';
+}
+exports.PARKED_OPEN_SCAN_LIMIT = 5_000;
+function parkedCanonicalMobile(mobile) {
+    return typeof mobile === 'string' ? (parkedMobileForms(mobile)[0] ?? null) : null;
+}
+async function openParkedEpisodeMobiles(episodes, opts = {}) {
+    const open = new Set();
+    if (!episodes || typeof episodes.find !== 'function')
+        return { open, error: 'no parkedAccounts handle' };
+    try {
+        const out = { open };
+        const docs = await withDeadline((async () => {
+            let enabled = null;
+            try {
+                enabled = await readEnabledEpisodeClauses(opts.control);
+            }
+            catch (controlError) {
+                out.controlError = controlError instanceof Error ? controlError.message : String(controlError);
+            }
+            if (enabled && enabled.length === 0)
+                return [];
+            return episodes.find({ open: true, mobile: { $type: 'string' }, $expr: { $gt: ['$expiresAt', '$$NOW'] }, ...(enabled ? { $or: enabled } : {}) }, { projection: { _id: 0, mobile: 1 }, limit: exports.PARKED_OPEN_SCAN_LIMIT, maxTimeMS: exports.PARKED_GUARD_OP_MAX_TIME_MS }).toArray();
+        })(), opts.deadlineMs ?? exports.PARKED_GUARD_DEADLINE_MS, 'parked episode read');
+        for (const d of docs) {
+            const m = d?.mobile;
+            const canonical = parkedCanonicalMobile(m);
+            if (canonical)
+                open.add(canonical);
+        }
+        return out;
+    }
+    catch (error) {
+        return { open: new Set(), error: error instanceof Error ? error.message : String(error) };
+    }
+}
+
+
+/***/ },
+
+/***/ "./src/components/clients/parked-swap-episode.ts"
+/*!*******************************************************!*\
+  !*** ./src/components/clients/parked-swap-episode.ts ***!
+  \*******************************************************/
+(__unused_webpack_module, exports, __webpack_require__) {
+
+
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.SWAP_EPISODE_OP_DEADLINE_MS = exports.SWAP_EPISODE_OP_MAX_TIME_MS = exports.SWAP_FIRST_PASS_MAX_MS = exports.SWAP_FIRST_PASS_MIN_MS = exports.TGAUT_PARK_MAX_AGE_MS = void 0;
+exports.swapEpisodeKey = swapEpisodeKey;
+exports.swapCutoverOpId = swapCutoverOpId;
+exports.buildSwapEpisode = buildSwapEpisode;
+exports.supersededStopPipeline = supersededStopPipeline;
+exports.swapSupersedeFilter = swapSupersedeFilter;
+exports.tgAutExistsMergePipeline = tgAutExistsMergePipeline;
+exports.recordUnparked = recordUnparked;
+exports.tgAutParkedEnabled = tgAutParkedEnabled;
+exports.openSwapEpisode = openSwapEpisode;
+const account_role_events_1 = __webpack_require__(/*! ./account-role-events */ "./src/components/clients/account-role-events.ts");
+const parked_session_guard_1 = __webpack_require__(/*! ./parked-session-guard */ "./src/components/clients/parked-session-guard.ts");
+const monitor_util_1 = __webpack_require__(/*! ../monitor/monitor-util */ "./src/components/monitor/monitor-util.ts");
+exports.TGAUT_PARK_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+exports.SWAP_FIRST_PASS_MIN_MS = 10 * 60 * 1000;
+exports.SWAP_FIRST_PASS_MAX_MS = 15 * 60 * 1000;
+exports.SWAP_EPISODE_OP_MAX_TIME_MS = 5_000;
+exports.SWAP_EPISODE_OP_DEADLINE_MS = 6_000;
+const PARKED_EPISODE_GC_MS = 30 * 24 * 60 * 60 * 1000;
+const OPEN_RETRIES = 3;
+const SUPERSEDE_LOOP_MAX = 10;
+function swapEpisodeKey(mobile, swappedAt) {
+    const ms = swappedAt instanceof Date ? swappedAt.getTime() : NaN;
+    if (!Number.isFinite(ms))
+        throw new Error('swapEpisodeKey: invalid swappedAt');
+    if (!mobile)
+        throw new Error('swapEpisodeKey: empty mobile');
+    return `tg-aut:${mobile}:${Math.trunc(ms)}`;
+}
+function swapCutoverOpId(clientId, swappedAt) {
+    return `${clientId}:${Math.trunc(swappedAt.getTime())}`;
+}
+function buildSwapEpisode(input, now, random) {
+    const anchor = input.swappedAt.getTime();
+    const delay = exports.SWAP_FIRST_PASS_MIN_MS + Math.round((exports.SWAP_FIRST_PASS_MAX_MS - exports.SWAP_FIRST_PASS_MIN_MS) * random());
+    return {
+        _id: swapEpisodeKey(input.mobile, input.swappedAt),
+        app: 'tg-aut',
+        mobile: input.mobile,
+        clientId: input.clientId,
+        persona: input.persona,
+        reason: input.reason,
+        cutoverOpId: swapCutoverOpId(input.clientId, input.swappedAt),
+        ...(typeof input.swapDays === 'number' && Number.isFinite(input.swapDays) && input.swapDays > 0 ? { swapDays: input.swapDays } : {}),
+        liveSince: null,
+        parkedAt: new Date(anchor),
+        expiresAt: new Date(anchor + exports.TGAUT_PARK_MAX_AGE_MS),
+        nextRunAt: new Date(anchor + delay),
+        createdBy: 'cms',
+        open: true,
+        state: 'pending',
+        passes: 0,
+        connectsToday: { day: '', n: 0 },
+        transientCount: 0,
+        emptyStreak: 0,
+        repliesTotal: 0,
+        repliesToday: { day: '', n: 0 },
+        runner: null,
+        version: 0,
+        createdAt: now,
+        updatedAt: now,
+    };
+}
+function supersededStopPipeline() {
+    return [
+        {
+            $set: {
+                state: 'stopped',
+                stopReason: { $literal: 'superseded' },
+                stoppedAt: '$$NOW',
+                updatedAt: '$$NOW',
+                gcAt: { $add: ['$$NOW', PARKED_EPISODE_GC_MS] },
+                runner: null,
+                version: { $add: [{ $ifNull: ['$version', 0] }, 1] },
+            },
+        },
+        { $unset: ['open'] },
+    ];
+}
+function swapSupersedeFilter(mobile, id) {
+    const forms = (0, parked_session_guard_1.parkedMobileForms)(mobile);
+    return { mobile: { $in: forms.length ? forms : [mobile] }, open: true, _id: { $ne: id }, $or: [{ app: 'tg-aut' }, { $expr: { $lte: ['$expiresAt', '$$NOW'] } }] };
+}
+const TGAUT_FALLBACK_REASON = 'swap';
+function tgAutExistsMergePipeline(input) {
+    const set = {};
+    if (typeof input.swapDays === 'number' && Number.isFinite(input.swapDays) && input.swapDays > 0) {
+        set.swapDays = { $ifNull: ['$swapDays', { $literal: input.swapDays }] };
+    }
+    if (typeof input.reason === 'string' && input.reason) {
+        set.reason = { $cond: [{ $in: [{ $ifNull: ['$reason', ''] }, ['', TGAUT_FALLBACK_REASON]] }, { $literal: input.reason }, '$reason'] };
+    }
+    return Object.keys(set).length ? [{ $set: set }] : null;
+}
+function recordUnparked(roleEvents, stopped, by, logger) {
+    try {
+        const stopReason = typeof stopped.stopReason === 'string' ? stopped.stopReason : 'unknown';
+        const app = typeof stopped.app === 'string' ? stopped.app : null;
+        (0, account_role_events_1.recordAccountRoleEventSoon)(roleEvents, {
+            mobile: String(stopped.mobile ?? ''), clientId: typeof stopped.clientId === 'string' ? stopped.clientId : null,
+            event: 'unparked', pool: app === 'promote' ? 'promote' : app === 'tg-aut' ? 'buffer' : null, by,
+            reason: stopReason, reasonCode: (0, account_role_events_1.unparkedReasonCode)(stopReason), opId: String(stopped._id ?? ''),
+            details: { app, stopReason },
+        }, { logger });
+    }
+    catch { }
+}
+function isDuplicateKey(error) {
+    return error?.code === 11000;
+}
+function onIdIndex(error) {
+    const pattern = error?.keyPattern;
+    if (pattern)
+        return '_id' in pattern;
+    return /_id_/.test(String(error?.message ?? ''));
+}
+function describe(error) {
+    return error instanceof Error ? error.message : String(error);
+}
+function withDeadline(promise, ms, label) {
+    let timer;
+    const timeout = new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms} ms (client-side deadline)`)), ms);
+        timer.unref?.();
+    });
+    return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+async function tgAutParkedEnabled(control, clientId, deadlineMs = exports.SWAP_EPISODE_OP_DEADLINE_MS) {
+    if (!control || typeof control.find !== 'function')
+        return { enabled: false, error: 'no parkedControl handle' };
+    try {
+        const docs = await withDeadline(control.find({ _id: { $in: ['global', 'tg-aut'] } }, { maxTimeMS: exports.SWAP_EPISODE_OP_MAX_TIME_MS }).toArray(), deadlineMs, 'parkedControl.find');
+        const byId = new Map();
+        for (const d of docs)
+            if (d && typeof d === 'object')
+                byId.set(d._id, d);
+        const app = byId.get('tg-aut');
+        if (byId.get('global')?.enabled !== true || app?.enabled !== true)
+            return { enabled: false };
+        if (Array.isArray(app.clientIds) && !app.clientIds.includes(clientId))
+            return { enabled: false };
+        return { enabled: true };
+    }
+    catch (error) {
+        return { enabled: false, error: describe(error) };
+    }
+}
+async function openSwapEpisode(collection, input, opts) {
+    const deadlineMs = opts.opDeadlineMs ?? exports.SWAP_EPISODE_OP_DEADLINE_MS;
+    const { logger } = opts;
+    const meta = { mobile: (0, monitor_util_1.maskMobile)(input.mobile), clientId: input.clientId, reason: input.reason };
+    let doc;
+    try {
+        doc = buildSwapEpisode(input, (opts.now ?? (() => new Date()))(), opts.random ?? Math.random);
+    }
+    catch (error) {
+        logger.warn(`[${input.clientId}] Parked swap episode not opened: ${describe(error)}`, meta);
+        return 'failed';
+    }
+    const gate = await tgAutParkedEnabled(opts.control, input.clientId, deadlineMs);
+    if (!gate.enabled) {
+        if (gate.error)
+            logger.warn(`[${input.clientId}] Parked swap episode not opened: parkedControl unreadable (${gate.error})`, meta);
+        else
+            logger.info(`[${input.clientId}] Parked swap episode not opened: parkedControl does not enable tg-aut for this client`, meta);
+        return 'disabled';
+    }
+    const OP = { maxTimeMS: exports.SWAP_EPISODE_OP_MAX_TIME_MS };
+    const exists = async () => {
+        const merge = tgAutExistsMergePipeline(input);
+        if (!merge)
+            return 'exists';
+        try {
+            await withDeadline(collection.findOneAndUpdate({ _id: doc._id, createdBy: 'tg-aut' }, merge, { ...OP, projection: { _id: 1 } }), deadlineMs, 'parkedAccounts.findOneAndUpdate(merge)');
+        }
+        catch (error) {
+            logger.warn(`[${input.clientId}] Parked swap episode exists; merging swapDays/reason into the tg-aut episode failed: ${describe(error)}`, meta);
+        }
+        return 'exists';
+    };
+    for (let attempt = 0; attempt < OPEN_RETRIES; attempt++) {
+        try {
+            await withDeadline(collection.insertOne(doc), deadlineMs, 'parkedAccounts.insertOne');
+            logger.info(`[${input.clientId}] Parked swap episode opened for the old main`, { ...meta, episode: String(doc._id).replace(input.mobile, String(meta.mobile)) });
+            (0, account_role_events_1.recordAccountRoleEventSoon)(opts.roleEvents, {
+                mobile: input.mobile, clientId: input.clientId, event: 'parked', pool: 'buffer', by: 'cms:parked-swap',
+                reason: input.reason, reasonCode: (0, account_role_events_1.classifyRoleEventReason)(input.reason, 'other'), opId: String(doc._id),
+                details: { app: 'tg-aut', cutoverOpId: String(doc.cutoverOpId), ...(typeof doc.swapDays === 'number' ? { swapDays: doc.swapDays } : {}) },
+            }, { logger });
+            return 'inserted';
+        }
+        catch (error) {
+            if (!isDuplicateKey(error)) {
+                logger.warn(`[${input.clientId}] Parked swap episode insert failed: ${describe(error)}`, meta);
+                return 'failed';
+            }
+            if (onIdIndex(error))
+                return exists();
+            try {
+                let closed = 0;
+                while (closed < SUPERSEDE_LOOP_MAX) {
+                    const stopped = await withDeadline(collection.findOneAndUpdate(swapSupersedeFilter(input.mobile, String(doc._id)), supersededStopPipeline(), { ...OP, returnDocument: 'after', projection: { _id: 1, app: 1, mobile: 1, clientId: 1, stopReason: 1 } }), deadlineMs, 'parkedAccounts.findOneAndUpdate');
+                    if (!stopped)
+                        break;
+                    closed += 1;
+                    recordUnparked(opts.roleEvents, stopped, 'cms:parked-swap', logger);
+                }
+                if (closed === 0) {
+                    const same = await withDeadline(collection.findOne({ _id: doc._id }, { projection: { _id: 1 }, ...OP }), deadlineMs, 'parkedAccounts.findOne');
+                    if (same)
+                        return exists();
+                }
+            }
+            catch (stopError) {
+                logger.warn(`[${input.clientId}] Parked swap episode: superseding the older episode failed: ${describe(stopError)}`, meta);
+                return 'failed';
+            }
+        }
+    }
+    logger.warn(`[${input.clientId}] Parked swap episode not opened: another open episode holds the mobile (other app or a race)`, meta);
+    return 'failed';
+}
 
 
 /***/ },
@@ -42953,6 +43795,10 @@ let PromoteClientService = PromoteClientService_1 = class PromoteClientService e
             const newUser = new this.promoteClientModel(promoteClientData);
             return newUser.save();
         }));
+        this.recordRoleEvent({
+            mobile: canonicalMobile, clientId: promoteClient.clientId ?? null, event: 'enrolled', pool: 'promote', by: 'cms:promote-create',
+            reasonCode: 'enrolment', details: { availableDate: promoteClient.availableDate ?? null, status },
+        });
         await this.sendAccountNotice({
             severity: 'success',
             title: 'Promote created',
@@ -43111,6 +43957,7 @@ let PromoteClientService = PromoteClientService_1 = class PromoteClientService e
             withPoolClaimOrRefuse: (m, fn) => this.withPoolClaimOrRefuse(m, fn),
             safeUnregisterClient: (m) => this.safeUnregisterClient(m),
             enrolmentInactiveSince: () => client_helper_utils_1.ClientHelperUtils.getDateStringDaysAgo(this.INACTIVE_USER_CUTOFF_DAYS, this.ONE_DAY_MS),
+            logger: this.logger,
         };
     }
     async updateInfo() {
@@ -44905,6 +45752,9 @@ let SessionAuditService = class SessionAuditService {
         this.sessionAuditModel = sessionAuditModel;
         this.logger = new telegram_logger_1.TelegramLogger('SessionAuditService');
     }
+    parkedGuardDb() {
+        return this.sessionAuditModel?.db ?? null;
+    }
     async createAuditRecord(createDto) {
         try {
             this.logger.info(createDto.mobile, 'Creating session audit record');
@@ -45263,6 +46113,7 @@ exports.SessionController = exports.GetOldestSessionDto = exports.SearchAuditDto
 const common_1 = __webpack_require__(/*! @nestjs/common */ "@nestjs/common");
 const swagger_1 = __webpack_require__(/*! @nestjs/swagger */ "@nestjs/swagger");
 const session_service_1 = __webpack_require__(/*! ./session.service */ "./src/components/session-manager/session.service.ts");
+const parked_session_guard_1 = __webpack_require__(/*! ../clients/parked-session-guard */ "./src/components/clients/parked-session-guard.ts");
 const class_validator_1 = __webpack_require__(/*! class-validator */ "class-validator");
 const swagger_2 = __webpack_require__(/*! @nestjs/swagger */ "@nestjs/swagger");
 class CreateSessionDto {
@@ -45412,11 +46263,13 @@ let SessionController = class SessionController {
                 };
             }
             else {
+                const retryable = !!result.retryable || result.code === parked_session_guard_1.PARKED_SESSION_BUSY;
                 throw new common_1.HttpException({
                     success: false,
                     message: result.error,
-                    retryable: result.retryable
-                }, result.retryable ? common_1.HttpStatus.TOO_MANY_REQUESTS : common_1.HttpStatus.BAD_REQUEST);
+                    retryable,
+                    ...(result.code ? { code: result.code } : {})
+                }, retryable ? common_1.HttpStatus.TOO_MANY_REQUESTS : common_1.HttpStatus.BAD_REQUEST);
             }
         }
         catch (error) {
@@ -45499,6 +46352,7 @@ let SessionController = class SessionController {
             }
             else {
                 let httpStatus = common_1.HttpStatus.BAD_REQUEST;
+                const retryable = !!result.retryable || result.code === parked_session_guard_1.PARKED_SESSION_BUSY;
                 if (result.code === 'NO_SESSION_FOUND') {
                     httpStatus = common_1.HttpStatus.NOT_FOUND;
                 }
@@ -45508,11 +46362,14 @@ let SessionController = class SessionController {
                 else if (result.code === 'FALLBACK_DISABLED') {
                     httpStatus = common_1.HttpStatus.NOT_FOUND;
                 }
+                else if (result.code === parked_session_guard_1.PARKED_SESSION_BUSY) {
+                    httpStatus = common_1.HttpStatus.TOO_MANY_REQUESTS;
+                }
                 throw new common_1.HttpException({
                     success: false,
                     message: result.message,
                     code: result.code,
-                    retryable: result.retryable || false
+                    retryable
                 }, httpStatus);
             }
         }
@@ -45722,6 +46579,7 @@ var __metadata = (this && this.__metadata) || function (k, v) {
 };
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.SessionService = exports.SessionManager = void 0;
+const parked_session_guard_1 = __webpack_require__(/*! ../clients/parked-session-guard */ "./src/components/clients/parked-session-guard.ts");
 const common_1 = __webpack_require__(/*! @nestjs/common */ "@nestjs/common");
 const telegram_1 = __webpack_require__(/*! telegram */ "telegram");
 const sessions_1 = __webpack_require__(/*! telegram/sessions */ "telegram/sessions");
@@ -46076,6 +46934,17 @@ let SessionService = class SessionService {
         this.RATE_LIMIT_WINDOW = 3600000;
         this.sessionAuditService = sessionAuditService;
     }
+    parkedSessionVerdict(mobile) {
+        const db = typeof this.sessionAuditService?.parkedGuardDb === 'function' ? this.sessionAuditService.parkedGuardDb() : null;
+        return (0, parked_session_guard_1.checkParkedSession)(db, mobile);
+    }
+    async parkedRefusal(mobile, step) {
+        const parked = await this.parkedSessionVerdict(mobile);
+        if (!parked.busy)
+            return null;
+        this.logger.info(mobile, `Session ${step} refused: ${(0, parked_session_guard_1.describeParkedVerdict)(parked)}`);
+        return { success: false, error: `Account is in use by the parked responder (${parked.reason}); try again later`, retryable: true, code: parked_session_guard_1.PARKED_SESSION_BUSY };
+    }
     getCredentials(mobile) {
         return (0, tg_config_1.getTelegramCredentialsForMobile)(mobile);
     }
@@ -46174,6 +47043,11 @@ let SessionService = class SessionService {
         if (!mobile || typeof mobile !== 'string') {
             return { success: false, error: 'Mobile number is required or must be extractable from session', retryable: false };
         }
+        const parked = await this.parkedSessionVerdict(mobile);
+        if (parked.busy) {
+            this.logger.info(mobile, `Session creation refused: ${(0, parked_session_guard_1.describeParkedVerdict)(parked)}`);
+            return { success: false, error: `Account is in use by the parked responder (${parked.reason}); try again later`, retryable: true, code: parked_session_guard_1.PARKED_SESSION_BUSY };
+        }
         const rateLimitCheck = this.checkRateLimit(mobile);
         if (!rateLimitCheck.allowed) {
             const resetTime = new Date(rateLimitCheck.resetTime || 0);
@@ -46195,6 +47069,9 @@ let SessionService = class SessionService {
                     this.logger.info(mobile, `Old session failed: ${result.error}`);
                 }
             }
+            const refusedBefore2 = await this.parkedRefusal(mobile, 'creation (priority 2)');
+            if (refusedBefore2)
+                return refusedBefore2;
             this.logger.info(mobile, 'Trying with existing manager (Priority 2)');
             const managerResult = await this.sessionManager.createSession({
                 ...options,
@@ -46209,6 +47086,8 @@ let SessionService = class SessionService {
             }
             this.logger.info(mobile, 'Trying with audit sessions (Priority 3)');
             const auditResult = await this.tryAuditSessions(mobile, options);
+            if (auditResult.code === parked_session_guard_1.PARKED_SESSION_BUSY)
+                return auditResult;
             if (auditResult.success) {
                 await this.updateAuditOnSuccess(mobile, auditResult.session, sessions_schema_1.SessionCreationMethod.OLD_SESSION);
                 return auditResult;
@@ -46241,6 +47120,9 @@ let SessionService = class SessionService {
             }
             for (let i = 0; i < Math.min(auditSessions.length, 2); i++) {
                 const auditSession = auditSessions[i];
+                const refused = await this.parkedRefusal(mobile, `creation (audit session ${i + 1})`);
+                if (refused)
+                    return refused;
                 try {
                     const result = await this.sessionManager.createSession({
                         ...options,
@@ -46364,7 +47246,20 @@ let SessionService = class SessionService {
                     retryable: true
                 };
             }
+            const parked = await this.parkedSessionVerdict(mobile);
+            if (parked.busy) {
+                this.logger.info(mobile, `Oldest-session lookup refused: ${(0, parked_session_guard_1.describeParkedVerdict)(parked)}`);
+                return {
+                    success: false,
+                    message: `Account is in use by the parked responder (${parked.reason}); try again later`,
+                    code: parked_session_guard_1.PARKED_SESSION_BUSY,
+                    retryable: true,
+                };
+            }
             const oldestSessionResult = await this.findOldestValidSession(mobile, maxAgeDays);
+            if (oldestSessionResult.parkedBusy) {
+                return { success: false, message: oldestSessionResult.error, code: parked_session_guard_1.PARKED_SESSION_BUSY, retryable: true };
+            }
             if (oldestSessionResult.success && oldestSessionResult.session) {
                 this.logger.info(mobile, 'Oldest valid session found, updating usage and returning');
                 try {
@@ -46413,11 +47308,12 @@ let SessionService = class SessionService {
             }
             else {
                 this.logger.error(mobile, 'Failed to create fallback session', createResult.error);
+                const parkedBusy = createResult.code === parked_session_guard_1.PARKED_SESSION_BUSY;
                 return {
                     success: false,
                     message: `Failed to create fallback session: ${createResult.error}`,
-                    code: 'FALLBACK_CREATION_FAILED',
-                    retryable: createResult.retryable || false
+                    code: parkedBusy ? parked_session_guard_1.PARKED_SESSION_BUSY : 'FALLBACK_CREATION_FAILED',
+                    retryable: parkedBusy || createResult.retryable || false
                 };
             }
         }
@@ -46460,6 +47356,9 @@ let SessionService = class SessionService {
                 return { success: false, error: 'No valid sessions found' };
             }
             for (const candidate of validSessions) {
+                const refused = await this.parkedRefusal(mobile, 'oldest-session validation');
+                if (refused)
+                    return { success: false, error: refused.error, parkedBusy: true };
                 this.logger.info(mobile, `Validating candidate session created at ${candidate.createdAt}`);
                 const validationResult = await this.sessionManager.validateSession(candidate.sessionString, mobile);
                 if (validationResult.isValid) {
@@ -46587,6 +47486,9 @@ Object.defineProperty(exports, "calculateWarmupPriority", { enumerable: true, ge
 Object.defineProperty(exports, "isAccountReady", { enumerable: true, get: function () { return warmup_phases_1.isAccountReady; } });
 Object.defineProperty(exports, "isAccountWarmingUp", { enumerable: true, get: function () { return warmup_phases_1.isAccountWarmingUp; } });
 const mobile_utils_1 = __webpack_require__(/*! ./mobile-utils */ "./src/components/shared/mobile-utils.ts");
+const parked_session_guard_1 = __webpack_require__(/*! ../clients/parked-session-guard */ "./src/components/clients/parked-session-guard.ts");
+const monitor_util_1 = __webpack_require__(/*! ../monitor/monitor-util */ "./src/components/monitor/monitor-util.ts");
+const account_role_events_1 = __webpack_require__(/*! ../clients/account-role-events */ "./src/components/clients/account-role-events.ts");
 exports.ClientStatus = {
     ACTIVE: 'active',
     INACTIVE: 'inactive',
@@ -46976,7 +47878,7 @@ class BaseClientService {
             await this.safeUnregisterClient(doc.mobile);
         }
     }
-    async updateStatus(mobile, status, message) {
+    async updateStatus(mobile, status, message, roleEvent = {}) {
         const pool = this.clientType;
         const Pool = pool === 'buffer' ? 'Buffer' : 'Promote';
         const updateData = { status };
@@ -46988,6 +47890,13 @@ class BaseClientService {
         try {
             const updated = await this.update(mobile, updateData);
             this.logger.log(`${Pool} client ${mobile} status updated to ${status}`);
+            this.recordRoleEvent({
+                mobile, clientId: updated?.clientId ?? null,
+                event: status === 'inactive' ? 'retired' : 'reactivated', pool, by: 'cms:status', reason: message ?? null,
+                reasonCode: (0, account_role_events_1.classifyRoleEventReason)(message, 'status_change'),
+                details: typeof roleEvent.permanent === 'boolean' ? { permanent: roleEvent.permanent } : undefined,
+                opId: roleEvent.opId ?? undefined,
+            });
             this.botsService.sendMessageByCategory(channel_category_enum_1.ChannelCategory.ACCOUNT_NOTIFICATIONS, {
                 title: `${Pool} status`,
                 fields: [
@@ -47017,14 +47926,14 @@ class BaseClientService {
     async markAsActive(mobile, message = 'Account is functioning properly') {
         return this.updateStatus(mobile, 'active', message);
     }
-    async markAsInactive(mobile, reason) {
+    async markAsInactive(mobile, reason, roleEvent) {
         try {
             const existing = await this.findOne(mobile, false);
             if (!existing || existing.status === 'inactive') {
                 return existing;
             }
             this.logger.log(`Marking ${this.clientType} client ${mobile} as inactive: ${reason}`);
-            return await this.updateStatus(mobile, 'inactive', reason);
+            return await this.updateStatus(mobile, 'inactive', reason, roleEvent?.opId ? { opId: roleEvent.opId } : {});
         }
         catch (error) {
             const errorMessage = error instanceof Error ? error.message : 'Unknown error';
@@ -47500,7 +48409,7 @@ class BaseClientService {
     async deactivateClient(mobile, reason, options = {}) {
         const taggedReason = this.classifyInactivationReason(reason, options.permanent);
         try {
-            await this.updateStatus(mobile, 'inactive', taggedReason);
+            await this.updateStatus(mobile, 'inactive', taggedReason, { permanent: options.permanent === true });
         }
         catch (error) {
             const errorMessage = error instanceof Error ? error.message : String(error);
@@ -48204,6 +49113,9 @@ class BaseClientService {
         try {
             await (0, Helpers_1.sleep)(client_helper_utils_1.ClientHelperUtils.gaussianRandom(20000, 2500, 15000, 25000));
             const rotated = await this.rotateSession(doc.mobile);
+            if (rotated === null) {
+                return { updateCount: 0, updateSummary: 'ready_rotation_parked_busy' };
+            }
             if (rotated) {
                 this.sendAccountNotice(this.warmupNotice('success', 'Warmup complete', doc.mobile, [{ label: 'Session', value: 'rotated', code: false }, { label: 'Channels', value: doc.channels || 0, code: false }]));
                 return { updateCount: 1, updateSummary: 'rotate_session' };
@@ -48284,8 +49196,13 @@ class BaseClientService {
             failedUpdateAttempts: doc.failedUpdateAttempts || 0,
             lastUpdateFailure: doc.lastUpdateFailure || null,
         });
+        let readyRecorded = false;
         if (warmupAction.phase !== doc.warmupPhase) {
             await this.update(doc.mobile, { warmupPhase: warmupAction.phase });
+            if (warmupAction.phase === warmup_phases_1.WarmupPhase.READY) {
+                this.recordRoleEvent({ mobile: doc.mobile, clientId: doc.clientId ?? null, event: 'ready', pool: this.clientType, by: 'cms:warmup', reason: `${doc.warmupPhase} -> ready`, reasonCode: 'warmup' });
+                readyRecorded = true;
+            }
         }
         if (warmupAction.action === 'wait') {
             await this.update(doc.mobile, { lastUpdateAttempt: new Date() });
@@ -48297,6 +49214,9 @@ class BaseClientService {
         if (warmupAction.action === 'advance_to_ready') {
             await this.update(doc.mobile, { warmupPhase: warmup_phases_1.WarmupPhase.READY });
             this.logger.log(`Client ${doc.mobile} advanced to READY`);
+            if (!readyRecorded && doc.warmupPhase !== warmup_phases_1.WarmupPhase.READY) {
+                this.recordRoleEvent({ mobile: doc.mobile, clientId: doc.clientId ?? null, event: 'ready', pool: this.clientType, by: 'cms:warmup', reason: `${doc.warmupPhase} -> ready`, reasonCode: 'warmup' });
+            }
             this.sendAccountNotice(this.warmupNotice('success', 'Warmup ready', doc.mobile, [{ label: 'Channels', value: doc.channels || 0, code: false }], 'Eligible for rotation'));
             return { updateCount: 0, updateSummary: 'advance_to_ready' };
         }
@@ -48348,8 +49268,13 @@ class BaseClientService {
                     }
                     this.logger.log(`Finished remove_external_login_sessions for ${doc.mobile}: updateCount=${updateCount}`);
                     return { updateCount, updateSummary: updateCount > 0 ? 'remove_external_login_sessions' : null };
-                case 'rotate_session':
-                    updateCount = (await this.rotateSession(doc.mobile)) ? 1 : 0;
+                case 'rotate_session': {
+                    const rotated = await this.rotateSession(doc.mobile);
+                    if (rotated === null) {
+                        await this.update(doc.mobile, { lastUpdateAttempt: new Date() });
+                        return { updateCount: 0, updateSummary: 'rotate_session_parked_busy' };
+                    }
+                    updateCount = rotated ? 1 : 0;
                     if (updateCount > 0) {
                         this.sendAccountNotice(this.warmupNotice('success', 'Warmup complete', doc.mobile, [{ label: 'Session', value: 'rotated', code: false }, { label: 'Channels', value: doc.channels || 0, code: false }]));
                     }
@@ -48362,6 +49287,7 @@ class BaseClientService {
                         this.sendAccountNotice(this.warmupNotice('warning', 'Warmup failed', doc.mobile, [{ label: 'Step', value: 'rotate_session', code: false }, { label: 'Fails', value: (doc.failedUpdateAttempts || 0) + 1, code: false }]));
                     }
                     return { updateCount, updateSummary: updateCount > 0 ? 'rotate_session' : null };
+                }
                 default:
                     await this.update(doc.mobile, { lastUpdateAttempt: new Date() });
                     return { updateCount: 0 };
@@ -48853,6 +49779,11 @@ class BaseClientService {
         const users = await this.usersService.findByMobileAnyStatus(mobile);
         let user = users[0];
         if (!user) {
+            const parked = await this.parkedSessionVerdict(mobile);
+            if (parked.busy) {
+                this.logger.warn(`Orphaned pool record ${(0, monitor_util_1.maskMobile)(mobile)}: users backfill skipped, ${(0, parked_session_guard_1.describeParkedVerdict)(parked)}`);
+                return null;
+            }
             const poolDoc = await this.model.findOne({ mobile }).lean().exec();
             const seedSession = (poolDoc?.session && String(poolDoc.session).trim()) || active;
             const healed = await this.usersService.backfillFromPool({
@@ -49335,6 +50266,15 @@ class BaseClientService {
         }
         return true;
     }
+    recordRoleEvent(input) {
+        try {
+            (0, account_role_events_1.recordAccountRoleEventSoon)((0, account_role_events_1.accountRoleEventsCollectionOf)(this.model), input, { logger: this.logger });
+        }
+        catch { }
+    }
+    async parkedSessionVerdict(mobile) {
+        return (0, parked_session_guard_1.checkParkedSession)(this.model?.db, mobile);
+    }
     async rotateSession(mobile) {
         let activeClient = null;
         try {
@@ -49360,6 +50300,15 @@ class BaseClientService {
                 this.logger.warn(`Session rotation refused for ${mobile}: ${missingPrerequisites.length > 0
                     ? `missing prerequisites ${missingPrerequisites.join(', ')}`
                     : 'session rotation already recorded'}`);
+                return false;
+            }
+            const parked = await this.parkedSessionVerdict(mobile);
+            if (parked.busy) {
+                if (parked.reason === 'open_episode' || parked.reason === 'parked_lease') {
+                    this.logger.warn(`Session rotation skipped for ${(0, monitor_util_1.maskMobile)(mobile)}: ${(0, parked_session_guard_1.describeParkedVerdict)(parked)}`);
+                    return null;
+                }
+                this.logger.warn(`Session rotation refused for ${(0, monitor_util_1.maskMobile)(mobile)}: ${(0, parked_session_guard_1.describeParkedVerdict)(parked)}`);
                 return false;
             }
             this.logger.log(`Starting session rotation for ${mobile}`);
@@ -49428,6 +50377,7 @@ class BaseClientService {
             skipped: 0,
             errors: [],
         };
+        let nonStringMobiles = 0;
         const clients = await this.model.find({
             status: 'active',
             inUse: { $ne: true },
@@ -49437,6 +50387,17 @@ class BaseClientService {
         for (const doc of clients) {
             const mobile = doc.mobile;
             const session = doc.session;
+            if (typeof mobile !== 'string') {
+                nonStringMobiles++;
+                results.skipped++;
+                continue;
+            }
+            const parked = await this.parkedSessionVerdict(mobile);
+            if (parked.busy) {
+                this.logger.warn(`[HealSessions] ${(0, monitor_util_1.maskMobile)(mobile)}: skipped, ${(0, parked_session_guard_1.describeParkedVerdict)(parked)}`);
+                results.skipped++;
+                continue;
+            }
             if (!session?.trim()) {
                 this.logger.warn(`[HealSessions] ${mobile}: no session string stored — attempting users-session recovery`);
                 let recoveredActiveClient = null;
@@ -49498,6 +50459,10 @@ class BaseClientService {
                     results.healed++;
                     this.logger.log(`[HealSessions] ${mobile}: session healed ✓`);
                 }
+                else if (createResult.retryable === true || createResult.code === parked_session_guard_1.PARKED_SESSION_BUSY) {
+                    this.logger.warn(`[HealSessions] ${(0, monitor_util_1.maskMobile)(mobile)}: session creation deferred (retryable) — ${createResult.error}`);
+                    results.skipped++;
+                }
                 else {
                     this.logger.warn(`[HealSessions] ${mobile}: session creation failed — ${createResult.error}`);
                     const deactivated = await this.deactivateClient(mobile, `Session heal: creation failed — ${createResult.error}`, { permanent: true });
@@ -49516,6 +50481,9 @@ class BaseClientService {
                 results.errors.push({ mobile, error: errMsg, action: deactivated ? 'deactivated (creation error)' : 'deactivation failed (creation error)' });
             }
             await (0, Helpers_1.sleep)(5000);
+        }
+        if (nonStringMobiles > 0) {
+            this.logger.warn(`[HealSessions] ${nonStringMobiles} ${this.clientType} pool doc(s) with a non-string mobile skipped (parked guard cannot check them)`);
         }
         this.logger.log(`[HealSessions] Complete: ${results.total} total, ${results.healthy} healthy, ` +
             `${results.healed} healed, ${results.deactivated} deactivated, ${results.skipped} skipped`);
@@ -50129,6 +51097,7 @@ const client_helper_utils_1 = __webpack_require__(/*! ../client-helper.utils */ 
 const enrollment_lock_1 = __webpack_require__(/*! ../enrollment-lock */ "./src/components/shared/enrollment-lock.ts");
 const pool_claim_1 = __webpack_require__(/*! ./pool-claim */ "./src/components/shared/onboarding/pool-claim.ts");
 const warmup_phases_1 = __webpack_require__(/*! ../warmup-phases */ "./src/components/shared/warmup-phases.ts");
+const account_role_events_1 = __webpack_require__(/*! ../../clients/account-role-events */ "./src/components/clients/account-role-events.ts");
 async function enrolPoolClientFromUser(port, document, targetClientId, availableDate) {
     const { profile, logger } = port;
     const pool = profile.kind;
@@ -50200,6 +51169,10 @@ async function enrolPoolClientFromUser(port, document, targetClientId, available
         }
         if (!enrolled)
             return false;
+        (0, account_role_events_1.recordAccountRoleEventSoon)((0, account_role_events_1.accountRoleEventsCollectionOf)(port.model), {
+            mobile: canonical, clientId: targetClientId, event: 'enrolled', pool, by: 'cms:auto-enrol',
+            reasonCode: 'enrolment', details: { availableDate: targetAvailableDate },
+        }, { logger });
         logger.log(`Created ${profile.label}Client for ${targetClientId} with availability ${targetAvailableDate}`);
         await port.sendAccountNotice({
             severity: 'success',
@@ -50441,6 +51414,7 @@ const enrollment_lock_1 = __webpack_require__(/*! ../enrollment-lock */ "./src/c
 const warmup_phases_1 = __webpack_require__(/*! ../warmup-phases */ "./src/components/shared/warmup-phases.ts");
 const candidate_source_1 = __webpack_require__(/*! ./candidate-source */ "./src/components/shared/onboarding/candidate-source.ts");
 const pool_profile_1 = __webpack_require__(/*! ./pool-profile */ "./src/components/shared/onboarding/pool-profile.ts");
+const account_role_events_1 = __webpack_require__(/*! ../../clients/account-role-events */ "./src/components/clients/account-role-events.ts");
 async function setAsPoolClient(port, mobile, clientId, availableDate) {
     const { profile } = port;
     const cfg = profile.setAs;
@@ -50518,6 +51492,10 @@ async function setAsPoolClient(port, mobile, clientId, availableDate) {
             }, { returnDocument: 'after', upsert: true })
                 .exec();
         }));
+        (0, account_role_events_1.recordAccountRoleEventSoon)((0, account_role_events_1.accountRoleEventsCollectionOf)(port.model), {
+            mobile: canonicalMobile, clientId: targetClientId ?? null, event: 'enrolled', pool: profile.kind, by: 'cms:set-as',
+            reasonCode: 'enrolment', details: { availableDate },
+        }, { logger: port.logger });
     }
     catch (error) {
         const errorDetails = cfg.errorContext
@@ -56177,8 +57155,11 @@ let UsersService = UsersService_1 = class UsersService {
         this.promoteClientService = promoteClientService;
         this.logger = new utils_1.Logger(UsersService_1.name);
     }
-    async expireAccount(mobile, reason = 'Account permanently lost (session revoked / banned / deactivated)') {
+    async expireAccount(mobile, reason = 'Account permanently lost (session revoked / banned / deactivated)', roleEvent) {
         const canonicalMobile = this.canonicalMobile(mobile);
+        const cascadeArgs = roleEvent?.opId
+            ? [canonicalMobile, reason, { opId: roleEvent.opId }]
+            : [canonicalMobile, reason];
         try {
             await this.userModel
                 .updateMany({ mobile: canonicalMobile }, { $set: { expired: true } })
@@ -56190,7 +57171,7 @@ let UsersService = UsersService_1 = class UsersService {
         await Promise.allSettled([
             (async () => {
                 try {
-                    await this.bufferClientService.markAsInactive(canonicalMobile, reason);
+                    await this.bufferClientService.markAsInactive(...cascadeArgs);
                 }
                 catch (error) {
                     this.logger.error(`expireAccount: failed to deactivate buffer client ${canonicalMobile}: ${error instanceof Error ? error.message : String(error)}`);
@@ -56198,7 +57179,7 @@ let UsersService = UsersService_1 = class UsersService {
             })(),
             (async () => {
                 try {
-                    await this.promoteClientService.markAsInactive(canonicalMobile, reason);
+                    await this.promoteClientService.markAsInactive(...cascadeArgs);
                 }
                 catch (error) {
                     this.logger.error(`expireAccount: failed to deactivate promote client ${canonicalMobile}: ${error instanceof Error ? error.message : String(error)}`);
