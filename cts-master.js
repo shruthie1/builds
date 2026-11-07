@@ -32799,6 +32799,9 @@ let FakePaymentController = class FakePaymentController {
     unmark(chatId, body) {
         return this.service.unmark(chatId, body ?? {});
     }
+    notFake(chatId, body) {
+        return this.service.notFake(chatId, body ?? {});
+    }
 };
 exports.FakePaymentController = FakePaymentController;
 __decorate([
@@ -32815,7 +32818,15 @@ __decorate([
     (0, common_1.HttpCode)(200),
     (0, swagger_1.ApiOperation)({ summary: 'Mark ALL payments of the chat fake: no revenue, blocked, owed nothing (idempotent)' }),
     (0, swagger_1.ApiParam)({ name: 'chatId' }),
-    (0, swagger_1.ApiBody)({ schema: { type: 'object', required: ['by', 'reason'], properties: { by: { type: 'string' }, reason: { type: 'string' } } } }),
+    (0, swagger_1.ApiBody)({
+        schema: {
+            type: 'object', required: ['reason'],
+            properties: {
+                by: { type: 'string', description: "operator; default 'tg-chats'" }, reason: { type: 'string' },
+                proofIds: { type: 'array', items: { type: 'string' }, description: 'the proofs judged fake (proof ids of this chat)' },
+            },
+        },
+    }),
     __param(0, (0, common_1.Param)('chatId')),
     __param(1, (0, common_1.Body)()),
     __metadata("design:type", Function),
@@ -32827,13 +32838,28 @@ __decorate([
     (0, common_1.HttpCode)(200),
     (0, swagger_1.ApiOperation)({ summary: 'Remove the fake-payment mark: restore payAmount / canReply and revenue (idempotent)' }),
     (0, swagger_1.ApiParam)({ name: 'chatId' }),
-    (0, swagger_1.ApiBody)({ schema: { type: 'object', required: ['by'], properties: { by: { type: 'string' }, reason: { type: 'string' } } } }),
+    (0, swagger_1.ApiBody)({ schema: { type: 'object', properties: { by: { type: 'string', description: "default 'tg-chats'" }, reason: { type: 'string' } } } }),
     __param(0, (0, common_1.Param)('chatId')),
     __param(1, (0, common_1.Body)()),
     __metadata("design:type", Function),
     __metadata("design:paramtypes", [String, Object]),
     __metadata("design:returntype", void 0)
 ], FakePaymentController.prototype, "unmark", null);
+__decorate([
+    (0, common_1.Post)(':chatId/not-fake'),
+    (0, common_1.HttpCode)(200),
+    (0, swagger_1.ApiOperation)({
+        summary: 'Not fake: undo an operator mark (unmark, history kept) or a payment-check fraud block / unknown mute ' +
+            '(canReply 1, limitTime 0, open fraud asks closed). Never writes cheatCount. Idempotent',
+    }),
+    (0, swagger_1.ApiParam)({ name: 'chatId' }),
+    (0, swagger_1.ApiBody)({ schema: { type: 'object', properties: { by: { type: 'string', description: "default 'tg-chats'" }, reason: { type: 'string' } } } }),
+    __param(0, (0, common_1.Param)('chatId')),
+    __param(1, (0, common_1.Body)()),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [String, Object]),
+    __metadata("design:returntype", void 0)
+], FakePaymentController.prototype, "notFake", null);
 exports.FakePaymentController = FakePaymentController = __decorate([
     (0, swagger_1.ApiTags)('fake-payment'),
     (0, common_1.Controller)('fake-payment'),
@@ -32904,7 +32930,7 @@ var __param = (this && this.__param) || function (paramIndex, decorator) {
 };
 var FakePaymentService_1;
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.FakePaymentService = exports.CHAT_ID_RE = void 0;
+exports.FakePaymentService = exports.DEFAULT_BY = exports.CHAT_ID_RE = void 0;
 const common_1 = __webpack_require__(/*! @nestjs/common */ "@nestjs/common");
 const mongoose_1 = __webpack_require__(/*! @nestjs/mongoose */ "@nestjs/mongoose");
 const mongoose_2 = __webpack_require__(/*! mongoose */ "mongoose");
@@ -32913,10 +32939,16 @@ const analytics_pg_reader_1 = __webpack_require__(/*! ../daily-analytics/analyti
 const channel_category_enum_1 = __webpack_require__(/*! ../bots/channel-category.enum */ "./src/components/bots/channel-category.enum.ts");
 const utils_1 = __webpack_require__(/*! ../../utils */ "./src/utils/index.ts");
 const payment_proofs_service_1 = __webpack_require__(/*! ../payment-proofs/payment-proofs.service */ "./src/components/payment-proofs/payment-proofs.service.ts");
+const payment_proofs_classify_1 = __webpack_require__(/*! ../payment-proofs/payment-proofs.classify */ "./src/components/payment-proofs/payment-proofs.classify.ts");
 exports.CHAT_ID_RE = /^-?\d{3,20}$/;
 const MAX_REASON = 300;
 const MAX_BY = 60;
-const ROW_PROJECTION = { chatId: 1, profile: 1, clientId: 1, payAmount: 1, highestPayAmount: 1, canReply: 1, cheatCount: 1, fakePaymentAt: 1, fakePaymentBy: 1, fakePaymentReason: 1, fakePaymentPrev: 1 };
+exports.DEFAULT_BY = 'tg-chats';
+const MAX_PROOF_IDS = 50;
+const ROW_PROJECTION = {
+    chatId: 1, profile: 1, clientId: 1, payAmount: 1, highestPayAmount: 1, canReply: 1, cheatCount: 1, fakePaymentAt: 1,
+    fakePaymentBy: 1, fakePaymentReason: 1, fakePaymentPrev: 1, fakePaymentProofIds: 1, fakePaymentHistory: 1,
+};
 function clean(value, max) {
     return typeof value === 'string' ? value.trim().slice(0, max) : '';
 }
@@ -32936,7 +32968,7 @@ let FakePaymentService = FakePaymentService_1 = class FakePaymentService {
         if (!ops.length)
             return;
         try {
-            await this.userDataModel.bulkWrite(ops, { ordered: true });
+            await this.userDataModel.bulkWrite(ops, { ordered: true, strict: false });
         }
         finally {
             await this.paymentProofs?.chatChanged(chatId);
@@ -32998,14 +33030,21 @@ let FakePaymentService = FakePaymentService_1 = class FakePaymentService {
             },
         };
     }
+    proofIdsOrThrow(chatId, raw) {
+        if (raw === undefined || raw === null)
+            return [];
+        if (!Array.isArray(raw) || raw.length > MAX_PROOF_IDS || raw.some((p) => (0, payment_proofs_classify_1.parseProofId)(p)?.chatId !== chatId)) {
+            throw new common_1.BadRequestException(`proofIds must be at most ${MAX_PROOF_IDS} proof ids of this chat`);
+        }
+        return [...new Set(raw.map((p) => String(p).trim()))];
+    }
     async mark(rawChatId, body = {}) {
         const chatId = this.chatIdOrThrow(rawChatId);
-        const by = clean(body.by, MAX_BY);
+        const by = clean(body.by, MAX_BY) || exports.DEFAULT_BY;
         const reason = clean(body.reason, MAX_REASON);
-        if (!by)
-            throw new common_1.BadRequestException('by (operator name) is required');
         if (!reason)
             throw new common_1.BadRequestException('reason is required');
+        const proofIds = this.proofIdsOrThrow(chatId, body.proofIds);
         const rows = await this.rows(chatId);
         const now = new Date();
         const ops = rows.map((r) => r.fakePaymentAt == null
@@ -33018,9 +33057,11 @@ let FakePaymentService = FakePaymentService_1 = class FakePaymentService {
                             fakePaymentBy: by,
                             fakePaymentReason: reason,
                             fakePaymentPrev: { payAmount: r.payAmount ?? 0, canReply: r.canReply ?? 1 },
+                            ...(proofIds.length ? { fakePaymentProofIds: proofIds } : {}),
                             payAmount: 0,
                             canReply: 0,
                         },
+                        $push: { fakePaymentHistory: { action: 'mark', by, reason, at: now, proofIds } },
                     },
                 },
             }
@@ -33054,12 +33095,16 @@ let FakePaymentService = FakePaymentService_1 = class FakePaymentService {
     }
     async unmark(rawChatId, body = {}) {
         const chatId = this.chatIdOrThrow(rawChatId);
-        const by = clean(body.by, MAX_BY);
+        const by = clean(body.by, MAX_BY) || exports.DEFAULT_BY;
         const reason = clean(body.reason, MAX_REASON);
-        if (!by)
-            throw new common_1.BadRequestException('by (operator name) is required');
+        const now = new Date();
         const rows = (await this.rows(chatId)).filter((r) => r.fakePaymentAt != null);
         const ops = rows.map((r) => {
+            const history = [];
+            if (!(r.fakePaymentHistory ?? []).some((h) => h.action === 'mark')) {
+                history.push({ action: 'mark', by: r.fakePaymentBy ?? '', reason: r.fakePaymentReason ?? '', at: r.fakePaymentAt, proofIds: r.fakePaymentProofIds ?? [] });
+            }
+            history.push({ action: 'unmark', by, reason, at: now, proofIds: r.fakePaymentProofIds ?? [] });
             const prev = r.fakePaymentPrev ?? {};
             const restore = {};
             if (typeof prev.payAmount === 'number' && r.payAmount === 0) {
@@ -33073,7 +33118,8 @@ let FakePaymentService = FakePaymentService_1 = class FakePaymentService {
                     filter: { _id: r._id },
                     update: {
                         ...(Object.keys(restore).length ? { $set: restore } : {}),
-                        $unset: { fakePaymentAt: '', fakePaymentBy: '', fakePaymentReason: '', fakePaymentPrev: '' },
+                        $unset: { fakePaymentAt: '', fakePaymentBy: '', fakePaymentReason: '', fakePaymentPrev: '', fakePaymentProofIds: '' },
+                        $push: { fakePaymentHistory: { $each: history } },
                     },
                 },
             };
@@ -33101,6 +33147,42 @@ let FakePaymentService = FakePaymentService_1 = class FakePaymentService {
             { label: 'Payer-days given back', value: String(postgres.payerDays) },
         ]);
         return { chatId, marked: false, mongo, postgres };
+    }
+    async notFake(rawChatId, body = {}) {
+        const chatId = this.chatIdOrThrow(rawChatId);
+        const by = clean(body.by, MAX_BY) || exports.DEFAULT_BY;
+        const reason = clean(body.reason, MAX_REASON);
+        const rows = await this.rows(chatId);
+        if (rows.some((r) => r.fakePaymentAt != null)) {
+            const res = await this.unmark(chatId, { by, reason });
+            return { ...res, source: 'operator_mark', changed: true, rowsUnmuted: res.mongo.rowsUnmarked, asksClosed: [] };
+        }
+        if (!this.paymentProofs)
+            throw new common_1.ServiceUnavailableException('payment proofs service unavailable');
+        const now = new Date();
+        const closed = await this.paymentProofs.closeFraudAsks(chatId, by, now);
+        const muted = rows.filter((r) => r.canReply === 0);
+        if (!muted.length && !closed.proofIds.length) {
+            return { chatId, source: 'none', changed: false, rowsUnmuted: 0, asksClosed: [] };
+        }
+        const source = closed.blocked > 0 ? 'fraud_block' : 'unknown';
+        const entry = { action: 'unmute', by, reason, at: now, proofIds: closed.proofIds, source };
+        await this.writeRows(chatId, rows.map((r) => ({
+            updateOne: {
+                filter: { _id: r._id },
+                update: {
+                    ...(r.canReply === 0 ? { $set: { canReply: 1, limitTime: 0 } } : {}),
+                    $push: { fakePaymentHistory: entry },
+                },
+            },
+        })));
+        this.logger.warn(`fake-payment not-fake ${chatId} by ${by}: ${source}, rows unmuted ${muted.length}, asks closed ${closed.proofIds.length}`);
+        this.notify('info', 'Mute lifted (not fake)', chatId, by, reason, [
+            { label: 'Source', value: source === 'fraud_block' ? 'payment check fraud block' : 'unknown' },
+            { label: 'Persona rows unmuted', value: `${muted.length} of ${rows.length}` },
+            { label: 'Fraud asks closed', value: String(closed.proofIds.length) },
+        ]);
+        return { chatId, source, changed: true, rowsUnmuted: muted.length, asksClosed: closed.proofIds };
     }
     notify(severity, title, chatId, by, reason, extra) {
         try {
@@ -41863,6 +41945,8 @@ function classify(row) {
         credited,
         risk: 0,
         riskReasons: [],
+        baseRisk: 0,
+        baseReasons: [],
         atRiskAmount: credited ? amount ?? 0 : 0,
         strong: false,
         repeat: outcome === 'repeat',
@@ -42048,7 +42132,17 @@ function buildReviewModel(items, isMarked, options = exports.DEFAULT_REVIEW_OPTI
             const reasons = [];
             let risk = 0;
             let strong = false;
-            const add = (pts, label, isStrong = false) => { risk += pts; reasons.push(label); strong ||= isStrong; };
+            let baseRisk = 0;
+            const baseReasons = [];
+            const add = (pts, label, isStrong = false) => {
+                risk += pts;
+                reasons.push(label);
+                strong ||= isStrong;
+                if (!isStrong) {
+                    baseRisk += pts;
+                    baseReasons.push(label);
+                }
+            };
             const fakeCodes = x.c.reasons.filter(isFakeReason);
             if (fakeCodes.length)
                 add(exports.RISK.fakeReason, `Fake sign: ${fakeCodes.join(', ')}`, true);
@@ -42106,6 +42200,8 @@ function buildReviewModel(items, isMarked, options = exports.DEFAULT_REVIEW_OPTI
             x.c.risk = Math.min(100, risk);
             x.c.riskReasons = reasons;
             x.c.strong = strong;
+            x.c.baseRisk = Math.min(100, baseRisk);
+            x.c.baseReasons = baseReasons;
         }
     }
     const days = new Map();
@@ -42188,12 +42284,18 @@ const common_1 = __webpack_require__(/*! @nestjs/common */ "@nestjs/common");
 const swagger_1 = __webpack_require__(/*! @nestjs/swagger */ "@nestjs/swagger");
 const payment_proofs_classify_1 = __webpack_require__(/*! ./payment-proofs.classify */ "./src/components/payment-proofs/payment-proofs.classify.ts");
 const payment_proofs_service_1 = __webpack_require__(/*! ./payment-proofs.service */ "./src/components/payment-proofs/payment-proofs.service.ts");
+const payment_proofs_views_1 = __webpack_require__(/*! ./payment-proofs.views */ "./src/components/payment-proofs/payment-proofs.views.ts");
 let PaymentProofsController = class PaymentProofsController {
     constructor(service) {
         this.service = service;
     }
     list(query) {
+        if (query?.view !== undefined && query.view !== '')
+            return this.service.views(query);
         return this.service.list(query ?? {});
+    }
+    reviewChat(chatId, body) {
+        return this.service.reviewChat(chatId, body ?? {});
     }
     review(proofId, body) {
         return this.service.review(proofId, body ?? {});
@@ -42225,11 +42327,30 @@ __decorate([
     (0, swagger_1.ApiQuery)({ name: 'limit', required: false, description: `default 50, max ${payment_proofs_service_1.MAX_LIMIT}` }),
     (0, swagger_1.ApiQuery)({ name: 'cursor', required: false, description: 'nextCursor from the previous page (same sort)' }),
     (0, swagger_1.ApiQuery)({ name: 'sort', required: false, enum: payment_proofs_service_1.PROOF_SORTS, description: 'default risk for state=review, else time' }),
+    (0, swagger_1.ApiQuery)({
+        name: 'view', required: false, enum: payment_proofs_views_1.REVIEW_VIEWS,
+        description: 'Redesign 2026-11-07 (additive; without view the response above is unchanged). check = one entry per chat ' +
+            'needing a look (real fake signal or high value); muted = one entry per chat with fakePaymentAt or canReply 0 ' +
+            '(source, when, why, evidence); refused = uncredited proofs that look genuine. Response { view, entries, counts, ' +
+            'truncated }; only client applies.',
+    }),
     __param(0, (0, common_1.Query)()),
     __metadata("design:type", Function),
     __metadata("design:paramtypes", [Object]),
     __metadata("design:returntype", void 0)
 ], PaymentProofsController.prototype, "list", null);
+__decorate([
+    (0, common_1.Post)('chat/:chatId/review'),
+    (0, common_1.HttpCode)(200),
+    (0, swagger_1.ApiOperation)({ summary: "Looks fine on a whole chat: review 'ok' on its credited, unreviewed proofs (only proofIds when given). Idempotent" }),
+    (0, swagger_1.ApiParam)({ name: 'chatId' }),
+    (0, swagger_1.ApiBody)({ schema: { type: 'object', required: ['by'], properties: { by: { type: 'string' }, proofIds: { type: 'array', items: { type: 'string' } } } } }),
+    __param(0, (0, common_1.Param)('chatId')),
+    __param(1, (0, common_1.Body)()),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [String, Object]),
+    __metadata("design:returntype", void 0)
+], PaymentProofsController.prototype, "reviewChat", null);
 __decorate([
     (0, common_1.Post)(':proofId/review'),
     (0, common_1.HttpCode)(200),
@@ -42321,6 +42442,7 @@ const mongoose_2 = __webpack_require__(/*! mongoose */ "mongoose");
 const user_data_schema_1 = __webpack_require__(/*! ../user-data/schemas/user-data.schema */ "./src/components/user-data/schemas/user-data.schema.ts");
 const payment_proof_schema_1 = __webpack_require__(/*! ./schemas/payment-proof.schema */ "./src/components/payment-proofs/schemas/payment-proof.schema.ts");
 const payment_proofs_classify_1 = __webpack_require__(/*! ./payment-proofs.classify */ "./src/components/payment-proofs/payment-proofs.classify.ts");
+const payment_proofs_views_1 = __webpack_require__(/*! ./payment-proofs.views */ "./src/components/payment-proofs/payment-proofs.views.ts");
 exports.DEFAULT_LIMIT = 50;
 exports.MAX_LIMIT = 100;
 exports.DEFAULT_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
@@ -42346,6 +42468,11 @@ const CLASSIFY_PROJECTION = {
     'verdict.outcome': 1, 'verdict.reasons': 1, 'verdict.fakeScore': 1, 'review.state': 1,
     imageSha256: 1, 'image.sha256': 1, utr: 1, payeeUpiId: 1, payeeName: 1, 'time.state': 1, 'time.epochMs': 1,
     'verdict.fakeSignals': 1, 'ocr.payerName': 1,
+    'verdict.payee': 1, 'ask.state': 1, 'ask.openedAt': 1, 'ask.closedAt': 1, 'image.stored': 1, 'image.host': 1,
+};
+const CHAT_USER_PROJECTION = {
+    _id: 0, chatId: 1, profile: 1, clientId: 1, username: 1, cheatCount: 1, canReply: 1, payAmount: 1, fakePaymentAt: 1,
+    fakePaymentBy: 1, fakePaymentReason: 1, fakePaymentPrev: 1, fakePaymentProofIds: 1, fakePaymentHistory: 1,
 };
 exports.PROOF_SORTS = ['risk', 'time'];
 let PaymentProofsService = PaymentProofsService_1 = class PaymentProofsService {
@@ -42520,13 +42647,16 @@ let PaymentProofsService = PaymentProofsService_1 = class PaymentProofsService {
         const truncated = rows.length > exports.MAX_WINDOW_ROWS;
         if (truncated)
             rows.length = exports.MAX_WINDOW_ROWS;
-        const chats = await this.chatInfo([...new Set(rows.map((row) => String(row.chatId)))]);
+        const markedIds = (await this.userDataModel.distinct('chatId', { fakePaymentAt: { $ne: null } }).exec()).map(String);
+        const chats = await this.chatInfo([...new Set([...rows.map((row) => String(row.chatId)), ...markedIds])]);
         return this.derive({ loadedAt: now, rows, truncated, chats });
     }
     derive(d) {
         const everything = d.rows.map((row) => ({ row, c: (0, payment_proofs_classify_1.classify)(row) }));
-        const reviewModel = (0, payment_proofs_classify_1.buildReviewModel)(everything, (chatId) => !!d.chats.get(chatId)?.marked, (0, payment_proofs_classify_1.reviewOptionsFromEnv)());
-        return { ...d, everything, reviewModel };
+        const options = (0, payment_proofs_classify_1.reviewOptionsFromEnv)();
+        const reviewModel = (0, payment_proofs_classify_1.buildReviewModel)(everything, (chatId) => !!d.chats.get(chatId)?.marked, options);
+        const users = new Map([...d.chats].map(([chatId, e]) => [chatId, [...e.rows.values()]]));
+        return { ...d, everything, reviewModel, views: (0, payment_proofs_views_1.buildViews)(everything, users, options) };
     }
     async patchWindows(what, apply) {
         this.gen++;
@@ -42550,7 +42680,7 @@ let PaymentProofsService = PaymentProofsService_1 = class PaymentProofsService {
         await this.patchWindows(`fake-payment ${id}`, async () => {
             const fresh = (await this.chatInfo([id])).get(id);
             return (w) => {
-                if (!w.rows.some((r) => String(r.chatId) === id))
+                if (!fresh && !w.chats.has(id))
                     return null;
                 const chats = new Map(w.chats);
                 if (fresh)
@@ -42566,7 +42696,7 @@ let PaymentProofsService = PaymentProofsService_1 = class PaymentProofsService {
         for (let i = 0; i < chatIds.length; i += USERDATA_IN_CHUNK) {
             const chunk = chatIds.slice(i, i + USERDATA_IN_CHUNK);
             const docs = await this.userDataModel
-                .find({ chatId: { $in: chunk } }, { _id: 0, chatId: 1, profile: 1, username: 1, cheatCount: 1, fakePaymentAt: 1 })
+                .find({ chatId: { $in: chunk } }, CHAT_USER_PROJECTION)
                 .lean()
                 .exec();
             for (const d of docs) {
@@ -42599,6 +42729,80 @@ let PaymentProofsService = PaymentProofsService_1 = class PaymentProofsService {
                 map.set(d.clientId, d.repl);
         this.clientHosts = { at: now, map };
         return map;
+    }
+    async views(q, now = Date.now()) {
+        const view = String(q.view ?? '');
+        if (!payment_proofs_views_1.REVIEW_VIEWS.includes(view))
+            throw new common_1.BadRequestException(`view must be one of ${payment_proofs_views_1.REVIEW_VIEWS.join('|')}`);
+        let client;
+        if (q.client !== undefined && q.client !== '') {
+            if (!CLIENT_ID_RE.test(String(q.client)))
+                throw new common_1.BadRequestException('client must be a clientId');
+            client = String(q.client);
+        }
+        const w = await this.window(now - exports.DEFAULT_WINDOW_MS, now);
+        const keep = (e) => !client || (e.clients ? e.clients.includes(client) : e.clientId === client);
+        const filtered = {
+            check: w.views.check.filter(keep),
+            muted: w.views.muted.filter(keep),
+            refused: w.views.refused.filter(keep),
+        };
+        const hosts = await this.clientHostMap(now);
+        const withHost = (c) => ({ ...c, clientHost: hosts.get(c.clientId) ?? null });
+        const entries = view === 'check'
+            ? filtered.check.map((e) => ({ ...e, history: e.history.map(withHost) }))
+            : view === 'muted'
+                ? filtered.muted.map((e) => ({ ...e, evidence: e.evidence.map(withHost) }))
+                : filtered.refused.map(withHost);
+        return {
+            view,
+            entries,
+            counts: { check: filtered.check.length, muted: filtered.muted.length, refused: filtered.refused.length },
+            truncated: w.truncated,
+        };
+    }
+    async reviewChat(chatId, body, now = new Date()) {
+        const id = String(chatId ?? '').trim();
+        if (!/^-?\d{1,20}$/.test(id))
+            throw new common_1.BadRequestException('chatId must be a chatId');
+        const by = typeof body?.by === 'string' ? body.by.trim().slice(0, MAX_BY) : '';
+        if (!by)
+            throw new common_1.BadRequestException('by is required');
+        let only = null;
+        if (body?.proofIds !== undefined) {
+            if (!Array.isArray(body.proofIds) || body.proofIds.some((p) => (0, payment_proofs_classify_1.parseProofId)(p)?.chatId !== id)) {
+                throw new common_1.BadRequestException('proofIds must be proof ids of this chat');
+            }
+            only = new Set(body.proofIds);
+        }
+        const rows = await this.proofModel.find({ chatId: id }, CLASSIFY_PROJECTION).lean().exec();
+        const todo = rows.map((row) => ({ row, c: (0, payment_proofs_classify_1.classify)(row) }))
+            .filter(({ c }) => c.credited && !c.reviewed && (!only || only.has(c.proofId)));
+        if (todo.length) {
+            const review = { state: 'ok', by, at: now };
+            await this.proofModel.updateMany({ _id: { $in: todo.map((x) => x.row._id) } }, { $set: { review } }).exec();
+            await this.patchWindows(`review chat ${id}`, () => this.rereadChat(id));
+        }
+        return { chatId: id, reviewed: todo.map((x) => x.c.proofId) };
+    }
+    async closeFraudAsks(chatId, by, now = new Date()) {
+        const filter = { chatId, 'ask.kind': 'fraud', 'ask.state': 'open' };
+        const open = await this.proofModel.find(filter, CLASSIFY_PROJECTION).lean().exec();
+        if (!open.length)
+            return { proofIds: [], blocked: 0 };
+        await this.proofModel.updateMany({ _id: { $in: open.map((r) => r._id) }, 'ask.state': 'open' }, { $set: { 'ask.state': 'resolved', 'ask.resolvedAt': now, 'ask.closedAt': now, 'ask.closedBy': by } }).exec();
+        await this.patchWindows(`close fraud asks ${chatId}`, () => this.rereadChat(chatId));
+        return { proofIds: open.map((r) => (0, payment_proofs_classify_1.proofIdOf)(r)), blocked: open.filter((r) => !!r.ask?.blockedAt).length };
+    }
+    async rereadChat(chatId) {
+        const fresh = new Map((await this.proofModel.find({ chatId }, CLASSIFY_PROJECTION).lean().exec())
+            .map((r) => [String(r._id), r]));
+        return (w) => {
+            let hit = false;
+            const rows = w.rows.map((r) => { const f = fresh.get(String(r._id)); if (f)
+                hit = true; return f ?? r; });
+            return hit ? this.derive({ ...w, rows }) : null;
+        };
     }
     async review(proofId, body, now = new Date()) {
         const key = (0, payment_proofs_classify_1.parseProofId)(proofId);
@@ -42637,6 +42841,274 @@ exports.PaymentProofsService = PaymentProofsService = PaymentProofsService_1 = _
     __metadata("design:paramtypes", [mongoose_2.Model,
         mongoose_2.Model])
 ], PaymentProofsService);
+
+
+/***/ },
+
+/***/ "./src/components/payment-proofs/payment-proofs.views.ts"
+/*!***************************************************************!*\
+  !*** ./src/components/payment-proofs/payment-proofs.views.ts ***!
+  \***************************************************************/
+(__unused_webpack_module, exports, __webpack_require__) {
+
+
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.REVIEW_VIEWS = void 0;
+exports.isRealFakeReason = isRealFakeReason;
+exports.proofCard = proofCard;
+exports.buildViews = buildViews;
+const payment_proofs_classify_1 = __webpack_require__(/*! ./payment-proofs.classify */ "./src/components/payment-proofs/payment-proofs.classify.ts");
+const REAL_FAKE_CODES = new Set([
+    'PERSONA_PAYEE', 'LAXMI_PAYEE', 'UPI_NOT_OURS', 'FAKE_TEXT', 'EDITED_PICTURE', 'AI_WATERMARK', 'DATE_IN_FUTURE',
+]);
+const REAL_FAKE_PREFIXES = ['LLM_FAKE_', 'FUTURE_', 'DISCLAIMER_', 'BLOCKLIST_', 'UTR_REUSED'];
+function isRealFakeReason(code) {
+    return REAL_FAKE_CODES.has(code) || REAL_FAKE_PREFIXES.some((p) => code.startsWith(p));
+}
+exports.REVIEW_VIEWS = ['check', 'muted', 'refused'];
+const MIN_MS = 60_000;
+const DAY_MS = 24 * 60 * MIN_MS;
+const FRESH_MS = 30 * MIN_MS;
+const SKEW_MS = 5 * MIN_MS;
+const NOT_A_MISSED_CREDIT_OUTCOMES = new Set(['not_receipt', 'over_limit', 'cross_client', 'not_ours', 'repeat']);
+const NOT_A_MISSED_CREDIT_CODES = new Set([
+    'FAILED_PAYMENT_TO_SCREEN', 'FAILED_PAYMENT', 'NOT_FINISHED', 'STATUS_UNCLEAR', 'NO_AMOUNT', 'OVER_1000', 'NOT_PAID_TO_US',
+]);
+const REFUSED_LABELS = {
+    fraud_ask: 'Payment check asked for proof', fake_blocked: 'Blocked as fake', not_ours: 'Not paid to us',
+    not_receipt: 'Not a finished receipt', over_limit: 'Over the ₹1,000 limit', old_time: 'Old payment time',
+    cross_client: 'Sent on another client', model_blocked: 'Image model blocked it', other: 'Not credited',
+};
+const msOf = (r) => new Date(r.createdAt).getTime();
+const shaOf = (r) => {
+    const s = r.imageSha256 || r.image?.sha256;
+    return typeof s === 'string' && s ? s : null;
+};
+const iso = (v) => {
+    if (v === null || v === undefined || v === '')
+        return null;
+    const t = new Date(v).getTime();
+    return Number.isFinite(t) ? new Date(t).toISOString() : null;
+};
+const uniqSorted = (xs) => [...new Set(xs.filter((x) => !!x))].sort();
+function proofCard({ row, c }) {
+    return {
+        _id: String(row._id), proofId: c.proofId, clientId: String(row.clientId), chatId: String(row.chatId),
+        profile: String(row.profile), telegramMsgId: row.telegramMsgId, createdAt: new Date(row.createdAt).toISOString(),
+        amount: c.amount, outcome: String(c.outcome), reasons: c.reasons, fakeScore: c.fakeScore, credited: c.credited,
+        reviewed: c.reviewed, legacy: c.legacy, image: row.image ?? null,
+    };
+}
+function buildViews(items, users, options) {
+    const asc = [...items].sort((a, b) => msOf(a.row) - msOf(b.row) || (String(a.row._id) < String(b.row._id) ? -1 : 1));
+    const byChat = new Map();
+    const shaFirstChat = new Map();
+    const shaCount = new Map();
+    for (const x of asc) {
+        const chat = String(x.row.chatId);
+        byChat.set(chat, [...(byChat.get(chat) ?? []), x]);
+        const sha = shaOf(x.row);
+        if (sha) {
+            if (!shaFirstChat.has(sha))
+                shaFirstChat.set(sha, chat);
+            shaCount.set(sha, (shaCount.get(sha) ?? 0) + 1);
+        }
+    }
+    const fromOtherChat = (x) => {
+        const sha = shaOf(x.row);
+        return !!sha && shaFirstChat.get(sha) !== String(x.row.chatId);
+    };
+    const marked = (chat) => (users.get(chat) ?? []).some((u) => !!u.fakePaymentAt);
+    const muted = (chat) => (users.get(chat) ?? []).some((u) => u.canReply === 0);
+    const usernameOf = (chat) => (users.get(chat) ?? []).map((u) => u.username).find((s) => !!s) ?? null;
+    const ownSigns = (x) => {
+        const out = [];
+        const codes = x.c.reasons.filter(isRealFakeReason);
+        if (codes.length)
+            out.push(`Fake sign: ${codes.join(', ')}`);
+        if (x.c.fakeScore !== null && x.c.fakeScore >= payment_proofs_classify_1.REVIEW_FAKE_SCORE)
+            out.push(`Fake score ${x.c.fakeScore}`);
+        const signals = Array.isArray(x.row.verdict?.fakeSignals) ? x.row.verdict.fakeSignals.filter((s) => typeof s === 'string' && s) : [];
+        if (signals.length)
+            out.push(`Image model: ${signals.slice(0, 3).join(', ')}`);
+        const from = x.c.reusedFrom;
+        if (from && from.chatId !== String(x.row.chatId))
+            out.push('Reused UTR of another chat');
+        else if (from && from.amount !== null && from.amount !== x.c.amount)
+            out.push(`Edited copy of an earlier receipt (₹${from.amount} before)`);
+        if (fromOtherChat(x))
+            out.push('Same image as another chat');
+        return out;
+    };
+    const siblingTamper = (x, f) => {
+        if (f === x)
+            return null;
+        if (f.c.reusedFrom && f.c.reusedFrom.proofId === x.c.proofId)
+            return null;
+        const codes = f.c.reasons.filter(isRealFakeReason);
+        if (codes.length)
+            return codes.join(', ');
+        if (f.c.outcome === 'cross_client' && f.c.reasons.includes('SAME_FILE') && fromOtherChat(f))
+            return 'same file as another chat';
+        return null;
+    };
+    const fakeReasons = (x) => {
+        const out = ownSigns(x);
+        const sib = (byChat.get(String(x.row.chatId)) ?? []).map((f) => siblingTamper(x, f)).find((s) => s !== null);
+        if (sib)
+            out.push(`Chat sent a fake receipt: ${sib}`);
+        return out;
+    };
+    const fake = new Map();
+    const over = new Set();
+    const topN = new Set();
+    const days = new Map();
+    for (const x of asc) {
+        if (!x.c.credited)
+            continue;
+        const f = fakeReasons(x);
+        if (f.length)
+            fake.set(x, f);
+        if (!x.c.repeat && x.c.amount !== null && x.c.amount > options.alwaysAmount)
+            over.add(x);
+        const d = (0, payment_proofs_classify_1.istDay)(msOf(x.row));
+        days.set(d, [...(days.get(d) ?? []), x]);
+    }
+    for (const list of days.values()) {
+        const slots = Math.max(0, options.dailyTarget - list.filter((x) => fake.has(x)).length);
+        list.filter((x) => !fake.has(x) && !over.has(x) && (x.c.amount ?? 0) >= options.minAmount && x.c.baseRisk >= options.riskFloor)
+            .sort((a, b) => b.c.baseRisk - a.c.baseRisk || (b.c.amount ?? 0) - (a.c.amount ?? 0) || (String(b.row._id) < String(a.row._id) ? -1 : 1))
+            .slice(0, slots)
+            .forEach((x) => topN.add(x));
+    }
+    const check = [];
+    for (const [chat, list] of byChat) {
+        if (marked(chat))
+            continue;
+        const creditedRows = list.filter((x) => x.c.credited);
+        const pending = creditedRows.filter((x) => !x.c.reviewed);
+        const reasons = [];
+        for (const x of pending) {
+            for (const label of fake.get(x) ?? [])
+                reasons.push({ kind: 'fake', label, proofId: x.c.proofId });
+            if (over.has(x))
+                reasons.push({ kind: 'high', label: `High value: ₹${x.c.amount} (over ₹${options.alwaysAmount})`, proofId: x.c.proofId });
+            else if (topN.has(x))
+                reasons.push({ kind: 'high', label: `Top risk today: ${x.c.baseReasons.join('; ')}`, proofId: x.c.proofId });
+        }
+        if (!reasons.length)
+            continue;
+        const sum = (xs) => xs.reduce((s, x) => s + x.c.atRiskAmount, 0);
+        const reviewedCount = creditedRows.filter((x) => x.c.reviewed).length;
+        check.push({
+            chatId: chat,
+            username: usernameOf(chat),
+            clients: uniqSorted(list.map((x) => String(x.row.clientId))),
+            personas: uniqSorted(list.map((x) => String(x.row.profile))),
+            reasons,
+            fakeSignal: reasons.some((r) => r.kind === 'fake'),
+            highValue: reasons.some((r) => r.kind === 'high'),
+            history: list.filter((x) => x.c.credited || !x.c.repeat).map(proofCard),
+            totalCredited: sum(creditedRows),
+            unreviewedCredited: sum(pending),
+            pendingProofIds: pending.map((x) => x.c.proofId),
+            reviewedCount,
+            reviewed: reviewedCount > 0,
+            muted: muted(chat),
+            marked: false,
+        });
+    }
+    check.sort((a, b) => Number(b.fakeSignal) - Number(a.fakeSignal) || b.unreviewedCredited - a.unreviewedCredited || (a.chatId < b.chatId ? -1 : 1));
+    const mutedEntries = [];
+    for (const [chat, rows] of users) {
+        const list = byChat.get(chat) ?? [];
+        const isMarked = marked(chat);
+        if (!isMarked && !(muted(chat) && list.length))
+            continue;
+        const creditedRows = list.filter((x) => x.c.credited);
+        const creditedAmount = creditedRows.reduce((s, x) => s + x.c.atRiskAmount, 0);
+        const ownFakeSign = list.some((x) => ownSigns(x).length > 0);
+        const blocks = list.filter((x) => x.row.ask?.kind === 'fraud' && x.row.ask.state === 'open' && !!x.row.ask.blockedAt && !x.row.ask.closedAt);
+        const markRow = rows.filter((u) => !!u.fakePaymentAt).sort((a, b) => new Date(a.fakePaymentAt).getTime() - new Date(b.fakePaymentAt).getTime())[0];
+        let entry;
+        if (markRow) {
+            const ids = new Set(markRow.fakePaymentProofIds ?? []);
+            const evidence = ids.size ? list.filter((x) => ids.has(x.c.proofId)) : creditedRows;
+            entry = {
+                source: 'operator_mark', at: iso(markRow.fakePaymentAt), by: markRow.fakePaymentBy ?? null,
+                reason: markRow.fakePaymentReason ?? null, reasonCodes: [], evidence: evidence.map(proofCard),
+                preMarkCanReply: typeof markRow.fakePaymentPrev?.canReply === 'number' ? markRow.fakePaymentPrev.canReply : null,
+            };
+        }
+        else if (blocks.length) {
+            const latest = Math.max(...blocks.map((x) => new Date(x.row.ask.blockedAt).getTime()));
+            entry = {
+                source: 'fraud_block', at: iso(latest), by: null, reason: null,
+                reasonCodes: uniqSorted(blocks.flatMap((x) => x.row.ask?.reasons ?? [])), evidence: blocks.map(proofCard), preMarkCanReply: null,
+            };
+        }
+        else {
+            entry = { source: 'unknown', at: null, by: null, reason: null, reasonCodes: [], evidence: [], preMarkCanReply: null };
+        }
+        mutedEntries.push({
+            chatId: chat,
+            username: usernameOf(chat),
+            clients: uniqSorted([...rows.map((u) => u.clientId), ...list.map((x) => String(x.row.clientId))]),
+            personas: [...rows].sort((a, b) => (a.profile < b.profile ? -1 : 1))
+                .map((u) => ({ profile: u.profile, clientId: u.clientId ?? null, canReply: typeof u.canReply === 'number' ? u.canReply : null })),
+            ...entry,
+            creditedAmount,
+            ownFakeSign,
+            likelyWrong: creditedAmount > 0 && !ownFakeSign,
+            history: rows.flatMap((u) => u.fakePaymentHistory ?? []).filter((h, i, all) => all.findIndex((o) => o.action === h.action && iso(o.at) === iso(h.at)) === i),
+        });
+    }
+    mutedEntries.sort((a, b) => Number(b.likelyWrong) - Number(a.likelyWrong) || b.creditedAmount - a.creditedAmount
+        || (new Date(b.at ?? 0).getTime() - new Date(a.at ?? 0).getTime()) || (a.chatId < b.chatId ? -1 : 1));
+    const refused = [];
+    for (const [chat, list] of byChat) {
+        if (marked(chat))
+            continue;
+        for (const x of list) {
+            if (x.c.credited || x.c.repeat || !looksGenuine(x))
+                continue;
+            const t = msOf(x.row);
+            if (list.some((y) => y.c.credited && msOf(y.row) > t && msOf(y.row) - t <= DAY_MS))
+                continue;
+            const sha = shaOf(x.row);
+            if (sha && (shaCount.get(sha) ?? 0) > 1)
+                continue;
+            const label = REFUSED_LABELS[String(x.c.outcome)] ?? 'Not credited';
+            refused.push({
+                ...proofCard(x),
+                username: usernameOf(chat),
+                refusedReason: x.c.reasons.length ? `${label}: ${x.c.reasons.join(', ')}` : label,
+            });
+        }
+    }
+    refused.sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
+    return { check, muted: mutedEntries, refused };
+}
+function looksGenuine(x) {
+    const r = x.row;
+    if (NOT_A_MISSED_CREDIT_OUTCOMES.has(String(x.c.outcome)) || x.c.reasons.some((code) => NOT_A_MISSED_CREDIT_CODES.has(code)))
+        return false;
+    if (r.verdict?.payee !== 'ours')
+        return false;
+    if (x.c.fakeScore !== null && x.c.fakeScore >= payment_proofs_classify_1.REVIEW_FAKE_SCORE)
+        return false;
+    if (x.c.reasons.some(isRealFakeReason))
+        return false;
+    if (x.c.reusedFrom)
+        return false;
+    const printed = r.time?.state === 'known' && typeof r.time.epochMs === 'number' ? r.time.epochMs : null;
+    if (printed === null)
+        return false;
+    const age = msOf(r) - printed;
+    if (age > FRESH_MS || age < -SKEW_MS)
+        return false;
+    return true;
+}
 
 
 /***/ },
