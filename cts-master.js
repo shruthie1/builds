@@ -41870,7 +41870,7 @@ exports.MonitorService = MonitorService = MonitorService_1 = __decorate([
 
 
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.MIN_UTR_LENGTH = exports.RISK = exports.MIN_CLIENT_CREDITS = exports.DEFAULT_REVIEW_OPTIONS = exports.FAKE_REASON_CODES = exports.FAKE_OUTCOMES = exports.FLAGGED_OUTCOMES = exports.REVIEW_FAKE_SCORE = exports.PROOF_STATES = void 0;
+exports.MIN_UTR_LENGTH = exports.RISK = exports.MIN_CLIENT_CREDITS = exports.DEFAULT_REVIEW_OPTIONS = exports.FAKE_REASON_CODES = exports.FAKE_OUTCOMES = exports.FLAGGED_OUTCOMES = exports.REVIEW_FAKE_SCORE = exports.COUNT_STATES = exports.PROOF_STATES = void 0;
 exports.isFakeReason = isFakeReason;
 exports.proofIdOf = proofIdOf;
 exports.parseProofId = parseProofId;
@@ -41884,11 +41884,11 @@ exports.reviewOptionsFromEnv = reviewOptionsFromEnv;
 exports.istDay = istDay;
 exports.normUtr = normUtr;
 exports.buildReviewModel = buildReviewModel;
-exports.priorityOf = priorityOf;
 exports.encodeCursor = encodeCursor;
 exports.decodeCursor = decodeCursor;
 exports.isAfterCursor = isAfterCursor;
-exports.PROOF_STATES = ['review', 'flagged', 'not_credited', 'credited', 'marked', 'reviewed', 'all'];
+exports.PROOF_STATES = ['all'];
+exports.COUNT_STATES = ['review', 'flagged', 'not_credited', 'credited', 'marked', 'reviewed', 'all'];
 exports.REVIEW_FAKE_SCORE = 40;
 exports.FLAGGED_OUTCOMES = new Set(['fraud_ask', 'fake_blocked', 'cross_client']);
 exports.FAKE_OUTCOMES = new Set(['fraud_ask', 'fake_blocked', 'cross_client', 'model_blocked']);
@@ -41938,7 +41938,7 @@ function num(v) {
 }
 function stampOf(row) {
     const r = row.review;
-    const decision = r?.decision ?? (r?.state === 'ok' ? 'fine' : undefined);
+    const decision = r?.decision;
     const at = r?.at ? new Date(r.at).getTime() : NaN;
     if (!decision || !Number.isFinite(at))
         return null;
@@ -41993,7 +41993,7 @@ function emptyCounts() {
     return { review: 0, flagged: 0, not_credited: 0, credited: 0, marked: 0, reviewed: 0, all: 0 };
 }
 function addToCounts(counts, c, marked) {
-    for (const s of exports.PROOF_STATES)
+    for (const s of exports.COUNT_STATES)
         if (inState(c, marked, s))
             counts[s]++;
 }
@@ -42257,9 +42257,6 @@ function buildReviewModel(items, isMarked, options = exports.DEFAULT_REVIEW_OPTI
             x.c.review = false;
     return { options, thresholds };
 }
-function priorityOf(c) {
-    return c.risk * c.atRiskAmount;
-}
 function encodeCursor(c) {
     return Buffer.from(JSON.stringify(c), 'utf8').toString('base64url');
 }
@@ -42269,9 +42266,9 @@ function decodeCursor(raw) {
     try {
         const v = JSON.parse(Buffer.from(raw, 'base64url').toString('utf8'));
         if (v && typeof v.t === 'number' && Number.isFinite(v.t) && typeof v.id === 'string' && /^[0-9a-f]{24}$/i.test(v.id)) {
-            if (v.s !== undefined && v.s !== 'r')
+            if (v.s !== undefined)
                 return null;
-            return v.s === 'r' ? { t: v.t, id: v.id.toLowerCase(), s: 'r' } : { t: v.t, id: v.id.toLowerCase() };
+            return { t: v.t, id: v.id.toLowerCase() };
         }
     }
     catch { }
@@ -42319,42 +42316,37 @@ let PaymentProofsController = class PaymentProofsController {
             return this.service.views(query);
         return this.service.list(query ?? {});
     }
-    reviewChat(chatId, body) {
-        return this.service.reviewChat(chatId, body ?? {});
-    }
     stampChat(chatId, body) {
         return this.service.stampChat(chatId, body ?? {});
-    }
-    review(proofId, body) {
-        return this.service.review(proofId, body ?? {});
     }
 };
 exports.PaymentProofsController = PaymentProofsController;
 __decorate([
     (0, common_1.Get)(),
     (0, swagger_1.ApiOperation)({
-        summary: 'Payment screenshots for review: filtered, cursor-paged, with counts per state and userData/client join',
-        description: 'review (revenue + long-term blocking, post-hoc; nothing in tg-aut reads it) = CREDITED AND not reviewed AND chat not ' +
+        summary: 'Every payment screenshot (state=all, newest first): filtered, cursor-paged, with counts and userData/client join',
+        description: 'Since 2026-11-07 the only state is all and the only sort time; the per-state lists and the risk order were removed ' +
+            '(the views replace them). counts keep their per-state keys and reviewAmount. ' +
+            'review rule (revenue + long-term blocking, post-hoc; nothing in tg-aut reads it) = CREDITED AND not reviewed AND chat not ' +
             'marked fake AND (strong fake signal OR (credited ₹ >= REVIEW_MIN_AMOUNT (100) AND among the IST day\'s top ' +
             'REVIEW_DAILY_TARGET (20) minus strong, by risk, with risk >= REVIEW_RISK_FLOOR (25))). Strong: fake reason code, ' +
             'fakeScore >= 40, fakeSignals, chat sent a fake receipt, same image in another chat (not the first chat), reused UTR of an ' +
             'earlier receipt (another chat or amount; the earliest proof with a UTR is the original), same receipt credited before, ' +
             'payer of a marked-fake chat. Uncredited proofs (repeats, not_ours, not_receipt, old_time, over_limit, uncredited ' +
             'fakes) never enter review. Items carry risk (0-100), riskReasons, atRiskAmount, strong, repeat, reusedFrom; ' +
-            'counts.reviewAmount = credited ₹ in review. ' +
+            'counts.review = proofs the rule picks, counts.reviewAmount = their credited ₹. ' +
             'flagged = outcome fraud_ask|fake_blocked|cross_client; marked = chat has userData.fakePaymentAt; reviewed = a stamp that still holds (item.stamp). ' +
             'Rows without verdict (before tg-aut wrote one) get an outcome derived from servedAt / ask / decision (legacy: true). ' +
-            'state=review defaults to sort=risk (risk x atRiskAmount), other states to newest first; counts cover ' +
-            'since/client/minAmount (not state/cursor); the review model always uses the whole 7-day collection.',
+            'counts cover since/client/chat/minAmount (not cursor); the review model always uses the whole 7-day collection.',
     }),
     (0, swagger_1.ApiQuery)({ name: 'since', required: false, description: 'ISO date; default now - 7 days (the TTL)' }),
     (0, swagger_1.ApiQuery)({ name: 'client', required: false, description: 'clientId' }),
     (0, swagger_1.ApiQuery)({ name: 'chat', required: false, description: 'chatId: only this chat (counts too)' }),
-    (0, swagger_1.ApiQuery)({ name: 'state', required: false, enum: payment_proofs_classify_1.PROOF_STATES, description: 'default review' }),
+    (0, swagger_1.ApiQuery)({ name: 'state', required: false, enum: payment_proofs_classify_1.PROOF_STATES, description: 'default all' }),
     (0, swagger_1.ApiQuery)({ name: 'minAmount', required: false, description: 'creditAmount (else amount read) >= n' }),
     (0, swagger_1.ApiQuery)({ name: 'limit', required: false, description: `default 50, max ${payment_proofs_service_1.MAX_LIMIT}` }),
     (0, swagger_1.ApiQuery)({ name: 'cursor', required: false, description: 'nextCursor from the previous page (same sort)' }),
-    (0, swagger_1.ApiQuery)({ name: 'sort', required: false, enum: payment_proofs_service_1.PROOF_SORTS, description: 'default risk for state=review, else time' }),
+    (0, swagger_1.ApiQuery)({ name: 'sort', required: false, enum: payment_proofs_service_1.PROOF_SORTS, description: 'default time' }),
     (0, swagger_1.ApiQuery)({
         name: 'view', required: false, enum: payment_proofs_views_1.REVIEW_VIEWS,
         description: 'Redesign 2026-11-07 (additive; without view the response above is unchanged). check = one entry per chat ' +
@@ -42368,18 +42360,6 @@ __decorate([
     __metadata("design:paramtypes", [Object]),
     __metadata("design:returntype", void 0)
 ], PaymentProofsController.prototype, "list", null);
-__decorate([
-    (0, common_1.Post)('chat/:chatId/review'),
-    (0, common_1.HttpCode)(200),
-    (0, swagger_1.ApiOperation)({ summary: "Looks fine on a whole chat: stamp decision 'fine' on its credited, unreviewed proofs (only proofIds when given). Idempotent" }),
-    (0, swagger_1.ApiParam)({ name: 'chatId' }),
-    (0, swagger_1.ApiBody)({ schema: { type: 'object', required: ['by'], properties: { by: { type: 'string' }, proofIds: { type: 'array', items: { type: 'string' } } } } }),
-    __param(0, (0, common_1.Param)('chatId')),
-    __param(1, (0, common_1.Body)()),
-    __metadata("design:type", Function),
-    __metadata("design:paramtypes", [String, Object]),
-    __metadata("design:returntype", void 0)
-], PaymentProofsController.prototype, "reviewChat", null);
 __decorate([
     (0, common_1.Post)('chat/:chatId/actions'),
     (0, common_1.HttpCode)(200),
@@ -42395,18 +42375,6 @@ __decorate([
     __metadata("design:paramtypes", [String, Object]),
     __metadata("design:returntype", void 0)
 ], PaymentProofsController.prototype, "stampChat", null);
-__decorate([
-    (0, common_1.Post)(':proofId/review'),
-    (0, common_1.HttpCode)(200),
-    (0, swagger_1.ApiOperation)({ summary: "Set (state 'ok' = stamp decision 'fine') or clear the operator review of one proof (idempotent)" }),
-    (0, swagger_1.ApiParam)({ name: 'proofId', description: '<clientId>-<chatId>-<telegramMsgId>' }),
-    (0, swagger_1.ApiBody)({ schema: { type: 'object', required: ['state'], properties: { state: { type: 'string', enum: ['ok', 'clear'] }, by: { type: 'string', description: "required for 'ok'" } } } }),
-    __param(0, (0, common_1.Param)('proofId')),
-    __param(1, (0, common_1.Body)()),
-    __metadata("design:type", Function),
-    __metadata("design:paramtypes", [String, Object]),
-    __metadata("design:returntype", void 0)
-], PaymentProofsController.prototype, "review", null);
 exports.PaymentProofsController = PaymentProofsController = __decorate([
     (0, swagger_1.ApiTags)('payment-proofs'),
     (0, common_1.Controller)('payment-proofs'),
@@ -42494,7 +42462,6 @@ exports.MAX_WINDOW_ROWS = 20_000;
 const USERDATA_IN_CHUNK = 1_000;
 const CLIENT_HOST_TTL_MS = 5 * 60 * 1000;
 const CLIENT_ID_RE = /^[A-Za-z0-9_.-]{1,40}$/;
-const MAX_BY = 60;
 exports.DEFAULT_LIST_CACHE_MS = 60_000;
 exports.MAX_CACHED_WINDOWS = 4;
 const DEFAULT_WINDOW_KEY = 'default';
@@ -42518,7 +42485,7 @@ const CHAT_USER_PROJECTION = {
     _id: 0, chatId: 1, profile: 1, clientId: 1, username: 1, cheatCount: 1, canReply: 1, payAmount: 1, fakePaymentAt: 1,
     fakePaymentBy: 1, fakePaymentReason: 1, fakePaymentPrev: 1, fakePaymentProofIds: 1, fakePaymentHistory: 1,
 };
-exports.PROOF_SORTS = ['risk', 'time'];
+exports.PROOF_SORTS = ['time'];
 exports.MAX_STAMP_IDS = 200;
 let PaymentProofsService = PaymentProofsService_1 = class PaymentProofsService {
     constructor(proofModel, userDataModel) {
@@ -42550,7 +42517,7 @@ let PaymentProofsService = PaymentProofsService_1 = class PaymentProofsService {
                 throw new common_1.BadRequestException('chat must be a chatId');
             chat = String(q.chat);
         }
-        const state = (q.state === undefined || q.state === '' ? 'review' : String(q.state));
+        const state = (q.state === undefined || q.state === '' ? 'all' : String(q.state));
         if (!payment_proofs_classify_1.PROOF_STATES.includes(state))
             throw new common_1.BadRequestException(`state must be one of ${payment_proofs_classify_1.PROOF_STATES.join('|')}`);
         let minAmount = null;
@@ -42566,13 +42533,13 @@ let PaymentProofsService = PaymentProofsService_1 = class PaymentProofsService {
                 throw new common_1.BadRequestException('limit must be an integer >= 1');
             limit = Math.min(limit, exports.MAX_LIMIT);
         }
-        const sort = (q.sort === undefined || q.sort === '' ? (state === 'review' ? 'risk' : 'time') : String(q.sort));
+        const sort = (q.sort === undefined || q.sort === '' ? 'time' : String(q.sort));
         if (!exports.PROOF_SORTS.includes(sort))
             throw new common_1.BadRequestException(`sort must be one of ${exports.PROOF_SORTS.join('|')}`);
         let cursor = null;
         if (q.cursor !== undefined && q.cursor !== '') {
             cursor = (0, payment_proofs_classify_1.decodeCursor)(q.cursor);
-            if (!cursor || (cursor.s === 'r') !== (sort === 'risk'))
+            if (!cursor)
                 throw new common_1.BadRequestException('invalid cursor');
         }
         return { since, client, chat, state, minAmount, limit, cursor, sort };
@@ -42592,15 +42559,11 @@ let PaymentProofsService = PaymentProofsService_1 = class PaymentProofsService {
             (0, payment_proofs_classify_1.addToCounts)(counts, x.c, marked);
             if (x.c.review)
                 counts.reviewAmount += x.c.atRiskAmount;
-            if (!(0, payment_proofs_classify_1.inState)(x.c, marked, p.state))
-                continue;
-            const t = p.sort === 'risk' ? (0, payment_proofs_classify_1.priorityOf)(x.c) : new Date(x.row.createdAt).getTime();
+            const t = new Date(x.row.createdAt).getTime();
             if (p.cursor && !(0, payment_proofs_classify_1.isAfterCursor)(t, String(x.row._id), p.cursor))
                 continue;
             inPage.push({ ...x, marked, t });
         }
-        if (p.sort === 'risk')
-            inPage.sort((a, b) => b.t - a.t || (String(b.row._id) < String(a.row._id) ? -1 : 1));
         const more = inPage.length > p.limit;
         const page = inPage.slice(0, p.limit);
         const hosts = page.length ? await this.clientHostMap(now) : new Map();
@@ -42626,7 +42589,6 @@ let PaymentProofsService = PaymentProofsService_1 = class PaymentProofsService {
                 reasons: c.reasons,
                 fakeScore: c.fakeScore,
                 amountValue: c.amount,
-                inReview: c.review,
                 stamp: c.stamp,
                 flagged: c.flagged,
                 risk: c.risk,
@@ -42643,9 +42605,7 @@ let PaymentProofsService = PaymentProofsService_1 = class PaymentProofsService {
             };
         });
         const last = page[page.length - 1];
-        const nextCursor = more && last
-            ? (0, payment_proofs_classify_1.encodeCursor)(p.sort === 'risk' ? { t: last.t, id: String(last.row._id), s: 'r' } : { t: last.t, id: String(last.row._id) })
-            : null;
+        const nextCursor = more && last ? (0, payment_proofs_classify_1.encodeCursor)({ t: last.t, id: String(last.row._id) }) : null;
         return { items, nextCursor, counts, reviewModel, truncated };
     }
     async window(since, now) {
@@ -42811,30 +42771,6 @@ let PaymentProofsService = PaymentProofsService_1 = class PaymentProofsService {
             truncated: w.truncated,
         };
     }
-    async reviewChat(chatId, body, now = new Date()) {
-        const id = String(chatId ?? '').trim();
-        if (!/^-?\d{1,20}$/.test(id))
-            throw new common_1.BadRequestException('chatId must be a chatId');
-        const by = typeof body?.by === 'string' ? body.by.trim().slice(0, MAX_BY) : '';
-        if (!by)
-            throw new common_1.BadRequestException('by is required');
-        let only = null;
-        if (body?.proofIds !== undefined) {
-            if (!Array.isArray(body.proofIds) || body.proofIds.some((p) => (0, payment_proofs_classify_1.parseProofId)(p)?.chatId !== id)) {
-                throw new common_1.BadRequestException('proofIds must be proof ids of this chat');
-            }
-            only = new Set(body.proofIds);
-        }
-        const rows = await this.proofModel.find({ chatId: id }, CLASSIFY_PROJECTION).lean().exec();
-        const todo = rows.map((row) => ({ row, c: (0, payment_proofs_classify_1.classify)(row) }))
-            .filter(({ c }) => c.credited && !c.reviewed && (!only || only.has(c.proofId)));
-        if (todo.length) {
-            const review = { decision: 'fine', at: now };
-            await this.proofModel.updateMany({ _id: { $in: todo.map((x) => x.row._id) } }, { $set: { review } }).exec();
-            await this.patchWindows(`review chat ${id}`, () => this.rereadChat(id));
-        }
-        return { chatId: id, reviewed: todo.map((x) => x.c.proofId) };
-    }
     async stampChat(chatId, body, now = new Date()) {
         const id = String(chatId ?? '').trim();
         if (!/^-?\d{1,20}$/.test(id))
@@ -42874,34 +42810,6 @@ let PaymentProofsService = PaymentProofsService_1 = class PaymentProofsService {
                 hit = true; return f ?? r; });
             return hit ? this.derive({ ...w, rows }) : null;
         };
-    }
-    async review(proofId, body, now = new Date()) {
-        const key = (0, payment_proofs_classify_1.parseProofId)(proofId);
-        if (!key)
-            throw new common_1.BadRequestException('proofId must be <clientId>-<chatId>-<telegramMsgId>');
-        const state = body?.state;
-        if (state !== 'ok' && state !== 'clear')
-            throw new common_1.BadRequestException("state must be 'ok' or 'clear'");
-        const by = typeof body?.by === 'string' ? body.by.trim().slice(0, MAX_BY) : '';
-        if (state === 'ok' && !by)
-            throw new common_1.BadRequestException('by is required');
-        const filter = { chatId: key.chatId, clientId: key.clientId, telegramMsgId: key.telegramMsgId };
-        const review = state === 'ok' ? { decision: 'fine', at: now } : null;
-        const update = review ? { $set: { review } } : { $unset: { review: 1 } };
-        const res = await this.proofModel.updateOne(filter, update).exec();
-        if (!res.matchedCount)
-            throw new common_1.NotFoundException('payment proof not found (gone after the 7-day TTL?)');
-        await this.patchWindows(`review ${proofId}`, async () => {
-            const fresh = new Map((await this.proofModel.find(filter, CLASSIFY_PROJECTION).lean().exec())
-                .map((r) => [String(r._id), r]));
-            return (w) => {
-                let hit = false;
-                const rows = w.rows.map((r) => { const f = fresh.get(String(r._id)); if (f)
-                    hit = true; return f ?? r; });
-                return hit ? this.derive({ ...w, rows }) : null;
-            };
-        });
-        return { proofId, review };
     }
 };
 exports.PaymentProofsService = PaymentProofsService;
