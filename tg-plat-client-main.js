@@ -55749,9 +55749,13 @@ function resolveVisionTime(input, contextText, nowMs, v2 = _v2__WEBPACK_IMPORTED
         }
     }
     // 2. R50: context date overrides the model's date; its clock wins when printed with the date
-    const ctx = contextText.trim()
+    let ctx = contextText.trim()
         ? extractFromContext(contextText, v2) ?? relativeFromText(contextText, nowMs)
         : null;
+    // A bare text date (no clock printed with it) on another day than the model's own date is a banner or offer line
+    // ("Validity: 31 Oct-8 Nov 2026"), not the receipt date: the model's date stands (sowmya2 2026-11-08, FUTURE_TIME).
+    if (ctx && !ctx.clock && modelDate && (modelDate.mo !== ctx.date.mo || modelDate.d !== ctx.date.d))
+        ctx = null;
     let date;
     let clock;
     let source;
@@ -58582,8 +58586,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "8e425ef8d8bbee0561673f88ed51db5126abc3ec" : 0;
-    const builtAt =  true ? "2026-11-07T14:55:30.443Z" : 0;
+    const sha =  true ? "7355443f9af52392444ce8c4473f06445cd16162" : 0;
+    const builtAt =  true ? "2026-11-07T19:27:48.146Z" : 0;
     return { sha, builtAt };
 }
 
