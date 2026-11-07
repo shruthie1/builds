@@ -30823,10 +30823,13 @@ var __metadata = (this && this.__metadata) || function (k, v) {
 };
 var AnalyticsHealthCheck_1;
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.AnalyticsHealthCheck = exports.ANALYTICS_HEALTH_CATEGORY = exports.PROBE_RETRY_DELAY_MS = exports.PROBE_RETRIES = exports.ANALYTICS_HEALTH_TRAILING_DAYS = exports.PROMOTION_SEND_MIN_MEDIAN_RATIO = void 0;
+exports.AnalyticsHealthCheck = exports.HISTORY_REALERT_DAYS = exports.HISTORY_JOB_MAX_AGE_MS = exports.HISTORY_CRON_JOB = exports.ANALYTICS_HEALTH_CATEGORY = exports.PROBE_RETRY_DELAY_MS = exports.PROBE_RETRIES = exports.ANALYTICS_HEALTH_TRAILING_DAYS = exports.PROMOTION_SEND_MIN_MEDIAN_RATIO = void 0;
 exports.summariseParity = summariseParity;
 exports.median = median;
 exports.decideAnalyticsHealth = decideAnalyticsHealth;
+exports.decideHistoryFindings = decideHistoryFindings;
+exports.dedupeHistoryFindings = dedupeHistoryFindings;
+exports.summariseHistoryFindings = summariseHistoryFindings;
 exports.istDay = istDay;
 const common_1 = __webpack_require__(/*! @nestjs/common */ "@nestjs/common");
 const channel_category_enum_1 = 0;
@@ -30839,6 +30842,11 @@ exports.PROBE_RETRY_DELAY_MS = 60_000;
 exports.ANALYTICS_HEALTH_CATEGORY = __webpack_require__(/*! ../bots/channel-category.enum */ "./src/components/bots/channel-category.enum.ts").ChannelCategory.CLIENT_UPDATES;
 const UNDEFINED_TABLE = '42P01';
 const UNDEFINED_FUNCTION = '42883';
+const INVALID_SCHEMA = '3F000';
+const INSUFFICIENT_PRIVILEGE = '42501';
+exports.HISTORY_CRON_JOB = 'analytics-history';
+exports.HISTORY_JOB_MAX_AGE_MS = 26 * 60 * 60 * 1000;
+exports.HISTORY_REALERT_DAYS = 7;
 const DAY_MS = 24 * 60 * 60 * 1000;
 const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
 function summariseParity(input) {
@@ -30885,6 +30893,114 @@ function decideAnalyticsHealth(input) {
         problems.push(`daily parity ${kind}: ${rows} mismatched row(s) across ${clients.size} client(s)`);
     }
     return problems;
+}
+function stableDetail(detail) {
+    return detail.replace(/\d+(?:[.:\-T]\d+)*/g, '#');
+}
+function toIso(v) {
+    if (v === undefined || v === null)
+        return 'n/a';
+    const t = new Date(v).getTime();
+    return Number.isFinite(t) ? new Date(t).toISOString() : String(v);
+}
+function decideHistoryFindings(input) {
+    const out = [];
+    for (const r of input.sizeRows ?? []) {
+        const level = String(r.level ?? '');
+        if (level !== 'warn' && level !== 'critical')
+            continue;
+        const subject = String(r.subject ?? '');
+        const detail = String(r.detail ?? '');
+        out.push({ key: `size:${level}:${subject}:${stableDetail(detail)}`, kind: 'size', level, text: `size ${level} ${subject}: ${detail}` });
+    }
+    for (const r of input.ledgerRows ?? []) {
+        const status = String(r.status ?? '');
+        if (status !== 'mismatch' && status !== 'error')
+            continue;
+        const step = String(r.step ?? '');
+        const period = String(r.period_start ?? '');
+        out.push({
+            key: `ledger:${status}:${step}:${period}`,
+            kind: 'ledger',
+            level: 'warn',
+            text: `ledger ${status} ${step} ${period}: ${r.detail ?? ''}`,
+            step,
+            status,
+            period,
+        });
+    }
+    if (input.historyJobMissing) {
+        out.push({ key: 'job:missing', kind: 'job', level: 'critical', text: `pg_cron job ${exports.HISTORY_CRON_JOB} is not scheduled` });
+    }
+    else if (input.historyJob === null) {
+        out.push({ key: 'job:never', kind: 'job', level: 'critical', text: `${exports.HISTORY_CRON_JOB} has never run` });
+    }
+    else if (input.historyJob) {
+        const job = input.historyJob;
+        const started = toIso(job.start_time);
+        const startedMs = new Date(job.start_time).getTime();
+        if (String(job.status) === 'failed') {
+            out.push({
+                key: `job:failed:${started}`,
+                kind: 'job',
+                level: 'critical',
+                text: `${exports.HISTORY_CRON_JOB} last run failed (started ${started}): ${String(job.return_message ?? '').slice(0, 300)}`,
+            });
+        }
+        const now = input.checkedAt ?? Date.now();
+        if (Number.isFinite(startedMs) && now - startedMs > exports.HISTORY_JOB_MAX_AGE_MS) {
+            out.push({
+                key: `job:stale:${started}`,
+                kind: 'job',
+                level: 'critical',
+                text: `${exports.HISTORY_CRON_JOB} has not run in ${exports.HISTORY_JOB_MAX_AGE_MS / 3_600_000} h (last start ${started}, ${job.status})`,
+            });
+        }
+    }
+    return out;
+}
+function istDayIndex(day) {
+    return Math.round(Date.parse(`${day}T00:00:00Z`) / DAY_MS);
+}
+function dedupeHistoryFindings(findings, previous, today) {
+    const alert = [];
+    const suppressed = [];
+    const state = {};
+    for (const f of findings) {
+        if (f.key in state)
+            continue;
+        const last = previous?.[f.key];
+        if (last && /^\d{4}-\d{2}-\d{2}$/.test(last) && istDayIndex(today) - istDayIndex(last) < exports.HISTORY_REALERT_DAYS) {
+            suppressed.push(f);
+            state[f.key] = last;
+        }
+        else {
+            alert.push(f);
+            state[f.key] = today;
+        }
+    }
+    return { alert, suppressed, state };
+}
+function summariseHistoryFindings(findings) {
+    const lines = [];
+    const ledger = new Map();
+    for (const f of findings) {
+        if (f.kind !== 'ledger') {
+            lines.push(f.text);
+            continue;
+        }
+        const k = `${f.status}|${f.step}`;
+        const g = ledger.get(k) ?? { status: f.status, step: f.step, periods: [], sample: f.text };
+        g.periods.push(f.period);
+        ledger.set(k, g);
+    }
+    for (const g of ledger.values()) {
+        const p = [...g.periods].sort();
+        const range = p.length === 1 ? p[0] : `${p[0]}..${p[p.length - 1]}`;
+        const sample = g.sample.replace(/^ledger \S+ \S+ \S+: /, '').slice(0, 200);
+        lines.push(`ledger ${g.status}: ${g.step} ${p.length} period(s) ${range}${sample ? ` (e.g. ${sample})` : ''}`);
+    }
+    return lines;
 }
 function istDay(now, offsetDays = 0) {
     return new Date(now + IST_OFFSET_MS + offsetDays * DAY_MS).toISOString().slice(0, 10);
@@ -30975,9 +31091,76 @@ let AnalyticsHealthCheck = AnalyticsHealthCheck_1 = class AnalyticsHealthCheck {
         else {
             input.parityRows = parity.rows;
         }
+        input.checkedAt = now;
+        const skippable = (e, extra = []) => e.code === UNDEFINED_FUNCTION || e.code === UNDEFINED_TABLE || (e.code !== undefined && extra.includes(e.code));
+        const size = await this.probe('SELECT level, subject, detail FROM analytics_size_check(ist_today())', []);
+        if ('error' in size) {
+            if (skippable(size.error)) {
+                this.logger.log(`Analytics size check skipped: ${size.error.message} [${size.error.code}]`);
+            }
+            else {
+                const stop = failed('analytics_size_check', size.error);
+                if (stop)
+                    return stop;
+            }
+        }
+        else {
+            input.sizeRows = size.rows;
+        }
+        const ledger = await this.probe(`SELECT step, to_char(period_start, 'YYYY-MM-DD') AS period_start, status, detail
+         FROM analytics_rollup_ledger
+        WHERE run_at = (SELECT max(run_at) FROM analytics_rollup_ledger)
+          AND status IN ('mismatch', 'error')
+        ORDER BY step, period_start`, []);
+        let historyInstalled = false;
+        if ('error' in ledger) {
+            if (skippable(ledger.error)) {
+                this.logger.log(`Analytics rollup ledger check skipped: ${ledger.error.message} [${ledger.error.code}]`);
+            }
+            else {
+                const stop = failed('analytics_rollup_ledger', ledger.error);
+                if (stop)
+                    return stop;
+            }
+        }
+        else {
+            historyInstalled = true;
+            input.ledgerRows = ledger.rows;
+        }
+        if (historyInstalled) {
+            const job = await this.probe(`SELECT j.jobid, r.status, r.start_time, r.return_message
+           FROM cron.job j
+           LEFT JOIN LATERAL (
+                SELECT d.status, d.start_time, d.return_message
+                  FROM cron.job_run_details d
+                 WHERE d.jobid = j.jobid
+                 ORDER BY d.start_time DESC
+                 LIMIT 1) r ON true
+          WHERE j.jobname = $1`, [exports.HISTORY_CRON_JOB]);
+            if ('error' in job) {
+                if (skippable(job.error, [INVALID_SCHEMA, INSUFFICIENT_PRIVILEGE])) {
+                    this.logger.log(`Analytics ${exports.HISTORY_CRON_JOB} job check skipped: ${job.error.message} [${job.error.code}]`);
+                }
+                else {
+                    const stop = failed('cron.job_run_details', job.error);
+                    if (stop)
+                        return stop;
+                }
+            }
+            else if (!job.rows.length) {
+                input.historyJobMissing = true;
+            }
+            else {
+                const r = job.rows[0];
+                input.historyJob = r.start_time ? { status: String(r.status), start_time: r.start_time, return_message: r.return_message } : null;
+            }
+        }
         return input;
     }
     async run(now = Date.now()) {
+        return (await this.runWithState(now, {})).problems;
+    }
+    async runWithState(now = Date.now(), previous = {}) {
         let input = await this.collect(now);
         for (let attempt = 1; input.pgError !== undefined && attempt <= exports.PROBE_RETRIES; attempt += 1) {
             this.logger.warn(`Analytics health probe failed for ${input.day} (${input.pgError}); retry ${attempt}/${exports.PROBE_RETRIES} in ${exports.PROBE_RETRY_DELAY_MS / 1000}s`);
@@ -30986,31 +31169,60 @@ let AnalyticsHealthCheck = AnalyticsHealthCheck_1 = class AnalyticsHealthCheck {
         }
         if (input.disabled) {
             this.logger.log(`Analytics health check skipped for ${input.day}: ANALYTICS_DB_URL not set`);
-            return [];
+            return { problems: [], suppressed: [], historyAlerts: previous };
         }
-        const problems = decideAnalyticsHealth(input);
+        const base = decideAnalyticsHealth(input);
+        const findings = input.pgError !== undefined ? [] : decideHistoryFindings(input);
+        const today = istDay(now, 0);
+        const dedupe = input.pgError !== undefined
+            ? { alert: [], suppressed: [], state: previous }
+            : dedupeHistoryFindings(findings, previous, today);
+        const historyLines = summariseHistoryFindings(dedupe.alert);
+        const suppressed = summariseHistoryFindings(dedupe.suppressed);
+        if (suppressed.length) {
+            this.logger.log(`Analytics history guardrails already reported (re-sent after ${exports.HISTORY_REALERT_DAYS} d): ${suppressed.join('; ')}`);
+        }
+        const problems = [...base, ...historyLines];
         if (!problems.length) {
-            this.logger.log(`Analytics health OK for ${input.day}: promotion_send=${input.promotionSendRows} daily_client=${input.dailyClientRows} daily_mobile=${input.dailyMobileRows ?? 'n/a'} parity_rows=${input.parityRows?.length ?? 'n/a'}`);
-            return problems;
+            this.logger.log(`Analytics health OK for ${input.day}: promotion_send=${input.promotionSendRows} daily_client=${input.dailyClientRows} daily_mobile=${input.dailyMobileRows ?? 'n/a'} parity_rows=${input.parityRows?.length ?? 'n/a'} size_rows=${input.sizeRows?.length ?? 'n/a'} ledger_bad=${input.ledgerRows?.length ?? 'n/a'} history_job=${input.historyJob?.status ?? (input.historyJob === null ? 'never' : 'n/a')}`);
+            return { problems, suppressed, historyAlerts: dedupe.state };
         }
         this.logger.warn(`Analytics health FAILED for ${input.day}: ${problems.join('; ')}`);
-        await this.notify({
-            severity: 'error',
-            title: 'Analytics Postgres health check failed',
-            summary: `IST day ${input.day}`,
-            fields: [
+        const critical = dedupe.alert.some((f) => f.level === 'critical');
+        const fields = base.length
+            ? [
                 { label: 'promotion_send', value: String(input.promotionSendRows ?? 'n/a') },
                 { label: '7-day median', value: String(median(input.trailingPromotionSendRows ?? [])) },
                 { label: 'daily_client', value: String(input.dailyClientRows ?? 'n/a') },
                 { label: 'daily_mobile', value: String(input.dailyMobileRows ?? 'n/a') },
                 { label: 'parity mismatches', value: String(input.parityRows?.length ?? 'n/a') },
-            ],
+            ]
+            : [];
+        if (historyLines.length) {
+            fields.push({ label: 'size warn/critical', value: String(dedupe.alert.filter((f) => f.kind === 'size').length) }, { label: 'ledger mismatch/error', value: String(dedupe.alert.filter((f) => f.kind === 'ledger').length) }, { label: `${exports.HISTORY_CRON_JOB} last run`, value: input.historyJob ? `${input.historyJob.status} ${toIso(input.historyJob.start_time)}` : input.historyJobMissing ? 'not scheduled' : input.historyJob === null ? 'never' : 'n/a' });
+        }
+        if (dedupe.suppressed.length)
+            fields.push({ label: 'already reported', value: String(dedupe.suppressed.length) });
+        const sent = await this.notify({
+            severity: critical ? 'critical' : 'error',
+            title: base.length ? 'Analytics Postgres health check failed' : 'Analytics history guardrails',
+            summary: `IST day ${input.day}`,
+            fields,
             details: problems,
         }).catch((err) => {
             this.logger.error(`Analytics health alert failed to send: ${err?.message ?? err}`);
             return false;
         });
-        return problems;
+        const historyAlerts = { ...dedupe.state };
+        if (sent !== true) {
+            for (const f of dedupe.alert) {
+                if (previous[f.key])
+                    historyAlerts[f.key] = previous[f.key];
+                else
+                    delete historyAlerts[f.key];
+            }
+        }
+        return { problems, suppressed, historyAlerts };
     }
 };
 exports.AnalyticsHealthCheck = AnalyticsHealthCheck;
@@ -38155,7 +38367,7 @@ function addBuckets(a, b) {
 
 
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.TTFP_BUCKETS = exports.MONGO_MAX_TIME_MS = void 0;
+exports.TTFP_BUCKETS = exports.WARMING_PHASES = exports.MONGO_MAX_TIME_MS = void 0;
 exports.oidAt = oidAt;
 exports.userCohortPipeline = userCohortPipeline;
 exports.flattenCohort = flattenCohort;
@@ -38166,6 +38378,7 @@ exports.firstPayRowsPipeline = firstPayRowsPipeline;
 exports.ttfpBuckets = ttfpBuckets;
 exports.mapTtfp = mapTtfp;
 const mongoose_1 = __webpack_require__(/*! mongoose */ "mongoose");
+const warmup_phases_1 = __webpack_require__(/*! ../shared/warmup-phases */ "./src/components/shared/warmup-phases.ts");
 exports.MONGO_MAX_TIME_MS = 8_000;
 const DAY_MS = 86_400_000;
 function oidAt(ms) {
@@ -38214,6 +38427,15 @@ function flattenCohort(rows) {
         same: Number(r.same) || 0,
     }));
 }
+const HARSH_SUM = { $sum: { $cond: [{ $eq: ['$spamStatus', 'harsh'] }, 1, 0] } };
+exports.WARMING_PHASES = [
+    warmup_phases_1.WarmupPhase.ENROLLED,
+    warmup_phases_1.WarmupPhase.SETTLING,
+    warmup_phases_1.WarmupPhase.IDENTITY,
+    warmup_phases_1.WarmupPhase.GROWING,
+    warmup_phases_1.WarmupPhase.MATURING,
+];
+const WARMING_SUM = { $sum: { $cond: [{ $in: [{ $ifNull: ['$warmupPhase', ''] }, ['', ...exports.WARMING_PHASES]] }, 1, 0] } };
 function bufferPoolPipeline(now, todayIst, clientId) {
     const nowDate = new Date(now);
     return [
@@ -38222,7 +38444,8 @@ function bufferPoolPipeline(now, todayIst, clientId) {
             $group: {
                 _id: '$clientId',
                 total: { $sum: 1 },
-                harsh: { $sum: { $cond: [{ $eq: ['$spamStatus', 'harsh'] }, 1, 0] } },
+                harsh: HARSH_SUM,
+                warming: WARMING_SUM,
                 eligible: {
                     $sum: {
                         $cond: [
@@ -38255,7 +38478,15 @@ function bufferPoolPipeline(now, todayIst, clientId) {
 function promotePoolPipeline(clientId) {
     return [
         ...(clientId ? [{ $match: { clientId } }] : []),
-        { $group: { _id: '$clientId', active: { $sum: { $cond: [{ $eq: ['$status', 'active'] }, 1, 0] } } } },
+        {
+            $group: {
+                _id: '$clientId',
+                active: { $sum: { $cond: [{ $eq: ['$status', 'active'] }, 1, 0] } },
+                total: { $sum: 1 },
+                harsh: HARSH_SUM,
+                warming: WARMING_SUM,
+            },
+        },
     ];
 }
 exports.TTFP_BUCKETS = ['<10m', '10-30m', '30m-2h', '2-24h', '1-3d', '3d+'];
@@ -39849,6 +40080,7 @@ const redisClient_1 = __webpack_require__(/*! ../../utils/redisClient */ "./src/
 const analytics_pg_reader_1 = __webpack_require__(/*! ../daily-analytics/analytics-pg.reader */ "./src/components/daily-analytics/analytics-pg.reader.ts");
 const monitor_controller_1 = __webpack_require__(/*! ./monitor.controller */ "./src/components/monitor/monitor.controller.ts");
 const monitor_service_1 = __webpack_require__(/*! ./monitor.service */ "./src/components/monitor/monitor.service.ts");
+const pool_snapshot_writer_1 = __webpack_require__(/*! ./pool-snapshot.writer */ "./src/components/monitor/pool-snapshot.writer.ts");
 let MonitorModule = class MonitorModule {
 };
 exports.MonitorModule = MonitorModule;
@@ -39858,6 +40090,7 @@ exports.MonitorModule = MonitorModule = __decorate([
         providers: [
             monitor_service_1.MonitorService,
             analytics_pg_reader_1.AnalyticsPgReader,
+            pool_snapshot_writer_1.PoolSnapshotWriter,
             {
                 provide: monitor_service_1.MONITOR_REDIS,
                 useFactory: () => ({
@@ -39878,6 +40111,7 @@ exports.MonitorModule = MonitorModule = __decorate([
                 }),
             },
         ],
+        exports: [pool_snapshot_writer_1.PoolSnapshotWriter],
     })
 ], MonitorModule);
 
@@ -39905,7 +40139,7 @@ var __param = (this && this.__param) || function (paramIndex, decorator) {
 };
 var MonitorService_1;
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.MonitorService = exports.FLEET_DETAIL_ID = exports.PAID_ENRICH_MAX = exports.PAID_HIST_KEYS = exports.RANGE_ONLY_NOTE_PREFIX = exports.CLIENT_AMOUNT_BUCKETS = exports.RANGE_ONLY_FIELDS = exports.RANGE_PAGE_RE = exports.RANGE_CLOSED_FRESH_MS = exports.PROMO_DAYS_HISTORY = exports.LIVE_SVCS = exports.HEARTBEAT_INDEX_KEY = exports.CLIENT_TTL_MS = exports.FLEET_TTL_MS = exports.PREWARM_PAGES = exports.MIDNIGHT_PREWARM_AFTER_MS = exports.PREWARM_DELAY_MS = exports.SNAPSHOT_TTL_SEC = exports.SNAPSHOT_KEY_PREFIX = exports.SNAPSHOT_MAX_SERVE_STALE_MS = exports.SNAPSHOT_FRESH_MS = exports.RESTRICTED_FRESH_MS = exports.LIVE_TTL_MS = exports.CHANNEL_CANDIDATES = exports.HISTORY_DAYS = exports.POOL_FRESH_MS = exports.HISTORY_FRESH_MS = exports.TODAY_MAX_STALE_MS = exports.TODAY_FRESH_MS = exports.LIVE_REDIS_DEADLINE_MS = exports.MONGO_TIMEOUT_MS = exports.PG_TIMEOUT_MS = exports.MONITOR_REDIS = void 0;
+exports.MonitorService = exports.UNASSIGNED_POOL_KEY = exports.FLEET_DETAIL_ID = exports.PAID_ENRICH_MAX = exports.PAID_HIST_KEYS = exports.RANGE_ONLY_NOTE_PREFIX = exports.CLIENT_AMOUNT_BUCKETS = exports.RANGE_ONLY_FIELDS = exports.RANGE_PAGE_RE = exports.RANGE_CLOSED_FRESH_MS = exports.PROMO_DAYS_HISTORY = exports.LIVE_SVCS = exports.HEARTBEAT_INDEX_KEY = exports.CLIENT_TTL_MS = exports.FLEET_TTL_MS = exports.PREWARM_PAGES = exports.MIDNIGHT_PREWARM_AFTER_MS = exports.PREWARM_DELAY_MS = exports.SNAPSHOT_TTL_SEC = exports.SNAPSHOT_KEY_PREFIX = exports.SNAPSHOT_MAX_SERVE_STALE_MS = exports.SNAPSHOT_FRESH_MS = exports.RESTRICTED_FRESH_MS = exports.LIVE_TTL_MS = exports.CHANNEL_CANDIDATES = exports.HISTORY_DAYS = exports.POOL_FRESH_MS = exports.HISTORY_FRESH_MS = exports.TODAY_MAX_STALE_MS = exports.TODAY_FRESH_MS = exports.LIVE_REDIS_DEADLINE_MS = exports.MONGO_TIMEOUT_MS = exports.PG_TIMEOUT_MS = exports.MONITOR_REDIS = void 0;
 exports.rangeOfPage = rangeOfPage;
 exports.legacyOf = legacyOf;
 exports.fleetSummaryRow = fleetSummaryRow;
@@ -40097,6 +40331,7 @@ const AMOUNT_BUCKETS = [
     { bucket: '300-499', lo: 300, hi: 500 },
     { bucket: '500-999', lo: 500, hi: 1000 },
 ];
+exports.UNASSIGNED_POOL_KEY = '';
 let MonitorService = MonitorService_1 = class MonitorService {
     constructor(pg, connection, redis) {
         this.pg = pg;
@@ -40435,17 +40670,30 @@ let MonitorService = MonitorService_1 = class MonitorService {
         ]);
         const out = new Map();
         const get = (id) => {
-            if (!out.has(id))
-                out.set(id, { total: 0, eligible: 0, harsh: 0, promoteActive: 0 });
-            return out.get(id);
+            const key = typeof id === 'string' && id ? id : exports.UNASSIGNED_POOL_KEY;
+            if (!out.has(key)) {
+                out.set(key, { total: 0, eligible: 0, harsh: 0, warming: 0, promoteActive: 0, promoteTotal: 0, promoteHarsh: 0, promoteWarming: 0 });
+            }
+            return out.get(key);
         };
-        for (const b of buf)
-            if (b._id)
-                Object.assign(get(b._id), { total: (0, monitor_util_1.num)(b.total), eligible: (0, monitor_util_1.num)(b.eligible), harsh: (0, monitor_util_1.num)(b.harsh) });
-        for (const p of prom)
-            if (p._id)
-                get(p._id).promoteActive = (0, monitor_util_1.num)(p.active);
+        for (const b of buf) {
+            const c = get(b._id);
+            c.total += (0, monitor_util_1.num)(b.total);
+            c.eligible += (0, monitor_util_1.num)(b.eligible);
+            c.harsh += (0, monitor_util_1.num)(b.harsh);
+            c.warming += (0, monitor_util_1.num)(b.warming);
+        }
+        for (const p of prom) {
+            const c = get(p._id);
+            c.promoteActive += (0, monitor_util_1.num)(p.active);
+            c.promoteTotal += (0, monitor_util_1.num)(p.total);
+            c.promoteHarsh += (0, monitor_util_1.num)(p.harsh);
+            c.promoteWarming += (0, monitor_util_1.num)(p.warming);
+        }
         return out;
+    }
+    async poolSnapshot() {
+        return this.pool(new Ctx(true));
     }
     async fleet(period) {
         return legacyOf(await this.snap(`fleet:${period}`));
@@ -41044,7 +41292,9 @@ let MonitorService = MonitorService_1 = class MonitorService {
             }));
         }
         const poolAll = { eligible: 0, total: 0, harsh: 0, promoteActive: 0 };
-        for (const v of pool?.values() ?? []) {
+        for (const [id, v] of pool ?? []) {
+            if (id === exports.UNASSIGNED_POOL_KEY)
+                continue;
             poolAll.eligible += v.eligible;
             poolAll.total += v.total;
             poolAll.harsh += v.harsh;
@@ -41858,6 +42108,126 @@ exports.MonitorService = MonitorService = MonitorService_1 = __decorate([
     __metadata("design:paramtypes", [analytics_pg_reader_1.AnalyticsPgReader,
         mongoose_2.Connection, Object])
 ], MonitorService);
+
+
+/***/ },
+
+/***/ "./src/components/monitor/pool-snapshot.writer.ts"
+/*!********************************************************!*\
+  !*** ./src/components/monitor/pool-snapshot.writer.ts ***!
+  \********************************************************/
+(__unused_webpack_module, exports, __webpack_require__) {
+
+
+var __decorate = (this && this.__decorate) || function (decorators, target, key, desc) {
+    var c = arguments.length, r = c < 3 ? target : desc === null ? desc = Object.getOwnPropertyDescriptor(target, key) : desc, d;
+    if (typeof Reflect === "object" && typeof Reflect.decorate === "function") r = Reflect.decorate(decorators, target, key, desc);
+    else for (var i = decorators.length - 1; i >= 0; i--) if (d = decorators[i]) r = (c < 3 ? d(r) : c > 3 ? d(target, key, r) : d(target, key)) || r;
+    return c > 3 && r && Object.defineProperty(target, key, r), r;
+};
+var __metadata = (this && this.__metadata) || function (k, v) {
+    if (typeof Reflect === "object" && typeof Reflect.metadata === "function") return Reflect.metadata(k, v);
+};
+var PoolSnapshotWriter_1;
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.PoolSnapshotWriter = exports.POOL_SNAPSHOT_SQL = exports.POOL_SNAPSHOT_FLAG = void 0;
+exports.poolSnapshotEnabled = poolSnapshotEnabled;
+exports.poolSnapshotRows = poolSnapshotRows;
+const common_1 = __webpack_require__(/*! @nestjs/common */ "@nestjs/common");
+const analytics_pg_reader_1 = __webpack_require__(/*! ../daily-analytics/analytics-pg.reader */ "./src/components/daily-analytics/analytics-pg.reader.ts");
+const monitor_service_1 = __webpack_require__(/*! ./monitor.service */ "./src/components/monitor/monitor.service.ts");
+exports.POOL_SNAPSHOT_FLAG = 'POOL_SNAPSHOT_ENABLED';
+function poolSnapshotEnabled(env = process.env) {
+    const v = env[exports.POOL_SNAPSHOT_FLAG];
+    if (v === undefined || v.trim() === '')
+        return true;
+    return !['0', 'false', 'no', 'off'].includes(v.trim().toLowerCase());
+}
+function poolSnapshotRows(pool) {
+    const rows = [];
+    const ids = [...pool.keys()].sort();
+    for (const id of ids) {
+        const c = pool.get(id);
+        rows.push({ pool: 'b', client_id: id, total: c.total, eligible: c.eligible, harsh: c.harsh, active: 0, warming: c.warming });
+    }
+    for (const id of ids) {
+        const c = pool.get(id);
+        rows.push({ pool: 'p', client_id: id, total: c.promoteTotal, eligible: 0, harsh: c.promoteHarsh, active: c.promoteActive, warming: c.promoteWarming });
+    }
+    return rows;
+}
+exports.POOL_SNAPSHOT_SQL = `/* cms.pool_snapshot */
+INSERT INTO pool_snapshot (ts_hour, pool, client_id, total, eligible, harsh, active, warming)
+SELECT date_trunc('hour', now()), r.pool, r.client_id, r.total, r.eligible, r.harsh, r.active, r.warming
+  FROM unnest($1::text[], $2::text[], $3::int[], $4::int[], $5::int[], $6::int[], $7::int[])
+       AS r(pool, client_id, total, eligible, harsh, active, warming)
+ON CONFLICT (ts_hour, pool, client_id) DO NOTHING
+RETURNING 1 AS inserted`;
+let PoolSnapshotWriter = PoolSnapshotWriter_1 = class PoolSnapshotWriter {
+    constructor(monitor, pg) {
+        this.monitor = monitor;
+        this.pg = pg;
+        this.logger = new common_1.Logger(PoolSnapshotWriter_1.name);
+    }
+    async run() {
+        try {
+            return await this.write();
+        }
+        catch (err) {
+            const reason = `unexpected: ${String(err?.message ?? err).slice(0, 200)}`;
+            this.logger.warn(`pool_snapshot ${reason}; this hour is a gap`);
+            return { status: 'failed', reason };
+        }
+    }
+    async write() {
+        if (!poolSnapshotEnabled())
+            return { status: 'skipped', reason: `${exports.POOL_SNAPSHOT_FLAG} is off` };
+        if (!this.pg.isEnabled())
+            return { status: 'skipped', reason: 'ANALYTICS_DB_URL not set' };
+        let pool;
+        try {
+            pool = await this.monitor.poolSnapshot();
+        }
+        catch (err) {
+            const reason = `pool counts unavailable: ${String(err?.message ?? err).slice(0, 200)}`;
+            this.logger.warn(`pool_snapshot ${reason}; this hour is a gap`);
+            return { status: 'failed', reason };
+        }
+        const rows = poolSnapshotRows(pool);
+        if (!rows.length) {
+            this.logger.warn('pool_snapshot: no pool rows (empty bufferClients and promoteClients?); nothing written');
+            return { status: 'skipped', reason: 'no rows' };
+        }
+        let error;
+        const res = await this.pg.query(exports.POOL_SNAPSHOT_SQL, [
+            rows.map((r) => r.pool),
+            rows.map((r) => r.client_id),
+            rows.map((r) => r.total),
+            rows.map((r) => r.eligible),
+            rows.map((r) => r.harsh),
+            rows.map((r) => r.active),
+            rows.map((r) => r.warming),
+        ], (e) => (error = e));
+        if (res === undefined) {
+            const e = error;
+            if (e?.code === '42P01') {
+                this.logger.warn('pool_snapshot table does not exist (apply upgrade-2026-11-07-bounded-history.sql); skipped');
+                return { status: 'skipped', reason: 'pool_snapshot missing' };
+            }
+            const reason = `${e?.kind ?? 'query'}${e?.code ? ` ${e.code}` : ''}: ${String(e?.message ?? 'unknown').slice(0, 200)}`;
+            this.logger.warn(`pool_snapshot insert failed (${reason}); this hour is a gap`);
+            return { status: 'failed', reason };
+        }
+        this.logger.log(`pool_snapshot: ${res.length}/${rows.length} rows inserted`);
+        return { status: 'written', rows: rows.length, inserted: res.length };
+    }
+};
+exports.PoolSnapshotWriter = PoolSnapshotWriter;
+exports.PoolSnapshotWriter = PoolSnapshotWriter = PoolSnapshotWriter_1 = __decorate([
+    (0, common_1.Injectable)(),
+    __metadata("design:paramtypes", [monitor_service_1.MonitorService,
+        analytics_pg_reader_1.AnalyticsPgReader])
+], PoolSnapshotWriter);
 
 
 /***/ },
@@ -60107,10 +60477,11 @@ const app_service_1 = __webpack_require__(/*! ../../app.service */ "./src/app.se
 const runtime_config_service_1 = __webpack_require__(/*! ../config/runtime-config.service */ "./src/control-plane/config/runtime-config.service.ts");
 const account_maintenance_service_1 = __webpack_require__(/*! ../maintenance/account-maintenance.service */ "./src/control-plane/maintenance/account-maintenance.service.ts");
 const analytics_health_check_1 = __webpack_require__(/*! ../../components/daily-analytics/analytics-health.check */ "./src/components/daily-analytics/analytics-health.check.ts");
+const pool_snapshot_writer_1 = __webpack_require__(/*! ../../components/monitor/pool-snapshot.writer */ "./src/components/monitor/pool-snapshot.writer.ts");
 const IST = 'Asia/Kolkata';
 exports.SWAP_MAINTENANCE_CLAIM_TTL_MS = 60 * 60 * 1000;
 let ScheduledJobsService = ScheduledJobsService_1 = class ScheduledJobsService {
-    constructor(config, appService, maintenance, clientService, activeChannelsService, stat1Service, connection, analyticsHealth) {
+    constructor(config, appService, maintenance, clientService, activeChannelsService, stat1Service, connection, analyticsHealth, poolSnapshot) {
         this.config = config;
         this.appService = appService;
         this.maintenance = maintenance;
@@ -60119,6 +60490,7 @@ let ScheduledJobsService = ScheduledJobsService_1 = class ScheduledJobsService {
         this.stat1Service = stat1Service;
         this.connection = connection;
         this.analyticsHealth = analyticsHealth;
+        this.poolSnapshot = poolSnapshot;
         this.logger = new common_1.Logger(ScheduledJobsService_1.name);
         this.jobs = [];
         this.startupTimers = [];
@@ -60165,6 +60537,7 @@ let ScheduledJobsService = ScheduledJobsService_1 = class ScheduledJobsService {
         });
         this.register('cms-buffer-join', '0 */3 * * *', () => this.appService.joinBufferClients());
         this.register('cms-analytics-health', '30 2 * * *', () => this.runAnalyticsHealth());
+        this.register('cms-pool-snapshot', '3 * * * *', () => this.runPoolSnapshot());
         this.register('cms-swap-maintenance', '7,37 * * * *', () => {
             const now = new Date();
             return this.runClaimed(`swap-maintenance:${this.halfHourSlotKey(now)}`, 'swap maintenance', async () => {
@@ -60308,6 +60681,15 @@ let ScheduledJobsService = ScheduledJobsService_1 = class ScheduledJobsService {
             throw error;
         }
     }
+    utcHourKey(now = new Date()) {
+        return now.toISOString().slice(0, 13);
+    }
+    runPoolSnapshot(now = new Date()) {
+        return this.runClaimed(`pool-snapshot:${this.utcHourKey(now)}`, 'pool snapshot', async () => {
+            const outcome = await this.poolSnapshot.run();
+            return { outcome };
+        });
+    }
     async runAnalyticsHealth() {
         const db = this.requireDatabase('analytics health check');
         const runs = db.collection('controlPlaneJobRuns');
@@ -60317,8 +60699,16 @@ let ScheduledJobsService = ScheduledJobsService_1 = class ScheduledJobsService {
             return;
         }
         try {
-            const problems = await this.analyticsHealth.run();
-            await runs.updateOne({ _id: jobId }, { $set: { completedAt: new Date(), problems }, $unset: { leaseOwner: '', leaseExpiresAt: '' } });
+            const previous = await runs
+                .find({ _id: { $regex: /^analytics-health:/ }, completedAt: { $exists: true } })
+                .sort({ completedAt: -1 })
+                .limit(1)
+                .next();
+            const { problems, suppressed, historyAlerts } = await this.analyticsHealth.runWithState(Date.now(), previous?.historyAlerts ?? {});
+            await runs.updateOne({ _id: jobId }, {
+                $set: { completedAt: new Date(), problems, suppressed, historyAlerts },
+                $unset: { leaseOwner: '', leaseExpiresAt: '' },
+            });
         }
         catch (error) {
             await runs.updateOne({ _id: jobId }, {
@@ -60513,7 +60903,8 @@ exports.ScheduledJobsService = ScheduledJobsService = ScheduledJobsService_1 = _
         account_maintenance_service_1.AccountMaintenanceService,
         components_1.ClientService,
         components_1.ActiveChannelsService,
-        components_1.Stat1Service, Function, analytics_health_check_1.AnalyticsHealthCheck])
+        components_1.Stat1Service, Function, analytics_health_check_1.AnalyticsHealthCheck,
+        pool_snapshot_writer_1.PoolSnapshotWriter])
 ], ScheduledJobsService);
 
 
