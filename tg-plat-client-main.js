@@ -35198,6 +35198,417 @@ class BaseRepository {
 
 /***/ },
 
+/***/ "../../packages/tg-db/src/collections/account-facet-common.ts"
+/*!********************************************************************!*\
+  !*** ../../packages/tg-db/src/collections/account-facet-common.ts ***!
+  \********************************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   applyGuardedFacetWrite: () => (/* binding */ applyGuardedFacetWrite),
+/* harmony export */   facetCleanString: () => (/* binding */ facetCleanString),
+/* harmony export */   facetToDate: () => (/* binding */ facetToDate),
+/* harmony export */   normalizeFacetMobile: () => (/* binding */ normalizeFacetMobile),
+/* harmony export */   withFacetDeadline: () => (/* binding */ withFacetDeadline)
+/* harmony export */ });
+/* harmony import */ var _tg_core_utils_mongo_errors__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/core/utils/mongo-errors */ "../../packages/tg-core/src/utils/mongo-errors.ts");
+
+function facetCleanString(value, max) {
+    if (typeof value !== 'string')
+        return null;
+    const trimmed = value.trim();
+    return trimmed ? trimmed.substring(0, max) : null;
+}
+/** Canonical mobile (pool docs' form): trimmed, no leading '+'. */
+function normalizeFacetMobile(value) {
+    if (typeof value !== 'string' && typeof value !== 'number')
+        return null;
+    const trimmed = String(value).trim();
+    const normalized = trimmed.startsWith('+') ? trimmed.slice(1) : trimmed;
+    return normalized || null;
+}
+function facetToDate(value) {
+    if (value instanceof Date)
+        return Number.isFinite(value.getTime()) ? value : null;
+    if (typeof value === 'number')
+        return Number.isFinite(value) ? new Date(value) : null;
+    if (typeof value === 'string' && value.trim()) {
+        const parsed = new Date(value);
+        return Number.isFinite(parsed.getTime()) ? parsed : null;
+    }
+    return null;
+}
+function withFacetDeadline(promise, ms, label) {
+    let timer;
+    const timeout = new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms} ms (client-side deadline)`)), ms);
+        timer.unref?.();
+    });
+    return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+/**
+ * Guarded upsert + one no-upsert retry on E11000 (the shared write path of the three snapshot facets). A doc that
+ * exists but did not match the guard is either newer (stale) or a lost insert race; the retry tells them apart.
+ * `maxTimeMS` (server-side) is the same budget as the caller's client-side deadline, so the server also gives up.
+ */
+async function applyGuardedFacetWrite(collection, write, maxTimeMS) {
+    const filter = write.filter;
+    const update = write.update;
+    try {
+        await collection.updateOne(filter, update, { upsert: true, maxTimeMS });
+        return 'written';
+    }
+    catch (error) {
+        if (!(0,_tg_core_utils_mongo_errors__WEBPACK_IMPORTED_MODULE_0__.isDuplicateKeyError)(error))
+            throw error;
+        const retry = (await collection.updateOne(filter, update, { maxTimeMS }));
+        return (retry?.matchedCount ?? 0) > 0 ? 'written' : 'stale';
+    }
+}
+
+
+/***/ },
+
+/***/ "../../packages/tg-db/src/collections/account-health.repository.ts"
+/*!*************************************************************************!*\
+  !*** ../../packages/tg-db/src/collections/account-health.repository.ts ***!
+  \*************************************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   ACCOUNT_HEALTH_COLLECTION: () => (/* binding */ ACCOUNT_HEALTH_COLLECTION),
+/* harmony export */   ACCOUNT_HEALTH_SPAM_STATUSES: () => (/* binding */ ACCOUNT_HEALTH_SPAM_STATUSES),
+/* harmony export */   ACCOUNT_HEALTH_VERSION: () => (/* binding */ ACCOUNT_HEALTH_VERSION),
+/* harmony export */   AccountHealthRepository: () => (/* binding */ AccountHealthRepository),
+/* harmony export */   buildAccountHealthWrite: () => (/* binding */ buildAccountHealthWrite)
+/* harmony export */ });
+/* harmony import */ var _tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/core/utils/dc-ip-family */ "../../packages/tg-core/src/utils/dc-ip-family.ts");
+/* harmony import */ var _tg_core_utils_mongo_errors__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! @tg/core/utils/mongo-errors */ "../../packages/tg-core/src/utils/mongo-errors.ts");
+/* harmony import */ var _base_repository__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../base-repository */ "../../packages/tg-db/src/base-repository.ts");
+/* harmony import */ var _connection__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../connection */ "../../packages/tg-db/src/connection.ts");
+
+
+
+
+/**
+ * `accountHealth`: one SpamBot verdict per account, `_id` = canonical mobile
+ * (design docs/design/2026-11-07-account-collection-split.md, step S2 + "S2 review fixes").
+ *
+ * S2 is ADDITIVE (dual-write only): every producer keeps its existing write (bufferClients spam fields, Redis
+ * tg::acct::{mobile}) and mirrors it here AFTER, fire-and-forget. No reader is switched, no field is removed, no
+ * backfill runs.
+ *   - tg-platform: tg-aut `saveAccountVerdict` (system-message-handler.ts; every tg::acct verdict write, which also
+ *     covers the bufferClients `recordSpamStatus` write made in the same call), promote `PromotionEngine.setDaysLeft` /
+ *     `recordHarshVerdict` (promotion-engine.ts; every promote tg::acct write).
+ *   - CMS (CommonTgService src/components/shared/account-health.ts): the swap SpamBot probe persist
+ *     (client.service.ts isSpamSafeForSwap).
+ * The pool health-check stamps (lastChecked / lastHealthCheckAttemptAt) are NOT health facts: they stay on the pool
+ * docs (future accountWarmup facet, S3).
+ *
+ * Two times (aligned with docs/design/2026-10-30-unified-account-health.md §2.5 / C17):
+ *   - `verdictAt`: the time of THIS verdict. The stale-write guard: applied only when the stored verdictAt is <= the
+ *     incoming one (or absent), so the stored verdictAt only moves forward. An equal time re-applies (last writer wins).
+ *   - `spamCheckedAt`: the time the status last CHANGED. Kept while a verdict repeats the stored status (a repeat harsh
+ *     does not restart the CMS 30-day rest, C17); set to verdictAt when the status differs or nothing is stored.
+ * That needs the stored status, so the update is an aggregation pipeline (one round trip, atomic per doc).
+ * `daysLeft` is the writing app's legacy encoding (see the design doc: tg-aut harsh = 5, promote harsh keeps the
+ * previous value incl. -1, the CMS probe has none and unsets it); `daysLeftBy` names that app. A verdict without
+ * daysLeft unsets both, so the doc never pairs one source's verdict with another source's daysLeft.
+ * Upsert by `_id`. When the stored doc is newer, the guarded upsert matches nothing and its insert hits E11000 on `_id`;
+ * the writer then retries once WITHOUT upsert: a match means it lost an insert race (applied), no match means a newer
+ * verdict is stored ('stale', not logged).
+ *
+ * record() NEVER throws and is bounded by a CLIENT-SIDE deadline (a stalled socket cannot hold the promise);
+ * recordSoon() is the fire-and-forget form producers use. A failure is one warn (mobile masked) and is dropped.
+ *
+ * MIRROR: the write shape (ACCOUNT_HEALTH_VERSION, field names, statuses, buildAccountHealthWrite) must stay identical
+ * to CMS src/components/shared/account-health.ts. Change both together; tests/unit/packages/tg-db/account-health.test.mjs
+ * runs both builders over the same inputs and diffs the results.
+ *
+ * No secondary index: no reader exists yet and every planned lookup is by `_id` (S2 review fix D-d). An index for a
+ * switched reader is added with that reader.
+ */
+const ACCOUNT_HEALTH_COLLECTION = 'accountHealth';
+const ACCOUNT_HEALTH_VERSION = 1;
+/** Client-side cap on one write including its single retry. */
+const ACCOUNT_HEALTH_DEADLINE_MS = 3000;
+const ACCOUNT_HEALTH_SPAM_STATUSES = ['free', 'limited', 'harsh'];
+const STATUS_SET = new Set(ACCOUNT_HEALTH_SPAM_STATUSES);
+function cleanString(value, max) {
+    if (typeof value !== 'string')
+        return null;
+    const trimmed = value.trim();
+    return trimmed ? trimmed.substring(0, max) : null;
+}
+/** Canonical mobile (pool docs' form): trimmed, no leading '+'. MIRROR of CMS normalizeAccountHealthMobile. */
+function normalizeAccountHealthMobile(value) {
+    if (typeof value !== 'string' && typeof value !== 'number')
+        return null;
+    const trimmed = String(value).trim();
+    const normalized = trimmed.startsWith('+') ? trimmed.slice(1) : trimmed;
+    return normalized || null;
+}
+function toDate(value) {
+    if (value instanceof Date)
+        return Number.isFinite(value.getTime()) ? value : null;
+    if (typeof value === 'number')
+        return Number.isFinite(value) ? new Date(value) : null;
+    if (typeof value === 'string' && value.trim()) {
+        const parsed = new Date(value);
+        return Number.isFinite(parsed.getTime()) ? parsed : null;
+    }
+    return null;
+}
+/**
+ * The guarded pipeline update for one verdict. Null when there is nothing valid to write (no mobile / producer / verdict,
+ * an unknown status, no verdict time, no source). Strings go in as `$literal` (a pipeline would read a leading `$` as a
+ * field path). MIRROR of CMS buildAccountHealthWrite.
+ */
+function buildAccountHealthWrite(input, now) {
+    const mobile = normalizeAccountHealthMobile(input?.mobile);
+    const by = cleanString(input?.by, 60);
+    const verdict = input?.verdict;
+    if (!mobile || !by || !verdict)
+        return null;
+    const spamStatus = typeof verdict.spamStatus === 'string' && STATUS_SET.has(verdict.spamStatus) ? verdict.spamStatus : null;
+    const verdictAt = toDate(verdict.verdictAt);
+    const spamCheckSource = cleanString(verdict.spamCheckSource, 40);
+    if (!spamStatus || !verdictAt || !spamCheckSource)
+        return null;
+    const set = {
+        v: ACCOUNT_HEALTH_VERSION,
+        spamStatus: { $literal: spamStatus },
+        limitedUntil: spamStatus === 'limited' ? toDate(verdict.limitedUntil) : null,
+        // Status-change time: the stored one while the status repeats (expressions read the doc BEFORE this stage).
+        spamCheckedAt: { $cond: [{ $eq: ['$spamStatus', { $literal: spamStatus }] }, { $ifNull: ['$spamCheckedAt', verdictAt] }, verdictAt] },
+        verdictAt,
+        spamCheckSource: { $literal: spamCheckSource },
+        spamCheckBy: { $literal: by },
+        updatedAt: now,
+    };
+    const update = [{ $set: set }];
+    const daysLeft = typeof verdict.daysLeft === 'number' && Number.isFinite(verdict.daysLeft) ? Math.trunc(verdict.daysLeft) : null;
+    if (daysLeft !== null) {
+        set.daysLeft = daysLeft;
+        set.daysLeftBy = { $literal: spamCheckSource };
+    }
+    else {
+        update.push({ $unset: ['daysLeft', 'daysLeftBy'] });
+    }
+    return {
+        // `verdictAt: null` also matches a doc without the field.
+        filter: { _id: mobile, $or: [{ verdictAt: { $lte: verdictAt } }, { verdictAt: null }] },
+        update,
+    };
+}
+function withDeadline(promise, ms, label) {
+    let timer;
+    const timeout = new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms} ms (client-side deadline)`)), ms);
+        timer.unref?.();
+    });
+    return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+class AccountHealthRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_2__.BaseRepository {
+    constructor() {
+        super(...arguments);
+        this.collectionName = ACCOUNT_HEALTH_COLLECTION;
+    }
+    /** One guarded write. Never throws; resolves within `deadlineMs`. */
+    async record(input, options = {}) {
+        try {
+            const write = buildAccountHealthWrite(input, options.now ? options.now() : new Date());
+            if (!write)
+                return 'skipped';
+            const filter = write.filter;
+            const update = write.update;
+            // Review L9: the server stops the op at the same budget as the client-side deadline below.
+            const maxTimeMS = options.deadlineMs ?? ACCOUNT_HEALTH_DEADLINE_MS;
+            const attempt = async () => {
+                try {
+                    await this.collection.updateOne(filter, update, { upsert: true, maxTimeMS });
+                    return 'written';
+                }
+                catch (error) {
+                    if (!(0,_tg_core_utils_mongo_errors__WEBPACK_IMPORTED_MODULE_1__.isDuplicateKeyError)(error))
+                        throw error;
+                    // The doc exists but did not match: a newer verdict (stale) or a lost insert race. Once more,
+                    // without upsert: a match applies it, no match = stale.
+                    const retry = (await this.collection.updateOne(filter, update, { maxTimeMS }));
+                    return (retry?.matchedCount ?? 0) > 0 ? 'written' : 'stale';
+                }
+            };
+            return await withDeadline(Promise.resolve().then(attempt), options.deadlineMs ?? ACCOUNT_HEALTH_DEADLINE_MS, `${ACCOUNT_HEALTH_COLLECTION}.updateOne`);
+        }
+        catch (error) {
+            try {
+                this.logger.warn(`[${this.collectionName}] verdict for ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_0__.maskMobile)(String(input?.mobile ?? ''))} not mirrored (the existing health write is unaffected): ${(0,_connection__WEBPACK_IMPORTED_MODULE_3__.describeError)(error)}`);
+            }
+            catch { /* a broken logger must not throw either */ }
+            return 'failed';
+        }
+    }
+    /** Fire-and-forget form for producers: returns immediately, never rejects. */
+    recordSoon(input, options = {}) {
+        void this.record(input, options).catch(() => undefined);
+    }
+}
+
+
+/***/ },
+
+/***/ "../../packages/tg-db/src/collections/account-identity.repository.ts"
+/*!***************************************************************************!*\
+  !*** ../../packages/tg-db/src/collections/account-identity.repository.ts ***!
+  \***************************************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   ACCOUNT_IDENTITY_COLLECTION: () => (/* binding */ ACCOUNT_IDENTITY_COLLECTION),
+/* harmony export */   ACCOUNT_IDENTITY_VERSION: () => (/* binding */ ACCOUNT_IDENTITY_VERSION),
+/* harmony export */   AccountIdentityRepository: () => (/* binding */ AccountIdentityRepository),
+/* harmony export */   buildAccountIdentityWrite: () => (/* binding */ buildAccountIdentityWrite),
+/* harmony export */   buildAccountTelegramIdentityWrite: () => (/* binding */ buildAccountTelegramIdentityWrite)
+/* harmony export */ });
+/* harmony import */ var _tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/core/utils/dc-ip-family */ "../../packages/tg-core/src/utils/dc-ip-family.ts");
+/* harmony import */ var _base_repository__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../base-repository */ "../../packages/tg-db/src/base-repository.ts");
+/* harmony import */ var _connection__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../connection */ "../../packages/tg-db/src/connection.ts");
+/* harmony import */ var _account_facet_common__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ./account-facet-common */ "../../packages/tg-db/src/collections/account-facet-common.ts");
+
+
+
+
+/**
+ * `accountIdentity`: who an account is on Telegram (design docs/design/2026-11-07-account-collection-split.md, step S3
+ * facet F5). One doc per MOBILE (`_id` = mobile), two independently guarded groups:
+ *   - `profile`: the pool-doc snapshot { pool, tgId, username, assignedFirstName, assignedLastName, assignedBio,
+ *     assignedProfilePics, sourceUpdatedAt, by }, guarded on `profile.sourceUpdatedAt` (the pool doc's updatedAt). A
+ *     mobile in both pools feeds the same group: the most recently updated pool doc wins (identity is per account).
+ *     Same producers as accountWarmup / accountMembership (account-pool-facets.ts).
+ *   - `telegram`: what tg-aut observed at connect (getMe) { username, observedAt, by }, guarded on
+ *     `telegram.observedAt`. Producer: ClientsRepository.updateProfile when the update carries the logged-in mobile and
+ *     a username (apps/tg-aut/src/telegram/telegram-manager.ts `updateClient(clientId, {mobile: me.phone, username})`),
+ *     only when a clients doc matched and me.phone canonicalises to digits. An update with only `name` writes nothing. observedAt is the writer's clock (skew between VMs: owner question).
+ * The profile-photo / name-bio step TIMES are accountWarmup fields; 2FA / other-auths are credentials (not split);
+ * the session is not split. CMS users-maintenance getMe writes on `users` are NOT mirrored (gap, owner question).
+ *
+ * S3 is ADDITIVE (dual-write only): no reader switched, no field removed, no backfill run. NEVER throws, client-side
+ * deadline, one masked warn on failure; an older snapshot is 'stale' (E11000 on _id + one no-upsert retry; not logged).
+ * No tgId index: a unique tgId index would turn a real E11000 on tgId into a silent 'stale'.
+ *
+ * MIRROR: ACCOUNT_IDENTITY_VERSION and buildAccountIdentityWrite must stay identical to CMS
+ * src/components/shared/account-identity.ts (tests/unit/packages/tg-db/account-identity.test.mjs diffs both).
+ * buildAccountTelegramIdentityWrite is tg-only (no CMS producer).
+ */
+const ACCOUNT_IDENTITY_COLLECTION = 'accountIdentity';
+const ACCOUNT_IDENTITY_VERSION = 1;
+const ACCOUNT_IDENTITY_DEADLINE_MS = 3000;
+const POOL_SET = new Set(['buffer', 'promote']);
+const MAX_PROFILE_PICS = 20;
+function profilePics(value) {
+    if (!Array.isArray(value))
+        return null;
+    return value.filter((pic) => typeof pic === 'string' && pic.trim() !== '').map((pic) => pic.trim()).slice(0, MAX_PROFILE_PICS);
+}
+/** tgId as stored in pool docs is a string; a number is accepted (users.tgId history). */
+function tgIdValue(value) {
+    if (typeof value === 'number' && Number.isFinite(value))
+        return String(value);
+    return (0,_account_facet_common__WEBPACK_IMPORTED_MODULE_3__.facetCleanString)(value, 40);
+}
+/**
+ * The guarded `profile` write of one pool doc. Null when there is nothing valid to write (no mobile / pool / producer /
+ * doc, or a doc without a valid updatedAt). MIRROR of CMS buildAccountIdentityWrite.
+ */
+function buildAccountIdentityWrite(input, now) {
+    const doc = input?.doc;
+    if (!doc || typeof doc !== 'object')
+        return null;
+    const mobile = (0,_account_facet_common__WEBPACK_IMPORTED_MODULE_3__.normalizeFacetMobile)(input.mobile ?? doc.mobile);
+    const pool = typeof input.pool === 'string' && POOL_SET.has(input.pool) ? input.pool : null;
+    const by = (0,_account_facet_common__WEBPACK_IMPORTED_MODULE_3__.facetCleanString)(input.by, 60);
+    const sourceUpdatedAt = (0,_account_facet_common__WEBPACK_IMPORTED_MODULE_3__.facetToDate)(doc.updatedAt);
+    if (!mobile || !pool || !by || !sourceUpdatedAt)
+        return null;
+    const profile = {
+        pool,
+        tgId: tgIdValue(doc.tgId),
+        username: (0,_account_facet_common__WEBPACK_IMPORTED_MODULE_3__.facetCleanString)(doc.username, 64),
+        assignedFirstName: (0,_account_facet_common__WEBPACK_IMPORTED_MODULE_3__.facetCleanString)(doc.assignedFirstName, 200),
+        assignedLastName: (0,_account_facet_common__WEBPACK_IMPORTED_MODULE_3__.facetCleanString)(doc.assignedLastName, 200),
+        assignedBio: (0,_account_facet_common__WEBPACK_IMPORTED_MODULE_3__.facetCleanString)(doc.assignedBio, 1000),
+        assignedProfilePics: profilePics(doc.assignedProfilePics),
+        sourceUpdatedAt,
+        by,
+    };
+    return {
+        filter: { _id: mobile, $or: [{ 'profile.sourceUpdatedAt': { $lte: sourceUpdatedAt } }, { 'profile.sourceUpdatedAt': null }] },
+        update: { $set: { v: ACCOUNT_IDENTITY_VERSION, mobile, profile, updatedAt: now } },
+    };
+}
+/** The guarded `telegram` write (tg-aut connect observation). Null without a digits-only mobile or a producer. tg-only. */
+function buildAccountTelegramIdentityWrite(input, now) {
+    if (!input || typeof input !== 'object')
+        return null;
+    const mobile = (0,_account_facet_common__WEBPACK_IMPORTED_MODULE_3__.normalizeFacetMobile)(input.mobile);
+    const by = (0,_account_facet_common__WEBPACK_IMPORTED_MODULE_3__.facetCleanString)(input.by, 60);
+    const observedAt = (0,_account_facet_common__WEBPACK_IMPORTED_MODULE_3__.facetToDate)(input.observedAt) ?? now;
+    // me.phone is not a pool-doc value: anything that is not all digits after canonicalisation never becomes an _id.
+    if (!mobile || !/^\d+$/.test(mobile) || !by)
+        return null;
+    const telegram = { username: (0,_account_facet_common__WEBPACK_IMPORTED_MODULE_3__.facetCleanString)(input.username, 64), observedAt, by };
+    return {
+        filter: { _id: mobile, $or: [{ 'telegram.observedAt': { $lte: observedAt } }, { 'telegram.observedAt': null }] },
+        update: { $set: { v: ACCOUNT_IDENTITY_VERSION, mobile, telegram, updatedAt: now } },
+    };
+}
+class AccountIdentityRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_1__.BaseRepository {
+    constructor() {
+        super(...arguments);
+        this.collectionName = ACCOUNT_IDENTITY_COLLECTION;
+    }
+    async apply(build, mobileForLog, deadlineMs) {
+        try {
+            const write = build();
+            if (!write)
+                return 'skipped';
+            const budgetMs = deadlineMs ?? ACCOUNT_IDENTITY_DEADLINE_MS;
+            return await (0,_account_facet_common__WEBPACK_IMPORTED_MODULE_3__.withFacetDeadline)(Promise.resolve().then(() => (0,_account_facet_common__WEBPACK_IMPORTED_MODULE_3__.applyGuardedFacetWrite)(this.collection, write, budgetMs)), budgetMs, `${ACCOUNT_IDENTITY_COLLECTION}.updateOne`);
+        }
+        catch (error) {
+            try {
+                this.logger.warn(`[${this.collectionName}] snapshot for ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_0__.maskMobile)(String(mobileForLog ?? ''))} not mirrored (the source write is unaffected): ${(0,_connection__WEBPACK_IMPORTED_MODULE_2__.describeError)(error)}`);
+            }
+            catch { /* a broken logger must not throw either */ }
+            return 'failed';
+        }
+    }
+    /** Pool-doc `profile` snapshot. Never throws; resolves within `deadlineMs`. */
+    record(input, options = {}) {
+        return this.apply(() => buildAccountIdentityWrite(input, options.now ? options.now() : new Date()), input?.mobile ?? input?.doc?.mobile, options.deadlineMs);
+    }
+    /** Fire-and-forget form for producers: returns immediately, never rejects. */
+    recordSoon(input, options = {}) {
+        void this.record(input, options).catch(() => undefined);
+    }
+    /** tg-aut connect observation (`telegram` group). Never throws; resolves within `deadlineMs`. */
+    recordTelegram(input, options = {}) {
+        return this.apply(() => buildAccountTelegramIdentityWrite(input, options.now ? options.now() : new Date()), input?.mobile, options.deadlineMs);
+    }
+    recordTelegramSoon(input, options = {}) {
+        void this.recordTelegram(input, options).catch(() => undefined);
+    }
+}
+
+
+/***/ },
+
 /***/ "../../packages/tg-db/src/collections/account-leases.repository.ts"
 /*!*************************************************************************!*\
   !*** ../../packages/tg-db/src/collections/account-leases.repository.ts ***!
@@ -35580,6 +35991,194 @@ class AccountLeasesRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_
 
 /***/ },
 
+/***/ "../../packages/tg-db/src/collections/account-membership.repository.ts"
+/*!*****************************************************************************!*\
+  !*** ../../packages/tg-db/src/collections/account-membership.repository.ts ***!
+  \*****************************************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   ACCOUNT_MEMBERSHIP_COLLECTION: () => (/* binding */ ACCOUNT_MEMBERSHIP_COLLECTION),
+/* harmony export */   ACCOUNT_MEMBERSHIP_VERSION: () => (/* binding */ ACCOUNT_MEMBERSHIP_VERSION),
+/* harmony export */   AccountMembershipRepository: () => (/* binding */ AccountMembershipRepository),
+/* harmony export */   buildAccountMembershipWrite: () => (/* binding */ buildAccountMembershipWrite)
+/* harmony export */ });
+/* harmony import */ var _tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/core/utils/dc-ip-family */ "../../packages/tg-core/src/utils/dc-ip-family.ts");
+/* harmony import */ var _base_repository__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../base-repository */ "../../packages/tg-db/src/base-repository.ts");
+/* harmony import */ var _connection__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../connection */ "../../packages/tg-db/src/connection.ts");
+/* harmony import */ var _account_facet_common__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ./account-facet-common */ "../../packages/tg-db/src/collections/account-facet-common.ts");
+
+
+
+
+/**
+ * `accountMembership`: which pool / client an account belongs to NOW (design
+ * docs/design/2026-11-07-account-collection-split.md, step S3 facet F4). The current-state twin of the S1
+ * `accountRoleEvents` history; S1 events are untouched.
+ *
+ * One doc per MOBILE (`_id` = mobile), with one sub-doc per pool: `pools.buffer` / `pools.promote` =
+ * { role, clientId, status, inUse, availableDate, lastUsed, message, sourceUpdatedAt, by }.
+ *   - role: 'main' for a buffer doc with inUse === true (the account a client runs on), else the pool name. 'retired'
+ *     is not stored: it is status === 'inactive'.
+ *   - dbcoll / persona are NOT stored: dbcoll is a `clients` field (join by clientId); the persona fields
+ *     (assignedFirstName ...) belong to accountIdentity.
+ *   - channels / lastActive / version are excluded: `channels` is a high-frequency counter ($inc outside update()).
+ * Each pool sub-doc is guarded separately on `pools.<pool>.sourceUpdatedAt` (the pool doc's own updatedAt), so the
+ * buffer and promote docs of one mobile never overwrite each other. An older snapshot hits E11000 on `_id` and the
+ * one no-upsert retry reports 'stale' (not logged). Equal times re-apply (last writer wins).
+ *
+ * S3 is ADDITIVE (dual-write only), same producers as accountWarmup (account-pool-facets.ts). No reader is switched,
+ * no field removed, no backfill run. A pool doc DELETE is not mirrored (the sub-doc stays; parity reports it).
+ *
+ * MIRROR: ACCOUNT_MEMBERSHIP_VERSION and buildAccountMembershipWrite must stay identical to CMS
+ * src/components/shared/account-membership.ts; tests/unit/packages/tg-db/account-membership.test.mjs diffs both.
+ *
+ * No secondary index (D-d): the planned readers (clientId lookups) get theirs with their own change.
+ */
+const ACCOUNT_MEMBERSHIP_COLLECTION = 'accountMembership';
+const ACCOUNT_MEMBERSHIP_VERSION = 1;
+const ACCOUNT_MEMBERSHIP_DEADLINE_MS = 3000;
+const POOL_SET = new Set(['buffer', 'promote']);
+/**
+ * The guarded write of one pool doc's membership. Null when there is nothing valid to write (no mobile / pool /
+ * producer / doc, or a doc without a valid updatedAt). MIRROR of CMS buildAccountMembershipWrite.
+ */
+function buildAccountMembershipWrite(input, now) {
+    const doc = input?.doc;
+    if (!doc || typeof doc !== 'object')
+        return null;
+    const mobile = (0,_account_facet_common__WEBPACK_IMPORTED_MODULE_3__.normalizeFacetMobile)(input.mobile ?? doc.mobile);
+    const pool = typeof input.pool === 'string' && POOL_SET.has(input.pool) ? input.pool : null;
+    const by = (0,_account_facet_common__WEBPACK_IMPORTED_MODULE_3__.facetCleanString)(input.by, 60);
+    const sourceUpdatedAt = (0,_account_facet_common__WEBPACK_IMPORTED_MODULE_3__.facetToDate)(doc.updatedAt);
+    if (!mobile || !pool || !by || !sourceUpdatedAt)
+        return null;
+    const inUse = typeof doc.inUse === 'boolean' ? doc.inUse : null;
+    const membership = {
+        role: pool === 'buffer' && inUse === true ? 'main' : pool,
+        clientId: (0,_account_facet_common__WEBPACK_IMPORTED_MODULE_3__.facetCleanString)(doc.clientId, 60),
+        status: (0,_account_facet_common__WEBPACK_IMPORTED_MODULE_3__.facetCleanString)(doc.status, 40),
+        inUse,
+        availableDate: (0,_account_facet_common__WEBPACK_IMPORTED_MODULE_3__.facetCleanString)(doc.availableDate, 40),
+        lastUsed: (0,_account_facet_common__WEBPACK_IMPORTED_MODULE_3__.facetToDate)(doc.lastUsed),
+        message: (0,_account_facet_common__WEBPACK_IMPORTED_MODULE_3__.facetCleanString)(doc.message, 500),
+        sourceUpdatedAt,
+        by,
+    };
+    const path = `pools.${pool}`;
+    return {
+        // `<path>.sourceUpdatedAt: null` also matches a doc without this pool's sub-doc.
+        filter: { _id: mobile, $or: [{ [`${path}.sourceUpdatedAt`]: { $lte: sourceUpdatedAt } }, { [`${path}.sourceUpdatedAt`]: null }] },
+        update: { $set: { v: ACCOUNT_MEMBERSHIP_VERSION, mobile, [path]: membership, updatedAt: now } },
+    };
+}
+class AccountMembershipRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_1__.BaseRepository {
+    constructor() {
+        super(...arguments);
+        this.collectionName = ACCOUNT_MEMBERSHIP_COLLECTION;
+    }
+    /** One guarded write. Never throws; resolves within `deadlineMs`. */
+    async record(input, options = {}) {
+        try {
+            const write = buildAccountMembershipWrite(input, options.now ? options.now() : new Date());
+            if (!write)
+                return 'skipped';
+            const deadlineMs = options.deadlineMs ?? ACCOUNT_MEMBERSHIP_DEADLINE_MS;
+            return await (0,_account_facet_common__WEBPACK_IMPORTED_MODULE_3__.withFacetDeadline)(Promise.resolve().then(() => (0,_account_facet_common__WEBPACK_IMPORTED_MODULE_3__.applyGuardedFacetWrite)(this.collection, write, deadlineMs)), deadlineMs, `${ACCOUNT_MEMBERSHIP_COLLECTION}.updateOne`);
+        }
+        catch (error) {
+            try {
+                this.logger.warn(`[${this.collectionName}] snapshot for ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_0__.maskMobile)(String(input?.mobile ?? input?.doc?.mobile ?? ''))} not mirrored (the pool-doc write is unaffected): ${(0,_connection__WEBPACK_IMPORTED_MODULE_2__.describeError)(error)}`);
+            }
+            catch { /* a broken logger must not throw either */ }
+            return 'failed';
+        }
+    }
+    /** Fire-and-forget form for producers: returns immediately, never rejects. */
+    recordSoon(input, options = {}) {
+        void this.record(input, options).catch(() => undefined);
+    }
+}
+
+
+/***/ },
+
+/***/ "../../packages/tg-db/src/collections/account-pool-facets.ts"
+/*!*******************************************************************!*\
+  !*** ../../packages/tg-db/src/collections/account-pool-facets.ts ***!
+  \*******************************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   ACCOUNT_POOL_FACET_PROJECTION: () => (/* binding */ ACCOUNT_POOL_FACET_PROJECTION),
+/* harmony export */   AccountPoolFacets: () => (/* binding */ AccountPoolFacets)
+/* harmony export */ });
+/* harmony import */ var _account_identity_repository__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./account-identity.repository */ "../../packages/tg-db/src/collections/account-identity.repository.ts");
+/* harmony import */ var _account_membership_repository__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./account-membership.repository */ "../../packages/tg-db/src/collections/account-membership.repository.ts");
+/* harmony import */ var _account_warmup_repository__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./account-warmup.repository */ "../../packages/tg-db/src/collections/account-warmup.repository.ts");
+
+
+
+/**
+ * findOneAndUpdate projection for producers that only need the AFTER doc to mirror it (the persona writes): `mobile`,
+ * `updatedAt` and exactly the pool-doc fields the three builders read, so the session / profile-pic / channel arrays are
+ * never shipped back. tests/unit/packages/tg-db/account-warmup.test.mjs proves the builders give the same write for the
+ * projected and the full doc.
+ */
+const ACCOUNT_POOL_FACET_PROJECTION = Object.freeze({
+    _id: 0,
+    mobile: 1,
+    updatedAt: 1,
+    ...Object.fromEntries(_account_warmup_repository__WEBPACK_IMPORTED_MODULE_2__.ACCOUNT_WARMUP_FIELDS.map((field) => [field, 1])),
+    // accountMembership
+    clientId: 1, status: 1, inUse: 1, availableDate: 1, lastUsed: 1, message: 1,
+    // accountIdentity `profile`
+    tgId: 1, username: 1, assignedFirstName: 1, assignedLastName: 1, assignedBio: 1, assignedProfilePics: 1,
+});
+/**
+ * The tg-platform producer hook of the S3 snapshot facets (design docs/design/2026-11-07-account-collection-split.md,
+ * "S3 implementation"): after a pool-doc write that returned the AFTER doc, mirror that doc into every facet.
+ * Fire-and-forget: returns at once, never throws, never changes the caller's result. Each facet repository bounds its
+ * own write with a client-side deadline and logs one warn on failure.
+ *
+ * Producers (all in this package, so the apps keep calling the same repository methods):
+ *   - PromoteRepository.updatePromoteClient / createPromoteClient / updatePromoteClientAssignment
+ *   - ClientsRepository.updateBufferClientAssignment
+ *   - ClientsRepository.updateProfile (accountIdentity `telegram` group only, via mirrorTelegramIdentitySoon)
+ */
+class AccountPoolFacets {
+    constructor(connection, logger) {
+        this.warmup = new _account_warmup_repository__WEBPACK_IMPORTED_MODULE_2__.AccountWarmupRepository(connection, logger);
+        this.membership = new _account_membership_repository__WEBPACK_IMPORTED_MODULE_1__.AccountMembershipRepository(connection, logger);
+        this.identity = new _account_identity_repository__WEBPACK_IMPORTED_MODULE_0__.AccountIdentityRepository(connection, logger);
+    }
+    mirrorSoon(pool, doc, by) {
+        try {
+            if (!doc || typeof doc !== 'object')
+                return;
+            const snapshot = doc;
+            this.warmup.recordSoon({ pool, by, doc: snapshot });
+            this.membership.recordSoon({ pool, by, doc: snapshot });
+            this.identity.recordSoon({ pool, by, doc: snapshot });
+        }
+        catch { /* mirroring is best-effort; the pool-doc write already happened */ }
+    }
+    /** accountIdentity `telegram` group: the username Telegram reported for the logged-in mobile. Fire-and-forget. */
+    mirrorTelegramIdentitySoon(mobile, username, by) {
+        try {
+            this.identity.recordTelegramSoon({ mobile, username, by });
+        }
+        catch { /* best-effort; the clients write already happened */ }
+    }
+}
+
+
+/***/ },
+
 /***/ "../../packages/tg-db/src/collections/account-role-events.repository.ts"
 /*!******************************************************************************!*\
   !*** ../../packages/tg-db/src/collections/account-role-events.repository.ts ***!
@@ -35848,6 +36447,144 @@ class AccountRoleEventsRepository extends _base_repository__WEBPACK_IMPORTED_MOD
         await this.guardWrite('ensureIndexes(mobile_at_id)', () => this.collection.createIndex({ mobile: 1, at: -1, _id: -1 }, { name: ACCOUNT_ROLE_EVENTS_MOBILE_INDEX }));
         await this.guardWrite('ensureIndexes(client_at_id)', () => this.collection.createIndex({ clientId: 1, at: -1, _id: -1 }, { name: ACCOUNT_ROLE_EVENTS_CLIENT_INDEX }));
         await this.guardWrite('ensureIndexes(op_unique)', () => this.collection.createIndex({ opId: 1, event: 1, mobile: 1 }, { name: ACCOUNT_ROLE_EVENTS_OP_INDEX, unique: true, partialFilterExpression: { opId: { $type: 'string' } } }));
+    }
+}
+
+
+/***/ },
+
+/***/ "../../packages/tg-db/src/collections/account-warmup.repository.ts"
+/*!*************************************************************************!*\
+  !*** ../../packages/tg-db/src/collections/account-warmup.repository.ts ***!
+  \*************************************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   ACCOUNT_FACET_POOLS: () => (/* binding */ ACCOUNT_FACET_POOLS),
+/* harmony export */   ACCOUNT_WARMUP_COLLECTION: () => (/* binding */ ACCOUNT_WARMUP_COLLECTION),
+/* harmony export */   ACCOUNT_WARMUP_FIELDS: () => (/* binding */ ACCOUNT_WARMUP_FIELDS),
+/* harmony export */   ACCOUNT_WARMUP_VERSION: () => (/* binding */ ACCOUNT_WARMUP_VERSION),
+/* harmony export */   AccountWarmupRepository: () => (/* binding */ AccountWarmupRepository),
+/* harmony export */   buildAccountWarmupWrite: () => (/* binding */ buildAccountWarmupWrite)
+/* harmony export */ });
+/* harmony import */ var _tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/core/utils/dc-ip-family */ "../../packages/tg-core/src/utils/dc-ip-family.ts");
+/* harmony import */ var _base_repository__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../base-repository */ "../../packages/tg-db/src/base-repository.ts");
+/* harmony import */ var _connection__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../connection */ "../../packages/tg-db/src/connection.ts");
+/* harmony import */ var _account_facet_common__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ./account-facet-common */ "../../packages/tg-db/src/collections/account-facet-common.ts");
+
+
+
+
+/**
+ * `accountWarmup`: where one pool doc is in the 20-25 day warmup, plus the CMS health-check maintenance stamps
+ * (design docs/design/2026-11-07-account-collection-split.md, step S3 facet F3).
+ *
+ * One doc per POOL DOC: `_id` = `<pool>:<mobile>` (pool = buffer | promote). Every field is written per pool doc
+ * today, and its readers are per pool: the CMS health-check selection and ordering
+ * (CommonTgService shared/base-client.service.ts selectHealthCheckCandidates, orderSessionRotatedOldestCheckedFirst,
+ * healthCheckFailedRecently) query `this.model` (one pool) together with that pool's status / warmupPhase / inUse. A
+ * mobile can (rarely) hold a buffer AND a promote doc; one doc per mobile would let the two pools overwrite each
+ * other's stamps.
+ *
+ * S3 is ADDITIVE (dual-write only): every producer keeps its pool-doc write and mirrors the AFTER doc here,
+ * fire-and-forget. No reader is switched, no field is removed, no backfill runs.
+ *   - tg-platform: PromoteRepository.updatePromoteClient / createPromoteClient / updatePromoteClientAssignment and
+ *     ClientsRepository.updateBufferClientAssignment (persona flow privacy / name-bio stamps), via account-pool-facets.ts.
+ *   - CMS (CommonTgService src/components/shared/account-warmup.ts): buffer / promote update() and create(), auto-enrol,
+ *     set-as, the cutover (re-read after commit).
+ *
+ * Snapshot mirror: the input is the pool doc AFTER the write (not the delta), so a missing write is repaired by the
+ * next one. Stale-write guard on the pool doc's own `updatedAt` (`sourceUpdatedAt`): applied only when the stored
+ * sourceUpdatedAt is <= the incoming one (or absent); an older snapshot arriving late matches nothing, its upsert hits
+ * E11000 on `_id` and the one no-upsert retry reports 'stale' (not logged). Equal times re-apply (last writer wins);
+ * every producer bumps the pool doc's updatedAt (CMS via mongoose timestamps, tg-platform's persona writes explicitly),
+ * so ties need two writes in the same millisecond. Writer clocks differ per VM (skew: owner question §6).
+ *
+ * record() NEVER throws and is bounded by a CLIENT-SIDE deadline (the same budget is sent as the server-side
+ * maxTimeMS); recordSoon() is the fire-and-forget form.
+ *
+ * MIRROR: the write shape (ACCOUNT_WARMUP_VERSION, ACCOUNT_WARMUP_FIELDS, pools, buildAccountWarmupWrite) must stay
+ * identical to CMS src/components/shared/account-warmup.ts. Change both together; tests/unit/packages/tg-db/
+ * account-warmup.test.mjs runs both builders over the same inputs and diffs the results.
+ *
+ * No secondary index (same rule as accountHealth, D-d): the planned reader (health-check selection) gets its index
+ * with its own change.
+ */
+const ACCOUNT_WARMUP_COLLECTION = 'accountWarmup';
+const ACCOUNT_WARMUP_VERSION = 1;
+const ACCOUNT_WARMUP_DEADLINE_MS = 3000;
+const ACCOUNT_FACET_POOLS = ['buffer', 'promote'];
+const POOL_SET = new Set(ACCOUNT_FACET_POOLS);
+/** Pool-doc fields mirrored (dates unless listed below). twoFASetAt / otherAuthsRemovedAt are credentials (not split). */
+const ACCOUNT_WARMUP_FIELDS = [
+    'warmupPhase', 'warmupJitter', 'enrolledAt',
+    'privacyUpdatedAt', 'profilePicsDeletedAt', 'nameBioUpdatedAt', 'usernameUpdatedAt', 'profilePicsUpdatedAt',
+    'organicActivityAt', 'lastUpdateAttempt', 'failedUpdateAttempts', 'lastUpdateFailure',
+    'lastChecked', 'lastHealthCheckAttemptAt',
+];
+const NUMBER_FIELDS = new Set(['warmupJitter', 'failedUpdateAttempts']);
+const STRING_FIELDS = new Set(['warmupPhase']);
+function fieldValue(field, value) {
+    if (NUMBER_FIELDS.has(field))
+        return typeof value === 'number' && Number.isFinite(value) ? value : null;
+    if (STRING_FIELDS.has(field))
+        return (0,_account_facet_common__WEBPACK_IMPORTED_MODULE_3__.facetCleanString)(value, 40);
+    return (0,_account_facet_common__WEBPACK_IMPORTED_MODULE_3__.facetToDate)(value);
+}
+/**
+ * The guarded snapshot write for one pool doc. Null when there is nothing valid to write (no mobile / pool / producer /
+ * doc, or a doc without a valid updatedAt). Absent / invalid fields are stored as null. MIRROR of CMS
+ * buildAccountWarmupWrite.
+ */
+function buildAccountWarmupWrite(input, now) {
+    const doc = input?.doc;
+    if (!doc || typeof doc !== 'object')
+        return null;
+    const mobile = (0,_account_facet_common__WEBPACK_IMPORTED_MODULE_3__.normalizeFacetMobile)(input.mobile ?? doc.mobile);
+    const pool = typeof input.pool === 'string' && POOL_SET.has(input.pool) ? input.pool : null;
+    const by = (0,_account_facet_common__WEBPACK_IMPORTED_MODULE_3__.facetCleanString)(input.by, 60);
+    const sourceUpdatedAt = (0,_account_facet_common__WEBPACK_IMPORTED_MODULE_3__.facetToDate)(doc.updatedAt);
+    if (!mobile || !pool || !by || !sourceUpdatedAt)
+        return null;
+    const set = { v: ACCOUNT_WARMUP_VERSION, mobile, pool };
+    for (const field of ACCOUNT_WARMUP_FIELDS)
+        set[field] = fieldValue(field, doc[field]);
+    set.sourceUpdatedAt = sourceUpdatedAt;
+    set.by = by;
+    set.updatedAt = now;
+    return {
+        // `sourceUpdatedAt: null` also matches a doc without the field.
+        filter: { _id: `${pool}:${mobile}`, $or: [{ sourceUpdatedAt: { $lte: sourceUpdatedAt } }, { sourceUpdatedAt: null }] },
+        update: { $set: set },
+    };
+}
+class AccountWarmupRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_1__.BaseRepository {
+    constructor() {
+        super(...arguments);
+        this.collectionName = ACCOUNT_WARMUP_COLLECTION;
+    }
+    /** One guarded write. Never throws; resolves within `deadlineMs`. */
+    async record(input, options = {}) {
+        try {
+            const write = buildAccountWarmupWrite(input, options.now ? options.now() : new Date());
+            if (!write)
+                return 'skipped';
+            const deadlineMs = options.deadlineMs ?? ACCOUNT_WARMUP_DEADLINE_MS;
+            return await (0,_account_facet_common__WEBPACK_IMPORTED_MODULE_3__.withFacetDeadline)(Promise.resolve().then(() => (0,_account_facet_common__WEBPACK_IMPORTED_MODULE_3__.applyGuardedFacetWrite)(this.collection, write, deadlineMs)), deadlineMs, `${ACCOUNT_WARMUP_COLLECTION}.updateOne`);
+        }
+        catch (error) {
+            try {
+                this.logger.warn(`[${this.collectionName}] snapshot for ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_0__.maskMobile)(String(input?.mobile ?? input?.doc?.mobile ?? ''))} not mirrored (the pool-doc write is unaffected): ${(0,_connection__WEBPACK_IMPORTED_MODULE_2__.describeError)(error)}`);
+            }
+            catch { /* a broken logger must not throw either */ }
+            return 'failed';
+        }
+    }
+    /** Fire-and-forget form for producers: returns immediately, never rejects. */
+    recordSoon(input, options = {}) {
+        void this.record(input, options).catch(() => undefined);
     }
 }
 
@@ -36366,6 +37103,10 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _base_repository__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../base-repository */ "../../packages/tg-db/src/base-repository.ts");
 /* harmony import */ var _promote_repository__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./promote.repository */ "../../packages/tg-db/src/collections/promote.repository.ts");
 /* harmony import */ var _account_role_events_repository__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ./account-role-events.repository */ "../../packages/tg-db/src/collections/account-role-events.repository.ts");
+/* harmony import */ var _account_pool_facets__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ./account-pool-facets */ "../../packages/tg-db/src/collections/account-pool-facets.ts");
+/* harmony import */ var _account_facet_common__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ./account-facet-common */ "../../packages/tg-db/src/collections/account-facet-common.ts");
+
+
 
 
 
@@ -36383,6 +37124,7 @@ class ClientsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_1__.Ba
         super(...arguments);
         this.collectionName = 'clients';
         this.roleEventsRepository = null;
+        this.poolFacetsMirror = null;
     }
     /** Secret-free client read. Use this unless a Telegram connection is genuinely being opened. */
     async findMasked(clientId) {
@@ -36410,6 +37152,14 @@ class ClientsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_1__.Ba
             // change of the stored main can be recorded without an extra read on tg-aut's connect path.
             const before = await this.collection.findOneAndUpdate({ clientId }, { $set: update }, { returnDocument: 'before', projection: { mobile: 1 } });
             this.recordMainRewrite(clientId, before?.mobile, update.mobile);
+            // S3 accountIdentity (additive): tg-aut's connect write carries the logged-in mobile (me.phone) + the username
+            // Telegram reported (getMe). Mirrored only when a clients doc matched (a before-doc came back) and the mobile
+            // canonicalises (same normaliser as the facets) to digits; an update without both (e.g. only `name`) mirrors
+            // nothing. Fire-and-forget.
+            const telegramMobile = (0,_account_facet_common__WEBPACK_IMPORTED_MODULE_5__.normalizeFacetMobile)(update.mobile);
+            if (before && telegramMobile && /^\d+$/.test(telegramMobile) && 'username' in update) {
+                this.poolFacets.mirrorTelegramIdentitySoon(telegramMobile, update.username, 'tg-platform:client-profile');
+            }
         });
     }
     /**
@@ -36433,6 +37183,12 @@ class ClientsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_1__.Ba
             this.roleEvents.appendSoon({ ...common, mobile: oldMobile, event: 'swapped_out', toMobile: mobile });
         }
         catch { /* history is best-effort */ }
+    }
+    /** S3 snapshot facets (design 2026-11-07-account-collection-split, "S3 implementation"). */
+    get poolFacets() {
+        if (!this.poolFacetsMirror)
+            this.poolFacetsMirror = new _account_pool_facets__WEBPACK_IMPORTED_MODULE_4__.AccountPoolFacets(this.connection, this.logger);
+        return this.poolFacetsMirror;
     }
     get roleEvents() {
         if (!this.roleEventsRepository)
@@ -36471,7 +37227,15 @@ class ClientsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_1__.Ba
     async updateBufferClientAssignment(mobile, update) {
         if (!mobile?.trim())
             return false;
-        return this.guardWrite(`bufferClients.updateAssignment(${mobile})`, () => this.bufferClients.updateOne({ mobile }, { $set: update }));
+        return this.guardWrite(`bufferClients.updateAssignment(${mobile})`, async () => {
+            // findOneAndUpdate (one round trip, like the updateOne it replaces) returns the AFTER doc for the S3
+            // snapshot facets (design 2026-11-07-account-collection-split); the boolean result is unchanged. updatedAt is
+            // bumped like every CMS (mongoose timestamps) write, so the facets' sourceUpdatedAt guard orders this write
+            // after an earlier CMS write instead of tying with it. Projection: only the fields the facet builders read.
+            const after = await this.bufferClients.findOneAndUpdate({ mobile }, { $set: { ...update, updatedAt: new Date() } }, { returnDocument: 'after', projection: _account_pool_facets__WEBPACK_IMPORTED_MODULE_4__.ACCOUNT_POOL_FACET_PROJECTION });
+            if (after)
+                this.poolFacets.mirrorSoon('buffer', after, 'tg-platform:buffer-persona');
+        });
     }
     /** Records the SpamBot-derived spam flag on an existing bufferClients row. No upsert: never creates a row. */
     async recordSpamStatus(mobile, update) {
@@ -38036,7 +38800,9 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _tg_persona_persona_timestamps__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/persona/persona-timestamps */ "../../packages/tg-persona/src/persona-timestamps.ts");
 /* harmony import */ var _base_repository__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../base-repository */ "../../packages/tg-db/src/base-repository.ts");
 /* harmony import */ var _account_role_events_repository__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./account-role-events.repository */ "../../packages/tg-db/src/collections/account-role-events.repository.ts");
-/* harmony import */ var _promote_stats_normalize__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ./promote-stats.normalize */ "../../packages/tg-db/src/collections/promote-stats.normalize.ts");
+/* harmony import */ var _account_pool_facets__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ./account-pool-facets */ "../../packages/tg-db/src/collections/account-pool-facets.ts");
+/* harmony import */ var _promote_stats_normalize__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ./promote-stats.normalize */ "../../packages/tg-db/src/collections/promote-stats.normalize.ts");
+
 
 
 
@@ -38107,6 +38873,7 @@ class PromoteRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_1__.Ba
         super(...arguments);
         this.collectionName = 'promoteMsgs';
         this.roleEventsRepository = null;
+        this.poolFacetsMirror = null;
     }
     /**
      * The legacy promotion message pool as a { index -> text } map.
@@ -38403,6 +39170,9 @@ class PromoteRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_1__.Ba
             const after = result ?? null;
             if (after)
                 this.recordStatusRoleEvent(mobile, data, after);
+            // S3 snapshot facets (additive): mirror the AFTER doc; fire-and-forget, never changes the result.
+            if (after)
+                this.poolFacets.mirrorSoon('promote', after, 'tg-platform:promote-update');
             return after;
         });
     }
@@ -38433,6 +39203,12 @@ class PromoteRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_1__.Ba
         }
         catch { /* history is best-effort */ }
     }
+    /** S3 snapshot facets (design 2026-11-07-account-collection-split, "S3 implementation"). */
+    get poolFacets() {
+        if (!this.poolFacetsMirror)
+            this.poolFacetsMirror = new _account_pool_facets__WEBPACK_IMPORTED_MODULE_3__.AccountPoolFacets(this.connection, this.logger);
+        return this.poolFacetsMirror;
+    }
     get roleEvents() {
         if (!this.roleEventsRepository)
             this.roleEventsRepository = new _account_role_events_repository__WEBPACK_IMPORTED_MODULE_2__.AccountRoleEventsRepository(this.connection, this.logger);
@@ -38455,7 +39231,10 @@ class PromoteRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_1__.Ba
                 updatedAt: new Date(),
             };
             const result = await this.promoteClients.insertOne(newClient);
-            return { ...newClient, _id: result.insertedId };
+            const created = { ...newClient, _id: result.insertedId };
+            // S3 snapshot facets (additive): the inserted doc is the full snapshot; fire-and-forget.
+            this.poolFacets.mirrorSoon('promote', created, 'tg-platform:promote-create');
+            return created;
         });
     }
     /** THROWS on a read failure (the persona flow must see it); logs what was loaded. */
@@ -38484,7 +39263,14 @@ class PromoteRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_1__.Ba
         this.info(`[Persona] Persisting promote client assignment update for ${mobile}`, {
             keys: Object.keys(update),
         });
-        await this.promoteClients.updateOne({ mobile }, { $set: update });
+        // findOneAndUpdate (one round trip, like the updateOne it replaces) returns the AFTER doc for the S3 snapshot
+        // facets (persona privacy / name-bio stamps -> accountWarmup); the method still returns nothing and still throws.
+        // updatedAt is bumped like every CMS (mongoose timestamps) write, so the facets' sourceUpdatedAt guard orders this
+        // write after an earlier CMS write instead of tying with it (design "S3 implementation"). Projection: only the
+        // fields the facet builders read (never the session / photo arrays).
+        const after = await this.promoteClients.findOneAndUpdate({ mobile }, { $set: { ...update, updatedAt: new Date() } }, { returnDocument: 'after', projection: _account_pool_facets__WEBPACK_IMPORTED_MODULE_3__.ACCOUNT_POOL_FACET_PROJECTION });
+        if (after)
+            this.poolFacets.mirrorSoon('promote', after, 'tg-platform:promote-persona');
     }
     /**
      * The promoteClients half of the persona assignment snapshot (accounts of `clientId` that hold an
@@ -38509,12 +39295,12 @@ class PromoteRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_1__.Ba
         const existingDocument = await this.promoteStats.findOne(filter);
         if (existingDocument) {
             const defaults = {};
-            const normalizedData = (0,_promote_stats_normalize__WEBPACK_IMPORTED_MODULE_3__.normalizePromoteStatsData)(existingDocument.data);
-            const normalizedCount = (0,_promote_stats_normalize__WEBPACK_IMPORTED_MODULE_3__.normalizeNonNegativeNumber)(existingDocument.count);
-            const normalizedTotalCount = (0,_promote_stats_normalize__WEBPACK_IMPORTED_MODULE_3__.normalizeNonNegativeNumber)(existingDocument.totalCount);
-            const normalizedUniqueChannels = (0,_promote_stats_normalize__WEBPACK_IMPORTED_MODULE_3__.normalizeNonNegativeNumber)(existingDocument.uniqueChannels);
-            const normalizedLastUpdated = (0,_promote_stats_normalize__WEBPACK_IMPORTED_MODULE_3__.normalizePositiveTimestamp)(existingDocument.lastUpdatedTimeStamp);
-            const normalizedReleaseDay = (0,_promote_stats_normalize__WEBPACK_IMPORTED_MODULE_3__.normalizePositiveTimestamp)(existingDocument.releaseDay);
+            const normalizedData = (0,_promote_stats_normalize__WEBPACK_IMPORTED_MODULE_4__.normalizePromoteStatsData)(existingDocument.data);
+            const normalizedCount = (0,_promote_stats_normalize__WEBPACK_IMPORTED_MODULE_4__.normalizeNonNegativeNumber)(existingDocument.count);
+            const normalizedTotalCount = (0,_promote_stats_normalize__WEBPACK_IMPORTED_MODULE_4__.normalizeNonNegativeNumber)(existingDocument.totalCount);
+            const normalizedUniqueChannels = (0,_promote_stats_normalize__WEBPACK_IMPORTED_MODULE_4__.normalizeNonNegativeNumber)(existingDocument.uniqueChannels);
+            const normalizedLastUpdated = (0,_promote_stats_normalize__WEBPACK_IMPORTED_MODULE_4__.normalizePositiveTimestamp)(existingDocument.lastUpdatedTimeStamp);
+            const normalizedReleaseDay = (0,_promote_stats_normalize__WEBPACK_IMPORTED_MODULE_4__.normalizePositiveTimestamp)(existingDocument.releaseDay);
             if (normalizedCount == null)
                 defaults.count = 0;
             else if (normalizedCount !== existingDocument.count)
@@ -38590,16 +39376,16 @@ class PromoteRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_1__.Ba
     }
     /** Count one send to `channelName`. Never throws: logs/alerts and returns undefined. */
     async updatePromoteStats(client, channelName) {
-        const channelKey = (0,_promote_stats_normalize__WEBPACK_IMPORTED_MODULE_3__.normalizePromoteStatsChannelKey)(channelName);
+        const channelKey = (0,_promote_stats_normalize__WEBPACK_IMPORTED_MODULE_4__.normalizePromoteStatsChannelKey)(channelName);
         return this.guard('promoteStats.update', undefined, async () => {
             const filter = { client };
             const now = Date.now();
             const existingDocument = await this.promoteStats.findOne(filter);
             if (existingDocument) {
                 const repairs = {};
-                const normalizedData = (0,_promote_stats_normalize__WEBPACK_IMPORTED_MODULE_3__.normalizePromoteStatsData)(existingDocument.data);
-                const normalizedCount = (0,_promote_stats_normalize__WEBPACK_IMPORTED_MODULE_3__.normalizeNonNegativeNumber)(existingDocument.count);
-                const normalizedTotalCount = (0,_promote_stats_normalize__WEBPACK_IMPORTED_MODULE_3__.normalizeNonNegativeNumber)(existingDocument.totalCount);
+                const normalizedData = (0,_promote_stats_normalize__WEBPACK_IMPORTED_MODULE_4__.normalizePromoteStatsData)(existingDocument.data);
+                const normalizedCount = (0,_promote_stats_normalize__WEBPACK_IMPORTED_MODULE_4__.normalizeNonNegativeNumber)(existingDocument.count);
+                const normalizedTotalCount = (0,_promote_stats_normalize__WEBPACK_IMPORTED_MODULE_4__.normalizeNonNegativeNumber)(existingDocument.totalCount);
                 if (normalizedCount == null)
                     repairs.count = 0;
                 else if (normalizedCount !== existingDocument.count)
@@ -39740,7 +40526,15 @@ async function readDatabaseSize(client) {
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   ACCOUNT_FACET_POOLS: () => (/* reexport safe */ _collections_account_warmup_repository__WEBPACK_IMPORTED_MODULE_17__.ACCOUNT_FACET_POOLS),
+/* harmony export */   ACCOUNT_HEALTH_COLLECTION: () => (/* reexport safe */ _collections_account_health_repository__WEBPACK_IMPORTED_MODULE_16__.ACCOUNT_HEALTH_COLLECTION),
+/* harmony export */   ACCOUNT_HEALTH_SPAM_STATUSES: () => (/* reexport safe */ _collections_account_health_repository__WEBPACK_IMPORTED_MODULE_16__.ACCOUNT_HEALTH_SPAM_STATUSES),
+/* harmony export */   ACCOUNT_HEALTH_VERSION: () => (/* reexport safe */ _collections_account_health_repository__WEBPACK_IMPORTED_MODULE_16__.ACCOUNT_HEALTH_VERSION),
+/* harmony export */   ACCOUNT_IDENTITY_COLLECTION: () => (/* reexport safe */ _collections_account_identity_repository__WEBPACK_IMPORTED_MODULE_19__.ACCOUNT_IDENTITY_COLLECTION),
+/* harmony export */   ACCOUNT_IDENTITY_VERSION: () => (/* reexport safe */ _collections_account_identity_repository__WEBPACK_IMPORTED_MODULE_19__.ACCOUNT_IDENTITY_VERSION),
 /* harmony export */   ACCOUNT_LEASES_GC_INDEX: () => (/* reexport safe */ _collections_account_leases_repository__WEBPACK_IMPORTED_MODULE_11__.ACCOUNT_LEASES_GC_INDEX),
+/* harmony export */   ACCOUNT_MEMBERSHIP_COLLECTION: () => (/* reexport safe */ _collections_account_membership_repository__WEBPACK_IMPORTED_MODULE_18__.ACCOUNT_MEMBERSHIP_COLLECTION),
+/* harmony export */   ACCOUNT_MEMBERSHIP_VERSION: () => (/* reexport safe */ _collections_account_membership_repository__WEBPACK_IMPORTED_MODULE_18__.ACCOUNT_MEMBERSHIP_VERSION),
 /* harmony export */   ACCOUNT_ROLE_EVENTS_CLIENT_INDEX: () => (/* reexport safe */ _collections_account_role_events_repository__WEBPACK_IMPORTED_MODULE_15__.ACCOUNT_ROLE_EVENTS_CLIENT_INDEX),
 /* harmony export */   ACCOUNT_ROLE_EVENTS_COLLECTION: () => (/* reexport safe */ _collections_account_role_events_repository__WEBPACK_IMPORTED_MODULE_15__.ACCOUNT_ROLE_EVENTS_COLLECTION),
 /* harmony export */   ACCOUNT_ROLE_EVENTS_MOBILE_INDEX: () => (/* reexport safe */ _collections_account_role_events_repository__WEBPACK_IMPORTED_MODULE_15__.ACCOUNT_ROLE_EVENTS_MOBILE_INDEX),
@@ -39749,10 +40543,17 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   ACCOUNT_ROLE_EVENT_DEADLINE_MS: () => (/* reexport safe */ _collections_account_role_events_repository__WEBPACK_IMPORTED_MODULE_15__.ACCOUNT_ROLE_EVENT_DEADLINE_MS),
 /* harmony export */   ACCOUNT_ROLE_EVENT_VERSION: () => (/* reexport safe */ _collections_account_role_events_repository__WEBPACK_IMPORTED_MODULE_15__.ACCOUNT_ROLE_EVENT_VERSION),
 /* harmony export */   ACCOUNT_ROLE_REASON_CODES: () => (/* reexport safe */ _collections_account_role_events_repository__WEBPACK_IMPORTED_MODULE_15__.ACCOUNT_ROLE_REASON_CODES),
+/* harmony export */   ACCOUNT_WARMUP_COLLECTION: () => (/* reexport safe */ _collections_account_warmup_repository__WEBPACK_IMPORTED_MODULE_17__.ACCOUNT_WARMUP_COLLECTION),
+/* harmony export */   ACCOUNT_WARMUP_FIELDS: () => (/* reexport safe */ _collections_account_warmup_repository__WEBPACK_IMPORTED_MODULE_17__.ACCOUNT_WARMUP_FIELDS),
+/* harmony export */   ACCOUNT_WARMUP_VERSION: () => (/* reexport safe */ _collections_account_warmup_repository__WEBPACK_IMPORTED_MODULE_17__.ACCOUNT_WARMUP_VERSION),
 /* harmony export */   ACTIVE_CHANNEL_MESSAGE_IDS: () => (/* reexport safe */ _collections_channels_repository__WEBPACK_IMPORTED_MODULE_6__.ACTIVE_CHANNEL_MESSAGE_IDS),
 /* harmony export */   ATTRIBUTION_CHANNEL_CAP: () => (/* reexport safe */ _collections_user_identity_repository__WEBPACK_IMPORTED_MODULE_4__.ATTRIBUTION_CHANNEL_CAP),
+/* harmony export */   AccountHealthRepository: () => (/* reexport safe */ _collections_account_health_repository__WEBPACK_IMPORTED_MODULE_16__.AccountHealthRepository),
+/* harmony export */   AccountIdentityRepository: () => (/* reexport safe */ _collections_account_identity_repository__WEBPACK_IMPORTED_MODULE_19__.AccountIdentityRepository),
 /* harmony export */   AccountLeasesRepository: () => (/* reexport safe */ _collections_account_leases_repository__WEBPACK_IMPORTED_MODULE_11__.AccountLeasesRepository),
+/* harmony export */   AccountMembershipRepository: () => (/* reexport safe */ _collections_account_membership_repository__WEBPACK_IMPORTED_MODULE_18__.AccountMembershipRepository),
 /* harmony export */   AccountRoleEventsRepository: () => (/* reexport safe */ _collections_account_role_events_repository__WEBPACK_IMPORTED_MODULE_15__.AccountRoleEventsRepository),
+/* harmony export */   AccountWarmupRepository: () => (/* reexport safe */ _collections_account_warmup_repository__WEBPACK_IMPORTED_MODULE_17__.AccountWarmupRepository),
 /* harmony export */   AdoptedDbConnection: () => (/* reexport safe */ _adopt_connection__WEBPACK_IMPORTED_MODULE_1__.AdoptedDbConnection),
 /* harmony export */   BaseRepository: () => (/* reexport safe */ _base_repository__WEBPACK_IMPORTED_MODULE_2__.BaseRepository),
 /* harmony export */   CREDIT_KEY_HISTORY: () => (/* reexport safe */ _collections_user_data_repository__WEBPACK_IMPORTED_MODULE_3__.CREDIT_KEY_HISTORY),
@@ -39764,7 +40565,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   DISPLAY_NAME_HISTORY: () => (/* reexport safe */ _collections_user_identity_repository__WEBPACK_IMPORTED_MODULE_4__.DISPLAY_NAME_HISTORY),
 /* harmony export */   DailyStatsRepository: () => (/* reexport safe */ _collections_daily_stats_repository__WEBPACK_IMPORTED_MODULE_5__.DailyStatsRepository),
 /* harmony export */   DbConnection: () => (/* reexport safe */ _connection__WEBPACK_IMPORTED_MODULE_0__.DbConnection),
-/* harmony export */   ERROR_ALERT_WINDOW_MS: () => (/* reexport safe */ _repositories__WEBPACK_IMPORTED_MODULE_17__.ERROR_ALERT_WINDOW_MS),
+/* harmony export */   ERROR_ALERT_WINDOW_MS: () => (/* reexport safe */ _repositories__WEBPACK_IMPORTED_MODULE_21__.ERROR_ALERT_WINDOW_MS),
 /* harmony export */   LEASE_OP_MAX_TIME_MS: () => (/* reexport safe */ _collections_account_leases_repository__WEBPACK_IMPORTED_MODULE_11__.LEASE_OP_MAX_TIME_MS),
 /* harmony export */   PARKED_ACCOUNTS_DUE_INDEX: () => (/* reexport safe */ _collections_parked_accounts_repository__WEBPACK_IMPORTED_MODULE_12__.PARKED_ACCOUNTS_DUE_INDEX),
 /* harmony export */   PARKED_ACCOUNTS_GC_INDEX: () => (/* reexport safe */ _collections_parked_accounts_repository__WEBPACK_IMPORTED_MODULE_12__.PARKED_ACCOUNTS_GC_INDEX),
@@ -39787,7 +40588,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   REPLY_FAILURES_TTL_SECONDS: () => (/* reexport safe */ _collections_reply_failures_repository__WEBPACK_IMPORTED_MODULE_10__.REPLY_FAILURES_TTL_SECONDS),
 /* harmony export */   REPLY_FAILURE_TEXT_MAX: () => (/* reexport safe */ _collections_reply_failures_repository__WEBPACK_IMPORTED_MODULE_10__.REPLY_FAILURE_TEXT_MAX),
 /* harmony export */   ReplyFailuresRepository: () => (/* reexport safe */ _collections_reply_failures_repository__WEBPACK_IMPORTED_MODULE_10__.ReplyFailuresRepository),
-/* harmony export */   RepositoryContainer: () => (/* reexport safe */ _repositories__WEBPACK_IMPORTED_MODULE_17__.RepositoryContainer),
+/* harmony export */   RepositoryContainer: () => (/* reexport safe */ _repositories__WEBPACK_IMPORTED_MODULE_21__.RepositoryContainer),
 /* harmony export */   StatsRepository: () => (/* reexport safe */ _collections_stats_repository__WEBPACK_IMPORTED_MODULE_9__.StatsRepository),
 /* harmony export */   USER_DATA_DEFAULTS: () => (/* reexport safe */ _collections_user_data_repository__WEBPACK_IMPORTED_MODULE_3__.USER_DATA_DEFAULTS),
 /* harmony export */   UserDataRepository: () => (/* reexport safe */ _collections_user_data_repository__WEBPACK_IMPORTED_MODULE_3__.UserDataRepository),
@@ -39795,14 +40596,19 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   activeChannelSetOnInsert: () => (/* reexport safe */ _collections_channels_repository__WEBPACK_IMPORTED_MODULE_6__.activeChannelSetOnInsert),
 /* harmony export */   adoptMongoClient: () => (/* reexport safe */ _adopt_connection__WEBPACK_IMPORTED_MODULE_1__.adoptMongoClient),
 /* harmony export */   availableMsgsUpdateExpression: () => (/* reexport safe */ _collections_channels_repository__WEBPACK_IMPORTED_MODULE_6__.availableMsgsUpdateExpression),
+/* harmony export */   buildAccountHealthWrite: () => (/* reexport safe */ _collections_account_health_repository__WEBPACK_IMPORTED_MODULE_16__.buildAccountHealthWrite),
+/* harmony export */   buildAccountIdentityWrite: () => (/* reexport safe */ _collections_account_identity_repository__WEBPACK_IMPORTED_MODULE_19__.buildAccountIdentityWrite),
+/* harmony export */   buildAccountMembershipWrite: () => (/* reexport safe */ _collections_account_membership_repository__WEBPACK_IMPORTED_MODULE_18__.buildAccountMembershipWrite),
 /* harmony export */   buildAccountRoleEvent: () => (/* reexport safe */ _collections_account_role_events_repository__WEBPACK_IMPORTED_MODULE_15__.buildAccountRoleEvent),
+/* harmony export */   buildAccountTelegramIdentityWrite: () => (/* reexport safe */ _collections_account_identity_repository__WEBPACK_IMPORTED_MODULE_19__.buildAccountTelegramIdentityWrite),
+/* harmony export */   buildAccountWarmupWrite: () => (/* reexport safe */ _collections_account_warmup_repository__WEBPACK_IMPORTED_MODULE_17__.buildAccountWarmupWrite),
 /* harmony export */   buildLiveChannelUpsert: () => (/* reexport safe */ _collections_channels_repository__WEBPACK_IMPORTED_MODULE_6__.buildLiveChannelUpsert),
 /* harmony export */   classifyRoleEventReason: () => (/* reexport safe */ _collections_account_role_events_repository__WEBPACK_IMPORTED_MODULE_15__.classifyRoleEventReason),
 /* harmony export */   createChannelsStore: () => (/* reexport safe */ _collections_channels_repository__WEBPACK_IMPORTED_MODULE_6__.createChannelsStore),
-/* harmony export */   createRepositories: () => (/* reexport safe */ _repositories__WEBPACK_IMPORTED_MODULE_17__.createRepositories),
+/* harmony export */   createRepositories: () => (/* reexport safe */ _repositories__WEBPACK_IMPORTED_MODULE_21__.createRepositories),
 /* harmony export */   describeError: () => (/* reexport safe */ _connection__WEBPACK_IMPORTED_MODULE_0__.describeError),
 /* harmony export */   emptyPromoteAvailability: () => (/* reexport safe */ _collections_promote_repository__WEBPACK_IMPORTED_MODULE_7__.emptyPromoteAvailability),
-/* harmony export */   ensureAllIndexes: () => (/* reexport safe */ _repositories__WEBPACK_IMPORTED_MODULE_17__.ensureAllIndexes),
+/* harmony export */   ensureAllIndexes: () => (/* reexport safe */ _repositories__WEBPACK_IMPORTED_MODULE_21__.ensureAllIndexes),
 /* harmony export */   getPromoteRuntimeEligibilityFilter: () => (/* reexport safe */ _collections_promote_repository__WEBPACK_IMPORTED_MODULE_7__.getPromoteRuntimeEligibilityFilter),
 /* harmony export */   isDuplicateKeyError: () => (/* reexport safe */ _collections_account_leases_repository__WEBPACK_IMPORTED_MODULE_11__.isDuplicateKeyError),
 /* harmony export */   leaseId: () => (/* reexport safe */ _collections_account_leases_repository__WEBPACK_IMPORTED_MODULE_11__.leaseId),
@@ -39813,14 +40619,14 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   normalizeRoleEventMobile: () => (/* reexport safe */ _collections_account_role_events_repository__WEBPACK_IMPORTED_MODULE_15__.normalizeRoleEventMobile),
 /* harmony export */   parkedChatId: () => (/* reexport safe */ _collections_parked_chats_repository__WEBPACK_IMPORTED_MODULE_13__.parkedChatId),
 /* harmony export */   personaAssignmentFilter: () => (/* reexport safe */ _collections_promote_repository__WEBPACK_IMPORTED_MODULE_7__.personaAssignmentFilter),
-/* harmony export */   readDatabaseSize: () => (/* reexport safe */ _database_info__WEBPACK_IMPORTED_MODULE_16__.readDatabaseSize),
+/* harmony export */   readDatabaseSize: () => (/* reexport safe */ _database_info__WEBPACK_IMPORTED_MODULE_20__.readDatabaseSize),
 /* harmony export */   recordDailyAnalytics: () => (/* reexport safe */ _collections_daily_stats_repository__WEBPACK_IMPORTED_MODULE_5__.recordDailyAnalytics),
 /* harmony export */   sanitizeAvailableMsgs: () => (/* reexport safe */ _collections_channels_repository__WEBPACK_IMPORTED_MODULE_6__.sanitizeAvailableMsgs),
 /* harmony export */   stopPipeline: () => (/* reexport safe */ _collections_parked_accounts_repository__WEBPACK_IMPORTED_MODULE_12__.stopPipeline),
 /* harmony export */   supersedeFilter: () => (/* reexport safe */ _collections_parked_accounts_repository__WEBPACK_IMPORTED_MODULE_12__.supersedeFilter),
 /* harmony export */   unparkedReasonCode: () => (/* reexport safe */ _collections_account_role_events_repository__WEBPACK_IMPORTED_MODULE_15__.unparkedReasonCode),
 /* harmony export */   usableChannelId: () => (/* reexport safe */ _collections_channels_repository__WEBPACK_IMPORTED_MODULE_6__.usableChannelId),
-/* harmony export */   withErrorReporter: () => (/* reexport safe */ _repositories__WEBPACK_IMPORTED_MODULE_17__.withErrorReporter)
+/* harmony export */   withErrorReporter: () => (/* reexport safe */ _repositories__WEBPACK_IMPORTED_MODULE_21__.withErrorReporter)
 /* harmony export */ });
 /* harmony import */ var _connection__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./connection */ "../../packages/tg-db/src/connection.ts");
 /* harmony import */ var _adopt_connection__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./adopt-connection */ "../../packages/tg-db/src/adopt-connection.ts");
@@ -39838,8 +40644,12 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _collections_parked_chats_repository__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! ./collections/parked-chats.repository */ "../../packages/tg-db/src/collections/parked-chats.repository.ts");
 /* harmony import */ var _collections_parked_control_repository__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! ./collections/parked-control.repository */ "../../packages/tg-db/src/collections/parked-control.repository.ts");
 /* harmony import */ var _collections_account_role_events_repository__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! ./collections/account-role-events.repository */ "../../packages/tg-db/src/collections/account-role-events.repository.ts");
-/* harmony import */ var _database_info__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! ./database-info */ "../../packages/tg-db/src/database-info.ts");
-/* harmony import */ var _repositories__WEBPACK_IMPORTED_MODULE_17__ = __webpack_require__(/*! ./repositories */ "../../packages/tg-db/src/repositories.ts");
+/* harmony import */ var _collections_account_health_repository__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! ./collections/account-health.repository */ "../../packages/tg-db/src/collections/account-health.repository.ts");
+/* harmony import */ var _collections_account_warmup_repository__WEBPACK_IMPORTED_MODULE_17__ = __webpack_require__(/*! ./collections/account-warmup.repository */ "../../packages/tg-db/src/collections/account-warmup.repository.ts");
+/* harmony import */ var _collections_account_membership_repository__WEBPACK_IMPORTED_MODULE_18__ = __webpack_require__(/*! ./collections/account-membership.repository */ "../../packages/tg-db/src/collections/account-membership.repository.ts");
+/* harmony import */ var _collections_account_identity_repository__WEBPACK_IMPORTED_MODULE_19__ = __webpack_require__(/*! ./collections/account-identity.repository */ "../../packages/tg-db/src/collections/account-identity.repository.ts");
+/* harmony import */ var _database_info__WEBPACK_IMPORTED_MODULE_20__ = __webpack_require__(/*! ./database-info */ "../../packages/tg-db/src/database-info.ts");
+/* harmony import */ var _repositories__WEBPACK_IMPORTED_MODULE_21__ = __webpack_require__(/*! ./repositories */ "../../packages/tg-db/src/repositories.ts");
 /**
  * @tg/db — the shared MongoDB layer.
  *
@@ -39886,6 +40696,14 @@ __webpack_require__.r(__webpack_exports__);
 // Account collection split (design 2026-11-07-account-collection-split).
 // S1: append-only role history.
 
+// S2: one account-health doc per mobile (latest verdict).
+
+// S3 snapshot mirrors (dual-write only). F3: warmup phase/steps + health-check stamps per pool doc.
+
+// S3 F4: pool membership per mobile (one sub-doc per pool).
+
+// S3 F5: Telegram identity per mobile (pool-doc `profile` + tg-aut `telegram` observation).
+
 
 
 
@@ -39923,6 +40741,14 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _collections_parked_chats_repository__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! ./collections/parked-chats.repository */ "../../packages/tg-db/src/collections/parked-chats.repository.ts");
 /* harmony import */ var _collections_parked_control_repository__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! ./collections/parked-control.repository */ "../../packages/tg-db/src/collections/parked-control.repository.ts");
 /* harmony import */ var _collections_account_role_events_repository__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! ./collections/account-role-events.repository */ "../../packages/tg-db/src/collections/account-role-events.repository.ts");
+/* harmony import */ var _collections_account_health_repository__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! ./collections/account-health.repository */ "../../packages/tg-db/src/collections/account-health.repository.ts");
+/* harmony import */ var _collections_account_warmup_repository__WEBPACK_IMPORTED_MODULE_17__ = __webpack_require__(/*! ./collections/account-warmup.repository */ "../../packages/tg-db/src/collections/account-warmup.repository.ts");
+/* harmony import */ var _collections_account_membership_repository__WEBPACK_IMPORTED_MODULE_18__ = __webpack_require__(/*! ./collections/account-membership.repository */ "../../packages/tg-db/src/collections/account-membership.repository.ts");
+/* harmony import */ var _collections_account_identity_repository__WEBPACK_IMPORTED_MODULE_19__ = __webpack_require__(/*! ./collections/account-identity.repository */ "../../packages/tg-db/src/collections/account-identity.repository.ts");
+
+
+
+
 
 
 
@@ -39970,6 +40796,10 @@ function createRepositories(connection, logger) {
         parkedChats: new _collections_parked_chats_repository__WEBPACK_IMPORTED_MODULE_13__.ParkedChatsRepository(connection, logger),
         parkedControl: new _collections_parked_control_repository__WEBPACK_IMPORTED_MODULE_14__.ParkedControlRepository(connection, logger),
         accountRoleEvents: new _collections_account_role_events_repository__WEBPACK_IMPORTED_MODULE_15__.AccountRoleEventsRepository(connection, logger),
+        accountHealth: new _collections_account_health_repository__WEBPACK_IMPORTED_MODULE_16__.AccountHealthRepository(connection, logger),
+        accountWarmup: new _collections_account_warmup_repository__WEBPACK_IMPORTED_MODULE_17__.AccountWarmupRepository(connection, logger),
+        accountMembership: new _collections_account_membership_repository__WEBPACK_IMPORTED_MODULE_18__.AccountMembershipRepository(connection, logger),
+        accountIdentity: new _collections_account_identity_repository__WEBPACK_IMPORTED_MODULE_19__.AccountIdentityRepository(connection, logger),
     };
 }
 /**
@@ -40011,6 +40841,14 @@ async function ensureAllIndexes(repositories, logger) {
         // account_role_events_client_at_id {clientId, at:-1, _id:-1} and the partial unique
         // account_role_events_op_unique {opId, event, mobile} (creates the collection on first boot).
         ['accountRoleEvents', repositories.accountRoleEvents],
+        // Account collection split S2: declares no index (lookups by _id; S2 review fix D-d); listed so the walk covers
+        // every repository.
+        ['accountHealth', repositories.accountHealth],
+        // Account collection split S3 (F3 accountWarmup, F4 accountMembership, F5 accountIdentity): no index (lookups by _id, same rule as S2 D-d); listed so the
+        // walk covers every repository.
+        ['accountWarmup', repositories.accountWarmup],
+        ['accountMembership', repositories.accountMembership],
+        ['accountIdentity', repositories.accountIdentity],
     ];
     for (const [name, repository] of all) {
         try {
@@ -57744,8 +58582,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "4dfcf2a4f7d3dff1a4bdf2d2a630ccfb0e44f397" : 0;
-    const builtAt =  true ? "2026-11-07T13:58:18.106Z" : 0;
+    const sha =  true ? "8e425ef8d8bbee0561673f88ed51db5126abc3ec" : 0;
+    const builtAt =  true ? "2026-11-07T14:55:30.443Z" : 0;
     return { sha, builtAt };
 }
 
@@ -68811,10 +69649,12 @@ function persistTgautDaysLeft(daysLeft) {
  */
 function persistSpamStatus(mobile, spamStatus, limitedUntil) {
     (0,_telegram_spam_state__WEBPACK_IMPORTED_MODULE_16__.setSpamState)(spamStatus, limitedUntil);
+    // One verdict time for tg::acct, bufferClients and the accountHealth mirror's verdictAt (S2 parity compares them).
+    const checkedAt = Date.now();
     saveAccountVerdict(mobile, {
         spamStatus,
         limitedUntil: limitedUntil ? limitedUntil.getTime() : null,
-        spamCheckedAt: Date.now(),
+        spamCheckedAt: checkedAt,
         ...(spamStatus === "free" ? { daysLeft: -1 } : {}),
     });
     if (!mobile) {
@@ -68826,7 +69666,7 @@ function persistSpamStatus(mobile, spamStatus, limitedUntil) {
             .recordSpamStatus(mobile, {
             spamStatus,
             limitedUntil,
-            spamCheckedAt: new Date(),
+            spamCheckedAt: new Date(checkedAt),
             spamCheckSource: "tg-aut",
         })
             .then((recorded) => {
@@ -68846,6 +69686,36 @@ function saveAccountVerdict(mobile, update) {
     if (!mobile)
         return;
     void (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_11__.saveAccountRestartState)(mobile, accountVerdict).catch((error) => (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "Failed to save tg::acct restart state", false));
+    // Mirror only a write that carries the verdict itself. A daysLeft-only save (persistTgautDaysLeft) always precedes
+    // the status write of the same SpamBot reply (or repeats the -1 the free verdict already carried), so mirroring it
+    // would store the OLD status with the NEW daysLeft until the status write lands (S2 review fix D-c).
+    if (update.spamStatus !== undefined)
+        mirrorAccountHealth(mobile, accountVerdict);
+}
+/**
+ * accountHealth S2 dual-write (design 2026-11-07-account-collection-split): every tg::acct verdict write is mirrored
+ * once, after the reply's daysLeft and status are both set (this also covers the bufferClients recordSpamStatus write
+ * made in the same persistSpamStatus call: its spamCheckedAt is this mirror's verdictAt). The repository keeps the
+ * newer verdictAt and derives spamCheckedAt (status-change time) itself. No verdict yet in this process (nothing to
+ * guard on) = nothing mirrored. Fire-and-forget; never throws, never delays.
+ */
+function mirrorAccountHealth(mobile, verdict) {
+    if (!verdict.spamStatus || verdict.spamCheckedAt === null)
+        return;
+    try {
+        _data_user_data_crud__WEBPACK_IMPORTED_MODULE_0__.UserDataDtoCrud.getInstance().recordAccountHealthSoon({
+            mobile,
+            by: "tg-aut:spambot",
+            verdict: {
+                spamStatus: verdict.spamStatus,
+                limitedUntil: verdict.limitedUntil,
+                verdictAt: verdict.spamCheckedAt,
+                spamCheckSource: verdict.source ?? "tg-aut",
+                daysLeft: verdict.daysLeft,
+            },
+        });
+    }
+    catch { /* best-effort mirror; tg::acct and bufferClients are unaffected */ }
 }
 /** Tests only. */
 function resetAccountVerdictForTests() {
@@ -78286,6 +79156,16 @@ class UserDataDtoCrud {
     /** Never throws; the repository logs failures. Returns whether the row was updated. */
     async recordSpamStatus(mobile, update) {
         return (await this.getRepositories()?.clients.recordSpamStatus(mobile, update)) ?? false;
+    }
+    /**
+     * accountHealth S2 dual-write (design 2026-11-07-account-collection-split): fire-and-forget mirror of a verdict
+     * already written to tg::acct / bufferClients. Returns at once; never throws (no db yet = nothing mirrored).
+     */
+    recordAccountHealthSoon(input) {
+        try {
+            this.getRepositories()?.accountHealth.recordSoon(input);
+        }
+        catch { /* best-effort mirror; the existing writes are unaffected */ }
     }
     async getBufferClientDoc(mobile) {
         logger.debug(`[Persona] Loading buffer client doc for ${mobile}`);
