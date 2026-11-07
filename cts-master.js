@@ -41875,6 +41875,7 @@ exports.isFakeReason = isFakeReason;
 exports.proofIdOf = proofIdOf;
 exports.parseProofId = parseProofId;
 exports.deriveLegacyOutcome = deriveLegacyOutcome;
+exports.stampOf = stampOf;
 exports.classify = classify;
 exports.inState = inState;
 exports.emptyCounts = emptyCounts;
@@ -41935,6 +41936,15 @@ function strings(v) {
 function num(v) {
     return typeof v === 'number' && Number.isFinite(v) ? v : null;
 }
+function stampOf(row) {
+    const r = row.review;
+    const decision = r?.decision ?? (r?.state === 'ok' ? 'fine' : undefined);
+    const at = r?.at ? new Date(r.at).getTime() : NaN;
+    if (!decision || !Number.isFinite(at))
+        return null;
+    const changedAfter = [row.ask?.blockedAt, row.ask?.openedAt].some((v) => !!v && new Date(v).getTime() > at);
+    return changedAfter ? null : { decision, at: new Date(at).toISOString() };
+}
 function classify(row) {
     const verdict = row.verdict && typeof row.verdict === 'object' ? row.verdict : null;
     const legacy = !verdict || typeof verdict.outcome !== 'string' || !verdict.outcome;
@@ -41945,7 +41955,7 @@ function classify(row) {
     const fakeScore = legacy ? null : num(verdict.fakeScore);
     const amount = num(row.creditAmount) ?? num(row.amount);
     const credited = outcome === 'credited';
-    const reviewed = row.review?.state === 'ok';
+    const stamp = stampOf(row);
     return {
         proofId: proofIdOf(row),
         outcome,
@@ -41953,7 +41963,8 @@ function classify(row) {
         reasons,
         fakeScore,
         amount,
-        reviewed,
+        reviewed: stamp !== null,
+        stamp,
         review: false,
         flagged: exports.FLAGGED_OUTCOMES.has(outcome),
         credited,
@@ -42311,6 +42322,9 @@ let PaymentProofsController = class PaymentProofsController {
     reviewChat(chatId, body) {
         return this.service.reviewChat(chatId, body ?? {});
     }
+    stampChat(chatId, body) {
+        return this.service.stampChat(chatId, body ?? {});
+    }
     review(proofId, body) {
         return this.service.review(proofId, body ?? {});
     }
@@ -42328,7 +42342,7 @@ __decorate([
             'payer of a marked-fake chat. Uncredited proofs (repeats, not_ours, not_receipt, old_time, over_limit, uncredited ' +
             'fakes) never enter review. Items carry risk (0-100), riskReasons, atRiskAmount, strong, repeat, reusedFrom; ' +
             'counts.reviewAmount = credited ₹ in review. ' +
-            'flagged = outcome fraud_ask|fake_blocked|cross_client; marked = chat has userData.fakePaymentAt; reviewed = review.state ok. ' +
+            'flagged = outcome fraud_ask|fake_blocked|cross_client; marked = chat has userData.fakePaymentAt; reviewed = a stamp that still holds (item.stamp). ' +
             'Rows without verdict (before tg-aut wrote one) get an outcome derived from servedAt / ask / decision (legacy: true). ' +
             'state=review defaults to sort=risk (risk x atRiskAmount), other states to newest first; counts cover ' +
             'since/client/minAmount (not state/cursor); the review model always uses the whole 7-day collection.',
@@ -42348,6 +42362,7 @@ __decorate([
             '(source, when, why, evidence); refused = uncredited proofs that look genuine. Response { view, entries, counts, ' +
             'truncated }; only client applies.',
     }),
+    (0, swagger_1.ApiQuery)({ name: 'includeReviewed', required: false, description: "view only: '1' also returns stamped entries (entry.stamp set) and marked chats with no proof left; counts never include them" }),
     __param(0, (0, common_1.Query)()),
     __metadata("design:type", Function),
     __metadata("design:paramtypes", [Object]),
@@ -42356,7 +42371,7 @@ __decorate([
 __decorate([
     (0, common_1.Post)('chat/:chatId/review'),
     (0, common_1.HttpCode)(200),
-    (0, swagger_1.ApiOperation)({ summary: "Looks fine on a whole chat: review 'ok' on its credited, unreviewed proofs (only proofIds when given). Idempotent" }),
+    (0, swagger_1.ApiOperation)({ summary: "Looks fine on a whole chat: stamp decision 'fine' on its credited, unreviewed proofs (only proofIds when given). Idempotent" }),
     (0, swagger_1.ApiParam)({ name: 'chatId' }),
     (0, swagger_1.ApiBody)({ schema: { type: 'object', required: ['by'], properties: { by: { type: 'string' }, proofIds: { type: 'array', items: { type: 'string' } } } } }),
     __param(0, (0, common_1.Param)('chatId')),
@@ -42366,9 +42381,24 @@ __decorate([
     __metadata("design:returntype", void 0)
 ], PaymentProofsController.prototype, "reviewChat", null);
 __decorate([
+    (0, common_1.Post)('chat/:chatId/actions'),
+    (0, common_1.HttpCode)(200),
+    (0, swagger_1.ApiOperation)({
+        summary: "Stamp the proofs a review card showed: review = { decision, at }. Mark fake / unblock stay on /fake-payment (called first). " +
+            'A stamp stops holding when tg-aut later opens or blocks an ask on the row',
+    }),
+    (0, swagger_1.ApiParam)({ name: 'chatId' }),
+    (0, swagger_1.ApiBody)({ schema: { type: 'object', required: ['decision', 'proofIds'], properties: { decision: { type: 'string', enum: ['fine', 'fake', 'unblocked'] }, proofIds: { type: 'array', maxItems: payment_proofs_service_1.MAX_STAMP_IDS, items: { type: 'string' } } } } }),
+    __param(0, (0, common_1.Param)('chatId')),
+    __param(1, (0, common_1.Body)()),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [String, Object]),
+    __metadata("design:returntype", void 0)
+], PaymentProofsController.prototype, "stampChat", null);
+__decorate([
     (0, common_1.Post)(':proofId/review'),
     (0, common_1.HttpCode)(200),
-    (0, swagger_1.ApiOperation)({ summary: "Set (state 'ok') or clear the operator review of one proof (idempotent)" }),
+    (0, swagger_1.ApiOperation)({ summary: "Set (state 'ok' = stamp decision 'fine') or clear the operator review of one proof (idempotent)" }),
     (0, swagger_1.ApiParam)({ name: 'proofId', description: '<clientId>-<chatId>-<telegramMsgId>' }),
     (0, swagger_1.ApiBody)({ schema: { type: 'object', required: ['state'], properties: { state: { type: 'string', enum: ['ok', 'clear'] }, by: { type: 'string', description: "required for 'ok'" } } } }),
     __param(0, (0, common_1.Param)('proofId')),
@@ -42448,7 +42478,7 @@ var __param = (this && this.__param) || function (paramIndex, decorator) {
 };
 var PaymentProofsService_1;
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.PaymentProofsService = exports.PROOF_SORTS = exports.MAX_CACHED_WINDOWS = exports.DEFAULT_LIST_CACHE_MS = exports.MAX_WINDOW_ROWS = exports.DEFAULT_WINDOW_MS = exports.MAX_LIMIT = exports.DEFAULT_LIMIT = void 0;
+exports.PaymentProofsService = exports.MAX_STAMP_IDS = exports.PROOF_SORTS = exports.MAX_CACHED_WINDOWS = exports.DEFAULT_LIST_CACHE_MS = exports.MAX_WINDOW_ROWS = exports.DEFAULT_WINDOW_MS = exports.MAX_LIMIT = exports.DEFAULT_LIMIT = void 0;
 exports.listCacheMs = listCacheMs;
 const common_1 = __webpack_require__(/*! @nestjs/common */ "@nestjs/common");
 const mongoose_1 = __webpack_require__(/*! @nestjs/mongoose */ "@nestjs/mongoose");
@@ -42479,7 +42509,7 @@ const ROW_PROJECTION = { shadow: 0, imageHash: 0, servedUtr: 0, servedSha: 0 };
 const CLASSIFY_PROJECTION = {
     _id: 1, chatId: 1, profile: 1, clientId: 1, telegramMsgId: 1, createdAt: 1, amount: 1, creditAmount: 1, decision: 1,
     reasons: 1, servedAt: 1, 'ask.kind': 1, 'ask.blockedAt': 1, 'ask.reasons': 1, proofId: 1,
-    'verdict.outcome': 1, 'verdict.reasons': 1, 'verdict.fakeScore': 1, 'review.state': 1,
+    'verdict.outcome': 1, 'verdict.reasons': 1, 'verdict.fakeScore': 1, review: 1,
     imageSha256: 1, 'image.sha256': 1, utr: 1, payeeUpiId: 1, payeeName: 1, 'time.state': 1, 'time.epochMs': 1,
     'verdict.fakeSignals': 1, 'ocr.payerName': 1,
     'verdict.payee': 1, 'ask.state': 1, 'ask.openedAt': 1, 'ask.closedAt': 1, 'image.stored': 1, 'image.host': 1,
@@ -42489,6 +42519,7 @@ const CHAT_USER_PROJECTION = {
     fakePaymentBy: 1, fakePaymentReason: 1, fakePaymentPrev: 1, fakePaymentProofIds: 1, fakePaymentHistory: 1,
 };
 exports.PROOF_SORTS = ['risk', 'time'];
+exports.MAX_STAMP_IDS = 200;
 let PaymentProofsService = PaymentProofsService_1 = class PaymentProofsService {
     constructor(proofModel, userDataModel) {
         this.proofModel = proofModel;
@@ -42596,6 +42627,7 @@ let PaymentProofsService = PaymentProofsService_1 = class PaymentProofsService {
                 fakeScore: c.fakeScore,
                 amountValue: c.amount,
                 inReview: c.review,
+                stamp: c.stamp,
                 flagged: c.flagged,
                 risk: c.risk,
                 riskReasons: c.riskReasons,
@@ -42713,8 +42745,12 @@ let PaymentProofsService = PaymentProofsService_1 = class PaymentProofsService {
                 .find({ chatId: { $in: chunk } }, CHAT_USER_PROJECTION)
                 .lean()
                 .exec();
+            const handles = new Map((await this.proofModel.db.collection('userIdentity')
+                .find({ chatId: { $in: chunk } }, { projection: { _id: 0, chatId: 1, handle: 1 } }).toArray())
+                .map((x) => [String(x.chatId), typeof x.handle === 'string' && x.handle ? x.handle : null]));
             for (const d of docs) {
                 const key = String(d.chatId);
+                d.name = handles.has(key) && !handles.get(key) && d.username ? d.username : null;
                 let e = out.get(key);
                 if (!e) {
                     e = { rows: new Map(), marked: false, fakePaymentAt: null };
@@ -42754,13 +42790,13 @@ let PaymentProofsService = PaymentProofsService_1 = class PaymentProofsService {
                 throw new common_1.BadRequestException('client must be a clientId');
             client = String(q.client);
         }
+        const all = q.includeReviewed === '1' || q.includeReviewed === 'true';
         const w = await this.window(now - exports.DEFAULT_WINDOW_MS, now);
-        const keep = (e) => !client || (e.clients ? e.clients.includes(client) : e.clientId === client);
-        const filtered = {
-            check: w.views.check.filter(keep),
-            muted: w.views.muted.filter(keep),
-            refused: w.views.refused.filter(keep),
-        };
+        const ofClient = (e) => !client || (e.clients ? e.clients.includes(client) : e.clientId === client);
+        const visible = (xs) => xs.filter((e) => !(0, payment_proofs_views_1.isHiddenEntry)(e));
+        const mine = { check: w.views.check.filter(ofClient), muted: w.views.muted.filter(ofClient), refused: w.views.refused.filter(ofClient) };
+        const open = { check: visible(mine.check), muted: visible(mine.muted), refused: visible(mine.refused) };
+        const filtered = all ? mine : open;
         const hosts = await this.clientHostMap(now);
         const withHost = (c) => ({ ...c, clientHost: hosts.get(c.clientId) ?? null });
         const entries = view === 'check'
@@ -42771,7 +42807,7 @@ let PaymentProofsService = PaymentProofsService_1 = class PaymentProofsService {
         return {
             view,
             entries,
-            counts: { check: filtered.check.length, muted: filtered.muted.length, refused: filtered.refused.length },
+            counts: { check: open.check.length, muted: open.muted.length, refused: open.refused.length },
             truncated: w.truncated,
         };
     }
@@ -42793,11 +42829,32 @@ let PaymentProofsService = PaymentProofsService_1 = class PaymentProofsService {
         const todo = rows.map((row) => ({ row, c: (0, payment_proofs_classify_1.classify)(row) }))
             .filter(({ c }) => c.credited && !c.reviewed && (!only || only.has(c.proofId)));
         if (todo.length) {
-            const review = { state: 'ok', by, at: now };
+            const review = { decision: 'fine', at: now };
             await this.proofModel.updateMany({ _id: { $in: todo.map((x) => x.row._id) } }, { $set: { review } }).exec();
             await this.patchWindows(`review chat ${id}`, () => this.rereadChat(id));
         }
         return { chatId: id, reviewed: todo.map((x) => x.c.proofId) };
+    }
+    async stampChat(chatId, body, now = new Date()) {
+        const id = String(chatId ?? '').trim();
+        if (!/^-?\d{1,20}$/.test(id))
+            throw new common_1.BadRequestException('chatId must be a chatId');
+        const decision = body?.decision;
+        if (!payment_proof_schema_1.REVIEW_DECISIONS.includes(decision) || decision === 'past')
+            throw new common_1.BadRequestException('decision must be fine|fake|unblocked');
+        const ids = body?.proofIds;
+        if (!Array.isArray(ids) || !ids.length || ids.length > exports.MAX_STAMP_IDS)
+            throw new common_1.BadRequestException(`proofIds: 1 to ${exports.MAX_STAMP_IDS} proof ids`);
+        const keys = ids.map((p) => (0, payment_proofs_classify_1.parseProofId)(p));
+        if (keys.some((k) => k?.chatId !== id))
+            throw new common_1.BadRequestException('proofIds must be proof ids of this chat');
+        const filter = { chatId: id, $or: keys.map((k) => ({ clientId: k.clientId, telegramMsgId: k.telegramMsgId })) };
+        const review = { decision, at: now };
+        const res = await this.proofModel.updateMany(filter, { $set: { review } }).exec();
+        if (!res.matchedCount)
+            throw new common_1.NotFoundException('no such proof of this chat (gone after the 7-day TTL?)');
+        await this.patchWindows(`stamp chat ${id}`, () => this.rereadChat(id));
+        return { chatId: id, decision, stamped: res.matchedCount };
     }
     async closeFraudAsks(chatId, by, now = new Date()) {
         const filter = { chatId, 'ask.kind': 'fraud', 'ask.state': 'open' };
@@ -42829,7 +42886,7 @@ let PaymentProofsService = PaymentProofsService_1 = class PaymentProofsService {
         if (state === 'ok' && !by)
             throw new common_1.BadRequestException('by is required');
         const filter = { chatId: key.chatId, clientId: key.clientId, telegramMsgId: key.telegramMsgId };
-        const review = state === 'ok' ? { state: 'ok', by, at: now } : null;
+        const review = state === 'ok' ? { decision: 'fine', at: now } : null;
         const update = review ? { $set: { review } } : { $unset: { review: 1 } };
         const res = await this.proofModel.updateOne(filter, update).exec();
         if (!res.matchedCount)
@@ -42869,6 +42926,7 @@ exports.PaymentProofsService = PaymentProofsService = PaymentProofsService_1 = _
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.REVIEW_VIEWS = void 0;
 exports.isRealFakeReason = isRealFakeReason;
+exports.isHiddenEntry = isHiddenEntry;
 exports.proofCard = proofCard;
 exports.buildViews = buildViews;
 const payment_proofs_classify_1 = __webpack_require__(/*! ./payment-proofs.classify */ "./src/components/payment-proofs/payment-proofs.classify.ts");
@@ -42878,6 +42936,9 @@ const REAL_FAKE_CODES = new Set([
 const REAL_FAKE_PREFIXES = ['LLM_FAKE_', 'FUTURE_', 'DISCLAIMER_', 'BLOCKLIST_', 'UTR_REUSED'];
 function isRealFakeReason(code) {
     return REAL_FAKE_CODES.has(code) || REAL_FAKE_PREFIXES.some((p) => code.startsWith(p));
+}
+function isHiddenEntry(e) {
+    return e.stamp !== null || e.noProofs === true;
 }
 exports.REVIEW_VIEWS = ['check', 'muted', 'refused'];
 const MIN_MS = 60_000;
@@ -42905,6 +42966,7 @@ const iso = (v) => {
     return Number.isFinite(t) ? new Date(t).toISOString() : null;
 };
 const uniqSorted = (xs) => [...new Set(xs.filter((x) => !!x))].sort();
+const stampOfAll = (xs) => xs.length && xs.every((x) => x.c.stamp) ? xs.map((x) => x.c.stamp).sort((a, b) => (a.at < b.at ? 1 : -1))[0] : null;
 function proofCard({ row, c }) {
     return {
         _id: String(row._id), proofId: c.proofId, clientId: String(row.clientId), chatId: String(row.chatId),
@@ -42935,6 +42997,8 @@ function buildViews(items, users, options) {
     const marked = (chat) => (users.get(chat) ?? []).some((u) => !!u.fakePaymentAt);
     const muted = (chat) => (users.get(chat) ?? []).some((u) => u.canReply === 0);
     const usernameOf = (chat) => (users.get(chat) ?? []).map((u) => u.username).find((s) => !!s) ?? null;
+    const nameOf = (chat) => (users.get(chat) ?? []).map((u) => u.name).find((s) => !!s) ?? null;
+    const inMuted = (chat) => marked(chat) || (muted(chat) && (byChat.get(chat)?.length ?? 0) > 0);
     const ownSigns = (x) => {
         const out = [];
         const codes = x.c.reasons.filter(isRealFakeReason);
@@ -42997,12 +43061,12 @@ function buildViews(items, users, options) {
     }
     const check = [];
     for (const [chat, list] of byChat) {
-        if (marked(chat))
+        if (inMuted(chat))
             continue;
         const creditedRows = list.filter((x) => x.c.credited);
         const pending = creditedRows.filter((x) => !x.c.reviewed);
         const reasons = [];
-        for (const x of pending) {
+        for (const x of creditedRows) {
             for (const label of fake.get(x) ?? [])
                 reasons.push({ kind: 'fake', label, proofId: x.c.proofId });
             if (over.has(x))
@@ -43014,15 +43078,17 @@ function buildViews(items, users, options) {
             continue;
         const sum = (xs) => xs.reduce((s, x) => s + x.c.atRiskAmount, 0);
         const reviewedCount = creditedRows.filter((x) => x.c.reviewed).length;
+        const history = list.filter((x) => x.c.credited || !x.c.repeat);
         check.push({
             chatId: chat,
             username: usernameOf(chat),
+            name: nameOf(chat),
             clients: uniqSorted(list.map((x) => String(x.row.clientId))),
             personas: uniqSorted(list.map((x) => String(x.row.profile))),
             reasons,
             fakeSignal: reasons.some((r) => r.kind === 'fake'),
             highValue: reasons.some((r) => r.kind === 'high'),
-            history: list.filter((x) => x.c.credited || !x.c.repeat).map(proofCard),
+            history: history.map(proofCard),
             totalCredited: sum(creditedRows),
             unreviewedCredited: sum(pending),
             pendingProofIds: pending.map((x) => x.c.proofId),
@@ -43030,6 +43096,7 @@ function buildViews(items, users, options) {
             reviewed: reviewedCount > 0,
             muted: muted(chat),
             marked: false,
+            stamp: stampOfAll(history),
         });
     }
     check.sort((a, b) => Number(b.fakeSignal) - Number(a.fakeSignal) || b.unreviewedCredited - a.unreviewedCredited || (a.chatId < b.chatId ? -1 : 1));
@@ -43045,9 +43112,12 @@ function buildViews(items, users, options) {
         const blocks = list.filter((x) => x.row.ask?.kind === 'fraud' && x.row.ask.state === 'open' && !!x.row.ask.blockedAt && !x.row.ask.closedAt);
         const markRow = rows.filter((u) => !!u.fakePaymentAt).sort((a, b) => new Date(a.fakePaymentAt).getTime() - new Date(b.fakePaymentAt).getTime())[0];
         let entry;
+        let shown = list;
         if (markRow) {
             const ids = new Set(markRow.fakePaymentProofIds ?? []);
             const evidence = ids.size ? list.filter((x) => ids.has(x.c.proofId)) : creditedRows;
+            if (evidence.length)
+                shown = evidence;
             entry = {
                 source: 'operator_mark', at: iso(markRow.fakePaymentAt), by: markRow.fakePaymentBy ?? null,
                 reason: markRow.fakePaymentReason ?? null, reasonCodes: [], evidence: evidence.map(proofCard),
@@ -43056,6 +43126,7 @@ function buildViews(items, users, options) {
         }
         else if (blocks.length) {
             const latest = Math.max(...blocks.map((x) => new Date(x.row.ask.blockedAt).getTime()));
+            shown = blocks;
             entry = {
                 source: 'fraud_block', at: iso(latest), by: null, reason: null,
                 reasonCodes: uniqSorted(blocks.flatMap((x) => x.row.ask?.reasons ?? [])), evidence: blocks.map(proofCard), preMarkCanReply: null,
@@ -43067,6 +43138,7 @@ function buildViews(items, users, options) {
         mutedEntries.push({
             chatId: chat,
             username: usernameOf(chat),
+            name: nameOf(chat),
             clients: uniqSorted([...rows.map((u) => u.clientId), ...list.map((x) => String(x.row.clientId))]),
             personas: [...rows].sort((a, b) => (a.profile < b.profile ? -1 : 1))
                 .map((u) => ({ profile: u.profile, clientId: u.clientId ?? null, canReply: typeof u.canReply === 'number' ? u.canReply : null })),
@@ -43075,13 +43147,16 @@ function buildViews(items, users, options) {
             ownFakeSign,
             likelyWrong: creditedAmount > 0 && !ownFakeSign,
             history: rows.flatMap((u) => u.fakePaymentHistory ?? []).filter((h, i, all) => all.findIndex((o) => o.action === h.action && iso(o.at) === iso(h.at)) === i),
+            stamp: stampOfAll(shown),
+            noProofs: list.length === 0,
         });
     }
     mutedEntries.sort((a, b) => Number(b.likelyWrong) - Number(a.likelyWrong) || b.creditedAmount - a.creditedAmount
         || (new Date(b.at ?? 0).getTime() - new Date(a.at ?? 0).getTime()) || (a.chatId < b.chatId ? -1 : 1));
     const refused = [];
+    const inCheck = new Set(check.map((e) => e.chatId));
     for (const [chat, list] of byChat) {
-        if (marked(chat))
+        if (inMuted(chat) || inCheck.has(chat))
             continue;
         for (const x of list) {
             if (x.c.credited || x.c.repeat || !looksGenuine(x))
@@ -43096,7 +43171,9 @@ function buildViews(items, users, options) {
             refused.push({
                 ...proofCard(x),
                 username: usernameOf(chat),
+                name: nameOf(chat),
                 refusedReason: x.c.reasons.length ? `${label}: ${x.c.reasons.join(', ')}` : label,
+                stamp: x.c.stamp,
             });
         }
     }
@@ -43168,10 +43245,11 @@ var __importStar = (this && this.__importStar) || (function () {
     };
 })();
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.PaymentProofSchema = exports.PAYMENT_PROOF_MODEL = exports.PAYMENT_PROOF_COLLECTION = void 0;
+exports.PaymentProofSchema = exports.REVIEW_DECISIONS = exports.PAYMENT_PROOF_MODEL = exports.PAYMENT_PROOF_COLLECTION = void 0;
 const mongoose = __importStar(__webpack_require__(/*! mongoose */ "mongoose"));
 exports.PAYMENT_PROOF_COLLECTION = 'paymentProofs';
 exports.PAYMENT_PROOF_MODEL = 'PaymentProof';
+exports.REVIEW_DECISIONS = ['fine', 'fake', 'unblocked', 'past'];
 exports.PaymentProofSchema = new mongoose.Schema({
     chatId: String,
     profile: String,
