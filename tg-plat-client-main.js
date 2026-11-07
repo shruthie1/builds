@@ -54871,6 +54871,10 @@ function correctImplausibleYear(date, contextText, currentYear) {
         return date;
     return { ...date, y: currentYear };
 }
+/** The text prints "12:MM AM" (also "12.MM a.m.") for this minute. */
+function printedAsAm(minute, text) {
+    return new RegExp(`(?<![0-9])12[:.]${p2(minute)}(?::\\d{2})?\\s*a\\.?\\s?m\\b`, 'i').test(text);
+}
 /**
  * Resolve the model's time fields plus text context into a VisionTime.
  * @param contextText the text the legacy code searched (the model's full text); '' when none
@@ -54924,6 +54928,9 @@ function resolveVisionTime(input, contextText, nowMs, v2 = _v2__WEBPACK_IMPORTED
         clock = modelClock;
         source = date || clock ? 'model' : null;
     }
+    // 2b. Models write clock24 "12:MM" for a printed "12:MM AM": midnight when printed with AM and the model's string has no PM.
+    if (clock && clock.h === 12 && !/p\.?\s?m\b/i.test(raw ?? '') && printedAsAm(clock.mi, `${raw ?? ''}\n${contextText}`))
+        clock = { ...clock, h: 0 };
     // 3. year handling (R54)
     if (date) {
         if (yearInferred) {
@@ -57737,8 +57744,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "2c61e8e4bafe3b7c2424803681ff5a482bab47ef" : 0;
-    const builtAt =  true ? "2026-11-07T11:14:12.749Z" : 0;
+    const sha =  true ? "4dfcf2a4f7d3dff1a4bdf2d2a630ccfb0e44f397" : 0;
+    const builtAt =  true ? "2026-11-07T13:58:18.106Z" : 0;
     return { sha, builtAt };
 }
 
@@ -84153,7 +84160,7 @@ function reachesPaymentGate(imageDetails, sanitizedData, caption) {
     return !!sanitizedData.isPaymentRelated && !!sanitizedData.isPaymentMine && !!sanitizedData.isFinishedPayment
         && !sanitizedData.isFailedPayment && !!imageDetails.isSuccess && !imageDetails.isFailed && !(0,_payments_screenshot_parse_image__WEBPACK_IMPORTED_MODULE_14__.isLocalFailed)(imageDetails)
         && (0,_payments_screenshot_helpers__WEBPACK_IMPORTED_MODULE_32__.isNotQuestionable)(caption?.toLowerCase())
-        && !(text.startsWith("payment to") && (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ["phonepe", "transfer details"]))
+        && !(0,_payments_screenshot_parse_image__WEBPACK_IMPORTED_MODULE_14__.isFailedPaymentToScreen)(text)
         && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, [`${process.env.name} connecting`, "failed to connect"]);
 }
 const fact = (label, value) => ({ label, value, code: false });
@@ -84908,8 +84915,7 @@ async function processImage(event) {
             }
         }
         if (imageDetails && sanitizedData.isPaymentRelated) {
-            if (text?.startsWith("payment to") &&
-                (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ["phonepe", "transfer details"])) {
+            if ((0,_payments_screenshot_parse_image__WEBPACK_IMPORTED_MODULE_14__.isFailedPaymentToScreen)(text)) {
                 await sendMessageWithTimeout(event.client, chatId, {
                     message: (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_12__.pickOneMsg)([
                         "It's a Failed payment, Don't play Games!!",
@@ -98320,6 +98326,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   RESEND_WINDOW_MS: () => (/* binding */ RESEND_WINDOW_MS),
 /* harmony export */   YESTERDAY_GRACE_MS: () => (/* binding */ YESTERDAY_GRACE_MS),
 /* harmony export */   callTimeAsOf: () => (/* binding */ callTimeAsOf),
+/* harmony export */   correctAmPmAhead: () => (/* binding */ correctAmPmAhead),
 /* harmony export */   "default": () => (/* binding */ isRecentValidPayment),
 /* harmony export */   istDayStartMs: () => (/* binding */ istDayStartMs),
 /* harmony export */   parsePaymentTime: () => (/* binding */ parsePaymentTime),
@@ -98512,6 +98519,15 @@ function parsePaymentTime(input, now = new Date(), shownText) {
 function callTimeAsOf(callTime, atMs) {
     return typeof callTime === "number" && callTime > atMs ? 0 : callTime;
 }
+/** A corrected misread time counts only when fresh: within RESEND_WINDOW_MS before the arrival and not in the future. */
+function isFreshMisreadFix(ms, nowMs) {
+    return nowMs - ms <= RESEND_WINDOW_MS && paymentDay(ms, nowMs) !== "future";
+}
+/** AM read as PM: the time 12 h earlier when that is fresh, else null. */
+function correctAmPmAhead(paymentMs, nowMs) {
+    const moved = paymentMs - TWELVE_HOURS_MS;
+    return isFreshMisreadFix(moved, nowMs) ? moved : null;
+}
 /**
  * A future time that is a misread, moved back: ~12 h ahead (AM read as PM), or a misread day with the right clock
  * ("21st Oct 26" read as day 26), moved back by whole days. Accepted only when the moved time is fresh: no more than
@@ -98519,15 +98535,15 @@ function callTimeAsOf(callTime, atMs) {
  * Landing anywhere on today is not enough: an edited time hours ahead would then always pass. Null otherwise.
  */
 function correctFutureMisread(paymentMs, nowMs) {
-    const fresh = (ms) => nowMs - ms <= RESEND_WINDOW_MS && paymentDay(ms, nowMs) !== "future";
-    if (fresh(paymentMs - TWELVE_HOURS_MS)) {
-        return { paymentMs: paymentMs - TWELVE_HOURS_MS, title: "Time adjusted", description: "input time ahead by ~12hrs, subtracting 12hrs" };
+    const amPm = correctAmPmAhead(paymentMs, nowMs);
+    if (amPm !== null) {
+        return { paymentMs: amPm, title: "Time adjusted", description: "input time ahead by ~12hrs, subtracting 12hrs" };
     }
     const days = Math.round((paymentMs - nowMs) / DAY_MS);
     if (days < 1 || days > MAX_DATE_SHIFT_DAYS)
         return null;
     const shifted = paymentMs - days * DAY_MS;
-    return fresh(shifted)
+    return isFreshMisreadFix(shifted, nowMs)
         ? { paymentMs: shifted, title: "Date adjusted", description: `input date ${days} day(s) in the future with a matching clock, moved back ${days} day(s)` }
         : null;
 }
@@ -99452,7 +99468,9 @@ const TIER_A_PHRASES = [
     '115289349823', '2028010000234', 'p2032484594584584538', 'fmpibi2147483647', '7070979668',
     'fmpib1731',
     'type...', 'get inked', 'photext', 'bak stat', 'futures &', 'getaway!', 'win 5 lucky',
-    'matlab no more', 'no pin upto 500₹', '**** 4821', '****4821', 'tn=', "mam="
+    'matlab no more', 'no pin upto 500₹', '**** 4821', '****4821', 'tn=', "mam=",
+    // GPay generator template: its placeholder text and fixed Google transaction id.
+    'your upi here', 'cicg8aloaur4ce',
 ];
 /** Tier B phrases (marketing/footer strings, unverified against genuine screens). */
 const TIER_B_PHRASES = [
@@ -99586,8 +99604,10 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _upi_ownership__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./upi-ownership */ "./src/payments/proof-check/upi-ownership.ts");
 /* harmony import */ var _screenshot_paid_to_us__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../screenshot/paid-to-us */ "./src/payments/screenshot/paid-to-us.ts");
 /* harmony import */ var _code_checks__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ./code-checks */ "./src/payments/proof-check/code-checks.ts");
-/* harmony import */ var _thresholds__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ./thresholds */ "./src/payments/proof-check/thresholds.ts");
-/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _payment_time__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ../payment-time */ "./src/payments/payment-time.ts");
+/* harmony import */ var _proof_gate_signals__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ../proof-gate/signals */ "./src/payments/proof-gate/signals.ts");
+/* harmony import */ var _thresholds__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ./thresholds */ "./src/payments/proof-check/thresholds.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
 
 
 
@@ -99595,7 +99615,10 @@ __webpack_require__.r(__webpack_exports__);
 
 
 
-const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_6__.Logger("tg-aut:proof-decision");
+
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_8__.Logger("tg-aut:proof-decision");
+const IST_OFFSET_MS = 330 * 60000;
 /** Lowercased OCR-Space text + model fullText, whitespace collapsed. Payee matching elsewhere keeps using the whole text. */
 function buildOcrAndText(vision) {
     const e = vision.extraction;
@@ -99616,6 +99639,13 @@ function hasHardTextSignal(vision, dbcoll) {
         logger.warn('hasHardTextSignal failed', error);
         return false;
     }
+}
+/** An AM time read as PM (~12 h ahead, e.g. 12:28 AM stored as 12:28 PM), unless the text prints that PM clock. */
+function isAmPmMisread(epochMs, nowMs, text) {
+    if ((0,_payment_time__WEBPACK_IMPORTED_MODULE_5__.correctAmPmAhead)(epochMs, nowMs) === null)
+        return false;
+    const ist = new Date(epochMs + IST_OFFSET_MS);
+    return !(0,_proof_gate_signals__WEBPACK_IMPORTED_MODULE_6__.clockPrintedAs)(text, ist.getUTCHours(), ist.getUTCMinutes());
 }
 /**
  * Pure rule engine (design 6 + LLM authenticity). Runs only on tg-vision category 'payment' (anything else is ACCEPT:
@@ -99672,7 +99702,8 @@ function decide(input) {
     // foreign id is TAMPERED UPI_NOT_OURS too).
     const payeeTampered = (0,_screenshot_paid_to_us__WEBPACK_IMPORTED_MODULE_3__.payeeVerdict)({ text, payeeName: e.payeeName, payeeUpiId: e.payeeUpiId, payerName: e.payerName, note: e.note }, { ownUpiIds: input.ownUpiIds ?? [], personaNames: input.personaNames ?? [] }).reasons.includes('UPI_NOT_OURS');
     const utrMalformed = (0,_code_checks__WEBPACK_IMPORTED_MODULE_4__.isUtrMalformed)(e.utr);
-    const futureDated = (0,_code_checks__WEBPACK_IMPORTED_MODULE_4__.isFutureDated)(e.time, input.ctx?.now ?? 0);
+    const now = input.ctx?.now ?? 0;
+    const futureDated = (0,_code_checks__WEBPACK_IMPORTED_MODULE_4__.isFutureDated)(e.time, now) && !isAmPmMisread(e.time.epochMs, now, text);
     if (utrMalformed)
         info.push('UTR_MALFORMED');
     if (futureDated)
@@ -99681,10 +99712,10 @@ function decide(input) {
         const a = e.authenticity ?? null;
         const s = so?.authenticity ?? null;
         const score = a?.fakeScore ?? 0;
-        const secondFake = !!s && (s.verdict === 'fake' || s.fakeScore >= _thresholds__WEBPACK_IMPORTED_MODULE_5__.SECOND_OPINION_FAKE_SCORE);
-        const concrete = [...(a?.signals ?? []), ...(s?.signals ?? [])].some(sig => _thresholds__WEBPACK_IMPORTED_MODULE_5__.CONCRETE_FAKE_SIGNALS.includes(sig));
-        const secondSuspicious = !!s && (s.verdict !== 'genuine' || s.fakeScore >= _thresholds__WEBPACK_IMPORTED_MODULE_5__.SECOND_OPINION_ASK_SCORE);
-        if (a && score >= _thresholds__WEBPACK_IMPORTED_MODULE_5__.FAKE_BLOCK_SCORE) {
+        const secondFake = !!s && (s.verdict === 'fake' || s.fakeScore >= _thresholds__WEBPACK_IMPORTED_MODULE_7__.SECOND_OPINION_FAKE_SCORE);
+        const concrete = [...(a?.signals ?? []), ...(s?.signals ?? [])].some(sig => _thresholds__WEBPACK_IMPORTED_MODULE_7__.CONCRETE_FAKE_SIGNALS.includes(sig));
+        const secondSuspicious = !!s && (s.verdict !== 'genuine' || s.fakeScore >= _thresholds__WEBPACK_IMPORTED_MODULE_7__.SECOND_OPINION_ASK_SCORE);
+        if (a && score >= _thresholds__WEBPACK_IMPORTED_MODULE_7__.FAKE_BLOCK_SCORE) {
             // corroboration by an independent check; the first matching rule names the BLOCK
             if (secondFake && concrete)
                 block.push('LLM_FAKE_CONFIRMED_SECOND_OPINION');
@@ -99696,7 +99727,7 @@ function decide(input) {
                 block.push('LLM_FAKE_FUTURE_DATE');
         }
         if (a && !block.some(r => r.startsWith('LLM_FAKE_'))) {
-            if (score >= _thresholds__WEBPACK_IMPORTED_MODULE_5__.FAKE_ASK_SCORE)
+            if (score >= _thresholds__WEBPACK_IMPORTED_MODULE_7__.FAKE_ASK_SCORE)
                 ask.push('LLM_FAKE_SUSPECTED');
             else if (a.verdict === 'fake')
                 ask.push('LLM_FAKE_UNCORROBORATED');
@@ -101451,6 +101482,7 @@ const PAYMENT_ASK_REPEAT_MESSAGES = [
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   clockPrintedAs: () => (/* binding */ clockPrintedAs),
 /* harmony export */   fabricatedTextReasons: () => (/* binding */ fabricatedTextReasons),
 /* harmony export */   futurePaymentTimeReasons: () => (/* binding */ futurePaymentTimeReasons),
 /* harmony export */   phonePeTxnTimeMs: () => (/* reexport safe */ _payment_time__WEBPACK_IMPORTED_MODULE_0__.phonePeTxnTimeMs)
@@ -102384,6 +102416,7 @@ function payeeVerdict(details, ctx) {
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   isFailedPaymentToScreen: () => (/* binding */ isFailedPaymentToScreen),
 /* harmony export */   isLocalFailed: () => (/* binding */ isLocalFailed),
 /* harmony export */   isPayment: () => (/* binding */ isPayment),
 /* harmony export */   isPaymentMine: () => (/* binding */ isPaymentMine),
@@ -102484,7 +102517,9 @@ function isValidPayment(imageData) {
     if (hasPrePaymentPrompt) {
         logger.debug(`[ImagePayment] Pre-payment prompt present; strongEvidence=${strongEvidenceCount}, success=${hasSuccessSignal}, ref=${hasReferenceSignal}, amount=${hasAmountSignal}, payee=${hasKnownPayeeSignal}`);
     }
-    return (imageData.confidence > 0.9 ? imageData.isFinished : true) &&
+    // PhonePe's success details page ("Paid to" + "Transfer Details") is finished even when the model leaves status unknown.
+    const isPaidToDetailsPage = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_4__.containsAll)(text, ['paid to', 'transfer details']) && !imageData.isFailed && !isLocalFailed(imageData);
+    return (imageData.confidence > 0.9 ? imageData.isFinished || isPaidToDetailsPage : true) &&
         (!isUnsubmittedPayScreen || hasStrongCompletionEvidence) &&
         !hasAlwaysInvalidContext &&
         (!hasInteractionsText || (hasStrongCompletionEvidence && hasKnownPayeeSignal)) &&
@@ -102500,6 +102535,10 @@ function isPayment(textLower) {
     const keywordsToCheck = ["reddy", "paidgirl", 'amount', "ravva", 'balance', "failed", "shetty", "community", "lakshmi", "0851610820",
         'payment', 'successful', 'payment', 'girls', 'shetty', 'lk pvt', '8000073302', 'community', "137045557", '210249262', 'paytmqr6m66o9@ptys', 'success', 'paid', 'phonepe', 'transaction', 'sent secure', 'transfer', 'paytm', 'bhim', ...getupiKeys()];
     return (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_4__.contains)(textLower, keywordsToCheck) && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_4__.contains)(textLower, ['failed to connect', 'fazlu rehman', 'genuine paid girl']);
+}
+/** PhonePe's failed details page: "Payment to" + "Transfer Details" anywhere in the text (a successful one says "Paid to"). */
+function isFailedPaymentToScreen(text) {
+    return (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_4__.containsAll)(text ?? '', ['payment to', 'transfer details']) && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_4__.contains)(text, ['paid to', 'transaction successful', 'payment successful']);
 }
 function isLocalFailed(imageData) {
     const invalidKeywords = ["failed", "pending", 'not enough', 'will be refund',
