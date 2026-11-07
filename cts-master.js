@@ -15084,6 +15084,7 @@ exports.UNPARSEABLE_LIMIT_FALLBACK_DAYS = exports.SPAMBOT_TOTAL_TIMEOUT_MS = exp
 exports.parseLimitedUntil = parseLimitedUntil;
 exports.classifySpamBotReply = classifySpamBotReply;
 exports.probeSpamBot = probeSpamBot;
+const telegram_1 = __webpack_require__(/*! telegram */ "telegram");
 const connection_manager_1 = __webpack_require__(/*! ./connection-manager */ "./src/components/Telegram/utils/connection-manager.ts");
 const telegram_logger_1 = __webpack_require__(/*! ./telegram-logger */ "./src/components/Telegram/utils/telegram-logger.ts");
 const logger = new telegram_logger_1.TelegramLogger('SpamBotProbe');
@@ -15176,6 +15177,13 @@ function isAfterSend(m, sentId, sentAtSec) {
     const date = messageDateSec(m);
     return date !== undefined && date >= sentAtSec;
 }
+function isYouBlockedUser(error) {
+    if (error?.errorMessage === 'YOU_BLOCKED_USER')
+        return true;
+    const message = error instanceof Error ? error.message : String(error ?? '');
+    return /\bYOU_BLOCKED_USER\b/.test(message);
+}
+const maskMobile = (mobile) => `***${String(mobile).slice(-4)}`;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 async function probeSpamBot(mobile, options = {}) {
     const pollTimeoutMs = options.pollTimeoutMs ?? exports.SPAMBOT_POLL_TIMEOUT_MS;
@@ -15241,8 +15249,24 @@ async function probeSpamBot(mobile, options = {}) {
         const tg = manager?.client;
         if (!tg)
             return { status: 'unknown', limitedUntil: null, connectFailed: true, error: 'no telegram client' };
-        const sentAtSec = Math.floor(Date.now() / 1000) - SEND_CLOCK_SKEW_SEC;
-        const sent = await withDeadline(tg.sendMessage(exports.SPAMBOT_USERNAME, { message: '/start' }), 'send /start');
+        let sentAtSec = Math.floor(Date.now() / 1000) - SEND_CLOCK_SKEW_SEC;
+        let sent;
+        try {
+            sent = await withDeadline(tg.sendMessage(exports.SPAMBOT_USERNAME, { message: '/start' }), 'send /start');
+        }
+        catch (sendError) {
+            if (!isYouBlockedUser(sendError))
+                throw sendError;
+            try {
+                await withDeadline((async () => tg.invoke(new telegram_1.Api.contacts.Unblock({ id: await tg.getInputEntity(exports.SPAMBOT_USERNAME) })))(), 'unblock @SpamBot');
+            }
+            catch {
+                throw sendError;
+            }
+            logger.info(maskMobile(mobile), 'SpamBot probe: unblocked @SpamBot after YOU_BLOCKED_USER, resending /start once');
+            sentAtSec = Math.floor(Date.now() / 1000) - SEND_CLOCK_SKEW_SEC;
+            sent = await withDeadline(tg.sendMessage(exports.SPAMBOT_USERNAME, { message: '/start' }), 'send /start');
+        }
         const sentId = typeof sent?.id === 'number' && sent.id > 0 ? sent.id : undefined;
         const pollUntil = Math.min(deadline, Date.now() + pollTimeoutMs);
         let lastText = '';
@@ -22750,6 +22774,7 @@ const pool_profile_1 = __webpack_require__(/*! ../shared/onboarding/pool-profile
 const enrolment_1 = __webpack_require__(/*! ../shared/onboarding/enrolment */ "./src/components/shared/onboarding/enrolment.ts");
 const set_as_1 = __webpack_require__(/*! ../shared/onboarding/set-as */ "./src/components/shared/onboarding/set-as.ts");
 const candidate_source_1 = __webpack_require__(/*! ../shared/onboarding/candidate-source */ "./src/components/shared/onboarding/candidate-source.ts");
+const account_facet_read_1 = __webpack_require__(/*! ../shared/account-facet-read */ "./src/components/shared/account-facet-read.ts");
 const buffer_supply_1 = __webpack_require__(/*! ./buffer-supply */ "./src/components/buffer-clients/buffer-supply.ts");
 let BufferClientService = BufferClientService_1 = class BufferClientService extends base_client_service_1.BaseClientService {
     get checkingBufferClientsSince() {
@@ -22782,6 +22807,9 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
             spamStatus: 1, limitedUntil: 1, spamCheckedAt: 1,
         })
             .exec();
+        const healthMode = config.mode === 'legacy' ? 'off' : (0, account_facet_read_1.accountFacetReadMode)('health', 'R2');
+        const healthViews = healthMode === 'off' ? null : await (0, account_facet_read_1.resolveAccountHealthViews)((0, account_facet_read_1.accountFacetReadCollectionOf)(this.bufferClientModel, account_facet_read_1.ACCOUNT_HEALTH_READ_COLLECTION), 'R2', assigned.map((doc) => ({ mobile: doc.mobile, doc: doc })), { mode: healthMode, logger: this.logger });
+        const healthByDoc = healthViews ? new Map(assigned.map((doc, i) => [doc, healthViews[i]])) : null;
         const countedPerClient = new Map();
         const capPerClient = new Map();
         const perClient = new Map();
@@ -22800,7 +22828,10 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
                 }
                 continue;
             }
-            const verdict = (0, buffer_supply_1.classifyBufferForCap)(doc, now, classifyOptions);
+            const health = healthByDoc?.get(doc);
+            const verdict = (0, buffer_supply_1.classifyBufferForCap)(health?.source === 'accountHealth'
+                ? { warmupPhase: doc.warmupPhase, channels: doc.channels, failedUpdateAttempts: doc.failedUpdateAttempts, inUse: doc.inUse, ...(0, account_facet_read_1.poolHealthFields)(health) }
+                : doc, now, classifyOptions);
             if ('kind' in verdict) {
                 bucket.counted[verdict.kind] += 1;
                 countedPerClient.set(doc.clientId, (countedPerClient.get(doc.clientId) || 0) + 1);
@@ -23758,10 +23789,10 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
     getExtraAvailabilityFilter() {
         return (0, buffer_client_schema_1.buildSpamEligibleFilter)();
     }
-    adjustSupplyDateForPoolState(doc, date, now) {
+    adjustSupplyDateForPoolState(doc, date, now, health) {
         if (!date)
             return date;
-        const spam = doc;
+        const spam = (health?.source === 'accountHealth' ? (0, account_facet_read_1.poolHealthFields)(health) : doc);
         if (spam.spamStatus === 'harsh') {
             const checkedAt = spam.spamCheckedAt ? new Date(spam.spamCheckedAt).getTime() : NaN;
             if (Number.isFinite(checkedAt) && now - checkedAt < buffer_client_schema_1.HARSH_RECHECK_AFTER_MS)
@@ -23773,6 +23804,12 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
             return liftDate > date ? liftDate : date;
         }
         return date;
+    }
+    supplyHealthViews(docs) {
+        const mode = (0, account_facet_read_1.accountFacetReadMode)('health', 'R4');
+        if (mode === 'off')
+            return null;
+        return (0, account_facet_read_1.resolveAccountHealthViews)((0, account_facet_read_1.accountFacetReadCollectionOf)(this.bufferClientModel, account_facet_read_1.ACCOUNT_HEALTH_READ_COLLECTION), 'R4', docs.map((doc) => ({ mobile: doc?.mobile, doc: doc })), { mode, logger: this.logger });
     }
     async getLeastRecentlyUsedBufferClients(clientId, limit = 1) {
         return await this.getLeastRecentlyUsedClients(clientId, limit);
@@ -26479,6 +26516,7 @@ const parked_session_guard_1 = __webpack_require__(/*! ./parked-session-guard */
 const monitor_util_1 = __webpack_require__(/*! ../monitor/monitor-util */ "./src/components/monitor/monitor-util.ts");
 const account_role_events_1 = __webpack_require__(/*! ./account-role-events */ "./src/components/clients/account-role-events.ts");
 const account_health_1 = __webpack_require__(/*! ../shared/account-health */ "./src/components/shared/account-health.ts");
+const account_facet_read_1 = __webpack_require__(/*! ../shared/account-facet-read */ "./src/components/shared/account-facet-read.ts");
 const buffer_client_schema_1 = __webpack_require__(/*! ../buffer-clients/schemas/buffer-client.schema */ "./src/components/buffer-clients/schemas/buffer-client.schema.ts");
 const spambot_probe_1 = __webpack_require__(/*! ../Telegram/utils/spambot-probe */ "./src/components/Telegram/utils/spambot-probe.ts");
 const degraded_swap_1 = __webpack_require__(/*! ./degraded-swap */ "./src/components/clients/degraded-swap.ts");
@@ -27118,7 +27156,9 @@ let ClientService = ClientService_1 = class ClientService {
             ...baseCandidateQuery,
             availableDate: { $lte: today },
         };
-        const candidateBufferClients = await this.bufferClientService.executeQuery(dueCandidateQuery, { availableDate: 1, createdAt: 1 }, 10);
+        const r3Mode = (0, account_facet_read_1.accountFacetReadMode)('health', 'R3');
+        const dueScanned = await this.bufferClientService.executeQuery(dueCandidateQuery, { availableDate: 1, createdAt: 1 }, 10);
+        const candidateBufferClients = r3Mode === 'off' ? dueScanned : await this.recheckSpamEligible(r3Mode, dueScanned);
         this.logger.info(`[${clientId}] Setup candidate scan completed`, { existingMobile: existingClientMobile, candidateCount: candidateBufferClients.length, query: dueCandidateQuery });
         let newBufferClient = await this.findSafeSetupBufferCandidate(candidateBufferClients, existingClient.session, probeBudget);
         let usedFutureAvailableFallback = false;
@@ -27127,7 +27167,8 @@ let ClientService = ClientService_1 = class ClientService {
                 ...baseCandidateQuery,
                 availableDate: { $gt: today },
             };
-            const futureCandidateBufferClients = await this.bufferClientService.executeQuery(futureCandidateQuery, { availableDate: 1, createdAt: 1 }, 10);
+            const futureScanned = await this.bufferClientService.executeQuery(futureCandidateQuery, { availableDate: 1, createdAt: 1 }, 10);
+            const futureCandidateBufferClients = r3Mode === 'off' ? futureScanned : await this.recheckSpamEligible(r3Mode, futureScanned);
             fallbackBudget = newProbeBudget();
             newBufferClient = await this.findSafeSetupBufferCandidate(futureCandidateBufferClients, existingClient.session, fallbackBudget, {}, 'allow');
             usedFutureAvailableFallback = !!newBufferClient;
@@ -27684,10 +27725,17 @@ let ClientService = ClientService_1 = class ClientService {
     }
     async returnOldClientToBufferPool(existingClient, existingClientUser, existingMobile, days, reason, roleOpId) {
         let existingBufferClient = null;
+        let returnHealth = null;
         try {
             await this.assertDistinctUserBackupSession(existingMobile, existingClient.session);
             existingBufferClient = await this.bufferClientService.findOne(existingMobile, false);
-            const availableDate = this.resolveReturnAvailableDate(existingBufferClient, days);
+            const r6Mode = (0, account_facet_read_1.accountFacetReadMode)('health', 'R6');
+            if (r6Mode !== 'off') {
+                const view = await (0, account_facet_read_1.resolveAccountHealthView)((0, account_facet_read_1.accountFacetReadCollectionOf)(this.clientModel, account_facet_read_1.ACCOUNT_HEALTH_READ_COLLECTION), 'R6', existingMobile, existingBufferClient, { mode: r6Mode, logger: this.logger });
+                if (view.source === 'accountHealth')
+                    returnHealth = (0, account_facet_read_1.poolHealthFields)(view);
+            }
+            const availableDate = this.resolveReturnAvailableDate(returnHealth ?? existingBufferClient, days);
             const bufferClientDto = {
                 clientId: existingClient.clientId,
                 mobile: existingMobile,
@@ -27723,7 +27771,7 @@ let ClientService = ClientService_1 = class ClientService {
                 await this.retireReplacedMobile(existingMobile, errorDetails.message, roleOpId);
             }
             else {
-                const retryAvailableDate = this.resolveReturnAvailableDate(existingBufferClient, days);
+                const retryAvailableDate = this.resolveReturnAvailableDate(returnHealth ?? existingBufferClient, days);
                 const released = await this.bufferClientService.update(existingMobile, {
                     inUse: false,
                     status: 'active',
@@ -27845,8 +27893,10 @@ let ClientService = ClientService_1 = class ClientService {
         return rows.length ? [{ title: 'Skipped: SpamBot', columns: ['Mobile', 'Reason'], rows }] : [];
     }
     async isSpamSafeForSwap(candidate, budget, accept = {}) {
-        const checkedAt = candidate.spamCheckedAt ? new Date(candidate.spamCheckedAt).getTime() : 0;
-        if (candidate.spamStatus === 'free' && checkedAt > 0 && Date.now() - checkedAt < SPAM_FREE_FRESH_MS) {
+        const r7Mode = (0, account_facet_read_1.accountFacetReadMode)('health', 'R7');
+        const health = r7Mode === 'off' ? (0, account_facet_read_1.healthViewFromPool)(candidate) : await (0, account_facet_read_1.resolveAccountHealthView)((0, account_facet_read_1.accountFacetReadCollectionOf)(this.clientModel, account_facet_read_1.ACCOUNT_HEALTH_READ_COLLECTION), 'R7', candidate.mobile, candidate, { mode: r7Mode, logger: this.logger });
+        const checkedAt = health.verdictAtMs ?? 0;
+        if (health.spamStatus === 'free' && checkedAt > 0 && Date.now() - checkedAt < SPAM_FREE_FRESH_MS) {
             budget.lastVerdict = { status: 'free', limitedUntil: null };
             return true;
         }
@@ -27941,6 +27991,38 @@ let ClientService = ClientService_1 = class ClientService {
             ...(0, buffer_client_schema_1.buildSpamEligibleFilter)(),
         };
     }
+    async recheckCandidatesByHealth(reader, mode, candidates, rejects) {
+        const views = await (0, account_facet_read_1.resolveAccountHealthViews)((0, account_facet_read_1.accountFacetReadCollectionOf)(this.clientModel, account_facet_read_1.ACCOUNT_HEALTH_READ_COLLECTION), reader, candidates.map((candidate) => ({ mobile: candidate.mobile, doc: candidate })), { mode, logger: this.logger });
+        const now = Date.now();
+        const kept = candidates
+            .map((candidate, i) => ({ candidate, view: views[i] ?? (0, account_facet_read_1.healthViewFromPool)(candidate) }))
+            .filter(({ view }) => !(mode === 'on' && view.source === 'accountHealth' && rejects(view, now)));
+        if (kept.length < candidates.length) {
+            this.logger.info(`[account-facet-read] ${reader}: accountHealth dropped ${candidates.length - kept.length} of ${candidates.length} candidates`);
+        }
+        return kept;
+    }
+    static harshResting(view, now) {
+        return view.spamStatus === 'harsh' && view.verdictAtMs !== null && now - view.verdictAtMs < buffer_client_schema_1.HARSH_RECHECK_AFTER_MS;
+    }
+    async recheckSpamEligible(mode, candidates) {
+        const kept = await this.recheckCandidatesByHealth('R3', mode, candidates, (view, now) => ClientService_1.harshResting(view, now) || (view.limitedUntilMs !== null && view.limitedUntilMs > now));
+        return kept.map((k) => k.candidate);
+    }
+    async recheckDegradedTier(tier, mode, candidates) {
+        if (tier !== 3) {
+            await this.recheckCandidatesByHealth('R5', 'shadow', candidates, () => false);
+            return candidates;
+        }
+        const kept = await this.recheckCandidatesByHealth('R5', mode, candidates, (view, now) => ClientService_1.harshResting(view, now));
+        if (mode !== 'on' || !kept.some((k) => k.view.source === 'accountHealth'))
+            return kept.map((k) => k.candidate);
+        const until = (view) => view.limitedUntilMs ?? Number.POSITIVE_INFINITY;
+        return kept
+            .map((k, i) => ({ ...k, i }))
+            .sort((a, b) => until(a.view) - until(b.view) || a.i - b.i)
+            .map((k) => k.candidate);
+    }
     async findDegradedCandidate(existingClient, tiers, budget, today, busyMobiles) {
         for (const tier of tiers) {
             if (budget.remaining <= 0) {
@@ -27956,7 +28038,9 @@ let ClientService = ClientService_1 = class ClientService {
             const { query, sort } = tier === 3
                 ? (0, degraded_swap_1.buildTier3Query)(existingClient.clientId, busyMobiles)
                 : (0, degraded_swap_1.buildTier4Query)(existingClient.clientId, busyMobiles);
-            const candidates = await this.bufferClientService.executeQuery(query, sort, 10);
+            const scanned = await this.bufferClientService.executeQuery(query, sort, 10);
+            const r5Mode = (0, account_facet_read_1.accountFacetReadMode)('health', 'R5');
+            const candidates = r5Mode === 'off' ? scanned : await this.recheckDegradedTier(tier, r5Mode, scanned);
             const healthy = await this.filterServingUsers(candidates);
             this.logger.info(`[${existingClient.clientId}] Degraded tier ${tier} scan`, {
                 candidateCount: candidates.length,
@@ -27975,10 +28059,12 @@ let ClientService = ClientService_1 = class ClientService {
         const siblings = (await this.findAll()).filter((client) => client.clientId !== existingClient.clientId && (client.dbcoll || '').trim().toLowerCase() === persona);
         const ranked = [];
         for (const sibling of siblings) {
-            const rows = await this.bufferClientService.executeQuery({
+            const scanned = await this.bufferClientService.executeQuery({
                 ...this.buildEligibleBufferQuery(sibling.clientId, { $nin: [...busyMobiles, sibling.mobile] }),
                 availableDate: { $lte: today },
             }, { availableDate: 1, createdAt: 1 });
+            const r3Mode = (0, account_facet_read_1.accountFacetReadMode)('health', 'R3');
+            const rows = r3Mode === 'off' ? scanned : await this.recheckSpamEligible(r3Mode, scanned);
             const spares = await this.filterServingUsers(rows, { requireDistinctBackup: true });
             if (spares.length >= degraded_swap_1.SIBLING_MIN_SPARES_AFTER + 1)
                 ranked.push({ siblingId: sibling.clientId, spares });
@@ -28095,15 +28181,21 @@ let ClientService = ClientService_1 = class ClientService {
         }
         catch (error) {
             this.logger.warn(`[${client.clientId}] Could not read main state: ${(0, parseError_1.parseError)(error, '', false).message}`);
-            return { dead, evidence, limited: false, buffer: null, userExpired: false };
+            return { dead, evidence, limited: false, buffer: null, userExpired: false, health: (0, account_facet_read_1.healthViewFromPool)(null), tier1Health: (0, account_facet_read_1.healthViewFromPool)(null) };
         }
         const userExpired = users.length > 0 && users.every((u) => u.expired === true);
+        const anyHealthRead = (0, account_facet_read_1.accountFacetReadMode)('health', 'R8') !== 'off' || (0, account_facet_read_1.accountFacetReadMode)('health', 'R9') !== 'off';
+        const views = buffer && anyHealthRead
+            ? await (0, account_facet_read_1.resolveAccountHealthViewsByReader)((0, account_facet_read_1.accountFacetReadCollectionOf)(this.clientModel, account_facet_read_1.ACCOUNT_HEALTH_READ_COLLECTION), ['R8', 'R9'], [{ mobile: client.mobile, doc: buffer }], { logger: this.logger })
+            : null;
+        const health = views ? views.R8[0] : (0, account_facet_read_1.healthViewFromPool)(buffer);
+        const tier1Health = views ? views.R9[0] : (0, account_facet_read_1.healthViewFromPool)(buffer);
         const now = Date.now();
-        const limitedUntilMs = buffer?.limitedUntil ? new Date(buffer.limitedUntil).getTime() : 0;
-        const checkedAtMs = buffer?.spamCheckedAt ? new Date(buffer.spamCheckedAt).getTime() : 0;
+        const limitedUntilMs = health.limitedUntilMs ?? 0;
+        const checkedAtMs = health.verdictAtMs ?? 0;
         const fresh = checkedAtMs > 0 && now - checkedAtMs <= degraded_swap_1.MAIN_SPAM_STATUS_FRESH_MS;
-        const limited = !dead && !!buffer && fresh && (buffer.spamStatus === 'harsh' || (buffer.spamStatus === 'limited' && limitedUntilMs > now));
-        return { dead, evidence, limited, buffer, userExpired };
+        const limited = !dead && !!buffer && fresh && (health.spamStatus === 'harsh' || (health.spamStatus === 'limited' && limitedUntilMs > now));
+        return { dead, evidence, limited, buffer, userExpired, health, tier1Health };
     }
     async poolFingerprint(client, clients) {
         const persona = (client.dbcoll || '').trim().toLowerCase();
@@ -28265,14 +28357,16 @@ let ClientService = ClientService_1 = class ClientService {
             return false;
         const now = Date.now();
         const markerUntil = client.degraded?.limitedUntil ? new Date(client.degraded.limitedUntil).getTime() : 0;
-        const docUntil = buffer.limitedUntil ? new Date(buffer.limitedUntil).getTime() : 0;
+        const docUntil = state.tier1Health.source === 'accountHealth'
+            ? (state.tier1Health.limitedUntilMs ?? 0)
+            : (buffer.limitedUntil ? new Date(buffer.limitedUntil).getTime() : 0);
         const createdAt = buffer.createdAt;
         return buffer.clientId === client.clientId
             && buffer.status === 'active'
             && buffer.warmupPhase === warmup_phases_1.WarmupPhase.SESSION_ROTATED
             && (buffer.channels ?? 0) >= warmup_phases_1.MIN_CHANNELS_FOR_MATURING
             && (!createdAt || new Date(createdAt).getTime() <= now - pool_profile_1.BUFFER_PROFILE.consumerMinAgeDays * 24 * 60 * 60 * 1000)
-            && buffer.spamStatus !== 'harsh'
+            && state.tier1Health.spamStatus !== 'harsh'
             && docUntil <= now
             && markerUntil <= now;
     }
@@ -38373,6 +38467,9 @@ exports.userCohortPipeline = userCohortPipeline;
 exports.flattenCohort = flattenCohort;
 exports.bufferPoolPipeline = bufferPoolPipeline;
 exports.promotePoolPipeline = promotePoolPipeline;
+exports.bufferPoolRowsPipeline = bufferPoolRowsPipeline;
+exports.promotePoolRowsPipeline = promotePoolRowsPipeline;
+exports.poolCountsFromRows = poolCountsFromRows;
 exports.timeToFirstPayPipeline = timeToFirstPayPipeline;
 exports.firstPayRowsPipeline = firstPayRowsPipeline;
 exports.ttfpBuckets = ttfpBuckets;
@@ -38427,7 +38524,8 @@ function flattenCohort(rows) {
         same: Number(r.same) || 0,
     }));
 }
-const HARSH_SUM = { $sum: { $cond: [{ $eq: ['$spamStatus', 'harsh'] }, 1, 0] } };
+const HARSH_COND = { $eq: ['$spamStatus', 'harsh'] };
+const HARSH_SUM = { $sum: { $cond: [HARSH_COND, 1, 0] } };
 exports.WARMING_PHASES = [
     warmup_phases_1.WarmupPhase.ENROLLED,
     warmup_phases_1.WarmupPhase.SETTLING,
@@ -38435,9 +38533,9 @@ exports.WARMING_PHASES = [
     warmup_phases_1.WarmupPhase.GROWING,
     warmup_phases_1.WarmupPhase.MATURING,
 ];
-const WARMING_SUM = { $sum: { $cond: [{ $in: [{ $ifNull: ['$warmupPhase', ''] }, ['', ...exports.WARMING_PHASES]] }, 1, 0] } };
+const WARMING_COND = { $in: [{ $ifNull: ['$warmupPhase', ''] }, ['', ...exports.WARMING_PHASES]] };
+const WARMING_SUM = { $sum: { $cond: [WARMING_COND, 1, 0] } };
 function bufferPoolPipeline(now, todayIst, clientId) {
-    const nowDate = new Date(now);
     return [
         ...(clientId ? [{ $match: { clientId } }] : []),
         {
@@ -38448,31 +38546,29 @@ function bufferPoolPipeline(now, todayIst, clientId) {
                 warming: WARMING_SUM,
                 eligible: {
                     $sum: {
-                        $cond: [
-                            {
-                                $and: [
-                                    { $eq: ['$status', 'active'] },
-                                    { $ne: ['$inUse', true] },
-                                    { $eq: ['$warmupPhase', 'session_rotated'] },
-                                    { $gte: [{ $ifNull: ['$channels', 0] }, 200] },
-                                    { $lte: ['$createdAt', new Date(now - 15 * DAY_MS)] },
-                                    {
-                                        $or: [
-                                            { $ne: ['$spamStatus', 'harsh'] },
-                                            { $lte: [{ $ifNull: ['$spamCheckedAt', new Date(0)] }, new Date(now - 30 * DAY_MS)] },
-                                        ],
-                                    },
-                                    { $not: [{ $gt: [{ $ifNull: ['$limitedUntil', new Date(0)] }, nowDate] }] },
-                                    { $lte: ['$availableDate', todayIst] },
-                                ],
-                            },
-                            1,
-                            0,
-                        ],
+                        $cond: [{ $and: eligibleConds(now, todayIst) }, 1, 0],
                     },
                 },
             },
         },
+    ];
+}
+function eligibleConds(now, todayIst) {
+    const nowDate = new Date(now);
+    return [
+        { $eq: ['$status', 'active'] },
+        { $ne: ['$inUse', true] },
+        { $eq: ['$warmupPhase', 'session_rotated'] },
+        { $gte: [{ $ifNull: ['$channels', 0] }, 200] },
+        { $lte: ['$createdAt', new Date(now - 15 * DAY_MS)] },
+        {
+            $or: [
+                { $ne: ['$spamStatus', 'harsh'] },
+                { $lte: [{ $ifNull: ['$spamCheckedAt', new Date(0)] }, new Date(now - 30 * DAY_MS)] },
+            ],
+        },
+        { $not: [{ $gt: [{ $ifNull: ['$limitedUntil', new Date(0)] }, nowDate] }] },
+        { $lte: ['$availableDate', todayIst] },
     ];
 }
 function promotePoolPipeline(clientId) {
@@ -38488,6 +38584,74 @@ function promotePoolPipeline(clientId) {
             },
         },
     ];
+}
+function bufferPoolRowsPipeline(now, todayIst, clientId) {
+    const conds = eligibleConds(now, todayIst);
+    return [
+        ...(clientId ? [{ $match: { clientId } }] : []),
+        {
+            $project: {
+                _id: 0,
+                c: '$clientId',
+                m: '$mobile',
+                s: '$spamStatus',
+                lu: '$limitedUntil',
+                at: '$spamCheckedAt',
+                h: HARSH_COND,
+                sg: { $and: [conds[5], conds[6]] },
+                g: { $and: [...conds.slice(0, 5), conds[7]] },
+                w: WARMING_COND,
+            },
+        },
+    ];
+}
+function promotePoolRowsPipeline(clientId) {
+    return [
+        ...(clientId ? [{ $match: { clientId } }] : []),
+        {
+            $project: {
+                _id: 0,
+                c: '$clientId',
+                m: '$mobile',
+                s: '$spamStatus',
+                lu: '$limitedUntil',
+                at: '$spamCheckedAt',
+                h: HARSH_COND,
+                a: { $eq: ['$status', 'active'] },
+                w: WARMING_COND,
+            },
+        },
+    ];
+}
+function poolCountsFromRows(kind, rows, verdicts, now) {
+    const out = new Map();
+    rows.forEach((r, i) => {
+        const key = r.c ?? null;
+        let g = out.get(key);
+        if (!g) {
+            g = kind === 'buffer' ? { _id: key, total: 0, harsh: 0, warming: 0, eligible: 0 } : { _id: key, active: 0, total: 0, harsh: 0, warming: 0 };
+            out.set(key, g);
+        }
+        const v = verdicts[i];
+        const facet = v?.source === 'accountHealth';
+        const harsh = facet ? v.spamStatus === 'harsh' : r.h === true;
+        g.total++;
+        if (harsh)
+            g.harsh++;
+        if (r.w === true)
+            g.warming++;
+        if (kind === 'promote') {
+            if (r.a === true)
+                g.active++;
+            return;
+        }
+        const spamGates = facet
+            ? (!harsh || (v.verdictAtMs ?? 0) <= now - 30 * DAY_MS) && !((v.limitedUntilMs ?? 0) > now)
+            : r.sg === true;
+        if (r.g === true && spamGates)
+            g.eligible++;
+    });
+    return [...out.values()];
 }
 exports.TTFP_BUCKETS = ['<10m', '10-30m', '30m-2h', '2-24h', '1-3d', '3d+'];
 function timeToFirstPayPipeline(clientId, start, end) {
@@ -38571,6 +38735,8 @@ exports.rowsFromSends = rowsFromSends;
 exports.rowsFromHist = rowsFromHist;
 exports.extrasFromToday = extrasFromToday;
 exports.parseSpam = parseSpam;
+exports.acctStateTtlMs = acctStateTtlMs;
+exports.spamStateFromHealth = spamStateFromHealth;
 exports.heartbeatJoins = heartbeatJoins;
 exports.looksLimited = looksLimited;
 exports.buildPromotions = buildPromotions;
@@ -38689,6 +38855,28 @@ function parseSpam(h) {
         daysLeft: days !== null && Number.isFinite(days) ? days : null,
         limitedUntil: isoOrRaw(h.limitedUntil),
         checkedAt: isoOrRaw(h.spamCheckedAt),
+    };
+}
+const ACCT_RESTART_TTL_MS = 48 * 60 * 60 * 1000;
+const ACCT_HARSH_REMEMBER_MS = 30 * 86_400_000;
+function acctStateTtlMs(limitedUntilMs, now, spamStatus) {
+    const floor = spamStatus === 'harsh' ? ACCT_HARSH_REMEMBER_MS : ACCT_RESTART_TTL_MS;
+    if (limitedUntilMs === null || !Number.isFinite(limitedUntilMs))
+        return floor;
+    return Math.max(floor, limitedUntilMs + 86_400_000 - now);
+}
+function spamStateFromHealth(old, view, now) {
+    if (view.source !== 'accountHealth' || view.verdictAtMs === null)
+        return old;
+    if (now - view.verdictAtMs >= acctStateTtlMs(view.limitedUntilMs, view.verdictAtMs, view.spamStatus))
+        return null;
+    const checkedAt = new Date(view.verdictAtMs).toISOString();
+    const same = !!old && old.checkedAt === checkedAt && old.status === view.spamStatus;
+    return {
+        status: view.spamStatus,
+        daysLeft: same ? old.daysLeft : null,
+        limitedUntil: view.limitedUntilMs === null ? null : new Date(view.limitedUntilMs).toISOString(),
+        checkedAt,
     };
 }
 function heartbeatJoins(entries) {
@@ -40150,6 +40338,7 @@ const common_1 = __webpack_require__(/*! @nestjs/common */ "@nestjs/common");
 const mongoose_1 = __webpack_require__(/*! @nestjs/mongoose */ "@nestjs/mongoose");
 const mongoose_2 = __webpack_require__(/*! mongoose */ "mongoose");
 const analytics_pg_reader_1 = __webpack_require__(/*! ../daily-analytics/analytics-pg.reader */ "./src/components/daily-analytics/analytics-pg.reader.ts");
+const account_facet_read_1 = __webpack_require__(/*! ../shared/account-facet-read */ "./src/components/shared/account-facet-read.ts");
 const monitor_cache_1 = __webpack_require__(/*! ./monitor-cache */ "./src/components/monitor/monitor-cache.ts");
 const monitor_merge_1 = __webpack_require__(/*! ./monitor-merge */ "./src/components/monitor/monitor-merge.ts");
 const monitor_family_1 = __webpack_require__(/*! ./monitor-family */ "./src/components/monitor/monitor-family.ts");
@@ -40378,6 +40567,7 @@ let MonitorService = MonitorService_1 = class MonitorService {
         this.prewarming = null;
         this.pgGate = new monitor_cache_1.ConcurrencyGate(2, 1);
         this.restrictedCache = new monitor_cache_1.SwrCache({ freshMs: exports.RESTRICTED_FRESH_MS, maxKeys: 2 });
+        this.poolHealthShadow = null;
         const store = typeof redis?.get === 'function' && typeof redis?.set === 'function'
             ? { get: (k) => redis.get(k), set: (k, v, mode, ttl) => redis.set(k, v, mode, ttl) }
             : null;
@@ -40664,10 +40854,16 @@ let MonitorService = MonitorService_1 = class MonitorService {
         return this.part(ctx, 'history', 'pool', (now, t) => this.poolByClient(now, (0, monitor_time_1.istDate)(now), t), this.poolCache).then((l) => l.value);
     }
     async poolByClient(now, today, t) {
-        const [buf, prom] = await Promise.all([
-            this.mongoAgg('bufferClients', (0, monitor_mongo_1.bufferPoolPipeline)(now, today), 'mongo.bufferClients_pool', t),
-            this.mongoAgg('promoteClients', (0, monitor_mongo_1.promotePoolPipeline)(), 'mongo.promoteClients_pool', t),
-        ]);
+        const healthMode = (0, account_facet_read_1.accountFacetReadMode)('health', 'R11');
+        const [buf, prom] = healthMode === 'on'
+            ? await this.poolCountsByHealth(now, today, t, 'on')
+            : await Promise.all([
+                this.mongoAgg('bufferClients', (0, monitor_mongo_1.bufferPoolPipeline)(now, today), 'mongo.bufferClients_pool', t),
+                this.mongoAgg('promoteClients', (0, monitor_mongo_1.promotePoolPipeline)(), 'mongo.promoteClients_pool', t),
+            ]);
+        if (healthMode === 'shadow') {
+            this.poolHealthShadow = this.poolCountsByHealth(now, today, {}, 'shadow').then(() => undefined, (err) => this.logger.warn(`monitor R11 shadow read failed: ${String(err?.message ?? err).slice(0, 200)}`));
+        }
         const out = new Map();
         const get = (id) => {
             const key = typeof id === 'string' && id ? id : exports.UNASSIGNED_POOL_KEY;
@@ -40691,6 +40887,18 @@ let MonitorService = MonitorService_1 = class MonitorService {
             c.promoteWarming += (0, monitor_util_1.num)(p.warming);
         }
         return out;
+    }
+    async poolCountsByHealth(now, today, t, mode) {
+        const [bufRows, promRows] = await Promise.all([
+            this.mongoAgg('bufferClients', (0, monitor_mongo_1.bufferPoolRowsPipeline)(now, today), 'mongo.bufferClients_pool_rows', t),
+            this.mongoAgg('promoteClients', (0, monitor_mongo_1.promotePoolRowsPipeline)(), 'mongo.promoteClients_pool_rows', t),
+        ]);
+        const rows = [...bufRows, ...promRows];
+        const views = await (0, account_facet_read_1.resolveAccountHealthViews)((0, account_facet_read_1.accountFacetReadCollectionOf)({ db: this.connection }, account_facet_read_1.ACCOUNT_HEALTH_READ_COLLECTION), 'R11', rows.map((r) => ({ mobile: r.m, doc: { spamStatus: r.s, limitedUntil: r.lu, spamCheckedAt: r.at } })), { mode, logger: this.logger });
+        return [
+            (0, monitor_mongo_1.poolCountsFromRows)('buffer', bufRows, views.slice(0, bufRows.length), now),
+            (0, monitor_mongo_1.poolCountsFromRows)('promote', promRows, views.slice(bufRows.length), now),
+        ];
     }
     async poolSnapshot() {
         return this.pool(new Ctx(true));
@@ -41517,6 +41725,7 @@ let MonitorService = MonitorService_1 = class MonitorService {
         }, this.poolCache).then((l) => l.value);
     }
     async redisAccountState(mobiles, promote, ctx) {
+        const healthMode = (0, account_facet_read_1.accountFacetReadMode)('health', 'R12');
         if (typeof this.redis?.readPipeline !== 'function') {
             ctx.notes.push('spam/route state not read: Redis pipeline not configured.');
             return null;
@@ -41527,11 +41736,26 @@ let MonitorService = MonitorService_1 = class MonitorService {
         const t = Date.now();
         try {
             const results = await (0, monitor_util_1.withTimeout)(this.redis.readPipeline(cmds), exports.LIVE_REDIS_DEADLINE_MS, 'redis account state');
-            return (0, monitor_promotions_1.readBatch)(mobiles, promote, results);
+            const out = (0, monitor_promotions_1.readBatch)(mobiles, promote, results);
+            if (healthMode === 'off')
+                return out;
+            return { spam: await this.spamByHealth(mobiles, out.spam, healthMode), route: out.route };
         }
         finally {
             ctx.timings['redis.account_state'] = Date.now() - t;
         }
+    }
+    async spamByHealth(mobiles, spam, mode) {
+        const views = await (0, account_facet_read_1.resolveAccountHealthViews)((0, account_facet_read_1.accountFacetReadCollectionOf)({ db: this.connection }, account_facet_read_1.ACCOUNT_HEALTH_READ_COLLECTION), 'R12', mobiles.map((m) => {
+            const s = spam.get(m) ?? null;
+            return { mobile: m, doc: { spamStatus: s?.status ?? null, limitedUntil: s?.limitedUntil ?? null, spamCheckedAt: s?.checkedAt ?? null } };
+        }), { mode, logger: this.logger });
+        if (mode !== 'on')
+            return spam;
+        const now = Date.now();
+        const out = new Map();
+        mobiles.forEach((m, i) => out.set(m, (0, monitor_promotions_1.spamStateFromHealth)(spam.get(m) ?? null, views[i], now)));
+        return out;
     }
     async buildPromotions(window, client, now, background = false) {
         const ctx = new Ctx(background);
@@ -48251,6 +48475,239 @@ exports.SessionService = SessionService = __decorate([
 
 /***/ },
 
+/***/ "./src/components/shared/account-facet-read.ts"
+/*!*****************************************************!*\
+  !*** ./src/components/shared/account-facet-read.ts ***!
+  \*****************************************************/
+(__unused_webpack_module, exports, __webpack_require__) {
+
+
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.ACCOUNT_HEALTH_READ_COLLECTION = exports.ACCOUNT_FACET_SHADOW_LOG_EVERY_MS = exports.ACCOUNT_FACET_READ_DEADLINE_MS = exports.ACCOUNT_FACET_READ_MAX_TIME_MS = exports.ACCOUNT_FACET_READ_ENV = void 0;
+exports.accountFacetReadMode = accountFacetReadMode;
+exports.accountFacetReadStats = accountFacetReadStats;
+exports.resetAccountFacetReadStats = resetAccountFacetReadStats;
+exports.flushAccountFacetShadowReads = flushAccountFacetShadowReads;
+exports.healthViewFromPool = healthViewFromPool;
+exports.poolHealthFields = poolHealthFields;
+exports.chooseAccountHealthView = chooseAccountHealthView;
+exports.accountFacetReadCollectionOf = accountFacetReadCollectionOf;
+exports.resolveAccountHealthViewsByReader = resolveAccountHealthViewsByReader;
+exports.resolveAccountHealthViews = resolveAccountHealthViews;
+exports.resolveAccountHealthView = resolveAccountHealthView;
+const monitor_util_1 = __webpack_require__(/*! ../monitor/monitor-util */ "./src/components/monitor/monitor-util.ts");
+exports.ACCOUNT_FACET_READ_ENV = {
+    health: 'ACCOUNT_HEALTH_READ',
+    warmup: 'ACCOUNT_WARMUP_READ',
+    membership: 'ACCOUNT_MEMBERSHIP_READ',
+    identity: 'ACCOUNT_IDENTITY_READ',
+};
+exports.ACCOUNT_FACET_READ_MAX_TIME_MS = 2_000;
+exports.ACCOUNT_FACET_READ_DEADLINE_MS = 2_500;
+exports.ACCOUNT_FACET_SHADOW_LOG_EVERY_MS = 60_000;
+function accountFacetReadMode(facet, reader, env = process.env) {
+    const key = exports.ACCOUNT_FACET_READ_ENV[facet];
+    const raw = String(env[key] ?? '').trim().toLowerCase();
+    const mode = raw === 'on' ? 'on' : raw === 'shadow' ? 'shadow' : 'off';
+    if (mode === 'off')
+        return 'off';
+    const list = env[`${key}_READERS`];
+    if (list === undefined || list === null)
+        return mode;
+    const readers = String(list).split(/[\s,;]+/).map((s) => s.trim().toUpperCase()).filter(Boolean);
+    return readers.includes(String(reader).trim().toUpperCase()) ? mode : 'off';
+}
+const stats = {};
+const lastLogAt = new Map();
+const pendingShadow = new Set();
+function counters(facet, reader) {
+    const byReader = (stats[facet] ??= {});
+    return (byReader[reader] ??= { equal: 0, newerInHealth: 0, newerInOld: 0, missingInHealth: 0, mismatch: 0, differs: 0, readError: 0 });
+}
+function accountFacetReadStats() {
+    return JSON.parse(JSON.stringify(stats));
+}
+function resetAccountFacetReadStats() {
+    for (const k of Object.keys(stats))
+        delete stats[k];
+    lastLogAt.clear();
+}
+async function flushAccountFacetShadowReads() {
+    while (pendingShadow.size > 0)
+        await Promise.all([...pendingShadow]);
+}
+function logRateLimited(logger, facet, reader, kind, now, message) {
+    const key = `${facet}:${reader}:${kind}`;
+    const last = lastLogAt.get(key);
+    if (last !== undefined && now - last < exports.ACCOUNT_FACET_SHADOW_LOG_EVERY_MS)
+        return;
+    lastLogAt.set(key, now);
+    try {
+        logger?.warn(`[account-facet-read] ${facet} ${reader}: ${message}; counts ${JSON.stringify(counters(facet, reader))}`);
+    }
+    catch { }
+}
+function normalizeMobile(value) {
+    if (typeof value !== 'string' && typeof value !== 'number')
+        return null;
+    const trimmed = String(value).trim();
+    const normalized = trimmed.startsWith('+') ? trimmed.slice(1) : trimmed;
+    return normalized || null;
+}
+function toMs(value) {
+    if (value instanceof Date)
+        return Number.isFinite(value.getTime()) ? value.getTime() : null;
+    if (typeof value === 'number')
+        return Number.isFinite(value) ? value : null;
+    if (typeof value === 'string' && value.trim()) {
+        const parsed = new Date(value).getTime();
+        return Number.isFinite(parsed) ? parsed : null;
+    }
+    return null;
+}
+function errorText(error) {
+    return error instanceof Error ? error.message : String(error);
+}
+function withDeadline(promise, ms, label) {
+    let timer;
+    const timeout = new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms} ms (client-side deadline)`)), ms);
+        timer.unref?.();
+    });
+    return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+exports.ACCOUNT_HEALTH_READ_COLLECTION = 'accountHealth';
+const HEALTH_STATUSES = new Set(['free', 'limited', 'harsh']);
+function healthViewFromPool(doc) {
+    const at = toMs(doc?.spamCheckedAt);
+    return {
+        spamStatus: typeof doc?.spamStatus === 'string' && doc.spamStatus ? doc.spamStatus : null,
+        limitedUntilMs: toMs(doc?.limitedUntil),
+        verdictAtMs: at,
+        statusSinceMs: at,
+        source: 'pool',
+    };
+}
+function poolHealthFields(view) {
+    return {
+        spamStatus: view.spamStatus,
+        limitedUntil: view.limitedUntilMs === null ? null : new Date(view.limitedUntilMs),
+        spamCheckedAt: view.verdictAtMs === null ? null : new Date(view.verdictAtMs),
+    };
+}
+function chooseAccountHealthView(old, facet) {
+    const status = facet && typeof facet.spamStatus === 'string' && HEALTH_STATUSES.has(facet.spamStatus) ? facet.spamStatus : null;
+    const verdictAtMs = facet ? toMs(facet.verdictAt) : null;
+    if (!facet || !status || verdictAtMs === null)
+        return { kind: 'missingInHealth', view: old };
+    const statusChangeMs = toMs(facet.spamCheckedAt);
+    const view = {
+        spamStatus: status,
+        limitedUntilMs: toMs(facet.limitedUntil),
+        verdictAtMs,
+        statusSinceMs: statusChangeMs ?? verdictAtMs,
+        source: 'accountHealth',
+    };
+    const oldAt = old.verdictAtMs;
+    if (!old.spamStatus || oldAt === null)
+        return { kind: 'newerInHealth', view };
+    const sameVerdict = verdictAtMs === oldAt || statusChangeMs === oldAt;
+    if (!sameVerdict)
+        return verdictAtMs > oldAt ? { kind: 'newerInHealth', view } : { kind: 'newerInOld', view: old };
+    if (status !== old.spamStatus)
+        return { kind: 'mismatch', view: old };
+    if (status === 'limited' && view.limitedUntilMs !== old.limitedUntilMs) {
+        return verdictAtMs > oldAt ? { kind: 'newerInHealth', view } : { kind: 'mismatch', view: old };
+    }
+    return { kind: 'equal', view };
+}
+function sameView(a, b) {
+    return a.spamStatus === b.spamStatus && a.limitedUntilMs === b.limitedUntilMs && a.verdictAtMs === b.verdictAtMs && a.statusSinceMs === b.statusSinceMs;
+}
+function accountFacetReadCollectionOf(model, name) {
+    try {
+        const db = model?.db;
+        if (!db || typeof db.collection !== 'function')
+            return null;
+        const collection = db.collection(name);
+        return collection && typeof collection.find === 'function' ? collection : null;
+    }
+    catch {
+        return null;
+    }
+}
+async function readHealthDocs(collection, ids, deadlineMs) {
+    if (!collection || typeof collection.find !== 'function')
+        throw new Error('no accountHealth handle');
+    const docs = await withDeadline(Promise.resolve().then(() => collection.find({ _id: { $in: ids } }, { projection: { spamStatus: 1, limitedUntil: 1, verdictAt: 1, spamCheckedAt: 1 }, maxTimeMS: exports.ACCOUNT_FACET_READ_MAX_TIME_MS }).toArray()), deadlineMs, `${exports.ACCOUNT_HEALTH_READ_COLLECTION}.find`);
+    return new Map(docs.map((d) => [String(d._id), d]));
+}
+async function resolveAccountHealthViewsByReader(collection, readers, entries, options = {}) {
+    const old = entries.map((e) => healthViewFromPool(e.doc));
+    const result = {};
+    const modes = new Map();
+    for (const reader of readers) {
+        result[reader] = old;
+        const mode = options.mode ?? accountFacetReadMode('health', reader, options.env ?? process.env);
+        if (mode !== 'off' && entries.length > 0)
+            modes.set(reader, mode);
+    }
+    if (modes.size === 0)
+        return result;
+    const now = options.now ?? Date.now;
+    const mobiles = entries.map((e) => normalizeMobile(e.mobile));
+    const ids = [...new Set(mobiles.filter((m) => m !== null))];
+    const compare = async () => {
+        let docs;
+        try {
+            docs = ids.length > 0 ? await readHealthDocs(collection, ids, options.deadlineMs ?? exports.ACCOUNT_FACET_READ_DEADLINE_MS) : new Map();
+        }
+        catch (error) {
+            for (const reader of modes.keys()) {
+                counters('health', reader).readError++;
+                logRateLimited(options.logger, 'health', reader, 'readError', now(), `accountHealth read failed (${errorText(error)}); old fields used`);
+            }
+            return;
+        }
+        for (const [reader, mode] of modes) {
+            const c = counters('health', reader);
+            const views = old.map((o, i) => {
+                const m = mobiles[i];
+                const { kind, view } = chooseAccountHealthView(o, m ? docs.get(m) : null);
+                c[kind]++;
+                const differs = !sameView(view, o);
+                if (differs)
+                    c.differs++;
+                if (mode === 'shadow' && (differs || kind === 'mismatch' || kind === 'newerInOld' || kind === 'missingInHealth')) {
+                    logRateLimited(options.logger, 'health', reader, kind, now(), `${kind} for ${(0, monitor_util_1.maskMobile)(m ?? '') ?? '?'}: old ${JSON.stringify(o)} on-mode ${JSON.stringify(view)}`);
+                }
+                return view;
+            });
+            if (mode === 'on')
+                result[reader] = views;
+        }
+    };
+    if (![...modes.values()].includes('on')) {
+        const p = compare().then(() => undefined, () => undefined).finally(() => { pendingShadow.delete(p); });
+        pendingShadow.add(p);
+        return result;
+    }
+    try {
+        await compare();
+    }
+    catch { }
+    return result;
+}
+async function resolveAccountHealthViews(collection, reader, entries, options = {}) {
+    return (await resolveAccountHealthViewsByReader(collection, [reader], entries, options))[reader];
+}
+async function resolveAccountHealthView(collection, reader, mobile, doc, options = {}) {
+    return (await resolveAccountHealthViews(collection, reader, [{ mobile, doc }], options))[0];
+}
+
+
+/***/ },
+
 /***/ "./src/components/shared/account-health.ts"
 /*!*************************************************!*\
   !*** ./src/components/shared/account-health.ts ***!
@@ -51253,9 +51710,14 @@ class BaseClientService {
         const pipelineOperationalDates = [];
         const operationalChannelThreshold = this.config.operationalChannelThreshold ?? warmup_phases_1.MIN_CHANNELS_FOR_MATURING;
         const supplyAdjustments = [];
+        const pendingHealth = this.supplyHealthViews(activeDocs);
+        const supplyHealth = pendingHealth ? await pendingHealth : null;
+        const healthByDoc = supplyHealth ? new Map(activeDocs.map((doc, i) => [doc, supplyHealth[i]])) : null;
         for (const doc of activeDocs) {
             const baseDate = this.getOperationalAvailabilityDateString(doc, today.getTime());
-            const operationalDate = this.adjustSupplyDateForPoolState(doc, baseDate, Date.now());
+            const operationalDate = healthByDoc
+                ? this.adjustSupplyDateForPoolState(doc, baseDate, Date.now(), healthByDoc.get(doc))
+                : this.adjustSupplyDateForPoolState(doc, baseDate, Date.now());
             if (baseDate && operationalDate !== baseDate) {
                 supplyAdjustments.push({ mobile: doc.mobile, from: baseDate, to: operationalDate });
             }
@@ -51391,8 +51853,11 @@ class BaseClientService {
             lastUsed: doc.lastUsed,
         }));
     }
-    adjustSupplyDateForPoolState(_doc, date, _now) {
+    adjustSupplyDateForPoolState(_doc, date, _now, _health) {
         return date;
+    }
+    supplyHealthViews(_docs) {
+        return null;
     }
     getExtraAvailabilityFilter() {
         return {};
