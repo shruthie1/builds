@@ -19127,14 +19127,17 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   runManualSpamBotProbe: () => (/* binding */ runManualSpamBotProbe),
 /* harmony export */   sendManualSpamBotProbe: () => (/* binding */ sendManualSpamBotProbe)
 /* harmony export */ });
-/* harmony import */ var _utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../utils/TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
-/* harmony import */ var _utils_parseError__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
-/* harmony import */ var _utils_logger__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! telegram */ "telegram");
+/* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(telegram__WEBPACK_IMPORTED_MODULE_0__);
+/* harmony import */ var _utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../utils/TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
+/* harmony import */ var _utils_parseError__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
+/* harmony import */ var _utils_logger__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+
 
 
 
 const SPAM_BOT_USERNAME = "@spambot";
-const logger = new _utils_logger__WEBPACK_IMPORTED_MODULE_2__.Logger("spam-bot-probe");
+const logger = new _utils_logger__WEBPACK_IMPORTED_MODULE_3__.Logger("spam-bot-probe");
 const manualProbesInFlight = new Map();
 const spamBotNotificationClaims = new Map();
 const SPAM_BOT_NOTIFICATION_CLAIM_TTL_MS = 5 * 60 * 1000;
@@ -19143,8 +19146,31 @@ const SPAM_BOT_NOTIFICATION_CLAIM_TTL_MS = 5 * 60 * 1000;
  * bypasses its cadence/state guard, so callers must expose it only through an
  * authenticated operator endpoint.
  */
-async function sendManualSpamBotProbe(client) {
-    await client.sendMessage(SPAM_BOT_USERNAME, { message: "/start" });
+async function sendManualSpamBotProbe(client, mobile = "") {
+    try {
+        await client.sendMessage(SPAM_BOT_USERNAME, { message: "/start" });
+    }
+    catch (sendError) {
+        if (!isYouBlockedUser(sendError))
+            throw sendError;
+        // The account blocked @spambot, so /start can never reach it. Unblock once and resend once;
+        // no loop. If the unblock fails, the original error is thrown as before.
+        try {
+            await client.invoke(new telegram__WEBPACK_IMPORTED_MODULE_0__.Api.contacts.Unblock({ id: await client.getInputEntity(SPAM_BOT_USERNAME) }));
+        }
+        catch {
+            throw sendError;
+        }
+        logger.info(`[SpamBot probe] ***${String(mobile).slice(-4)}: unblocked @spambot after YOU_BLOCKED_USER, resending /start once`);
+        await client.sendMessage(SPAM_BOT_USERNAME, { message: "/start" });
+    }
+}
+/** gramjs RPCError: errorMessage 'YOU_BLOCKED_USER', message "400: YOU_BLOCKED_USER (caused by ...)". */
+function isYouBlockedUser(error) {
+    if (error?.errorMessage === "YOU_BLOCKED_USER")
+        return true;
+    const message = error instanceof Error ? error.message : String(error ?? "");
+    return /\bYOU_BLOCKED_USER\b/.test(message);
 }
 /**
  * Reads the latest reply already present in the account's SpamBot dialog.
@@ -19318,8 +19344,8 @@ async function reportManualSpamBotProbe(mobile, probeStartedAt, client) {
     }
     try {
         const status = describeSpamBotReply(latestReply.text);
-        const sent = await _utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_0__.BotConfig.getInstance().sendMessage(_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_0__.ChannelCategory.ACCOUNT_NOTIFICATIONS, {
-            severity: status.healthy ? _utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_0__.NotificationSeverity.SUCCESS : _utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_0__.NotificationSeverity.WARNING,
+        const sent = await _utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_1__.BotConfig.getInstance().sendMessage(_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_1__.ChannelCategory.ACCOUNT_NOTIFICATIONS, {
+            severity: status.healthy ? _utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_1__.NotificationSeverity.SUCCESS : _utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_1__.NotificationSeverity.WARNING,
             title: "SpamBot check",
             fields: [
                 { label: "Mobile", value: mobile },
@@ -19331,10 +19357,10 @@ async function reportManualSpamBotProbe(mobile, probeStartedAt, client) {
             details: latestReply.text,
             tags: ["spambot", "manual-health-check"],
         });
-        (0,_utils_parseError__WEBPACK_IMPORTED_MODULE_1__.logUnsentNotification)(sent, "Manual SpamBot notification returned false", "spam-bot-probe.notification");
+        (0,_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.logUnsentNotification)(sent, "Manual SpamBot notification returned false", "spam-bot-probe.notification");
     }
     catch (error) {
-        (0,_utils_parseError__WEBPACK_IMPORTED_MODULE_1__.parseError)(error, "spam-bot-probe.notification", false);
+        (0,_utils_parseError__WEBPACK_IMPORTED_MODULE_2__.parseError)(error, "spam-bot-probe.notification", false);
     }
     return { latestReply, replyIsFresh };
 }
@@ -19349,7 +19375,7 @@ async function runManualSpamBotProbe(mobile, client) {
         return existing;
     const probe = (async () => {
         const probeStartedAt = Date.now();
-        await sendManualSpamBotProbe(client);
+        await sendManualSpamBotProbe(client, mobile);
         return reportManualSpamBotProbe(mobile, probeStartedAt, client);
     })();
     manualProbesInFlight.set(mobile, probe);
@@ -28687,6 +28713,241 @@ async function applyGuardedFacetWrite(collection, write, maxTimeMS) {
 
 /***/ },
 
+/***/ "../../packages/tg-db/src/collections/account-facet-read.ts"
+/*!******************************************************************!*\
+  !*** ../../packages/tg-db/src/collections/account-facet-read.ts ***!
+  \******************************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   ACCOUNT_FACET_READ_DEADLINE_MS: () => (/* binding */ ACCOUNT_FACET_READ_DEADLINE_MS),
+/* harmony export */   ACCOUNT_FACET_READ_ENV: () => (/* binding */ ACCOUNT_FACET_READ_ENV),
+/* harmony export */   ACCOUNT_FACET_READ_MAX_TIME_MS: () => (/* binding */ ACCOUNT_FACET_READ_MAX_TIME_MS),
+/* harmony export */   ACCOUNT_FACET_SHADOW_LOG_EVERY_MS: () => (/* binding */ ACCOUNT_FACET_SHADOW_LOG_EVERY_MS),
+/* harmony export */   accountFacetReadMode: () => (/* binding */ accountFacetReadMode),
+/* harmony export */   accountFacetReadStats: () => (/* binding */ accountFacetReadStats),
+/* harmony export */   chooseAccountHealthView: () => (/* binding */ chooseAccountHealthView),
+/* harmony export */   flushAccountFacetShadowReads: () => (/* binding */ flushAccountFacetShadowReads),
+/* harmony export */   healthViewFromPool: () => (/* binding */ healthViewFromPool),
+/* harmony export */   poolHealthFields: () => (/* binding */ poolHealthFields),
+/* harmony export */   resetAccountFacetReadStats: () => (/* binding */ resetAccountFacetReadStats),
+/* harmony export */   resolveAccountHealthViews: () => (/* binding */ resolveAccountHealthViews),
+/* harmony export */   resolveAccountHealthViewsByReader: () => (/* binding */ resolveAccountHealthViewsByReader)
+/* harmony export */ });
+/* harmony import */ var _tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/core/utils/dc-ip-family */ "../../packages/tg-core/src/utils/dc-ip-family.ts");
+/* harmony import */ var _connection__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../connection */ "../../packages/tg-db/src/connection.ts");
+/* harmony import */ var _account_health_repository__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./account-health.repository */ "../../packages/tg-db/src/collections/account-health.repository.ts");
+/* harmony import */ var _account_facet_common__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ./account-facet-common */ "../../packages/tg-db/src/collections/account-facet-common.ts");
+
+
+
+
+const ACCOUNT_FACET_READ_ENV = {
+    health: 'ACCOUNT_HEALTH_READ',
+    warmup: 'ACCOUNT_WARMUP_READ',
+    membership: 'ACCOUNT_MEMBERSHIP_READ',
+    identity: 'ACCOUNT_IDENTITY_READ',
+};
+/** Server-side cap of one facet read; the client-side deadline is a little longer. */
+const ACCOUNT_FACET_READ_MAX_TIME_MS = 2000;
+const ACCOUNT_FACET_READ_DEADLINE_MS = 2500;
+/** At most one shadow warn per facet + reader + kind in this window. */
+const ACCOUNT_FACET_SHADOW_LOG_EVERY_MS = 60000;
+function accountFacetReadMode(facet, reader, env = process.env) {
+    const key = ACCOUNT_FACET_READ_ENV[facet];
+    const raw = String(env[key] ?? '').trim().toLowerCase();
+    const mode = raw === 'on' ? 'on' : raw === 'shadow' ? 'shadow' : 'off';
+    if (mode === 'off')
+        return 'off';
+    const list = env[`${key}_READERS`];
+    if (list === undefined || list === null)
+        return mode;
+    const readers = String(list).split(/[\s,;]+/).map((s) => s.trim().toUpperCase()).filter(Boolean);
+    return readers.includes(String(reader).trim().toUpperCase()) ? mode : 'off';
+}
+const stats = {};
+const lastLogAt = new Map();
+const pendingShadow = new Set();
+function counters(facet, reader) {
+    const byReader = (stats[facet] ?? (stats[facet] = {}));
+    return (byReader[reader] ?? (byReader[reader] = { equal: 0, newerInHealth: 0, newerInOld: 0, missingInHealth: 0, mismatch: 0, differs: 0, readError: 0 }));
+}
+/** A copy of the counters since process start (or the last reset). */
+function accountFacetReadStats() {
+    return JSON.parse(JSON.stringify(stats));
+}
+/** Tests only. */
+function resetAccountFacetReadStats() {
+    for (const k of Object.keys(stats))
+        delete stats[k];
+    lastLogAt.clear();
+}
+/** Tests only: waits for the background shadow comparisons started so far. */
+async function flushAccountFacetShadowReads() {
+    while (pendingShadow.size > 0)
+        await Promise.all([...pendingShadow]);
+}
+function logRateLimited(logger, facet, reader, kind, now, message) {
+    const key = `${facet}:${reader}:${kind}`;
+    const last = lastLogAt.get(key);
+    if (last !== undefined && now - last < ACCOUNT_FACET_SHADOW_LOG_EVERY_MS)
+        return;
+    lastLogAt.set(key, now);
+    try {
+        logger?.warn(`[account-facet-read] ${facet} ${reader}: ${message}; counts ${JSON.stringify(counters(facet, reader))}`);
+    }
+    catch { /* a broken logger must not break the reader */ }
+}
+function toMs(value) {
+    const d = (0,_account_facet_common__WEBPACK_IMPORTED_MODULE_3__.facetToDate)(value);
+    return d ? d.getTime() : null;
+}
+function healthViewFromPool(doc) {
+    const at = toMs(doc?.spamCheckedAt);
+    return {
+        spamStatus: typeof doc?.spamStatus === 'string' && doc.spamStatus ? doc.spamStatus : null,
+        limitedUntilMs: toMs(doc?.limitedUntil),
+        verdictAtMs: at,
+        statusSinceMs: at,
+        source: 'pool',
+    };
+}
+/**
+ * Pool-shaped health fields of a view, for a reader that takes a pool doc (pure functions, query-built
+ * candidates): spamCheckedAt = the view's LAST VERDICT (the pool doc's meaning today), not the status-change time;
+ * epoch ms become Dates, nulls stay null. Callers use it only for views from accountHealth (on mode), so off /
+ * shadow / fallback keep handing the pool doc itself to today's expressions.
+ */
+function poolHealthFields(view) {
+    return {
+        spamStatus: view.spamStatus,
+        limitedUntil: view.limitedUntilMs === null ? null : new Date(view.limitedUntilMs),
+        spamCheckedAt: view.verdictAtMs === null ? null : new Date(view.verdictAtMs),
+    };
+}
+const HEALTH_STATUSES = new Set(_account_health_repository__WEBPACK_IMPORTED_MODULE_2__.ACCOUNT_HEALTH_SPAM_STATUSES);
+/**
+ * The on-mode merge of one pool view with its accountHealth doc, by the parity script's rules
+ * (scripts/account-health-parity.cjs): same verdict = facet verdictAt or spamCheckedAt equals the old time.
+ * - missing / invalid facet doc -> old (missingInHealth);
+ * - facet newer (or the old side has no verdict) -> facet (newerInHealth; e.g. promote verdicts);
+ * - old newer -> old (newerInOld; known gap: an old-build or unmirrored write);
+ * - same verdict time, other status / limitedUntil -> old (mismatch; known gap: generic PATCH /bufferclients edits);
+ * - same status, facet verdictAt newer (status-change time equal, e.g. a limited re-verdict with a new limitedUntil)
+ *   -> facet (newerInHealth; newest verdictAt wins);
+ * - same verdict, same status -> facet (equal; brings the status-change time).
+ */
+function chooseAccountHealthView(old, facet) {
+    const status = facet && typeof facet.spamStatus === 'string' && HEALTH_STATUSES.has(facet.spamStatus) ? facet.spamStatus : null;
+    const verdictAtMs = facet ? toMs(facet.verdictAt) : null;
+    if (!facet || !status || verdictAtMs === null)
+        return { kind: 'missingInHealth', view: old };
+    const statusChangeMs = toMs(facet.spamCheckedAt);
+    const view = {
+        spamStatus: status,
+        limitedUntilMs: toMs(facet.limitedUntil),
+        verdictAtMs,
+        statusSinceMs: statusChangeMs ?? verdictAtMs,
+        source: 'accountHealth',
+    };
+    const oldAt = old.verdictAtMs;
+    if (!old.spamStatus || oldAt === null)
+        return { kind: 'newerInHealth', view };
+    const sameVerdict = verdictAtMs === oldAt || statusChangeMs === oldAt;
+    if (!sameVerdict)
+        return verdictAtMs > oldAt ? { kind: 'newerInHealth', view } : { kind: 'newerInOld', view: old };
+    if (status !== old.spamStatus)
+        return { kind: 'mismatch', view: old };
+    if (status === 'limited' && view.limitedUntilMs !== old.limitedUntilMs) {
+        return verdictAtMs > oldAt ? { kind: 'newerInHealth', view } : { kind: 'mismatch', view: old };
+    }
+    return { kind: 'equal', view };
+}
+function sameView(a, b) {
+    return a.spamStatus === b.spamStatus && a.limitedUntilMs === b.limitedUntilMs && a.verdictAtMs === b.verdictAtMs && a.statusSinceMs === b.statusSinceMs;
+}
+async function readHealthDocs(collection, ids, deadlineMs) {
+    if (!collection || typeof collection.find !== 'function')
+        throw new Error('no accountHealth handle');
+    const docs = await (0,_account_facet_common__WEBPACK_IMPORTED_MODULE_3__.withFacetDeadline)(Promise.resolve().then(() => collection.find({ _id: { $in: ids } }, { projection: { spamStatus: 1, limitedUntil: 1, verdictAt: 1, spamCheckedAt: 1 }, maxTimeMS: ACCOUNT_FACET_READ_MAX_TIME_MS }).toArray()), deadlineMs, `${_account_health_repository__WEBPACK_IMPORTED_MODULE_2__.ACCOUNT_HEALTH_COLLECTION}.find`);
+    return new Map(docs.map((d) => [String(d._id), d]));
+}
+/**
+ * The health views per entry (same order) for several readers that share one pool read (e.g. CMS R8 + R9), with ONE
+ * accountHealth read. Each reader gets its own mode (flag + _READERS): off and shadow readers get the pool views; on
+ * readers the merged views (chooseAccountHealthView); counters and shadow logs are per reader. No query when every
+ * reader is off; shadow-only compares in the background. A read error or a missing handle gives the pool views.
+ * Never throws.
+ */
+async function resolveAccountHealthViewsByReader(collection, readers, entries, options = {}) {
+    const old = entries.map((e) => healthViewFromPool(e.doc));
+    const result = {};
+    const modes = new Map();
+    for (const reader of readers) {
+        result[reader] = old;
+        const mode = options.mode ?? accountFacetReadMode('health', reader, options.env ?? process.env);
+        if (mode !== 'off' && entries.length > 0)
+            modes.set(reader, mode);
+    }
+    if (modes.size === 0)
+        return result;
+    const now = options.now ?? Date.now;
+    const mobiles = entries.map((e) => (0,_account_facet_common__WEBPACK_IMPORTED_MODULE_3__.normalizeFacetMobile)(e.mobile));
+    const ids = [...new Set(mobiles.filter((m) => m !== null))];
+    const compare = async () => {
+        let docs;
+        try {
+            docs = ids.length > 0 ? await readHealthDocs(collection, ids, options.deadlineMs ?? ACCOUNT_FACET_READ_DEADLINE_MS) : new Map();
+        }
+        catch (error) {
+            for (const reader of modes.keys()) {
+                counters('health', reader).readError++;
+                logRateLimited(options.logger, 'health', reader, 'readError', now(), `accountHealth read failed (${(0,_connection__WEBPACK_IMPORTED_MODULE_1__.describeError)(error)}); old fields used`);
+            }
+            return;
+        }
+        for (const [reader, mode] of modes) {
+            const c = counters('health', reader);
+            const views = old.map((o, i) => {
+                const m = mobiles[i];
+                const { kind, view } = chooseAccountHealthView(o, m ? docs.get(m) : null);
+                c[kind]++;
+                const differs = !sameView(view, o);
+                if (differs)
+                    c.differs++;
+                if (mode === 'shadow' && (differs || kind === 'mismatch' || kind === 'newerInOld' || kind === 'missingInHealth')) {
+                    logRateLimited(options.logger, 'health', reader, kind, now(), `${kind} for ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_0__.maskMobile)(m ?? '')}: old ${JSON.stringify(o)} on-mode ${JSON.stringify(view)}`);
+                }
+                return view;
+            });
+            if (mode === 'on')
+                result[reader] = views;
+        }
+    };
+    if (![...modes.values()].includes('on')) {
+        const p = compare().then(() => undefined, () => undefined).finally(() => { pendingShadow.delete(p); });
+        pendingShadow.add(p);
+        return result;
+    }
+    try {
+        await compare();
+    }
+    catch { /* result keeps the pool views */ }
+    return result;
+}
+/**
+ * The health view per entry (same order) for reader `reader`. off: the pool views, no query. shadow: the pool views at
+ * once; the comparison runs in the background. on: the merged views (chooseAccountHealthView); a read error or a
+ * missing handle returns the pool views. Never throws.
+ */
+async function resolveAccountHealthViews(collection, reader, entries, options = {}) {
+    return (await resolveAccountHealthViewsByReader(collection, [reader], entries, options))[reader];
+}
+
+
+/***/ },
+
 /***/ "../../packages/tg-db/src/collections/account-health.repository.ts"
 /*!*************************************************************************!*\
   !*** ../../packages/tg-db/src/collections/account-health.repository.ts ***!
@@ -30888,7 +31149,11 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _base_repository__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../base-repository */ "../../packages/tg-db/src/base-repository.ts");
 /* harmony import */ var _account_leases_repository__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./account-leases.repository */ "../../packages/tg-db/src/collections/account-leases.repository.ts");
 /* harmony import */ var _tg_core_account_lease__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! @tg/core/account-lease */ "../../packages/tg-core/src/account-lease/index.ts");
-/* harmony import */ var _account_role_events_repository__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ./account-role-events.repository */ "../../packages/tg-db/src/collections/account-role-events.repository.ts");
+/* harmony import */ var _tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! @tg/core/state/state-redis */ "../../packages/tg-core/src/state/state-redis.ts");
+/* harmony import */ var _account_facet_read__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ./account-facet-read */ "../../packages/tg-db/src/collections/account-facet-read.ts");
+/* harmony import */ var _account_role_events_repository__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ./account-role-events.repository */ "../../packages/tg-db/src/collections/account-role-events.repository.ts");
+
+
 
 
 
@@ -31086,7 +31351,7 @@ class ParkedAccountsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE
                 pool: seed.app === 'promote' ? 'promote' : 'buffer',
                 by: 'tg-platform:parked-open',
                 reason: seed.reason,
-                reasonCode: (0,_account_role_events_repository__WEBPACK_IMPORTED_MODULE_3__.classifyRoleEventReason)(seed.reason, 'other'),
+                reasonCode: (0,_account_role_events_repository__WEBPACK_IMPORTED_MODULE_5__.classifyRoleEventReason)(seed.reason, 'other'),
                 opId: seed._id,
                 details: { app: seed.app, createdBy: seed.createdBy },
             });
@@ -31103,7 +31368,7 @@ class ParkedAccountsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE
                 pool: ep.app === 'promote' ? 'promote' : 'buffer',
                 by,
                 reason: stopReason,
-                reasonCode: (0,_account_role_events_repository__WEBPACK_IMPORTED_MODULE_3__.unparkedReasonCode)(stopReason),
+                reasonCode: (0,_account_role_events_repository__WEBPACK_IMPORTED_MODULE_5__.unparkedReasonCode)(stopReason),
                 opId: ep._id,
                 details: { app: ep.app, stopReason },
             });
@@ -31112,7 +31377,7 @@ class ParkedAccountsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE
     }
     get roleEvents() {
         if (!this.roleEventsRepository)
-            this.roleEventsRepository = new _account_role_events_repository__WEBPACK_IMPORTED_MODULE_3__.AccountRoleEventsRepository(this.connection, this.logger);
+            this.roleEventsRepository = new _account_role_events_repository__WEBPACK_IMPORTED_MODULE_5__.AccountRoleEventsRepository(this.connection, this.logger);
         return this.roleEventsRepository;
     }
     async releaseRunner(id, owner) {
@@ -31139,17 +31404,52 @@ class ParkedAccountsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE
             if (forms.length === 0)
                 throw new Error(`readAccountRows needs a mobile, got ${JSON.stringify(mobile)}`);
             const T = { maxTimeMS: _account_leases_repository__WEBPACK_IMPORTED_MODULE_1__.LEASE_OP_MAX_TIME_MS };
+            // Reader R13 of the account split (S2): bufferClients.spamStatus, or accountHealth behind
+            // ACCOUNT_HEALTH_READ (off = today's query exactly; see account-facet-read.ts).
+            const healthMode = (0,_account_facet_read__WEBPACK_IMPORTED_MODULE_4__.accountFacetReadMode)('health', 'R13');
+            const bufferProjection = healthMode === 'off' ? POOL_PROJECTION : { ...POOL_PROJECTION, mobile: 1, limitedUntil: 1, spamCheckedAt: 1 };
             const [clients, promote, buffer] = await Promise.all([
                 this.connection.collection('clients').find({ mobile: { $in: forms } }, { projection: { clientId: 1 }, limit: 20, ...T }).toArray(),
                 this.connection.collection('promoteClients').find({ mobile: { $in: forms } }, { projection: POOL_PROJECTION, limit: 5, ...T }).toArray(),
-                this.connection.collection('bufferClients').find({ mobile: { $in: forms } }, { projection: POOL_PROJECTION, limit: 5, ...T }).toArray(),
+                this.connection.collection('bufferClients').find({ mobile: { $in: forms } }, { projection: bufferProjection, limit: 5, ...T }).toArray(),
             ]);
+            let bufferRows = buffer.map(poolRow);
+            if (healthMode !== 'off') {
+                // Never throws: a facet read error keeps the bufferClients value (this read stays strict for the pool).
+                const views = await (0,_account_facet_read__WEBPACK_IMPORTED_MODULE_4__.resolveAccountHealthViews)(this.connection.collection('accountHealth'), 'R13', buffer.map((doc) => ({ mobile: doc.mobile, doc })), { mode: healthMode, logger: this.logger });
+                bufferRows = bufferRows.map((row, i) => ({ ...row, spamStatus: views[i]?.spamStatus ?? row.spamStatus }));
+            }
             return {
                 mainOfClientIds: clients.map((c) => String(c.clientId ?? '')).filter(Boolean),
                 promote: promote.map(poolRow),
-                buffer: buffer.map(poolRow),
+                buffer: bufferRows,
             };
         });
+    }
+    /**
+     * Readers R14 (tg-aut parked adapter) and R15 (promote parked adapter), the tg::acct half of the account split
+     * (S2): the accountHealth verdict that replaces a parked account's tg::acct verdict, or null = keep tg::acct.
+     * - off: null, no read. shadow: compares in the background (counted under `reader`), null.
+     * - on: the parity merge against the tg::acct verdict (its spamCheckedAt = verdict time): a newer facet verdict
+     *   wins; missing / invalid / older / same-time-disagreeing doc, or a read error = null. A winning facet verdict
+     *   that tg::acct would no longer hold (accountStateTtlMs: 48 h, 30 d for harsh, limitedUntil + 1 d, counted from
+     *   the verdict) reads as no verdict ({ spamStatus: null }), as an expired tg::acct key does.
+     * Never throws.
+     */
+    async resolveAcctHealth(reader, mobile, acct, mode, now) {
+        if (mode === 'off')
+            return null;
+        try {
+            const [view] = await (0,_account_facet_read__WEBPACK_IMPORTED_MODULE_4__.resolveAccountHealthViews)(this.connection.collection('accountHealth'), reader, [{ mobile, doc: { spamStatus: acct?.spamStatus ?? null, limitedUntil: acct?.limitedUntil ?? null, spamCheckedAt: acct?.spamCheckedAt ?? null } }], { mode, logger: this.logger });
+            if (mode !== 'on' || !view || view.source !== 'accountHealth' || view.verdictAtMs === null)
+                return null;
+            const status = view.spamStatus === 'free' || view.spamStatus === 'limited' || view.spamStatus === 'harsh' ? view.spamStatus : null;
+            const live = now - view.verdictAtMs < (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_3__.accountStateTtlMs)(view.limitedUntilMs, view.verdictAtMs, status);
+            return { spamStatus: live ? status : null };
+        }
+        catch {
+            return null;
+        }
     }
     /** clients{clientId}: main mobile, username, swappedAt and dbcoll (tg-aut adapter, P4). STRICT: throws on a store error. */
     async readClientSwap(clientId) {
@@ -46583,6 +46883,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
 /* harmony import */ var _tg_parked_registry_episode_key__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! @tg/parked/registry/episode-key */ "../../packages/tg-parked/src/registry/episode-key.ts");
 /* harmony import */ var _tg_core_account_lease_mobile__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! @tg/core/account-lease/mobile */ "../../packages/tg-core/src/account-lease/mobile.ts");
+/* harmony import */ var _tg_db_collections_account_facet_read__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! @tg/db/collections/account-facet-read */ "../../packages/tg-db/src/collections/account-facet-read.ts");
+
 
 
 
@@ -46863,6 +47165,16 @@ function createPromoteParkedAdapter(deps) {
             ]);
             if (acct === undefined)
                 throw new Error('tg::acct unavailable (Redis); not connecting');
+            // Reader R15 of the account split (S2): off = tg::acct only, no call; shadow = background compare, tg::acct
+            // decides; on = a newer, still-live accountHealth verdict replaces tg::acct (null answer = keep tg::acct).
+            const healthMode = (0,_tg_db_collections_account_facet_read__WEBPACK_IMPORTED_MODULE_8__.accountFacetReadMode)('health', 'R15');
+            let facetAcct = null;
+            if (healthMode === 'shadow') {
+                void repos.parkedAccounts.resolveAcctHealth?.('R15', mobile, acct, healthMode, now)?.catch(() => null);
+            }
+            else if (healthMode === 'on' && repos.parkedAccounts.resolveAcctHealth) {
+                facetAcct = await repos.parkedAccounts.resolveAcctHealth('R15', mobile, acct, healthMode, now).catch(() => null);
+            }
             const pool = rows.promote.find((r) => r.clientId === clientId) ?? rows.promote[0] ?? null;
             return {
                 mainOfClientIds: rows.mainOfClientIds,
@@ -46872,8 +47184,8 @@ function createPromoteParkedAdapter(deps) {
                 // promote (only buffer-client.service does, for bufferClients). Loaded/live use is covered by
                 // loadedHere and liveLeaseHeld below.
                 inUse: false,
-                harsh: acct?.spamStatus === 'harsh',
-                limited: acct?.spamStatus === 'limited' || (acct !== null && acct.daysLeft >= 0),
+                harsh: facetAcct ? facetAcct.spamStatus === 'harsh' : acct?.spamStatus === 'harsh',
+                limited: facetAcct ? facetAcct.spamStatus === 'limited' : (acct?.spamStatus === 'limited' || (acct !== null && acct.daysLeft >= 0)),
                 lastUsedMs: pool?.lastUsedMs ?? null,
                 sessionPresent: !!pool?.session,
                 sharedKey: false, // checked on the exact session string by the runner (isUsersSession)
@@ -47799,8 +48111,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "7355443f9af52392444ce8c4473f06445cd16162" : 0;
-    const builtAt =  true ? "2026-11-07T19:27:48.922Z" : 0;
+    const sha =  true ? "6f9b4a28f9d5f982309b12d061115e28f079a138" : 0;
+    const builtAt =  true ? "2026-11-07T19:50:43.626Z" : 0;
     return { sha, builtAt };
 }
 
