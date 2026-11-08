@@ -5481,8 +5481,41 @@ class AnalyticsSink {
         if (!this.accepting())
             return;
         this.enqueued += 1;
+        if (row.table === "payment_event" && this.spoolAtEnqueue(row))
+            return;
         this.buffer.push(row);
         this.enforceCap();
+    }
+    /**
+     * PAYMENT ROWS (see the header): the row's own batch is on disk before this returns, then queued
+     * for the next flush with that file, which release() unlinks once the INSERT commits. Never throws:
+     * false (counted, logged) sends the row to the in-memory buffer as before.
+     */
+    spoolAtEnqueue(row) {
+        const firstAt = Date.now();
+        const batch = { id: (0,crypto__WEBPACK_IMPORTED_MODULE_0__.randomUUID)(), table: batchKind(row.table), rows: [row], firstAt };
+        const base = path__WEBPACK_IMPORTED_MODULE_3__.basename(this.newSpoolPath());
+        const tmp = path__WEBPACK_IMPORTED_MODULE_3__.join(this.spoolDir, `${base}.tmp-${process.pid}`);
+        const file = path__WEBPACK_IMPORTED_MODULE_3__.join(this.spoolDir, `${base}.claimed-${process.pid}-${this.instanceKey}`);
+        try {
+            const line = JSON.stringify({ b: batch.id, f: firstAt, t: row.table, c: row.columns, v: row.values });
+            fs__WEBPACK_IMPORTED_MODULE_1__.mkdirSync(this.spoolDir, { recursive: true });
+            fs__WEBPACK_IMPORTED_MODULE_1__.writeFileSync(tmp, `${line}\n${spoolEndMarker(1)}`);
+            fs__WEBPACK_IMPORTED_MODULE_1__.renameSync(tmp, file);
+        }
+        catch (err) {
+            this.spoolErrors += 1;
+            try {
+                fs__WEBPACK_IMPORTED_MODULE_1__.unlinkSync(tmp);
+            }
+            catch { /* never written */ }
+            this.log("warn", `[analytics] payment row kept in memory only (spool write failed): ${describe(err)}`);
+            return false;
+        }
+        batch.file = file;
+        this.fileRefs.set(file, 1);
+        this.retryQueue.push(batch);
+        return true;
     }
     retryRows() {
         let n = 0;
@@ -58682,8 +58715,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "ce8f90b8699f9c2dea12bb8ffc5ad152c36f2886" : 0;
-    const builtAt =  true ? "2026-11-08T13:58:02.249Z" : 0;
+    const sha =  true ? "1c0ffb898c32d994f30ff6867a6ec727583b2e8e" : 0;
+    const builtAt =  true ? "2026-11-08T15:32:13.285Z" : 0;
     return { sha, builtAt };
 }
 
@@ -85702,16 +85735,18 @@ async function handleRepeatPayment(event, chatId, imageDetails, userDetails, amo
         userChatState.invalidPhotoTimestamp = Date.now();
     }
 }
-/** Every valid payment: ledger credit, centralized payAmount update, attribution. */
-async function recordValidPaymentCredit(event, chatId, db, userDetails, amount, tierAmount = amount, gateIdentified = false) {
-    const endedWithoutService = endedUnserved.delete(chatId);
-    // Centralized payAmount update - ensures payAmount is updated for all valid payments
-    // This handles cases where payAmount might not be updated in specific code paths above
-    // Skip if payAmount was already updated to a value >= amount (e.g., set to 50 for demo upgrade when amount is 20)
-    // Read current payAmount from DB to ensure we have the latest value (may have been updated in code paths above)
-    const currentUserDetails = await db.read(chatId);
-    // The authoritative ledger write: every valid payment converges here. It runs alongside the payAmount writes above
-    // and adds what they cannot:
+/**
+ * Every valid payment, step 1, BEFORE the service path (payment before call, 2026-11-08): the ledger credit and the
+ * payment attribution (stats2 counting + the payment_event row, spooled to disk at enqueue by the analytics sink).
+ * Proof arpitha2-6675736514-7400 (₹150) lost its payment_event row when the process crashed after the call started;
+ * every tg-aut SIGSEGV since 11-01 hung right after a call started. Nothing here sends a message, so the user sees
+ * the same replies in the same order. resetStatesOnPayment (before this) already noted the credit moment and ended a
+ * call pause, so creditPaymentOutcome's endCallPause changes nothing for the call that follows. Its payAmount $max is
+ * overwritten by the service writes (initiateCall, the demo / call-link updates) and re-raised to the tier by
+ * finishValidPaymentCredit, as before. Returns the attribution's ledger outcome.
+ */
+async function creditAndAttributePayment(event, chatId, db, amount, gateIdentified = false) {
+    // The authoritative ledger write: every valid payment converges here. It adds what the payAmount writes cannot:
     //   - `lifetimePaid`, only ever raised (the sum of payments since 2026-10-22), while highestPayAmount can drop
     //     (ladder tooHighDropUpdate, showDeliveredUpdate at the cycle's end);
     //   - idempotency keyed on the screenshot message: the credit paths run in scheduleProcessImageTask callbacks
@@ -85735,6 +85770,24 @@ async function recordValidPaymentCredit(event, chatId, db, userDetails, amount, 
             (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_21__.parseError)(creditError, `[ProcessImage] creditPayment failed for ${chatId}`, false);
         }
     }
+    const ledger = credit === 'duplicate' ? 'duplicate' : credit === 'applied' && gateIdentified ? 'applied' : undefined;
+    try {
+        await db.recordPaymentAttribution(chatId, amount, ledger);
+    }
+    catch (error) {
+        // Payment service must not be withheld because analytics is unavailable.
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_21__.parseError)(error, `processImage.paymentAttribution.${chatId}`, false);
+    }
+    return credit;
+}
+/** Every valid payment, step 2, AFTER the service path: centralized payAmount update and the unserved-sum arming. */
+async function finishValidPaymentCredit(event, chatId, db, userDetails, amount, tierAmount, credit) {
+    const endedWithoutService = endedUnserved.delete(chatId);
+    // Centralized payAmount update - ensures payAmount is updated for all valid payments
+    // This handles cases where payAmount might not be updated in specific code paths above
+    // Skip if payAmount was already updated to a value >= amount (e.g., set to 50 for demo upgrade when amount is 20)
+    // Read current payAmount from DB to ensure we have the latest value (may have been updated in code paths above)
+    const currentUserDetails = await db.read(chatId);
     // Same-day unserved sum: the balance is the summed tier, not this screenshot alone.
     if ((0,_tg_vision__WEBPACK_IMPORTED_MODULE_48__.isCreditableAmount)(amount) && tierAmount > currentUserDetails.payAmount) {
         // Only update if amount is greater than current payAmount
@@ -85747,7 +85800,6 @@ async function recordValidPaymentCredit(event, chatId, db, userDetails, amount, 
     else if (currentUserDetails.payAmount >= amount && amount > 0) {
         logger.log(`[ProcessImage] Skipping centralized update: payAmount already at ${currentUserDetails.payAmount} (amount: ${amount})`);
     }
-    const ledger = credit === 'duplicate' ? 'duplicate' : credit === 'applied' && gateIdentified ? 'applied' : undefined;
     if (credit === 'applied') {
         const fresh = (await db.read(chatId)) ?? userDetails;
         if (endedWithoutService || (0,_payments_ladder__WEBPACK_IMPORTED_MODULE_4__.hasPendingPaidService)(fresh)) {
@@ -85758,13 +85810,6 @@ async function recordValidPaymentCredit(event, chatId, db, userDetails, amount, 
         else {
             unservedCredits.delete(chatId);
         }
-    }
-    try {
-        await db.recordPaymentAttribution(chatId, amount, ledger);
-    }
-    catch (error) {
-        // Payment service must not be withheld because analytics is unavailable.
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_21__.parseError)(error, `processImage.paymentAttribution.${chatId}`, false);
     }
 }
 /** The pay nudge an ordinary picture gets (also the hold give-up's ask for a fallback "not a payment"). */
@@ -86086,9 +86131,15 @@ async function processImage(event) {
                                         if (tierAmount > userDetails.highestPayAmount) {
                                             userDetails = await db.updateSingleKey(chatId, _data_user_data_crud__WEBPACK_IMPORTED_MODULE_0__.user.highestPayAmount, tierAmount);
                                         }
+                                        // Payment before call (2026-11-08): the ledger credit and the payment_event row are on record before any
+                                        // service starts, so a crash during the call cannot lose them (creditAndAttributePayment). It runs AFTER
+                                        // the cycle / bought writes below (whose returned row the service path reads: the credit's payAmount
+                                        // $max must not reach it) and right before each branch's service, so every decision sees what it saw before.
+                                        let credit;
                                         // tierAmount sums this chat's unserved receipts (each below the credit limit): ₹600 + ₹600 is served, so
                                         // the read range bounds it, not the per-receipt credit limit.
                                         if (tierAmount !== payAmount && tierAmount < _payments_ladder__WEBPACK_IMPORTED_MODULE_4__.PAID_MIN) {
+                                            credit = await creditAndAttributePayment(event, chatId, db, amount, gateIdentified);
                                             await handleLowAmountPayment(event, chatId, db, imageDetails, userDetails, tierAmount, payAmount, isWithinPastTenMinutesImage, userChatState, initiateCallKeepingClaim);
                                         }
                                         else if (tierAmount >= _payments_ladder__WEBPACK_IMPORTED_MODULE_4__.DEMO_GRANT_MIN && tierAmount <= _tg_vision__WEBPACK_IMPORTED_MODULE_48__.MAX_PAYMENT_AMOUNT) {
@@ -86102,9 +86153,11 @@ async function processImage(event) {
                                                 logger.log(`[payment-shows] ${chatId}: ₹${tierAmount} bought ${JSON.stringify(bought)}`);
                                                 userDetails = await db.update(chatId, bought);
                                             }
+                                            credit = await creditAndAttributePayment(event, chatId, db, amount, gateIdentified);
                                             await handlePaidServiceAmount(event, chatId, db, imageDetails, userDetails, tierAmount, payAmount, text, isWithinPastTenMinutesImage, userChatState, initiateCallKeepingClaim, serviceStarted);
                                         }
                                         else {
+                                            credit = await creditAndAttributePayment(event, chatId, db, amount, gateIdentified);
                                             await (0,_telegram_delete_messages__WEBPACK_IMPORTED_MODULE_6__.deleteMessage)(event);
                                             await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_31__.notifyChat)(chatId, {
                                                 title: 'Pic deleted',
@@ -86112,7 +86165,7 @@ async function processImage(event) {
                                                 fields: [fact('Previous', userDetails.payAmount), fact('Now', amount)],
                                             });
                                         }
-                                        await recordValidPaymentCredit(event, chatId, db, userDetails, amount, tierAmount, gateIdentified);
+                                        await finishValidPaymentCredit(event, chatId, db, userDetails, amount, tierAmount, credit);
                                     }
                                     else if (isPaymentProperlyMine) {
                                         await sendMessageWithTimeout(event.client, chatId, {
