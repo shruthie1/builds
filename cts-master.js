@@ -22736,6 +22736,7 @@ const bots_1 = __webpack_require__(/*! ../bots */ "./src/components/bots/index.t
 const base_client_service_1 = __webpack_require__(/*! ../shared/base-client.service */ "./src/components/shared/base-client.service.ts");
 const client_helper_utils_1 = __webpack_require__(/*! ../shared/client-helper.utils */ "./src/components/shared/client-helper.utils.ts");
 const enrollment_lock_1 = __webpack_require__(/*! ../shared/enrollment-lock */ "./src/components/shared/enrollment-lock.ts");
+const account_health_1 = __webpack_require__(/*! ../shared/account-health */ "./src/components/shared/account-health.ts");
 const pool_claim_1 = __webpack_require__(/*! ../shared/onboarding/pool-claim */ "./src/components/shared/onboarding/pool-claim.ts");
 const pool_profile_1 = __webpack_require__(/*! ../shared/onboarding/pool-profile */ "./src/components/shared/onboarding/pool-profile.ts");
 const enrolment_1 = __webpack_require__(/*! ../shared/onboarding/enrolment */ "./src/components/shared/onboarding/enrolment.ts");
@@ -23037,7 +23038,7 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
             };
             return this.bufferClientModel.create({ ...createData });
         }));
-        this.mirrorAccountFacets(result, 'cms:buffer-create');
+        this.mirrorVerdictToAccountHealth(result, 'cms:buffer-create');
         if (!opts?.suppressEnrolledEvent) {
             this.recordRoleEvent({
                 mobile: canonicalMobile, clientId: bufferClient.clientId ?? null, event: 'enrolled', pool: 'buffer', by: 'cms:buffer-create',
@@ -23075,7 +23076,19 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
         const canonicalMobile = this.canonicalMobile(mobile);
         return !!(await this.bufferClientModel.findOne({ mobile: canonicalMobile }, { _id: 1 }).lean().exec());
     }
-    async update(mobile, updateClientDto) {
+    mirrorVerdictToAccountHealth(doc, by) {
+        try {
+            const d = (doc && typeof doc.toObject === 'function' ? doc.toObject() : doc);
+            if (!d?.spamStatus || !d.spamCheckedAt)
+                return;
+            (0, account_health_1.recordAccountHealthSoon)((0, account_health_1.accountHealthCollectionOf)(this.bufferClientModel), {
+                mobile: d.mobile, by,
+                verdict: { spamStatus: d.spamStatus, limitedUntil: d.limitedUntil ?? null, verdictAt: d.spamCheckedAt, spamCheckSource: d.spamCheckSource ?? 'cms-patch' },
+            }, { logger: this.logger });
+        }
+        catch { }
+    }
+    async update(mobile, updateClientDto, opts) {
         const canonicalMobile = this.canonicalMobile(mobile);
         const updateData = { ...updateClientDto };
         if (typeof updateData.channels === 'number') {
@@ -23101,7 +23114,9 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
         if (!updatedBufferClient) {
             throw new common_1.NotFoundException(`BufferClient with mobile ${mobile} not found`);
         }
-        this.mirrorAccountFacets(updatedBufferClient, 'cms:buffer-update');
+        if (BufferClientService_1.SPAM_FIELDS.some((k) => k in updateData)) {
+            this.mirrorVerdictToAccountHealth(updatedBufferClient, opts?.accountHealthBy ?? 'cms:buffer-update');
+        }
         return updatedBufferClient;
     }
     async createOrUpdate(mobile, createorUpdateBufferClientDto, opts) {
@@ -23847,6 +23862,7 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
     }
 };
 exports.BufferClientService = BufferClientService;
+BufferClientService.SPAM_FIELDS = ['spamStatus', 'limitedUntil', 'spamCheckedAt', 'spamCheckSource'];
 exports.BufferClientService = BufferClientService = BufferClientService_1 = __decorate([
     (0, common_1.Injectable)(),
     __param(0, (0, mongoose_1.InjectModel)('bufferClientModule')),
@@ -26491,7 +26507,6 @@ const parked_swap_episode_1 = __webpack_require__(/*! ./parked-swap-episode */ "
 const parked_session_guard_1 = __webpack_require__(/*! ./parked-session-guard */ "./src/components/clients/parked-session-guard.ts");
 const monitor_util_1 = __webpack_require__(/*! ../monitor/monitor-util */ "./src/components/monitor/monitor-util.ts");
 const account_role_events_1 = __webpack_require__(/*! ./account-role-events */ "./src/components/clients/account-role-events.ts");
-const account_health_1 = __webpack_require__(/*! ../shared/account-health */ "./src/components/shared/account-health.ts");
 const account_facet_read_1 = __webpack_require__(/*! ../shared/account-facet-read */ "./src/components/shared/account-facet-read.ts");
 const buffer_client_schema_1 = __webpack_require__(/*! ../buffer-clients/schemas/buffer-client.schema */ "./src/components/buffer-clients/schemas/buffer-client.schema.ts");
 const spambot_probe_1 = __webpack_require__(/*! ../Telegram/utils/spambot-probe */ "./src/components/Telegram/utils/spambot-probe.ts");
@@ -27416,10 +27431,6 @@ let ClientService = ClientService_1 = class ClientService {
             }, degradedPlan);
             cutoverCommitted = true;
             this.recordMainChangeEvents(clientId, existingMobile, newMobile, 'cms:cutover', reason, degradedPlan, this.cutoverRoleEventOpId(clientId, committedClient?.swappedAt) ?? (0, crypto_1.randomUUID)());
-            try {
-                this.bufferClientService.mirrorAccountFacetsByQuery?.({ $or: [{ clientId }, { mobile: { $in: [newMobile, existingMobile].filter((m) => typeof m === 'string' && !!m) } }] }, 'cms:cutover');
-            }
-            catch { }
             this.logger.info(`[${clientId}] Cutover committed`, {
                 existingMobile: (0, monitor_util_1.maskMobile)(existingMobile),
                 newMobile: (0, monitor_util_1.maskMobile)(newMobile),
@@ -27930,14 +27941,7 @@ let ClientService = ClientService_1 = class ClientService {
             patch.availableDate = candidate.availableDate && candidate.availableDate > limitDate ? candidate.availableDate : limitDate;
         }
         try {
-            await this.bufferClientService.update(candidate.mobile, patch);
-            try {
-                (0, account_health_1.recordAccountHealthSoon)((0, account_health_1.accountHealthCollectionOf)(this.clientModel), {
-                    mobile: candidate.mobile, by: 'cms:swap-probe',
-                    verdict: { spamStatus: patch.spamStatus, limitedUntil: patch.limitedUntil, verdictAt: patch.spamCheckedAt, spamCheckSource: patch.spamCheckSource },
-                }, { logger: this.logger });
-            }
-            catch { }
+            await this.bufferClientService.update(candidate.mobile, patch, { accountHealthBy: 'cms:swap-probe' });
         }
         catch (error) {
             this.logger.warn(`[${budget.clientId}] Failed to persist SpamBot result for ${(0, monitor_util_1.maskMobile)(candidate.mobile)}: ${(0, parseError_1.parseError)(error, '', false).message}`);
@@ -30110,11 +30114,6 @@ __decorate([
     (0, mongoose_1.Prop)({ required: true }),
     __metadata("design:type", String)
 ], Client.prototype, "product", void 0);
-__decorate([
-    (0, swagger_1.ApiProperty)({ description: 'Optional main-account label', required: false }),
-    (0, mongoose_1.Prop)({ required: false, default: null }),
-    __metadata("design:type", String)
-], Client.prototype, "mainAccount", void 0);
 __decorate([
     (0, swagger_1.ApiProperty)({ description: 'Paytm QR ID', required: false }),
     (0, mongoose_1.Prop)({ required: false, default: null }),
@@ -46078,7 +46077,6 @@ let PromoteClientService = PromoteClientService_1 = class PromoteClientService e
             const newUser = new this.promoteClientModel(promoteClientData);
             return newUser.save();
         }));
-        this.mirrorAccountFacets(result, 'cms:promote-create');
         this.recordRoleEvent({
             mobile: canonicalMobile, clientId: promoteClient.clientId ?? null, event: 'enrolled', pool: 'promote', by: 'cms:promote-create',
             reasonCode: 'enrolment', details: { availableDate: promoteClient.availableDate ?? null, status },
@@ -46139,7 +46137,6 @@ let PromoteClientService = PromoteClientService_1 = class PromoteClientService e
         if (!updatedUser) {
             throw new common_1.NotFoundException(`PromoteClient with mobile ${mobile} not found`);
         }
-        this.mirrorAccountFacets(updatedUser, 'cms:promote-update');
         return updatedUser;
     }
     async updateLastUsed(mobile) {
@@ -49714,9 +49711,6 @@ exports.resolveAccountHealthView = resolveAccountHealthView;
 const monitor_util_1 = __webpack_require__(/*! ../monitor/monitor-util */ "./src/components/monitor/monitor-util.ts");
 exports.ACCOUNT_FACET_READ_ENV = {
     health: 'ACCOUNT_HEALTH_READ',
-    warmup: 'ACCOUNT_WARMUP_READ',
-    membership: 'ACCOUNT_MEMBERSHIP_READ',
-    identity: 'ACCOUNT_IDENTITY_READ',
 };
 exports.ACCOUNT_FACET_READ_MAX_TIME_MS = 2_000;
 exports.ACCOUNT_FACET_READ_DEADLINE_MS = 2_500;
@@ -49835,7 +49829,7 @@ function chooseAccountHealthView(old, facet) {
     if (status === 'limited' && view.limitedUntilMs !== old.limitedUntilMs) {
         return verdictAtMs > oldAt ? { kind: 'newerInHealth', view } : { kind: 'mismatch', view: old };
     }
-    return { kind: 'equal', view };
+    return { kind: 'equal', view: status === 'harsh' ? { ...view, limitedUntilMs: old.limitedUntilMs } : view };
 }
 function sameView(a, b) {
     return a.spamStatus === b.spamStatus && a.limitedUntilMs === b.limitedUntilMs && a.verdictAtMs === b.verdictAtMs && a.statusSinceMs === b.statusSinceMs;
@@ -49989,18 +49983,9 @@ function buildAccountHealthWrite(input, now) {
         spamCheckBy: { $literal: by },
         updatedAt: now,
     };
-    const update = [{ $set: set }];
-    const daysLeft = typeof verdict.daysLeft === 'number' && Number.isFinite(verdict.daysLeft) ? Math.trunc(verdict.daysLeft) : null;
-    if (daysLeft !== null) {
-        set.daysLeft = daysLeft;
-        set.daysLeftBy = { $literal: spamCheckSource };
-    }
-    else {
-        update.push({ $unset: ['daysLeft', 'daysLeftBy'] });
-    }
     return {
         filter: { _id: mobile, $or: [{ verdictAt: { $lte: verdictAt } }, { verdictAt: null }] },
-        update,
+        update: [{ $set: set }],
     };
 }
 function isDuplicateKey(error) {
@@ -50057,351 +50042,6 @@ function accountHealthCollectionOf(model) {
         if (!db || typeof db.collection !== 'function')
             return null;
         const collection = db.collection(exports.ACCOUNT_HEALTH_COLLECTION);
-        return collection && typeof collection.updateOne === 'function' ? collection : null;
-    }
-    catch {
-        return null;
-    }
-}
-
-
-/***/ },
-
-/***/ "./src/components/shared/account-identity.ts"
-/*!***************************************************!*\
-  !*** ./src/components/shared/account-identity.ts ***!
-  \***************************************************/
-(__unused_webpack_module, exports, __webpack_require__) {
-
-
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.ACCOUNT_IDENTITY_VERSION = exports.ACCOUNT_IDENTITY_COLLECTION = void 0;
-exports.buildAccountIdentityWrite = buildAccountIdentityWrite;
-exports.recordAccountIdentity = recordAccountIdentity;
-exports.recordAccountIdentitySoon = recordAccountIdentitySoon;
-const account_warmup_1 = __webpack_require__(/*! ./account-warmup */ "./src/components/shared/account-warmup.ts");
-exports.ACCOUNT_IDENTITY_COLLECTION = 'accountIdentity';
-exports.ACCOUNT_IDENTITY_VERSION = 1;
-const POOL_SET = new Set(['buffer', 'promote']);
-const MAX_PROFILE_PICS = 20;
-function profilePics(value) {
-    if (!Array.isArray(value))
-        return null;
-    return value.filter((pic) => typeof pic === 'string' && pic.trim() !== '').map((pic) => pic.trim()).slice(0, MAX_PROFILE_PICS);
-}
-function tgIdValue(value) {
-    if (typeof value === 'number' && Number.isFinite(value))
-        return String(value);
-    return (0, account_warmup_1.facetCleanString)(value, 40);
-}
-function buildAccountIdentityWrite(input, now) {
-    const doc = input?.doc;
-    if (!doc || typeof doc !== 'object')
-        return null;
-    const mobile = (0, account_warmup_1.normalizeFacetMobile)(input.mobile ?? doc.mobile);
-    const pool = typeof input.pool === 'string' && POOL_SET.has(input.pool) ? input.pool : null;
-    const by = (0, account_warmup_1.facetCleanString)(input.by, 60);
-    const sourceUpdatedAt = (0, account_warmup_1.facetToDate)(doc.updatedAt);
-    if (!mobile || !pool || !by || !sourceUpdatedAt)
-        return null;
-    const profile = {
-        pool,
-        tgId: tgIdValue(doc.tgId),
-        username: (0, account_warmup_1.facetCleanString)(doc.username, 64),
-        assignedFirstName: (0, account_warmup_1.facetCleanString)(doc.assignedFirstName, 200),
-        assignedLastName: (0, account_warmup_1.facetCleanString)(doc.assignedLastName, 200),
-        assignedBio: (0, account_warmup_1.facetCleanString)(doc.assignedBio, 1000),
-        assignedProfilePics: profilePics(doc.assignedProfilePics),
-        sourceUpdatedAt,
-        by,
-    };
-    return {
-        filter: { _id: mobile, $or: [{ 'profile.sourceUpdatedAt': { $lte: sourceUpdatedAt } }, { 'profile.sourceUpdatedAt': null }] },
-        update: { $set: { v: exports.ACCOUNT_IDENTITY_VERSION, mobile, profile, updatedAt: now } },
-    };
-}
-function recordAccountIdentity(collection, input, options = {}) {
-    return (0, account_warmup_1.recordAccountFacetWrite)(collection, exports.ACCOUNT_IDENTITY_COLLECTION, () => buildAccountIdentityWrite(input, options.now ? options.now() : new Date()), input?.mobile ?? input?.doc?.mobile, options);
-}
-function recordAccountIdentitySoon(collection, input, options = {}) {
-    try {
-        void recordAccountIdentity(collection, input, options).catch(() => undefined);
-    }
-    catch { }
-}
-
-
-/***/ },
-
-/***/ "./src/components/shared/account-membership.ts"
-/*!*****************************************************!*\
-  !*** ./src/components/shared/account-membership.ts ***!
-  \*****************************************************/
-(__unused_webpack_module, exports, __webpack_require__) {
-
-
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.ACCOUNT_MEMBERSHIP_VERSION = exports.ACCOUNT_MEMBERSHIP_COLLECTION = void 0;
-exports.buildAccountMembershipWrite = buildAccountMembershipWrite;
-exports.recordAccountMembership = recordAccountMembership;
-exports.recordAccountMembershipSoon = recordAccountMembershipSoon;
-const account_warmup_1 = __webpack_require__(/*! ./account-warmup */ "./src/components/shared/account-warmup.ts");
-exports.ACCOUNT_MEMBERSHIP_COLLECTION = 'accountMembership';
-exports.ACCOUNT_MEMBERSHIP_VERSION = 1;
-const POOL_SET = new Set(['buffer', 'promote']);
-function buildAccountMembershipWrite(input, now) {
-    const doc = input?.doc;
-    if (!doc || typeof doc !== 'object')
-        return null;
-    const mobile = (0, account_warmup_1.normalizeFacetMobile)(input.mobile ?? doc.mobile);
-    const pool = typeof input.pool === 'string' && POOL_SET.has(input.pool) ? input.pool : null;
-    const by = (0, account_warmup_1.facetCleanString)(input.by, 60);
-    const sourceUpdatedAt = (0, account_warmup_1.facetToDate)(doc.updatedAt);
-    if (!mobile || !pool || !by || !sourceUpdatedAt)
-        return null;
-    const inUse = typeof doc.inUse === 'boolean' ? doc.inUse : null;
-    const membership = {
-        role: pool === 'buffer' && inUse === true ? 'main' : pool,
-        clientId: (0, account_warmup_1.facetCleanString)(doc.clientId, 60),
-        status: (0, account_warmup_1.facetCleanString)(doc.status, 40),
-        inUse,
-        availableDate: (0, account_warmup_1.facetCleanString)(doc.availableDate, 40),
-        lastUsed: (0, account_warmup_1.facetToDate)(doc.lastUsed),
-        message: (0, account_warmup_1.facetCleanString)(doc.message, 500),
-        sourceUpdatedAt,
-        by,
-    };
-    const path = `pools.${pool}`;
-    return {
-        filter: { _id: mobile, $or: [{ [`${path}.sourceUpdatedAt`]: { $lte: sourceUpdatedAt } }, { [`${path}.sourceUpdatedAt`]: null }] },
-        update: { $set: { v: exports.ACCOUNT_MEMBERSHIP_VERSION, mobile, [path]: membership, updatedAt: now } },
-    };
-}
-function recordAccountMembership(collection, input, options = {}) {
-    return (0, account_warmup_1.recordAccountFacetWrite)(collection, exports.ACCOUNT_MEMBERSHIP_COLLECTION, () => buildAccountMembershipWrite(input, options.now ? options.now() : new Date()), input?.mobile ?? input?.doc?.mobile, options);
-}
-function recordAccountMembershipSoon(collection, input, options = {}) {
-    try {
-        void recordAccountMembership(collection, input, options).catch(() => undefined);
-    }
-    catch { }
-}
-
-
-/***/ },
-
-/***/ "./src/components/shared/account-pool-facets.ts"
-/*!******************************************************!*\
-  !*** ./src/components/shared/account-pool-facets.ts ***!
-  \******************************************************/
-(__unused_webpack_module, exports, __webpack_require__) {
-
-
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.mirrorPoolDocFacetsSoon = mirrorPoolDocFacetsSoon;
-exports.mirrorPoolFacetsByQuerySoon = mirrorPoolFacetsByQuerySoon;
-const account_identity_1 = __webpack_require__(/*! ./account-identity */ "./src/components/shared/account-identity.ts");
-const account_membership_1 = __webpack_require__(/*! ./account-membership */ "./src/components/shared/account-membership.ts");
-const account_warmup_1 = __webpack_require__(/*! ./account-warmup */ "./src/components/shared/account-warmup.ts");
-function plain(doc) {
-    if (!doc || typeof doc !== 'object')
-        return null;
-    const toObject = doc.toObject;
-    const value = typeof toObject === 'function' ? toObject.call(doc) : doc;
-    return value && typeof value === 'object' ? value : null;
-}
-function mirrorPoolDocFacetsSoon(model, pool, doc, by, logger) {
-    try {
-        const snapshot = plain(doc);
-        if (!snapshot)
-            return;
-        (0, account_warmup_1.recordAccountWarmupSoon)((0, account_warmup_1.accountFacetCollectionOf)(model, account_warmup_1.ACCOUNT_WARMUP_COLLECTION), { pool, by, doc: snapshot }, { logger });
-        (0, account_membership_1.recordAccountMembershipSoon)((0, account_warmup_1.accountFacetCollectionOf)(model, account_membership_1.ACCOUNT_MEMBERSHIP_COLLECTION), { pool, by, doc: snapshot }, { logger });
-        (0, account_identity_1.recordAccountIdentitySoon)((0, account_warmup_1.accountFacetCollectionOf)(model, account_identity_1.ACCOUNT_IDENTITY_COLLECTION), { pool, by, doc: snapshot }, { logger });
-    }
-    catch { }
-}
-function mirrorPoolFacetsByQuerySoon(model, pool, filter, by, logger, deadlineMs = 3_000) {
-    try {
-        const findable = model;
-        if (!findable || typeof findable.find !== 'function')
-            return;
-        let timer;
-        const read = Promise.resolve().then(async () => {
-            const query = findable.find(filter).lean();
-            if (typeof query.maxTimeMS === 'function')
-                query.maxTimeMS(deadlineMs);
-            return query.exec();
-        });
-        const timeout = new Promise((_, reject) => {
-            timer = setTimeout(() => reject(new Error(`pool re-read timed out after ${deadlineMs} ms (client-side deadline)`)), deadlineMs);
-            timer.unref?.();
-        });
-        void Promise.race([read, timeout])
-            .then((docs) => {
-            for (const doc of Array.isArray(docs) ? docs : [])
-                mirrorPoolDocFacetsSoon(model, pool, doc, by, logger);
-        })
-            .catch((error) => {
-            try {
-                logger?.warn(`account facets: ${pool} re-read for ${by} failed; snapshots not mirrored (the pool write is unaffected)`, {
-                    error: error instanceof Error ? error.message : String(error),
-                });
-            }
-            catch { }
-        })
-            .finally(() => clearTimeout(timer));
-    }
-    catch { }
-}
-
-
-/***/ },
-
-/***/ "./src/components/shared/account-warmup.ts"
-/*!*************************************************!*\
-  !*** ./src/components/shared/account-warmup.ts ***!
-  \*************************************************/
-(__unused_webpack_module, exports, __webpack_require__) {
-
-
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.ACCOUNT_WARMUP_FIELDS = exports.ACCOUNT_FACET_POOLS = exports.ACCOUNT_WARMUP_DEADLINE_MS = exports.ACCOUNT_WARMUP_VERSION = exports.ACCOUNT_WARMUP_COLLECTION = void 0;
-exports.facetCleanString = facetCleanString;
-exports.normalizeFacetMobile = normalizeFacetMobile;
-exports.facetToDate = facetToDate;
-exports.buildAccountWarmupWrite = buildAccountWarmupWrite;
-exports.recordAccountFacetWrite = recordAccountFacetWrite;
-exports.recordAccountWarmup = recordAccountWarmup;
-exports.recordAccountWarmupSoon = recordAccountWarmupSoon;
-exports.accountFacetCollectionOf = accountFacetCollectionOf;
-const monitor_util_1 = __webpack_require__(/*! ../monitor/monitor-util */ "./src/components/monitor/monitor-util.ts");
-exports.ACCOUNT_WARMUP_COLLECTION = 'accountWarmup';
-exports.ACCOUNT_WARMUP_VERSION = 1;
-exports.ACCOUNT_WARMUP_DEADLINE_MS = 3_000;
-exports.ACCOUNT_FACET_POOLS = ['buffer', 'promote'];
-const POOL_SET = new Set(exports.ACCOUNT_FACET_POOLS);
-exports.ACCOUNT_WARMUP_FIELDS = [
-    'warmupPhase', 'warmupJitter', 'enrolledAt',
-    'privacyUpdatedAt', 'profilePicsDeletedAt', 'nameBioUpdatedAt', 'usernameUpdatedAt', 'profilePicsUpdatedAt',
-    'organicActivityAt', 'lastUpdateAttempt', 'failedUpdateAttempts', 'lastUpdateFailure',
-    'lastChecked', 'lastHealthCheckAttemptAt',
-];
-const NUMBER_FIELDS = new Set(['warmupJitter', 'failedUpdateAttempts']);
-const STRING_FIELDS = new Set(['warmupPhase']);
-function facetCleanString(value, max) {
-    if (typeof value !== 'string')
-        return null;
-    const trimmed = value.trim();
-    return trimmed ? trimmed.substring(0, max) : null;
-}
-function normalizeFacetMobile(value) {
-    if (typeof value !== 'string' && typeof value !== 'number')
-        return null;
-    const trimmed = String(value).trim();
-    const normalized = trimmed.startsWith('+') ? trimmed.slice(1) : trimmed;
-    return normalized || null;
-}
-function facetToDate(value) {
-    if (value instanceof Date)
-        return Number.isFinite(value.getTime()) ? value : null;
-    if (typeof value === 'number')
-        return Number.isFinite(value) ? new Date(value) : null;
-    if (typeof value === 'string' && value.trim()) {
-        const parsed = new Date(value);
-        return Number.isFinite(parsed.getTime()) ? parsed : null;
-    }
-    return null;
-}
-function fieldValue(field, value) {
-    if (NUMBER_FIELDS.has(field))
-        return typeof value === 'number' && Number.isFinite(value) ? value : null;
-    if (STRING_FIELDS.has(field))
-        return facetCleanString(value, 40);
-    return facetToDate(value);
-}
-function buildAccountWarmupWrite(input, now) {
-    const doc = input?.doc;
-    if (!doc || typeof doc !== 'object')
-        return null;
-    const mobile = normalizeFacetMobile(input.mobile ?? doc.mobile);
-    const pool = typeof input.pool === 'string' && POOL_SET.has(input.pool) ? input.pool : null;
-    const by = facetCleanString(input.by, 60);
-    const sourceUpdatedAt = facetToDate(doc.updatedAt);
-    if (!mobile || !pool || !by || !sourceUpdatedAt)
-        return null;
-    const set = { v: exports.ACCOUNT_WARMUP_VERSION, mobile, pool };
-    for (const field of exports.ACCOUNT_WARMUP_FIELDS)
-        set[field] = fieldValue(field, doc[field]);
-    set.sourceUpdatedAt = sourceUpdatedAt;
-    set.by = by;
-    set.updatedAt = now;
-    return {
-        filter: { _id: `${pool}:${mobile}`, $or: [{ sourceUpdatedAt: { $lte: sourceUpdatedAt } }, { sourceUpdatedAt: null }] },
-        update: { $set: set },
-    };
-}
-function isDuplicateKey(error) {
-    if (!error || typeof error !== 'object')
-        return false;
-    const e = error;
-    return e.code === 11000 || e.code === '11000' || e.codeName === 'DuplicateKey' || (typeof e.message === 'string' && e.message.includes('E11000'));
-}
-function withDeadline(promise, ms, label) {
-    let timer;
-    const timeout = new Promise((_, reject) => {
-        timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms} ms (client-side deadline)`)), ms);
-        timer.unref?.();
-    });
-    return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
-}
-async function recordAccountFacetWrite(collection, label, build, mobileForLog, options = {}) {
-    try {
-        if (!collection || typeof collection.updateOne !== 'function')
-            return 'skipped';
-        const write = build();
-        if (!write)
-            return 'skipped';
-        const deadlineMs = options.deadlineMs ?? exports.ACCOUNT_WARMUP_DEADLINE_MS;
-        const attempt = async () => {
-            try {
-                await collection.updateOne(write.filter, write.update, { upsert: true, maxTimeMS: deadlineMs });
-                return 'written';
-            }
-            catch (error) {
-                if (!isDuplicateKey(error))
-                    throw error;
-                const retry = (await collection.updateOne(write.filter, write.update, { maxTimeMS: deadlineMs }));
-                return (retry?.matchedCount ?? 0) > 0 ? 'written' : 'stale';
-            }
-        };
-        return await withDeadline(Promise.resolve().then(attempt), deadlineMs, `${label}.updateOne`);
-    }
-    catch (error) {
-        try {
-            options.logger?.warn(`${label}: snapshot for ${(0, monitor_util_1.maskMobile)(String(mobileForLog ?? '')) ?? '?'} not mirrored (the pool-doc write is unaffected)`, {
-                error: error instanceof Error ? error.message : String(error),
-            });
-        }
-        catch { }
-        return 'failed';
-    }
-}
-function recordAccountWarmup(collection, input, options = {}) {
-    return recordAccountFacetWrite(collection, exports.ACCOUNT_WARMUP_COLLECTION, () => buildAccountWarmupWrite(input, options.now ? options.now() : new Date()), input?.mobile ?? input?.doc?.mobile, options);
-}
-function recordAccountWarmupSoon(collection, input, options = {}) {
-    try {
-        void recordAccountWarmup(collection, input, options).catch(() => undefined);
-    }
-    catch { }
-}
-function accountFacetCollectionOf(model, name) {
-    try {
-        const db = model?.db;
-        if (!db || typeof db.collection !== 'function')
-            return null;
-        const collection = db.collection(name);
         return collection && typeof collection.updateOne === 'function' ? collection : null;
     }
     catch {
@@ -50494,7 +50134,6 @@ const mobile_utils_1 = __webpack_require__(/*! ./mobile-utils */ "./src/componen
 const parked_session_guard_1 = __webpack_require__(/*! ../clients/parked-session-guard */ "./src/components/clients/parked-session-guard.ts");
 const monitor_util_1 = __webpack_require__(/*! ../monitor/monitor-util */ "./src/components/monitor/monitor-util.ts");
 const account_role_events_1 = __webpack_require__(/*! ../clients/account-role-events */ "./src/components/clients/account-role-events.ts");
-const account_pool_facets_1 = __webpack_require__(/*! ./account-pool-facets */ "./src/components/shared/account-pool-facets.ts");
 exports.ClientStatus = {
     ACTIVE: 'active',
     INACTIVE: 'inactive',
@@ -53280,18 +52919,6 @@ class BaseClientService {
         }
         return true;
     }
-    mirrorAccountFacets(doc, by) {
-        try {
-            (0, account_pool_facets_1.mirrorPoolDocFacetsSoon)(this.model, this.clientType, doc, by, this.logger);
-        }
-        catch { }
-    }
-    mirrorAccountFacetsByQuery(filter, by) {
-        try {
-            (0, account_pool_facets_1.mirrorPoolFacetsByQuerySoon)(this.model, this.clientType, filter, by, this.logger);
-        }
-        catch { }
-    }
     recordRoleEvent(input) {
         try {
             (0, account_role_events_1.recordAccountRoleEventSoon)((0, account_role_events_1.accountRoleEventsCollectionOf)(this.model), input, { logger: this.logger });
@@ -54125,7 +53752,6 @@ const enrollment_lock_1 = __webpack_require__(/*! ../enrollment-lock */ "./src/c
 const pool_claim_1 = __webpack_require__(/*! ./pool-claim */ "./src/components/shared/onboarding/pool-claim.ts");
 const warmup_phases_1 = __webpack_require__(/*! ../warmup-phases */ "./src/components/shared/warmup-phases.ts");
 const account_role_events_1 = __webpack_require__(/*! ../../clients/account-role-events */ "./src/components/clients/account-role-events.ts");
-const account_pool_facets_1 = __webpack_require__(/*! ../account-pool-facets */ "./src/components/shared/account-pool-facets.ts");
 const monitor_util_1 = __webpack_require__(/*! ../../monitor/monitor-util */ "./src/components/monitor/monitor-util.ts");
 async function enrolPoolClientFromUser(port, document, targetClientId, availableDate) {
     const { profile, logger } = port;
@@ -54186,7 +53812,7 @@ async function enrolPoolClientFromUser(port, document, targetClientId, available
                 logger.warn(`Skipping ${pool} enrollment for ${(0, monitor_util_1.maskMobile)(document.mobile)}: now enrolled in ${already}`);
                 return false;
             }
-            const after = await port.model.findOneAndUpdate({ mobile: document.mobile }, {
+            await port.model.findOneAndUpdate({ mobile: document.mobile }, {
                 $set: {
                     ...poolDoc,
                     warmupPhase: warmup_phases_1.WarmupPhase.ENROLLED,
@@ -54194,7 +53820,6 @@ async function enrolPoolClientFromUser(port, document, targetClientId, available
                     enrolledAt: new Date(),
                 },
             }, { returnDocument: 'after', upsert: true }).exec();
-            (0, account_pool_facets_1.mirrorPoolDocFacetsSoon)(port.model, pool, after, 'cms:auto-enrol', logger);
             return true;
         }
         if (!enrolled)
@@ -54445,7 +54070,6 @@ const warmup_phases_1 = __webpack_require__(/*! ../warmup-phases */ "./src/compo
 const candidate_source_1 = __webpack_require__(/*! ./candidate-source */ "./src/components/shared/onboarding/candidate-source.ts");
 const pool_profile_1 = __webpack_require__(/*! ./pool-profile */ "./src/components/shared/onboarding/pool-profile.ts");
 const account_role_events_1 = __webpack_require__(/*! ../../clients/account-role-events */ "./src/components/clients/account-role-events.ts");
-const account_pool_facets_1 = __webpack_require__(/*! ../account-pool-facets */ "./src/components/shared/account-pool-facets.ts");
 async function setAsPoolClient(port, mobile, clientId, availableDate) {
     const { profile } = port;
     const cfg = profile.setAs;
@@ -54512,7 +54136,7 @@ async function setAsPoolClient(port, mobile, clientId, availableDate) {
             if (already && already !== profile.collection) {
                 throw new common_1.BadRequestException(`Mobile ${canonicalMobile} is already enrolled in ${already}; refusing to create a cross-pool ${cfg.entityName}`);
             }
-            const after = await port.model
+            await port.model
                 .findOneAndUpdate({ mobile: canonicalMobile }, {
                 $set: {
                     ...poolDoc,
@@ -54522,7 +54146,6 @@ async function setAsPoolClient(port, mobile, clientId, availableDate) {
                 },
             }, { returnDocument: 'after', upsert: true })
                 .exec();
-            (0, account_pool_facets_1.mirrorPoolDocFacetsSoon)(port.model, profile.kind, after, 'cms:set-as', port.logger);
         }));
         (0, account_role_events_1.recordAccountRoleEventSoon)((0, account_role_events_1.accountRoleEventsCollectionOf)(port.model), {
             mobile: canonicalMobile, clientId: targetClientId ?? null, event: 'enrolled', pool: profile.kind, by: 'cms:set-as',
@@ -58668,30 +58291,6 @@ let UserDataService = UserDataService_1 = class UserDataService {
     }
     async findActiveUsers(threshold = 30) {
         return this.userDataModel.find({ totalCount: { $gt: threshold } }).sort({ totalCount: -1 }).lean().exec();
-    }
-    async removeRedundantData() {
-        const twoMonths = Date.now() - 60 * 24 * 60 * 60 * 1000;
-        try {
-            const result = await this.userDataModel
-                .deleteMany({
-                lastMsgTimeStamp: { $lt: twoMonths },
-                payAmount: 0,
-                canReply: 1,
-                $and: [
-                    { $or: [{ lifetimePaid: { $exists: false } }, { lifetimePaid: { $lte: 0 } }] },
-                    { $or: [{ firstPaidAt: { $exists: false } }, { firstPaidAt: null }] },
-                    { $or: [{ highestPayAmount: { $exists: false } }, { highestPayAmount: { $lte: 0 } }] },
-                    { $or: [{ paidCount: { $exists: false } }, { paidCount: { $lte: 0 } }] },
-                    { $or: [{ lifetimeCredits: { $exists: false } }, { lifetimeCredits: { $lte: 0 } }] },
-                    { $or: [{ lastPaidAt: { $exists: false } }, { lastPaidAt: null }] },
-                ],
-            })
-                .exec();
-            return { deletedCount: result.deletedCount ?? 0 };
-        }
-        catch (error) {
-            throw new common_1.InternalServerErrorException((0, parseError_1.parseError)(error));
-        }
     }
     async resetUserCounts(profile, chatId) {
         return this.userDataModel
