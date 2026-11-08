@@ -19116,11 +19116,15 @@ async function sendMessageWithTimeoutOrThrow(client, entityLike, sendMessagePara
 
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   SPAMBOT_FREE_PHRASES: () => (/* binding */ SPAMBOT_FREE_PHRASES),
+/* harmony export */   SPAMBOT_HARSH_PHRASES: () => (/* binding */ SPAMBOT_HARSH_PHRASES),
+/* harmony export */   SPAMBOT_LIMITED_PHRASES: () => (/* binding */ SPAMBOT_LIMITED_PHRASES),
 /* harmony export */   SPAM_BOT_USERNAME: () => (/* binding */ SPAM_BOT_USERNAME),
 /* harmony export */   claimSpamBotNotification: () => (/* binding */ claimSpamBotNotification),
 /* harmony export */   classifySpamBotMessage: () => (/* binding */ classifySpamBotMessage),
 /* harmony export */   describeSpamBotReply: () => (/* binding */ describeSpamBotReply),
 /* harmony export */   extractSpamBotReleaseDate: () => (/* binding */ extractSpamBotReleaseDate),
+/* harmony export */   normalizeSpamBotText: () => (/* binding */ normalizeSpamBotText),
 /* harmony export */   parseSpamBotReleaseDate: () => (/* binding */ parseSpamBotReleaseDate),
 /* harmony export */   readLatestSpamBotReply: () => (/* binding */ readLatestSpamBotReply),
 /* harmony export */   reportManualSpamBotProbe: () => (/* binding */ reportManualSpamBotProbe),
@@ -19191,18 +19195,33 @@ async function readLatestSpamBotReply(client) {
     }
     return null;
 }
+/*
+ * SpamBot reply phrases, checked in this order: a dated limit, then an indefinite (harsh) limit, then
+ * "good news". A limit statement always wins over a "good news" phrase in the same reply, and a readable
+ * release date wins over the harsh wording: a dated limit must never be recorded as an indefinite harsh
+ * limit (CMS excludes harsh accounts from swaps).
+ * MIRROR: CommonTgService src/components/Telegram/utils/spambot-probe.ts classifySpamBotReply uses the same
+ * three lists in the same order. Shared fixture: tests/unit/packages/tg-core/telegram-utils/
+ * spam-bot-replies.fixture.json (same file in CMS __tests__/spambot-replies.fixture.json);
+ * spam-bot-classifier-mirror.test.mjs compares the lists and runs the CMS classifier over that fixture.
+ */
+const SPAMBOT_LIMITED_PHRASES = ["limited until", "automatically released", "released on"];
+const SPAMBOT_HARSH_PHRASES = ["trigger a harsh", "harsh response", "while the account is limited"];
+const SPAMBOT_FREE_PHRASES = ["good news"];
+/** Lower case, whitespace runs (line breaks included) collapsed to one space. */
+function normalizeSpamBotText(text) {
+    return (text || "").toLowerCase().replace(/\s+/g, " ");
+}
+const hasAnyPhrase = (normalized, phrases) => phrases.some((p) => normalized.includes(p));
 /** Classifies the stable phrases used by the existing account-state handlers. */
 function classifySpamBotMessage(text) {
-    const normalized = text.toLowerCase();
-    // A readable release date wins over the "harsh response" phrase: a dated limit must never be
-    // recorded as an indefinite harsh limit (CMS excludes harsh accounts from swaps). Same order as
-    // the CMS probe classifier.
-    if (normalized.includes("automatically released") || extractSpamBotReleaseDate(text) !== null)
+    const normalized = normalizeSpamBotText(text);
+    if (hasAnyPhrase(normalized, SPAMBOT_LIMITED_PHRASES))
         return "released";
-    if (normalized.includes("good news"))
-        return "healthy";
-    if (normalized.includes("can trigger a harsh"))
+    if (hasAnyPhrase(normalized, SPAMBOT_HARSH_PHRASES))
         return "harsh-warning";
+    if (hasAnyPhrase(normalized, SPAMBOT_FREE_PHRASES))
+        return "healthy";
     return "other";
 }
 const MONTH_PATTERN = "(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\\.?";
@@ -33772,10 +33791,12 @@ class UserDataRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_2__.B
     /**
      * Delete rows whose real numeric lastMsgTimeStamp is older than `cutoff`. `$gt: 0` never matches
      * null/missing/strings (BSON orders them below numbers), so unanchored rows are kept. Rows with any
-     * payment marker are never deleted (`neverPaidFilter`, the CMS retention guard). Throws.
+     * payment marker are never deleted (`neverPaidFilter`, the CMS retention guard). Only `canReply: 1` rows are
+     * deleted, exactly as CMS `removeRedundantData`: a blocked row (canReply 0) holds the block (owner rule 2026-10-21:
+     * blocked on any persona = no call, however old the block), and a row without canReply is kept too. Throws.
      */
     async deleteInactiveBefore(identity, cutoff) {
-        return this.collection.deleteMany({ ...(0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.mineFilter)(identity), lastMsgTimeStamp: { $gt: 0, $lt: cutoff }, ...neverPaidFilter() });
+        return this.collection.deleteMany({ ...(0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.mineFilter)(identity), lastMsgTimeStamp: { $gt: 0, $lt: cutoff }, canReply: 1, ...neverPaidFilter() });
     }
     /** paidReply -> true on every row of this persona. Throws. */
     async enablePaidReplyForAll(identity) {
@@ -48111,8 +48132,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "a71557c426229f707c873569860af7f90fa26a61" : 0;
-    const builtAt =  true ? "2026-11-08T03:43:02.032Z" : 0;
+    const sha =  true ? "27dcf07047cf139471beabe4851944fcb281314d" : 0;
+    const builtAt =  true ? "2026-11-08T04:31:29.695Z" : 0;
     return { sha, builtAt };
 }
 
