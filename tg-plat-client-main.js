@@ -4825,7 +4825,6 @@ const REQUIRED_COLUMNS = {
     promotion_send: new Set(["ts", "client_id", "mobile", "channel_id", "outcome"]),
     conversion_event: new Set(["conversion_id", "chat_id", "channel_id", "weight", "kind"]),
     payment_event: new Set(["chat_id", "client_id", "persona_id", "amount"]),
-    cheat_flag: new Set(["ts", "chat_id", "client_id", "persona_id", "cheat_count"]),
     daily_client: new Set(["day", "client_id", "namespace"]),
     daily_mobile: new Set(["day", "client_id", "namespace", "mobile"]),
     hourly_client: new Set(["day", "hour", "client_id", "namespace"]),
@@ -4924,6 +4923,13 @@ function serviceCode(service) {
         : null;
 }
 /**
+ * Tables a previous build wrote and this build no longer does (dropped by an analytics upgrade). A spool
+ * line for one is skipped on replay and logged once per file (info); it is neither replayed (the table is
+ * gone: 42P01 would retry forever) nor reported as corrupt/lost.
+ * cheat_flag: cleanup wave 3 (analytics/upgrade-2026-11-08-cleanup-wave3.sql); no reader since 2026-11-02.
+ */
+const RETIRED_TABLES = new Set(["cheat_flag"]);
+/**
  * Per table: column list (for spool validation), conflict tail and conflict-key length.
  * `legacyColumns`: older column lists still accepted from the disk spool. A spool written by the
  * previous build (before `service` existed) must still replay after a deploy, so a legacy line is
@@ -4940,8 +4946,14 @@ const TABLES = {
         columns: ["ts", "conversion_id", "chat_id", "channel_id", "client_id", "weight", "kind", "profile", "service"],
         legacyColumns: [["ts", "conversion_id", "chat_id", "channel_id", "client_id", "weight", "kind", "profile"]],
     },
-    payment_event: { columns: ["ts", "chat_id", "client_id", "persona_id", "amount", "balance_after", "lifetime_after", "is_cheat", "source"] },
-    cheat_flag: { columns: ["ts", "chat_id", "client_id", "persona_id", "cheat_count"] },
+    // Cleanup wave 3 (analytics/upgrade-2026-11-08-cleanup-wave3.sql): balance_after, lifetime_after and
+    // is_cheat are no longer named (they were always NULL / NULL / false). The old 9-column list stays as a
+    // legacy shape so a spool written by the previous build still replays its payments: upgradeLegacyValues
+    // maps by name, so the three retired values are dropped and nothing else changes.
+    payment_event: {
+        columns: ["ts", "chat_id", "client_id", "persona_id", "amount", "source"],
+        legacyColumns: [["ts", "chat_id", "client_id", "persona_id", "amount", "balance_after", "lifetime_after", "is_cheat", "source"]],
+    },
     daily_client: {
         columns: [...DAILY_CLIENT_KEY, ...COUNTER_COLUMNS],
         keyCount: 3,
@@ -5431,28 +5443,8 @@ class AnalyticsSink {
             columns: TABLES.payment_event.columns,
             values: [
                 row.ts ?? new Date(this.opts.now()),
-                row.chatId, row.clientId, row.personaId, row.amount,
-                row.balanceAfter ?? null, row.lifetimeAfter ?? null,
-                row.isCheat ?? false, row.source ?? null,
+                row.chatId, row.clientId, row.personaId, row.amount, row.source ?? null,
             ],
-        });
-    }
-    /**
-     * One write of userData.cheatCount (analytics/upgrade-2026-10-25-service.sql `cheat_flag`).
-     * Append-only, so it needs no UPDATE and replays exactly-once through the batch-id ledger like
-     * every other event. A non-integer count is rejected here (droppedInvalid), never sent.
-     */
-    recordCheatFlag(row) {
-        const n = row.cheatCount;
-        if (typeof n !== "number" || !Number.isInteger(n) || Math.abs(n) > 2147483647) {
-            if (this.enabled || this.everEnabled)
-                this.droppedInvalid += 1;
-            return;
-        }
-        this.enqueue({
-            table: "cheat_flag",
-            columns: TABLES.cheat_flag.columns,
-            values: [row.ts ?? new Date(this.opts.now()), row.chatId, row.clientId, row.personaId, n],
         });
     }
     /**
@@ -6626,6 +6618,7 @@ class AnalyticsSink {
             const fallbackAt = this.fileEpoch(file);
             let rows = 0;
             let corrupt = 0;
+            let retired = 0;
             let parsed = 0;
             for (const line of text.split("\n")) {
                 if (!line.trim())
@@ -6651,6 +6644,10 @@ class AnalyticsSink {
                 if (rec.b === undefined && typeof rec.end === "number")
                     continue; // end marker
                 const table = typeof rec.t === "string" ? rec.t : "";
+                if (RETIRED_TABLES.has(table)) {
+                    retired += 1;
+                    continue;
+                }
                 const spec = Object.prototype.hasOwnProperty.call(TABLES, table) ? TABLES[table] : undefined;
                 // Table and columns are validated against the known schema: the SQL text is never built
                 // from file content.
@@ -6681,6 +6678,8 @@ class AnalyticsSink {
                 batch.rows.push({ table, columns: spec.columns, values: rec.v });
                 rows += 1;
             }
+            if (retired > 0)
+                this.log("info", `[analytics] ${retired} line(s) of a retired table skipped in ${file}`);
             if (corrupt > 0) {
                 this.log("warn", `[analytics] ${corrupt} corrupt/partial line(s) skipped in ${file}`);
                 this.reportLoss(`corrupt spool line (${path__WEBPACK_IMPORTED_MODULE_3__.basename(file)})`, corrupt);
@@ -7112,7 +7111,6 @@ class PreInitRecorder {
     recordPromotionSend(row) { this.event("recordPromotionSend", row); }
     recordConversion(row) { this.event("recordConversion", row); }
     recordPayment(row) { this.event("recordPayment", row); }
-    recordCheatFlag(row) { this.event("recordCheatFlag", row); }
     recordDailyClient(row) { this.counter("recordDailyClient", row); }
     recordDailyMobile(row) { this.counter("recordDailyMobile", row); }
     size() { return this.events.length + this.counters.size; }
@@ -7269,7 +7267,6 @@ const DISABLED = {
     recordPromotionSend: () => { },
     recordConversion: () => { },
     recordPayment: () => { },
-    recordCheatFlag: () => { },
     recordDailyClient: () => { },
     recordDailyMobile: () => { },
     stats: () => ({
@@ -58715,8 +58712,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "1c0ffb898c32d994f30ff6867a6ec727583b2e8e" : 0;
-    const builtAt =  true ? "2026-11-08T15:32:13.285Z" : 0;
+    const sha =  true ? "6bc7d500f49e16bd378fd5b29209c7a325a594c2" : 0;
+    const builtAt =  true ? "2026-11-08T17:41:22.833Z" : 0;
     return { sha, builtAt };
 }
 
@@ -59397,8 +59394,8 @@ async function initiateCall(amount, userDetails, reason = "Default") {
         secondShow: userDetails.secondShow,
         paidCount: 0,
         highestPayAmount: userDetails.highestPayAmount,
-        // cheatCount is not written here (2026-11-02): it rewrote the value just read on every call setup, so each one
-        // appended an unchanged cheat_flag row (mirrorCheatCount) and could undo an accusation counted in between.
+        // cheatCount is not written here (2026-11-02): it rewrote the value just read on every call setup
+        // and could undo an accusation counted in between.
         limitTime: limitTime,
         paidReply: false,
     };
@@ -65857,7 +65854,7 @@ async function executehs(client, chatId, data) {
     const updatedData = {
         paidReply: true,
         // The show settles accusations made while it was owed (failed calls); the cheat ban counts only later ones.
-        // Written only when it changes (an unchanged write appends a duplicate cheat_flag row, mirrorCheatCount).
+        // Written only when it changes (an unchanged write is a wasted Mongo write).
         ...(userDetails?.cheatCount !== 0 ? { cheatCount: 0 } : {}),
         limitTime: Date.now(),
         totalCount: 10,
@@ -65946,7 +65943,7 @@ async function executehsl(client, chatId, data) {
     (0,_conversation_state_upsell_quiet__WEBPACK_IMPORTED_MODULE_5__.noteShowCompleted)(chatId, before.highestPayAmount);
     const updatedData = {
         // The show settles accusations made while it was owed (failed calls); the cheat ban counts only later ones.
-        // Written only when it changes (an unchanged write appends a duplicate cheat_flag row, mirrorCheatCount).
+        // Written only when it changes (an unchanged write is a wasted Mongo write).
         ...(userDetails?.cheatCount !== 0 ? { cheatCount: 0 } : {}),
         paidReply: true,
         limitTime: (0,_payments_ladder__WEBPACK_IMPORTED_MODULE_6__.showHoldsReplies)(userDetails.payAmount) ? Date.now() + _payments_ladder__WEBPACK_IMPORTED_MODULE_6__.SHOW_HOLD_REPLIES_MS : Date.now(),
@@ -78964,16 +78961,9 @@ class UserDataDtoCrud {
                         clientId,
                         personaId: profile,
                         amount: creditedNow,
-                        // Not available here: markDailyPaid returns the stats2 pre-image, not userData's
-                        // payAmount / lifetimePaid, and reading them back would add a Mongo read to the
-                        // payment path for analytics. The columns stay (NULL); see
-                        // docs/design/2026-10-25-postgres-review-fixes.md section C.
-                        balanceAfter: null,
-                        lifetimeAfter: null,
-                        // Fixed at credit time, so it cannot express "flagged later". Owner revenue
-                        // excludes chats via payment_event.is_fake (fake_payment_mark, 2026-11-02) in the
-                        // payment_event_owner view; cheat_flag is no longer read there.
-                        isCheat: false,
+                        // balance_after / lifetime_after / is_cheat were dropped in cleanup wave 3
+                        // (analytics/upgrade-2026-11-08-cleanup-wave3.sql; always NULL / NULL / false).
+                        // Owner revenue excludes chats via payment_event.is_fake in payment_event_owner.
                         source: 'screenshot',
                     });
             }
@@ -79127,9 +79117,6 @@ class UserDataDtoCrud {
             // never landed must not be reported as success. `?? read` covers only a write that
             // succeeded but returned no document.
             const viaRepo = await this.userDataRepository().updateFields(chatId, (0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_1__.currentScopeIdentity)(), updates);
-            if (Object.prototype.hasOwnProperty.call(updates, user.cheatCount)) {
-                this.mirrorCheatCount(chatId, updates[user.cheatCount]);
-            }
             return viaRepo ?? await this.read(chatId);
         }
         catch (error) {
@@ -79155,27 +79142,6 @@ class UserDataDtoCrud {
             throw error;
         }
     }
-    /**
-     * Mirrors a LANDED userData.cheatCount write (increment, reset to 0, the -2 grace sentinel) into
-     * the optional analytics store as an append-only `cheat_flag` row (2026-10-25). The owner's
-     * revenue rule is "credited minus ALL credits of a chat with cheatCount > 0 on any persona doc";
-     * payment_event.is_cheat could not express that (it is fixed at credit time, and the flag can
-     * come later or be reset). The latest row per (chat, persona) is the doc's current value. Since
-     * 2026-11-02 the `payment_event_owner` view reads payment_event.is_fake instead, so this row is an
-     * audit trail with no reader. Every cheatCount writer goes through update()/updateSingleKey(), so
-     * this is the one place that sees them all. Never throws, never awaited.
-     */
-    mirrorCheatCount(chatId, value) {
-        try {
-            const clientId = process.env.clientId?.trim();
-            const personaId = process.env.dbcoll?.trim();
-            const cheatCount = Number(value);
-            if (!clientId || !personaId || !Number.isInteger(cheatCount))
-                return;
-            (0,_tg_analytics__WEBPACK_IMPORTED_MODULE_3__.getAnalytics)().recordCheatFlag({ chatId: String(chatId).trim(), clientId, personaId, cheatCount });
-        }
-        catch { /* analytics is optional and must never affect the conversation */ }
-    }
     async updateSingleKey(chatId, key, value) {
         if (!chatId || !key) {
             logger.log("ChatId or key is undefined");
@@ -79185,8 +79151,6 @@ class UserDataDtoCrud {
         try {
             // Same filter, insert seeding and duplicate-key handling as update(); see setField.
             const viaRepo = await this.userDataRepository().setField(chatId, (0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_1__.currentScopeIdentity)(), key, value);
-            if (key === user.cheatCount)
-                this.mirrorCheatCount(chatId, value);
             return viaRepo ?? await this.read(chatId);
         }
         catch (error) {
