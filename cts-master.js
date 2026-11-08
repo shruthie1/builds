@@ -1149,6 +1149,7 @@ const daily_analytics_module_1 = __webpack_require__(/*! ./components/daily-anal
 const monitor_module_1 = __webpack_require__(/*! ./components/monitor/monitor.module */ "./src/components/monitor/monitor.module.ts");
 const fake_payment_module_1 = __webpack_require__(/*! ./components/fake-payment/fake-payment.module */ "./src/components/fake-payment/fake-payment.module.ts");
 const payment_proofs_module_1 = __webpack_require__(/*! ./components/payment-proofs/payment-proofs.module */ "./src/components/payment-proofs/payment-proofs.module.ts");
+const payment_uncredit_module_1 = __webpack_require__(/*! ./components/payment-uncredit/payment-uncredit.module */ "./src/components/payment-uncredit/payment-uncredit.module.ts");
 const file_module_1 = __webpack_require__(/*! ./components/files/file.module */ "./src/components/files/file.module.ts");
 const app_service_1 = __webpack_require__(/*! ./app.service */ "./src/app.service.ts");
 const runtime_config_service_1 = __webpack_require__(/*! ./control-plane/config/runtime-config.service */ "./src/control-plane/config/runtime-config.service.ts");
@@ -1186,6 +1187,7 @@ exports.AppModule = AppModule = __decorate([
             monitor_module_1.MonitorModule,
             fake_payment_module_1.FakePaymentModule,
             payment_proofs_module_1.PaymentProofsModule,
+            payment_uncredit_module_1.PaymentUncreditModule,
             stat_module_1.StatModule,
             stat2_module_1.Stat2Module,
             tg_signup_module_1.TgSignupModule,
@@ -39846,7 +39848,7 @@ function paidOriginSql(dmFrom, payFrom) {
     return q('paid_origin', `SELECT DISTINCT ON (c.chat_id, c.client_id) c.chat_id, c.client_id, c.service
 FROM conversion_event c
 WHERE c.kind = 'dm' AND c.ts >= $1::timestamptz AND c.client_id IS NOT NULL
-  AND (c.chat_id, c.client_id) IN (SELECT chat_id, client_id FROM payment_event WHERE ts >= $2::timestamptz AND amount > 0)
+  AND (c.chat_id, c.client_id) IN (SELECT chat_id, client_id FROM payment_event_owner WHERE ts >= $2::timestamptz AND amount > 0)
 ORDER BY c.chat_id, c.client_id, c.ts`, [iso(dmFrom), iso(payFrom)]);
 }
 
@@ -43336,6 +43338,10 @@ let PaymentProofsService = PaymentProofsService_1 = class PaymentProofsService {
             this.logger.error(`payment-proofs cache patch after ${what} failed; cache dropped: ${err?.stack ?? err}`);
         }
     }
+    async proofsChanged(chatId) {
+        const id = String(chatId);
+        await this.patchWindows(`uncredit ${id}`, () => this.rereadChat(id));
+    }
     async chatChanged(chatId) {
         const id = String(chatId);
         await this.patchWindows(`fake-payment ${id}`, async () => {
@@ -43830,6 +43836,691 @@ exports.PaymentProofSchema = new mongoose.Schema({
     timestamps: false,
     _id: true,
 });
+
+
+/***/ },
+
+/***/ "./src/components/payment-uncredit/payment-uncredit.controller.ts"
+/*!************************************************************************!*\
+  !*** ./src/components/payment-uncredit/payment-uncredit.controller.ts ***!
+  \************************************************************************/
+(__unused_webpack_module, exports, __webpack_require__) {
+
+
+var __decorate = (this && this.__decorate) || function (decorators, target, key, desc) {
+    var c = arguments.length, r = c < 3 ? target : desc === null ? desc = Object.getOwnPropertyDescriptor(target, key) : desc, d;
+    if (typeof Reflect === "object" && typeof Reflect.decorate === "function") r = Reflect.decorate(decorators, target, key, desc);
+    else for (var i = decorators.length - 1; i >= 0; i--) if (d = decorators[i]) r = (c < 3 ? d(r) : c > 3 ? d(target, key, r) : d(target, key)) || r;
+    return c > 3 && r && Object.defineProperty(target, key, r), r;
+};
+var __metadata = (this && this.__metadata) || function (k, v) {
+    if (typeof Reflect === "object" && typeof Reflect.metadata === "function") return Reflect.metadata(k, v);
+};
+var __param = (this && this.__param) || function (paramIndex, decorator) {
+    return function (target, key) { decorator(target, key, paramIndex); }
+};
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.PaymentUncreditController = void 0;
+const common_1 = __webpack_require__(/*! @nestjs/common */ "@nestjs/common");
+const swagger_1 = __webpack_require__(/*! @nestjs/swagger */ "@nestjs/swagger");
+const payment_uncredit_service_1 = __webpack_require__(/*! ./payment-uncredit.service */ "./src/components/payment-uncredit/payment-uncredit.service.ts");
+let PaymentUncreditController = class PaymentUncreditController {
+    constructor(service) {
+        this.service = service;
+    }
+    uncredit(proofId, body) {
+        return this.service.uncredit(proofId, body ?? {});
+    }
+    recredit(proofId, body) {
+        return this.service.recredit(proofId, body ?? {});
+    }
+};
+exports.PaymentUncreditController = PaymentUncreditController;
+__decorate([
+    (0, common_1.Post)(':proofId/uncredit'),
+    (0, common_1.HttpCode)(200),
+    (0, swagger_1.ApiOperation)({
+        summary: 'Void ONE credited payment: Postgres payment_void (out of revenue; payer taken back only if it was the day\'s last), ' +
+            'stats2 day marker, the profile\'s userData credit/tier, review stamp fake. Idempotent (changed:false). ' +
+            '409 fake_marked | call_in_progress (retry with force) | pg_row_pending | ambiguous_match | already_voided | uncredit_in_progress; 502 {failedAt, compensated}',
+    }),
+    (0, swagger_1.ApiParam)({ name: 'proofId', description: '<clientId>-<chatId>-<telegramMsgId>' }),
+    (0, swagger_1.ApiBody)({
+        schema: {
+            type: 'object', required: ['reason'],
+            properties: {
+                reason: { type: 'string', enum: [...payment_uncredit_service_1.UNCREDIT_REASONS] },
+                note: { type: 'string', description: "required for 'other'" },
+                by: { type: 'string', description: "default 'tg-chats'" },
+                force: { type: 'boolean', description: 'uncredit during a live show (treated as delivered)' },
+            },
+        },
+    }),
+    __param(0, (0, common_1.Param)('proofId')),
+    __param(1, (0, common_1.Body)()),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [String, Object]),
+    __metadata("design:returntype", void 0)
+], PaymentUncreditController.prototype, "uncredit", null);
+__decorate([
+    (0, common_1.Post)(':proofId/recredit'),
+    (0, common_1.HttpCode)(200),
+    (0, swagger_1.ApiOperation)({ summary: 'Undo an Uncredit: userData, stats2, Postgres payment_unvoid, review stamp back. Idempotent (changed:false)' }),
+    (0, swagger_1.ApiParam)({ name: 'proofId' }),
+    (0, swagger_1.ApiBody)({ schema: { type: 'object', properties: { by: { type: 'string', description: "default 'tg-chats'" } } } }),
+    __param(0, (0, common_1.Param)('proofId')),
+    __param(1, (0, common_1.Body)()),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [String, Object]),
+    __metadata("design:returntype", void 0)
+], PaymentUncreditController.prototype, "recredit", null);
+exports.PaymentUncreditController = PaymentUncreditController = __decorate([
+    (0, swagger_1.ApiTags)('payment-proofs'),
+    (0, common_1.Controller)('payment-proofs'),
+    __metadata("design:paramtypes", [payment_uncredit_service_1.PaymentUncreditService])
+], PaymentUncreditController);
+
+
+/***/ },
+
+/***/ "./src/components/payment-uncredit/payment-uncredit.module.ts"
+/*!********************************************************************!*\
+  !*** ./src/components/payment-uncredit/payment-uncredit.module.ts ***!
+  \********************************************************************/
+(__unused_webpack_module, exports, __webpack_require__) {
+
+
+var __decorate = (this && this.__decorate) || function (decorators, target, key, desc) {
+    var c = arguments.length, r = c < 3 ? target : desc === null ? desc = Object.getOwnPropertyDescriptor(target, key) : desc, d;
+    if (typeof Reflect === "object" && typeof Reflect.decorate === "function") r = Reflect.decorate(decorators, target, key, desc);
+    else for (var i = decorators.length - 1; i >= 0; i--) if (d = decorators[i]) r = (c < 3 ? d(r) : c > 3 ? d(target, key, r) : d(target, key)) || r;
+    return c > 3 && r && Object.defineProperty(target, key, r), r;
+};
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.PaymentUncreditModule = void 0;
+const common_1 = __webpack_require__(/*! @nestjs/common */ "@nestjs/common");
+const mongoose_1 = __webpack_require__(/*! @nestjs/mongoose */ "@nestjs/mongoose");
+const user_data_schema_1 = __webpack_require__(/*! ../user-data/schemas/user-data.schema */ "./src/components/user-data/schemas/user-data.schema.ts");
+const daily_analytics_module_1 = __webpack_require__(/*! ../daily-analytics/daily-analytics.module */ "./src/components/daily-analytics/daily-analytics.module.ts");
+const payment_proofs_module_1 = __webpack_require__(/*! ../payment-proofs/payment-proofs.module */ "./src/components/payment-proofs/payment-proofs.module.ts");
+const payment_proof_schema_1 = __webpack_require__(/*! ../payment-proofs/schemas/payment-proof.schema */ "./src/components/payment-proofs/schemas/payment-proof.schema.ts");
+const payment_uncredit_controller_1 = __webpack_require__(/*! ./payment-uncredit.controller */ "./src/components/payment-uncredit/payment-uncredit.controller.ts");
+const payment_uncredit_service_1 = __webpack_require__(/*! ./payment-uncredit.service */ "./src/components/payment-uncredit/payment-uncredit.service.ts");
+let PaymentUncreditModule = class PaymentUncreditModule {
+};
+exports.PaymentUncreditModule = PaymentUncreditModule;
+exports.PaymentUncreditModule = PaymentUncreditModule = __decorate([
+    (0, common_1.Module)({
+        imports: [
+            daily_analytics_module_1.DailyAnalyticsModule,
+            payment_proofs_module_1.PaymentProofsModule,
+            mongoose_1.MongooseModule.forFeature([
+                { name: payment_proof_schema_1.PAYMENT_PROOF_MODEL, schema: payment_proof_schema_1.PaymentProofSchema, collection: payment_proof_schema_1.PAYMENT_PROOF_COLLECTION },
+                { name: user_data_schema_1.UserData.name, schema: user_data_schema_1.UserDataSchema, collection: 'userData' },
+            ]),
+        ],
+        controllers: [payment_uncredit_controller_1.PaymentUncreditController],
+        providers: [payment_uncredit_service_1.PaymentUncreditService],
+    })
+], PaymentUncreditModule);
+
+
+/***/ },
+
+/***/ "./src/components/payment-uncredit/payment-uncredit.service.ts"
+/*!*********************************************************************!*\
+  !*** ./src/components/payment-uncredit/payment-uncredit.service.ts ***!
+  \*********************************************************************/
+(__unused_webpack_module, exports, __webpack_require__) {
+
+
+var __decorate = (this && this.__decorate) || function (decorators, target, key, desc) {
+    var c = arguments.length, r = c < 3 ? target : desc === null ? desc = Object.getOwnPropertyDescriptor(target, key) : desc, d;
+    if (typeof Reflect === "object" && typeof Reflect.decorate === "function") r = Reflect.decorate(decorators, target, key, desc);
+    else for (var i = decorators.length - 1; i >= 0; i--) if (d = decorators[i]) r = (c < 3 ? d(r) : c > 3 ? d(target, key, r) : d(target, key)) || r;
+    return c > 3 && r && Object.defineProperty(target, key, r), r;
+};
+var __metadata = (this && this.__metadata) || function (k, v) {
+    if (typeof Reflect === "object" && typeof Reflect.metadata === "function") return Reflect.metadata(k, v);
+};
+var __param = (this && this.__param) || function (paramIndex, decorator) {
+    return function (target, key) { decorator(target, key, paramIndex); }
+};
+var PaymentUncreditService_1;
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.PaymentUncreditService = exports.PENDING_STALE_MS = exports.PG_ROW_GRACE_MS = exports.UNCREDIT_REASONS = void 0;
+exports.isCredited = isCredited;
+exports.creditOf = creditOf;
+const common_1 = __webpack_require__(/*! @nestjs/common */ "@nestjs/common");
+const mongoose_1 = __webpack_require__(/*! @nestjs/mongoose */ "@nestjs/mongoose");
+const mongoose_2 = __webpack_require__(/*! mongoose */ "mongoose");
+const user_data_schema_1 = __webpack_require__(/*! ../user-data/schemas/user-data.schema */ "./src/components/user-data/schemas/user-data.schema.ts");
+const analytics_pg_reader_1 = __webpack_require__(/*! ../daily-analytics/analytics-pg.reader */ "./src/components/daily-analytics/analytics-pg.reader.ts");
+const channel_category_enum_1 = __webpack_require__(/*! ../bots/channel-category.enum */ "./src/components/bots/channel-category.enum.ts");
+const utils_1 = __webpack_require__(/*! ../../utils */ "./src/utils/index.ts");
+const payment_proofs_service_1 = __webpack_require__(/*! ../payment-proofs/payment-proofs.service */ "./src/components/payment-proofs/payment-proofs.service.ts");
+const payment_proofs_classify_1 = __webpack_require__(/*! ../payment-proofs/payment-proofs.classify */ "./src/components/payment-proofs/payment-proofs.classify.ts");
+const payment_proof_schema_1 = __webpack_require__(/*! ../payment-proofs/schemas/payment-proof.schema */ "./src/components/payment-proofs/schemas/payment-proof.schema.ts");
+const uncredit_plan_1 = __webpack_require__(/*! ./uncredit.plan */ "./src/components/payment-uncredit/uncredit.plan.ts");
+exports.UNCREDIT_REASONS = ['resent', 'fake', 'duplicate', 'other'];
+const DEFAULT_BY = 'tg-chats';
+const MAX_BY = 60;
+const MAX_NOTE = 300;
+exports.PG_ROW_GRACE_MS = 60 * 60_000;
+exports.PENDING_STALE_MS = 2 * 60_000;
+function clean(value, max) {
+    return typeof value === 'string' ? value.trim().slice(0, max) : '';
+}
+function pgMessage(err) {
+    if (!err)
+        return 'unknown error';
+    return err.code ? `${err.message} (${err.code})` : err.message;
+}
+function isCredited(p) {
+    const outcome = p.verdict?.outcome;
+    return outcome ? outcome === 'credited' : !!p.servedAt;
+}
+function creditOf(p) {
+    return (0, uncredit_plan_1.amountOf)(p.creditAmount ?? p.amount);
+}
+function publicPart(j) {
+    return { at: j.at, by: j.by, reason: j.reason, note: j.note, amount: j.amount };
+}
+class StepError extends Error {
+    constructor(step, message) {
+        super(message);
+        this.step = step;
+    }
+}
+let PaymentUncreditService = PaymentUncreditService_1 = class PaymentUncreditService {
+    constructor(proofModel, userDataModel, pg, paymentProofs) {
+        this.proofModel = proofModel;
+        this.userDataModel = userDataModel;
+        this.pg = pg;
+        this.paymentProofs = paymentProofs;
+        this.logger = new common_1.Logger(PaymentUncreditService_1.name);
+    }
+    get proofs() { return this.proofModel.collection; }
+    get users() { return this.userDataModel.collection; }
+    get stats2() { return this.userDataModel.db.collection('stats2'); }
+    async pgCall(sql, params) {
+        let failure;
+        const rows = await this.pg.query(sql, params, (e) => { failure = e; });
+        if (!rows)
+            return { error: pgMessage(failure), kind: failure?.kind };
+        return { row: rows[0] };
+    }
+    async proofOrThrow(rawProofId) {
+        const key = (0, payment_proofs_classify_1.parseProofId)(rawProofId);
+        if (!key)
+            throw new common_1.BadRequestException('proofId must be <clientId>-<chatId>-<telegramMsgId>');
+        const proof = await this.proofs.findOne({ chatId: key.chatId, clientId: key.clientId, telegramMsgId: key.telegramMsgId }, { projection: { shadow: 0, ocr: 0, imageHash: 0 } });
+        if (!proof)
+            throw new common_1.NotFoundException('no such proof (gone after the 7-day TTL?)');
+        return proof;
+    }
+    async setJournal(id, set) {
+        await this.proofs.updateOne({ _id: id }, { $set: set });
+    }
+    async unsetJournal(id, keys) {
+        await this.proofs.updateOne({ _id: id }, { $unset: Object.fromEntries(keys.map((k) => [k, ''])) });
+    }
+    async chatMarked(chatId) {
+        return !!(await this.users.findOne({ chatId, fakePaymentAt: { $ne: null } }, { projection: { _id: 1 } }));
+    }
+    async uncredit(rawProofId, body = {}, nowMs = Date.now()) {
+        const reason = clean(body.reason, 20);
+        if (!exports.UNCREDIT_REASONS.includes(reason))
+            throw new common_1.BadRequestException(`reason must be ${exports.UNCREDIT_REASONS.join('|')}`);
+        const note = clean(body.note, MAX_NOTE);
+        if (reason === 'other' && !note)
+            throw new common_1.BadRequestException("reason 'other' needs a note");
+        const by = clean(body.by, MAX_BY) || DEFAULT_BY;
+        const force = body.force === true;
+        const proof = await this.proofOrThrow(rawProofId);
+        const proofId = (0, payment_proofs_classify_1.proofIdOf)(proof);
+        const A = creditOf(proof);
+        if (!isCredited(proof) || !A || !proof.servedAt)
+            throw new common_1.BadRequestException('this proof was not credited');
+        if (proof.uncredited?.state === 'done')
+            return { proofId, changed: false, uncredited: publicPart(proof.uncredited), ...this.answerOf(proof.uncredited) };
+        if (proof.uncredited?.state === 'pending' && nowMs - new Date(proof.uncredited.at).getTime() < exports.PENDING_STALE_MS) {
+            throw new common_1.ConflictException({ code: 'uncredit_in_progress', message: 'another Uncredit of this payment is running' });
+        }
+        if (!this.pg.isEnabled())
+            throw new common_1.ServiceUnavailableException('analytics Postgres is not configured (ANALYTICS_DB_URL)');
+        if (await this.chatMarked(proof.chatId)) {
+            throw new common_1.ConflictException({ code: 'fake_marked', message: 'the chat is marked fake: no payment of it counts already' });
+        }
+        const user = await this.users.findOne({ chatId: proof.chatId, profile: proof.profile });
+        const live = !!user && (0, uncredit_plan_1.callInProgress)(user.callProgress, nowMs);
+        if (live && !force)
+            throw new common_1.ConflictException({ code: 'call_in_progress', message: 'a show is running for this payment; Uncredit anyway treats it as delivered' });
+        let journal;
+        const resumed = !!proof.uncredited;
+        if (proof.uncredited) {
+            journal = proof.uncredited;
+            journal.at = new Date(nowMs);
+            await this.setJournal(proof._id, { 'uncredited.state': 'pending', 'uncredited.at': new Date(nowMs) });
+        }
+        else {
+            journal = { state: 'pending', at: new Date(nowMs), by, reason, note, amount: A, undo: { review: proof.review ?? null } };
+            const claim = await this.proofs.updateOne({ _id: proof._id, uncredited: { $exists: false } }, { $set: { uncredited: journal } });
+            if (!claim.modifiedCount)
+                throw new common_1.ConflictException({ code: 'uncredit_in_progress', message: 'another Uncredit of this payment is running' });
+        }
+        let failedAt = null;
+        let failure = '';
+        try {
+            if (!journal.undo.pg) {
+                const voidReason = note ? `${reason}: ${note}` : reason;
+                const pg = await this.pgCall(`SELECT status, payment_id::text AS payment_id, amount, day::text AS day, payers_taken, payers_mobile
+                       FROM payment_void($1, $2, $3, $4, $5::integer, $6::timestamptz, $7, $8)`, [proofId, proof.chatId, proof.clientId, proof.profile, A, new Date(proof.servedAt).toISOString(), voidReason, by]);
+                if (!pg.row)
+                    throw new StepError('postgres', pg.error ?? 'no row');
+                if (pg.row.status === 'fake_marked') {
+                    await this.release(proof._id, journal);
+                    throw new common_1.ConflictException({ code: 'fake_marked', message: 'the chat is marked fake in Postgres: no payment of it counts already' });
+                }
+                if (pg.row.status === 'ambiguous') {
+                    await this.release(proof._id, journal);
+                    throw new common_1.ConflictException({ code: 'ambiguous_match', message: 'more than one revenue row matches this payment (same chat, amount and minute): not uncredited; fix it by hand' });
+                }
+                if (pg.row.status === 'already' && !resumed) {
+                    await this.release(proof._id, journal);
+                    throw new common_1.ConflictException({ code: 'already_voided', message: 'the revenue row of this payment is already voided outside tg-chats: not changed' });
+                }
+                if (pg.row.status === 'no_row' && nowMs - new Date(proof.servedAt).getTime() < exports.PG_ROW_GRACE_MS) {
+                    await this.release(proof._id, journal);
+                    throw new common_1.ConflictException({ code: 'pg_row_pending', message: 'the payment is not in Postgres yet (sink flush); try again in a few minutes' });
+                }
+                journal.undo.pg = {
+                    status: pg.row.status, linked: pg.row.status !== 'no_row', paymentId: pg.row.payment_id,
+                    day: pg.row.day, payersTaken: !!pg.row.payers_taken,
+                };
+                await this.setJournal(proof._id, { 'uncredited.undo.pg': journal.undo.pg });
+            }
+            if (!journal.undo.stats2) {
+                journal.undo.stats2 = await this.stats2Void(proof, journal.undo.pg, A).catch((e) => { throw new StepError('stats2', e.message); });
+                await this.setJournal(proof._id, { 'uncredited.undo.stats2': journal.undo.stats2 });
+            }
+            if (!journal.undo.userData) {
+                journal.undo.userData = await this.userDataVoid(proof, A, live && force).catch((e) => { throw new StepError('userData', e.message); });
+                await this.setJournal(proof._id, { 'uncredited.undo.userData': journal.undo.userData });
+            }
+            const done = await this.proofs.updateOne({ _id: proof._id, 'uncredited.state': 'pending' }, { $set: { 'uncredited.state': 'done', review: { decision: 'fake', at: new Date(nowMs) } } }).catch((e) => { throw new StepError('proof', e.message); });
+            if (!done.matchedCount)
+                throw new StepError('proof', 'journal changed during the uncredit');
+            journal.state = 'done';
+        }
+        catch (err) {
+            if (!(err instanceof StepError))
+                throw err;
+            failedAt = err.step;
+            failure = err.message;
+        }
+        if (failedAt) {
+            this.logger.error(`uncredit ${proofId}: ${failedAt} failed: ${failure}; compensating`);
+            let compensated = false;
+            try {
+                await this.undoSteps(proof._id, journal, proof.chatId, proofId);
+                await this.release(proof._id, journal);
+                compensated = true;
+            }
+            catch (e) {
+                this.logger.error(`uncredit ${proofId}: compensation failed: ${e?.message ?? e}`);
+                await this.setJournal(proof._id, { 'uncredited.state': 'failed' }).catch(() => undefined);
+            }
+            await this.cacheChanged(proof.chatId);
+            this.notify('error', `Uncredit FAILED at ${failedAt}${compensated ? ' (undone)' : ' (NOT undone: repeat Uncredit or Recredit)'}`, proof, by, [
+                { label: 'Error', value: failure },
+            ]);
+            throw new common_1.HttpException({ code: 'step_failed', message: `Uncredit failed at ${failedAt}: ${failure}`, failedAt, compensated, proofId }, common_1.HttpStatus.BAD_GATEWAY);
+        }
+        await this.cacheChanged(proof.chatId);
+        const answer = this.answerOf(journal);
+        this.logger.warn(`uncredit ${proofId} by ${by} (${reason}) ₹${A}: ${JSON.stringify(answer)}`);
+        this.notify('warning', `Payment uncredited (₹${A})`, proof, by, [
+            { label: 'Reason', value: note ? `${reason}: ${note}` : reason },
+            { label: 'Postgres', value: `${answer.postgres.status}${answer.postgres.payersTaken ? ', payer taken back' : ''}` },
+            { label: 'userData', value: answer.userData.status },
+        ]);
+        return { proofId, changed: true, uncredited: publicPart(journal), ...answer };
+    }
+    async recredit(rawProofId, body = {}, nowMs = Date.now()) {
+        const by = clean(body.by, MAX_BY) || DEFAULT_BY;
+        const proof = await this.proofOrThrow(rawProofId);
+        const proofId = (0, payment_proofs_classify_1.proofIdOf)(proof);
+        const journal = proof.uncredited;
+        if (!journal)
+            return { proofId, changed: false };
+        if (journal.state === 'pending' && nowMs - new Date(journal.at).getTime() < exports.PENDING_STALE_MS) {
+            throw new common_1.ConflictException({ code: 'uncredit_in_progress', message: 'an Uncredit of this payment is running' });
+        }
+        if (journal.undo.pg?.linked && !this.pg.isEnabled())
+            throw new common_1.ServiceUnavailableException('analytics Postgres is not configured (ANALYTICS_DB_URL)');
+        if (await this.chatMarked(proof.chatId)) {
+            throw new common_1.ConflictException({ code: 'fake_marked', message: 'the chat is marked fake: unmark it first' });
+        }
+        const before = { pg: journal.undo.pg, stats2: journal.undo.stats2, userData: journal.undo.userData };
+        let userData = { status: before.userData?.status ?? 'none', restored: [], skipped: [] };
+        let stats2 = 'unchanged';
+        let postgres = { status: before.pg ? 'skipped' : 'none' };
+        try {
+            const r = await this.undoSteps(proof._id, journal, proof.chatId, proofId);
+            userData = r.userData ?? userData;
+            stats2 = r.stats2 ?? stats2;
+            postgres = r.postgres ?? postgres;
+        }
+        catch (err) {
+            if (err instanceof common_1.HttpException)
+                throw err;
+            this.logger.error(`recredit ${proofId}: ${err?.message ?? err}`);
+            await this.paymentProofs?.chatChanged(proof.chatId);
+            throw new common_1.HttpException({ code: 'step_failed', message: `Recredit failed: ${err?.message ?? err}; repeat Recredit`, proofId }, common_1.HttpStatus.BAD_GATEWAY);
+        }
+        const review = journal.undo.review;
+        await this.proofs.updateOne({ _id: proof._id }, {
+            $unset: { uncredited: '', ...(review ? {} : { review: '' }) },
+            ...(review ? { $set: { review } } : {}),
+            $push: { uncreditHistory: { ...publicPart(journal), recreditedAt: new Date(nowMs), recreditedBy: by } },
+        });
+        await this.cacheChanged(proof.chatId);
+        this.logger.warn(`recredit ${proofId} by ${by}: userData ${JSON.stringify(userData)}, stats2 ${stats2}, pg ${JSON.stringify(postgres)}`);
+        this.notify('info', `Payment recredited (₹${journal.amount})`, proof, by, [
+            { label: 'Postgres', value: String(postgres.status) },
+            { label: 'userData', value: `${userData.status}${userData.skipped.length ? `, kept ${userData.skipped.join(', ')}` : ''}` },
+        ]);
+        return { proofId, changed: true, postgres, stats2, userData };
+    }
+    answerOf(j) {
+        const pg = j.undo.pg;
+        const ud = j.undo.userData;
+        return {
+            postgres: { status: pg?.status ?? null, paymentId: pg?.paymentId ?? null, linked: !!pg?.linked, payersTaken: !!pg?.payersTaken, day: pg?.day ?? null },
+            stats2: j.undo.stats2?.result ?? 'unchanged',
+            userData: { status: ud?.status ?? 'unchanged', set: ud?.after ?? {}, inc: ud?.inc ?? {} },
+        };
+    }
+    async release(id, journal) {
+        await this.proofs.updateOne({ _id: id, 'uncredited.at': journal.at }, { $unset: { uncredited: '' } });
+    }
+    async cacheChanged(chatId) {
+        await this.paymentProofs?.chatChanged(chatId);
+        await this.paymentProofs?.proofsChanged(chatId);
+    }
+    async stats2Void(proof, pg, A) {
+        const doc = await this.stats2.findOne({ chatId: proof.chatId, profile: proof.profile, client: proof.clientId });
+        if (!doc)
+            return { result: 'missing' };
+        const day = pg?.linked ? pg.day : null;
+        if (!day || doc.dailyPaidCountedAt !== day)
+            return { result: 'unchanged' };
+        const prev = { dailyPaidCountedAt: doc.dailyPaidCountedAt, dailyRevenueCounted: doc.dailyRevenueCounted ?? null };
+        const guard = { _id: doc._id, dailyPaidCountedAt: day, dailyRevenueCounted: prev.dailyRevenueCounted };
+        if (pg.payersTaken) {
+            const r = await this.stats2.updateOne(guard, { $unset: { dailyPaidCountedAt: '', dailyRevenueCounted: '' } });
+            if (!r.matchedCount)
+                throw new Error('stats2 changed during the uncredit');
+            return { result: 'unset', docId: doc._id, day, prev };
+        }
+        const after = Math.max(0, (0, uncredit_plan_1.amountOf)(prev.dailyRevenueCounted) - A);
+        const r = await this.stats2.updateOne(guard, { $set: { dailyRevenueCounted: after } });
+        if (!r.matchedCount)
+            throw new Error('stats2 changed during the uncredit');
+        return { result: 'lowered', docId: doc._id, day, prev, after };
+    }
+    async userDataVoid(proof, A, forceDelivered) {
+        const row = await this.users.findOne({ chatId: proof.chatId, profile: proof.profile });
+        if (!row)
+            return { status: 'missing' };
+        const others = (await this.proofs.find({ chatId: proof.chatId, profile: proof.profile, clientId: proof.clientId, _id: { $ne: proof._id } }, { projection: { amount: 1, creditAmount: 1, servedAt: 1, 'verdict.outcome': 1, 'uncredited.state': 1 } }).toArray())
+            .filter((p) => isCredited(p) && !p.uncredited)
+            .map(creditOf);
+        const plan = (0, uncredit_plan_1.planUncredit)(row, { amount: A, servedAtMs: new Date(proof.servedAt).getTime(), others, forceDelivered });
+        if (plan.undo.status === 'unchanged')
+            return plan.undo;
+        const update = {};
+        if (Object.keys(plan.set).length)
+            update.$set = plan.set;
+        if (Object.keys(plan.inc).length)
+            update.$inc = plan.inc;
+        const r = await this.users.updateOne({ _id: row._id, ...plan.guard }, update);
+        if (!r.matchedCount)
+            throw new Error('userData changed during the uncredit');
+        return plan.undo;
+    }
+    async undoSteps(id, journal, chatId, proofId) {
+        const out = {};
+        const ud = journal.undo.userData;
+        if (ud) {
+            if (ud.status === 'applied') {
+                const row = await this.users.findOne({ _id: ud.rowId });
+                if (row) {
+                    const plan = (0, uncredit_plan_1.planRecredit)(row, ud);
+                    if (Object.keys(plan.update).length) {
+                        const r = await this.users.updateOne(plan.filter, plan.update);
+                        if (!r.matchedCount)
+                            throw new Error('userData changed during the recredit; repeat');
+                    }
+                    out.userData = { status: 'restored', restored: plan.restored, skipped: plan.skipped };
+                }
+                else {
+                    out.userData = { status: 'missing', restored: [], skipped: [] };
+                }
+            }
+            else {
+                out.userData = { status: ud.status, restored: [], skipped: [] };
+            }
+            await this.unsetJournal(id, ['uncredited.undo.userData']);
+            delete journal.undo.userData;
+        }
+        const st = journal.undo.stats2;
+        if (st) {
+            out.stats2 = 'unchanged';
+            if (st.result === 'unset' && st.prev) {
+                const r = await this.stats2.updateOne({ _id: st.docId, dailyPaidCountedAt: { $exists: false } }, { $set: st.prev });
+                out.stats2 = r.matchedCount ? 'restored' : 'kept';
+            }
+            else if (st.result === 'lowered' && st.prev) {
+                const r = await this.stats2.updateOne({ _id: st.docId, dailyPaidCountedAt: st.day, dailyRevenueCounted: st.after }, { $set: { dailyRevenueCounted: st.prev.dailyRevenueCounted } });
+                out.stats2 = r.matchedCount ? 'restored' : 'kept';
+            }
+            await this.unsetJournal(id, ['uncredited.undo.stats2']);
+            delete journal.undo.stats2;
+        }
+        const pg = journal.undo.pg;
+        if (pg) {
+            if (pg.linked) {
+                const r = await this.pgCall(`SELECT status, payment_id::text AS payment_id, amount, day::text AS day, payers_given FROM payment_unvoid($1, $2)`, [proofId, chatId]);
+                if (!r.row)
+                    throw new Error(`Postgres: ${r.error}`);
+                if (r.row.status === 'fake_marked') {
+                    throw new common_1.ConflictException({ code: 'fake_marked', message: 'the chat is marked fake in Postgres: unmark it, then Recredit again' });
+                }
+                out.postgres = { status: r.row.status, paymentId: r.row.payment_id, payersGiven: !!r.row.payers_given, day: r.row.day };
+            }
+            else {
+                out.postgres = { status: 'not_linked' };
+            }
+            await this.unsetJournal(id, ['uncredited.undo.pg']);
+            delete journal.undo.pg;
+        }
+        return out;
+    }
+    notify(severity, title, proof, by, extra) {
+        try {
+            const bots = (0, utils_1.getBotsServiceInstance)();
+            if (!bots)
+                return;
+            void bots.sendMessageByCategory(channel_category_enum_1.ChannelCategory.ACCOUNT_NOTIFICATIONS, {
+                severity,
+                title,
+                fields: [
+                    { label: 'Chat', value: proof.chatId },
+                    { label: 'Client / persona', value: `${proof.clientId} / ${proof.profile}` },
+                    { label: 'Proof', value: (0, payment_proofs_classify_1.proofIdOf)(proof) },
+                    { label: 'By', value: by },
+                    ...extra,
+                ],
+            }).catch((e) => this.logger.warn(`uncredit notice failed: ${e?.message ?? e}`));
+        }
+        catch (e) {
+            this.logger.warn(`uncredit notice failed: ${e?.message ?? e}`);
+        }
+    }
+};
+exports.PaymentUncreditService = PaymentUncreditService;
+exports.PaymentUncreditService = PaymentUncreditService = PaymentUncreditService_1 = __decorate([
+    (0, common_1.Injectable)(),
+    __param(0, (0, mongoose_1.InjectModel)(payment_proof_schema_1.PAYMENT_PROOF_MODEL)),
+    __param(1, (0, mongoose_1.InjectModel)(user_data_schema_1.UserData.name)),
+    __param(3, (0, common_1.Optional)()),
+    __metadata("design:paramtypes", [mongoose_2.Model,
+        mongoose_2.Model,
+        analytics_pg_reader_1.AnalyticsPgReader,
+        payment_proofs_service_1.PaymentProofsService])
+], PaymentUncreditService);
+
+
+/***/ },
+
+/***/ "./src/components/payment-uncredit/uncredit.plan.ts"
+/*!**********************************************************!*\
+  !*** ./src/components/payment-uncredit/uncredit.plan.ts ***!
+  \**********************************************************/
+(__unused_webpack_module, exports) {
+
+
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.TIER_FIELDS = exports.LIVE_CALL_MS = exports.DEMO_BALANCE = void 0;
+exports.amountOf = amountOf;
+exports.countOf = countOf;
+exports.owedShowCap = owedShowCap;
+exports.callInProgress = callInProgress;
+exports.planUncredit = planUncredit;
+exports.planRecredit = planRecredit;
+exports.DEMO_BALANCE = 50;
+const OWED_SHOW_ROWS = [[200, 3], [250, 5], [350, 7], [600, 9]];
+function amountOf(value) {
+    const n = typeof value === 'number' ? value : typeof value === 'string' && value.trim() !== '' ? Number(value) : NaN;
+    return Number.isFinite(n) && n > 0 ? n : 0;
+}
+function countOf(value) {
+    return Math.floor(amountOf(value));
+}
+function owedShowCap(highest) {
+    const h = amountOf(highest);
+    return OWED_SHOW_ROWS.reduce((cap, [min, owed]) => (h >= min ? Math.max(cap, owed) : cap), 0);
+}
+exports.LIVE_CALL_MS = 10 * 60_000;
+function callInProgress(callProgress, now) {
+    if (!callProgress || typeof callProgress !== 'object')
+        return false;
+    return Object.values(callProgress).some((p) => p && typeof p === 'object' && p.completed !== true && now - amountOf(p.updatedAt) < exports.LIVE_CALL_MS);
+}
+exports.TIER_FIELDS = ['highestPayAmount', 'payAmount', 'fullShow', 'showsPaidTo', 'secondShow', 'demoGiven'];
+const raw = (row, f) => (row[f] === undefined ? null : row[f]);
+function planUncredit(row, input) {
+    const A = amountOf(input.amount);
+    const lp = amountOf(row.lifetimePaid);
+    const lc = countOf(row.lifetimeCredits);
+    const h = amountOf(row.highestPayAmount);
+    const pay = amountOf(row.payAmount);
+    const fs = countOf(row.fullShow);
+    const spt = countOf(row.showsPaidTo);
+    const others = input.others.map(amountOf);
+    const maxR = others.length ? Math.max(...others) : 0;
+    const sumR = others.reduce((a, b) => a + b, 0);
+    const inc = {};
+    const takePaid = Math.min(A, lp);
+    if (takePaid > 0)
+        inc.lifetimePaid = -takePaid;
+    if (lc > 0)
+        inc.lifetimeCredits = -1;
+    const lpAfter = lp - takePaid;
+    let hNew = h;
+    if (h > 0 && h <= A && h > maxR)
+        hNew = Math.max(maxR, lpAfter > sumR ? exports.DEMO_BALANCE : 0);
+    const delivered = !!input.forceDelivered || amountOf(row.callTime) > input.servedAtMs;
+    const next = {
+        highestPayAmount: hNew, payAmount: pay, fullShow: fs, showsPaidTo: spt,
+        secondShow: row.secondShow, demoGiven: row.demoGiven,
+    };
+    if (!delivered) {
+        next.payAmount = Math.max(0, pay - A);
+        if (spt > fs)
+            next.showsPaidTo = spt - 1;
+    }
+    else {
+        if (hNew > 0)
+            next.payAmount = Math.min(pay, hNew);
+        const fsEnd = Math.max(fs, owedShowCap(h));
+        next.fullShow = fsEnd;
+        next.showsPaidTo = Math.min(spt, fsEnd);
+        if (h > exports.DEMO_BALANCE)
+            next.secondShow = true;
+        next.demoGiven = true;
+    }
+    const set = {};
+    const before = {};
+    const guard = {};
+    const numeric = { highestPayAmount: h, payAmount: pay, fullShow: fs, showsPaidTo: spt, secondShow: null, demoGiven: null };
+    for (const f of exports.TIER_FIELDS) {
+        const cur = numeric[f];
+        const changed = cur === null ? next[f] !== row[f] && next[f] !== undefined : next[f] !== cur;
+        if (!changed)
+            continue;
+        set[f] = next[f];
+        before[f] = raw(row, f);
+        guard[f] = raw(row, f);
+    }
+    if (inc.lifetimePaid)
+        guard.lifetimePaid = raw(row, 'lifetimePaid');
+    if (inc.lifetimeCredits)
+        guard.lifetimeCredits = raw(row, 'lifetimeCredits');
+    const any = Object.keys(set).length > 0 || Object.keys(inc).length > 0;
+    return {
+        guard, set, inc, delivered,
+        undo: any ? { status: 'applied', rowId: row._id, before, after: { ...set }, inc: { ...inc } } : { status: 'unchanged', rowId: row._id },
+    };
+}
+function planRecredit(row, undo) {
+    const $set = {};
+    const $unset = {};
+    const $inc = {};
+    const restored = [];
+    const skipped = [];
+    const filter = { _id: row._id };
+    for (const [f, wrote] of Object.entries(undo.after ?? {})) {
+        const now = raw(row, f);
+        if (now !== wrote) {
+            skipped.push(f);
+            continue;
+        }
+        filter[f] = now;
+        const prev = (undo.before ?? {})[f];
+        if (prev === null || prev === undefined)
+            $unset[f] = '';
+        else
+            $set[f] = prev;
+        restored.push(f);
+    }
+    for (const [f, d] of Object.entries(undo.inc ?? {})) {
+        if (typeof d === 'number' && d !== 0) {
+            $inc[f] = -d;
+            restored.push(f);
+        }
+    }
+    const update = {};
+    if (Object.keys($set).length)
+        update.$set = $set;
+    if (Object.keys($unset).length)
+        update.$unset = $unset;
+    if (Object.keys($inc).length)
+        update.$inc = $inc;
+    return { filter, update, restored, skipped };
+}
 
 
 /***/ },
