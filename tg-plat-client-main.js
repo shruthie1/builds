@@ -22582,6 +22582,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   generateVariants: () => (/* reexport safe */ _utils_obfuscateText__WEBPACK_IMPORTED_MODULE_27__.generateVariants),
 /* harmony export */   getAllMobileProxyStatus: () => (/* reexport safe */ _utils_generateTGConfig__WEBPACK_IMPORTED_MODULE_14__.getAllMobileProxyStatus),
 /* harmony export */   getAllReactionsFromTg: () => (/* reexport safe */ _telegram_utils_getAllReactions__WEBPACK_IMPORTED_MODULE_23__.getAllReactionsFromTg),
+/* harmony export */   getAuthProtectionReason: () => (/* reexport safe */ _utils_tg_config__WEBPACK_IMPORTED_MODULE_12__.getAuthProtectionReason),
 /* harmony export */   getAvailablePlatforms: () => (/* reexport safe */ _utils_tg_config__WEBPACK_IMPORTED_MODULE_12__.getAvailablePlatforms),
 /* harmony export */   getAvailableReactions: () => (/* reexport safe */ _telegram_utils_getFullEntityInfo__WEBPACK_IMPORTED_MODULE_21__.getAvailableReactions),
 /* harmony export */   getBackoffDelay: () => (/* reexport safe */ _utils_exponential_backoff__WEBPACK_IMPORTED_MODULE_8__.getBackoffDelay),
@@ -32248,6 +32249,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _expected_outcome_log__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ./expected-outcome-log */ "../../packages/tg-core/src/utils/expected-outcome-log.ts");
 /* harmony import */ var _telegram_utils_account_dead_notice__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../telegram-utils/account-dead-notice */ "../../packages/tg-core/src/telegram-utils/account-dead-notice.ts");
 /* harmony import */ var _monitoring_last_error__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ../monitoring/last-error */ "../../packages/tg-core/src/monitoring/last-error.ts");
+/* harmony import */ var _redact_secrets__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ./redact-secrets */ "../../packages/tg-core/src/utils/redact-secrets.ts");
+
 
 
 
@@ -32534,16 +32537,17 @@ function parseError(err, prefix, sendErr = true, config = {}) {
         // Process the raw message to get a clean version
         let extractedMessage;
         try {
-            extractedMessage = typeof rawMessage === 'string' ? rawMessage : extractMessage(rawMessage);
+            extractedMessage = (0,_redact_secrets__WEBPACK_IMPORTED_MODULE_6__.redactSecretText)(typeof rawMessage === 'string' ? rawMessage : extractMessage(rawMessage));
         }
         catch (e) {
-            extractedMessage = safeStringify(rawMessage) || 'Error extracting message';
+            extractedMessage = (0,_redact_secrets__WEBPACK_IMPORTED_MODULE_6__.redactSecretText)(safeStringify(rawMessage) || 'Error extracting message');
         }
-        // Prepare the Full message for logging
-        const fullMessage = `${prefixStr} :: ${extractedMessage}`;
+        // Prepare the Full message for logging. Scrubbed (CMS redactSecretText, owner decision 2026-11-08) before it is
+        // logged, kept in the heartbeat slot, notified or returned: an error can embed a session string or bot token.
+        const fullMessage = (0,_redact_secrets__WEBPACK_IMPORTED_MODULE_6__.redactSecretText)(`${prefixStr} :: ${extractedMessage}`);
         // Extract errorMessage from Telegram errors
         const errObj = (err && typeof err === 'object') ? err : null;
-        const telegramErrorMsg = typeof errObj?.errorMessage === 'string' ? errObj.errorMessage : '';
+        const telegramErrorMsg = typeof errObj?.errorMessage === 'string' ? (0,_redact_secrets__WEBPACK_IMPORTED_MODULE_6__.redactSecretText)(errObj.errorMessage) : '';
         const expected = isExpectedTelegramOutcome(`${telegramErrorMsg} ${fullMessage}`);
         if (expected)
             logger.warn(fullMessage);
@@ -33016,6 +33020,50 @@ function getReadableTimeDifference(ms1, ms2 = Date.now()) {
     if (secs > 0 || result.length === 0)
         result.push(`${secs}s`);
     return result.join(" ");
+}
+
+
+/***/ },
+
+/***/ "../../packages/tg-core/src/utils/redact-secrets.ts"
+/*!**********************************************************!*\
+  !*** ../../packages/tg-core/src/utils/redact-secrets.ts ***!
+  \**********************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   REDACTED: () => (/* binding */ REDACTED),
+/* harmony export */   isSecretKey: () => (/* binding */ isSecretKey),
+/* harmony export */   redactSecretText: () => (/* binding */ redactSecretText)
+/* harmony export */ });
+/**
+ * Log redaction for credentials. Used by the shared Logger and parseError so a whole document
+ * (users / bufferClients / promoteClients / clients / session_audits) or an error that embeds one
+ * (e.g. Mongo E11000 on users.session_1) never prints a live Telegram session, a 2FA password,
+ * an API key or a bot token. Logs only: never apply it to stored or returned data.
+ */
+const SECRET_KEYS = new Set([
+    'session', 'stringsession', 'sessionstring', 'activesession', 'backupsession',
+    'password', 'passwd', 'twofa', 'apikey', 'api_key', 'x-api-key',
+    'token', 'bottoken', 'accesstoken', 'refreshtoken', 'secret', 'authkey',
+]);
+/** GramJS StringSession: "1" followed by ~350 base64 chars. 200+ never occurs in ordinary text. */
+const SESSION_LIKE = /\b1[A-Za-z0-9+/_-]{200,}={0,2}/g;
+/**
+ * Telegram bot token: <bot id>:<35-char secret>. Only the secret is replaced: the leading digits (a bot id, which
+ * is not secret, or a mobile written straight before ':') are kept, so a mobile is never lost (2026-11-08).
+ */
+const BOT_TOKEN_LIKE = /(?<!\d)(\d{6,12}):[A-Za-z0-9_-]{30,}/g; // also inside ".../bot<token>/..."
+const REDACTED = '[redacted]';
+function isSecretKey(key) {
+    return SECRET_KEYS.has(String(key).toLowerCase());
+}
+function redactSecretText(text) {
+    if (typeof text !== 'string')
+        return text;
+    return text.replace(SESSION_LIKE, '[redacted-session]').replace(BOT_TOKEN_LIKE, '$1:[redacted-token]');
 }
 
 
@@ -34702,6 +34750,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   generateRealisticConfig: () => (/* binding */ generateRealisticConfig),
 /* harmony export */   generateTGConfigWithProxy: () => (/* binding */ generateTGConfigWithProxy),
+/* harmony export */   getAuthProtectionReason: () => (/* binding */ getAuthProtectionReason),
 /* harmony export */   getAvailablePlatforms: () => (/* binding */ getAvailablePlatforms),
 /* harmony export */   getExpectedAuthFingerprint: () => (/* binding */ getExpectedAuthFingerprint),
 /* harmony export */   getPlatformConfig: () => (/* binding */ getPlatformConfig),
@@ -34981,26 +35030,35 @@ const AUTH_ALLOWLIST = {
     deviceModelSuffixes: ['-ssk'],
     appNamePrefixes: ['lik', 'ram', 'sru', 'shru', 'han'],
 };
-function isOwnedAppName(appName) {
+// Owner decision 2026-11-08: tg and CMS share this rule. Prefixes match the app name with non-alphanumerics
+// stripped ("Ram s 1" -> "rams1"), so operator rams*/ramys sessions are kept; "Telegram ..." never starts with one.
+function ownedAppPrefix(appName) {
     const compactAppName = appName.replace(/[^a-z0-9]+/g, "");
-    return AUTH_ALLOWLIST.appNamePrefixes.some((prefix) => compactAppName.startsWith(prefix));
+    return AUTH_ALLOWLIST.appNamePrefixes.find((prefix) => compactAppName.startsWith(prefix));
 }
-function isAuthAllowlisted(auth) {
+function getAuthProtectionReason(auth) {
     // Most reliable: exact apiId match against our registered credentials
     if (auth.apiId && OUR_API_IDS.has(auth.apiId))
-        return true;
+        return `apiId:${auth.apiId}`;
     const country = normalizeAuthField(auth.country);
     const device = normalizeAuthField(auth.deviceModel);
     const app = normalizeAuthField(auth.appName);
-    if (country && AUTH_ALLOWLIST.countries.includes(country))
-        return true;
-    if (device && AUTH_ALLOWLIST.deviceModelSubstrings.some(s => device.includes(s)))
-        return true;
-    if (device && AUTH_ALLOWLIST.deviceModelSuffixes.some(s => device.endsWith(s)))
-        return true;
-    if (app && isOwnedAppName(app))
-        return true;
-    return false;
+    const countryMatch = AUTH_ALLOWLIST.countries.find(s => country === s);
+    if (countryMatch)
+        return `country:${countryMatch}`;
+    const deviceSubstringMatch = AUTH_ALLOWLIST.deviceModelSubstrings.find(s => device.includes(s));
+    if (deviceSubstringMatch)
+        return `device_contains:${deviceSubstringMatch}`;
+    const deviceSuffixMatch = AUTH_ALLOWLIST.deviceModelSuffixes.find(s => device.endsWith(s));
+    if (deviceSuffixMatch)
+        return `device_suffix:${deviceSuffixMatch}`;
+    const appPrefixMatch = ownedAppPrefix(app);
+    if (appPrefixMatch)
+        return `app_prefix:${appPrefixMatch}`;
+    return null;
+}
+function isAuthAllowlisted(auth) {
+    return getAuthProtectionReason(auth) !== null;
 }
 function isAuthFingerprintMatch(mobile, auth) {
     if (auth.current) {
@@ -39476,7 +39534,8 @@ const routedUserCountPipeline = (count) => [
             },
         },
     },
-    { $unset: ['convertedCount'] },
+    // Owner decision 2026-11-08: old fields are not removed from documents. The legacy convertedCount stays;
+    // $ifNull above prefers routedUserCount once it exists, so the legacy value is folded in only once.
 ];
 class PromoteRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_1__.BaseRepository {
     constructor() {
@@ -48828,6 +48887,10 @@ function cleanDisplayName(name) {
 function nameMatchesAssignment(tgFirstName, assignedFirstName) {
     const normalized = cleanDisplayName(tgFirstName).toLowerCase();
     const assigned = assignedFirstName.toLowerCase().trim();
+    // An empty assigned (or empty TG) name must never count as a match — includes('') is
+    // always true, which would falsely "verify" any profile against an unset assignment.
+    if (!assigned || !normalized)
+        return false;
     return normalized.includes(assigned);
 }
 /**
@@ -49361,7 +49424,9 @@ async function verifyAndCorrectPersona(client, mobile, pool, doc, saveAssignment
         // ── Step 3: Compare all fields, collect mismatches ───────────────────
         let needsProfileUpdate = false;
         const profileUpdate = {};
-        if (assignment.assignedFirstName && !(0,_homoglyph_normalizer__WEBPACK_IMPORTED_MODULE_2__.nameMatchesAssignment)(currentFirstName, assignment.assignedFirstName)) {
+        // trim(): nameMatchesAssignment rejects a blank assignment (CMS guard, 2026-11-08); a whitespace-only
+        // assignedFirstName stays "no first name assigned" here, as before, instead of an UpdateProfile every cycle.
+        if (assignment.assignedFirstName?.trim() && !(0,_homoglyph_normalizer__WEBPACK_IMPORTED_MODULE_2__.nameMatchesAssignment)(currentFirstName, assignment.assignedFirstName)) {
             logger.info(`🧍 PERSONA correct first | ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_9__.maskMobile)(mobile)} | ${currentFirstName || 'empty'} -> ${assignment.assignedFirstName}`);
             profileUpdate.firstName = assignment.assignedFirstName;
             needsProfileUpdate = true;
@@ -59293,8 +59358,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "3ee6d63cf28a1d519d9fd2665e1c728ab14a81f7" : 0;
-    const builtAt =  true ? "2026-11-08T10:08:04.203Z" : 0;
+    const sha =  true ? "5f0a98baf394c30212bfdd3879842f3b0243006b" : 0;
+    const builtAt =  true ? "2026-11-08T10:57:03.380Z" : 0;
     return { sha, builtAt };
 }
 
@@ -79805,7 +79870,7 @@ class UserDataDtoCrud {
      * to ~TTL days of active conversations. This is ephemeral state — the permanent payment record lives in
      * `transactions`, and a returning user simply starts a fresh conversation. Scoped to this profile.
      * `lastMsgTimeStamp` is stamped `now` on every write (verified), so it is the reliable activity anchor.
-     * TTL days are env-tunable via USERDATA_TTL_DAYS (default 30); a non-positive value disables the sweep.
+     * Superseded 2026-11-08: the sweep no longer deletes (owner rule 2026-10-26); see sweepStaleUserData below.
      */
     /**
      * DB-size guardrail (512 MB hard cap). Logs current data+index usage each day and WARNs when it
@@ -79834,32 +79899,15 @@ class UserDataDtoCrud {
             return null;
         }
     }
+    /**
+     * Owner rule 2026-10-26 "never delete records from db" (decision 2026-11-08, item 6). This sweep used to delete
+     * unpaid userData rows inactive > USERDATA_TTL_DAYS and orphaned userIdentity rows; live pm2 logs showed 6,790
+     * userData + 4,947 userIdentity deletes in ~7 days. It now deletes nothing and ignores USERDATA_TTL_DAYS.
+     * Kept as a logged no-op so the daily-reset job and its diagnostics keep the same shape.
+     */
     async sweepStaleUserData() {
-        const ttlDays = Number(process.env.USERDATA_TTL_DAYS ?? 30);
-        if (!Number.isFinite(ttlDays) || ttlDays <= 0) {
-            logger.log(`sweepStaleUserData: disabled (USERDATA_TTL_DAYS=${process.env.USERDATA_TTL_DAYS})`);
-            return { deleted: 0, ttlDays };
-        }
-        const cutoff = Date.now() - ttlDays * 24 * 60 * 60 * 1000;
-        // Only sweep docs with a real numeric activity anchor older than the cutoff. Docs missing
-        // lastMsgTimeStamp are left alone (never matched) rather than risking deletion of unanchored state.
-        // `$gt: 0` guarantees a real positive numeric anchor (BSON orders null/missing/strings below
-        // numbers, so they never satisfy $gt:0) — docs without a genuine lastMsgTimeStamp are never matched.
-        // Rows with any payment marker are kept (deleteInactiveBefore ANDs in neverPaidFilter, the CMS guard).
-        const result = await this.userDataRepository().deleteInactiveBefore((0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_1__.currentScopeIdentity)(), cutoff);
-        logger.log(`sweepStaleUserData: deleted ${result.deletedCount ?? 0} unpaid userData docs inactive > ${ttlDays}d`);
-        // userIdentity (person-level, no TTL): rows unseen past the same cutoff whose person has no userData row
-        // left under any persona. Its own failure is logged and must not skip the rest of the daily reset.
-        let identitiesDeleted = 0;
-        try {
-            identitiesDeleted = (await this.getRepositories()?.userIdentity.deleteOrphanedBefore(cutoff)) ?? 0;
-            if (identitiesDeleted > 0)
-                logger.log(`sweepStaleUserData: deleted ${identitiesDeleted} orphaned userIdentity docs unseen > ${ttlDays}d`);
-        }
-        catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, 'sweepStaleUserData: userIdentity sweep failed', false);
-        }
-        return { deleted: result.deletedCount ?? 0, ttlDays, identitiesDeleted };
+        logger.log('sweepStaleUserData: disabled (owner rule 2026-10-26: never delete records); USERDATA_TTL_DAYS is ignored');
+        return { deleted: 0, ttlDays: 0, identitiesDeleted: 0 };
     }
     async resetPpl() {
         return this.userDataRepository().enablePaidReplyForAll((0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_1__.currentScopeIdentity)());
@@ -87314,8 +87362,8 @@ class JobManager {
             await this.executeJob('dailyReset', async () => {
                 const db = _data_user_data_crud__WEBPACK_IMPORTED_MODULE_8__.UserDataDtoCrud.getInstance();
                 await db.resetUnpaid();
-                // Bound userData under the 512MB DB cap: delete conversation state inactive > TTL days,
-                // then log current DB size (WARNs if approaching the cap).
+                // sweepStaleUserData is a logged no-op since 2026-11-08 (owner rule: never delete records);
+                // logDbSize still WARNs when data+index approaches the 512MB cap.
                 await db.sweepStaleUserData();
                 await db.logDbSize();
                 await (0,_conversation_user_stats__WEBPACK_IMPORTED_MODULE_1__.getUserStats)(false);
