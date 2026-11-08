@@ -56011,14 +56011,30 @@ function extractFromText(text) {
     }
     return null;
 }
+/** A printed clock "11:59", "11.59 pm", "11:59 p.m." (groups: hour, minute, am/pm). */
+const DAY_CLOCK = '(\\d{1,2})[:.](\\d{2})\\s*(am|pm|a\\.m\\.|p\\.m\\.)?';
+/** A clock printed right after "yesterday" ("Yesterday, 11:59 PM", "Yesterday at 11:59", "Yesterday\n11:59 pm"). */
+const YESTERDAY_THEN_CLOCK = new RegExp(`\\byesterday\\b[\\s,·•|\\-]*(?:at\\s+)?${DAY_CLOCK}`, 'g');
+/** A clock printed right before "yesterday" on the same line ("11:59 PM · Yesterday", "11:59 pm, yesterday"). */
+const CLOCK_THEN_YESTERDAY = new RegExp(`${DAY_CLOCK}[ \\t,·•|\\-]*(?:on\\s+)?yesterday\\b`, 'g');
+/** Any printed h:mm clock (colon only: "10.00" is an amount). */
+const ANY_CLOCK = /\b(\d{1,2}):(\d{2})(?::\d{2})?\b/g;
+/** Where the payment rows start: a status-bar clock above this is not a payment's time. */
+const PAYMENT_ROW_MARK = /\b(?:paid|received|sent|debited|credited|payment|transaction)\b|₹|\brs\.?\s*\d/i;
 /**
  * R58: the most recent "N minutes/hours ago" (or "just now") on a history screen, as an IST moment. Day units too
  * (hole 2, sowmya1 8296621331 2026-11-08: a PhonePe History list whose newest row said "1 day ago" was read with no time
- * and credited as a new ₹350): "N day(s) ago" / "a day ago" / "yesterday" give that past IST date, with the clock printed
- * after "yesterday" when there is one, else the start of that day, so the same-day rule calls it an old payment (start
- * of day is always more than YESTERDAY_GRACE_MS old). The most recent row wins: any minutes/hours row beats a day row,
- * and an undated "today" row on the screen means no day row is the newest (null, as before). `relativeDays` marks a
- * day result (resolveVisionTime keeps the model's own date over it).
+ * and credited as a new ₹350): "N day(s) ago" / "a day ago" / "yesterday" give that past IST date. The most recent row
+ * wins: any minutes/hours row beats a day row, and an undated "today" row means no day row is the newest (null).
+ * Fix 2026-11-08 (R2), the day word never throws away a real clock:
+ *  - "yesterday" with a clock printed right after it or right before it on its line ("Yesterday, 11:59 PM",
+ *    "11:59 PM · Yesterday") = yesterday at that clock;
+ *  - a printed clock in the payment rows that belongs to no "yesterday" (a today row shown with a clock only above
+ *    "1 day ago" rows, or the receipt's own time with a "Last paid 1 day ago" line elsewhere) = today's payment: null,
+ *    the screen is not dated by the day word (the model / other rules read it, as before hole 2);
+ *  - otherwise a bare day word: `clock` null and `relativeDays` set. resolveVisionTime then uses the model's clock for
+ *    "yesterday" (`modelClockOk`; the model read the receipt's time) and the start of that day for "N day(s) ago"
+ *    (a history row prints no clock; a model clock there is the status bar), so a bare one is an old payment.
  */
 function relativeFromText(text, nowMs) {
     const t = text.toLowerCase();
@@ -56045,17 +56061,35 @@ function relativeFromText(text, nowMs) {
         days = 1;
     if (days === null)
         return null;
+    // Clocks printed with "yesterday" (topmost first) and the spans they cover.
+    const attached = [];
+    if (yesterday) {
+        for (const re of [YESTERDAY_THEN_CLOCK, CLOCK_THEN_YESTERDAY]) {
+            for (const m of t.matchAll(re))
+                attached.push({ at: m.index, end: m.index + m[0].length, h: m[1], mi: m[2], ap: m[3] });
+        }
+        attached.sort((x, y) => x.at - y.at);
+    }
+    const mark = t.search(PAYMENT_ROW_MARK);
+    if (mark >= 0) {
+        for (const m of t.matchAll(ANY_CLOCK)) {
+            const at = m.index;
+            if (at < mark || attached.some((c) => at >= c.at && at < c.end))
+                continue;
+            if (isValidHms(parseInt(m[1], 10), parseInt(m[2], 10), 0))
+                return null;
+        }
+    }
     const today = istParts(nowMs);
     const p = istParts(Date.UTC(today.y, today.mo - 1, today.d) - days * DAY_MS);
-    let clock = { h: 0, mi: 0, s: 0 };
-    const at = yesterday ? t.match(/\byesterday\b[\s,]*(?:at\s+)?(\d{1,2})[:.](\d{2})\s*(am|pm|a\.m\.|p\.m\.)?/) : null;
-    if (at) {
-        const h = to24h(parseInt(at[1], 10), at[3]?.replace(/\./g, ''));
-        const mi = parseInt(at[2], 10);
+    const date = { y: p.y, mo: p.mo, d: p.d };
+    for (const c of attached) {
+        const h = to24h(parseInt(c.h, 10), c.ap?.replace(/\./g, ''));
+        const mi = parseInt(c.mi, 10);
         if (isValidHms(h, mi, 0))
-            clock = { h, mi, s: 0 };
+            return { date, clock: { h, mi, s: 0 }, relativeDays: true };
     }
-    return { date: { y: p.y, mo: p.mo, d: p.d }, clock, relativeDays: true };
+    return { date, clock: null, relativeDays: true, ...(yesterday ? { modelClockOk: true } : {}) };
 }
 /** Manual (host-TZ independent) parse of a model-supplied time string. Zone-carrying ISO strings are converted to IST. */
 function parseTimeString(raw, nowMs) {
@@ -56193,8 +56227,10 @@ function resolveVisionTime(input, contextText, nowMs, v2 = _v2__WEBPACK_IMPORTED
     let clock;
     let source;
     if (ctx) {
+        const rel = ctx;
         date = ctx.date;
-        clock = ctx.clock ?? modelClock;
+        // A bare day word: the model's clock only for "yesterday", else the start of that day (old payment).
+        clock = ctx.clock ?? (rel.relativeDays ? (rel.modelClockOk && modelClock) || { h: 0, mi: 0, s: 0 } : modelClock);
         source = 'ocr_text';
         yearInferred = false;
     }
@@ -59032,8 +59068,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "c73e4e34298fb34e5d2dc56e5978f706e7c098da" : 0;
-    const builtAt =  true ? "2026-11-08T05:02:52.166Z" : 0;
+    const sha =  true ? "53d974d781c974ff124591501afbd04cbcdebb9d" : 0;
+    const builtAt =  true ? "2026-11-08T07:00:42.195Z" : 0;
     return { sha, builtAt };
 }
 
@@ -101817,7 +101853,6 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   NEEDS_REAL_REFERENCE_REASONS: () => (/* binding */ NEEDS_REAL_REFERENCE_REASONS),
 /* harmony export */   SAME_TIME_MS: () => (/* binding */ SAME_TIME_MS),
 /* harmony export */   askAnswerable: () => (/* binding */ askAnswerable),
-/* harmony export */   canonicalPayee: () => (/* binding */ canonicalPayee),
 /* harmony export */   classifyAgainstServed: () => (/* binding */ classifyAgainstServed),
 /* harmony export */   confirmsAsk: () => (/* binding */ confirmsAsk),
 /* harmony export */   creditedSameAmountWithin: () => (/* binding */ creditedSameAmountWithin),
@@ -101833,6 +101868,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   isDifferentPicture: () => (/* binding */ isDifferentPicture),
 /* harmony export */   isImpossibleReference: () => (/* binding */ isImpossibleReference),
 /* harmony export */   isRealReference: () => (/* binding */ isRealReference),
+/* harmony export */   minutePayeeKey: () => (/* binding */ minutePayeeKey),
 /* harmony export */   normalizePayeeName: () => (/* binding */ normalizePayeeName),
 /* harmony export */   normalizePayeeUpi: () => (/* binding */ normalizePayeeUpi),
 /* harmony export */   normalizeUtr: () => (/* binding */ normalizeUtr),
@@ -102369,46 +102405,47 @@ function creditedSameAmountWithin(facts, rows, nowMs, windowMs) {
         return Number.isFinite(served) && nowMs - served <= windowMs && sameAmount(r.amount, facts.amount);
     });
 }
-/** Our banking names (paid-to-us.ts OUR_PAYEE_NAMES) as letters only, and the cut-off "Ravva Laksh..." read. */
-const OUR_NAME_KEYS = [
-    ['ravvalakshmi', 'ravvalakshmi'], ['lakshmiravva', 'ravvalakshmi'], ['ravvalaksh', 'ravvalakshmi'],
-    ['lakshmistores', 'lakshmistores'], ['storeslakshmi', 'lakshmistores'], ['girlscommunity', 'girlscommunity'],
-    ['communitygirls', 'girlscommunity'], ['reddygirl', 'reddygirl'], ['girlreddy', 'reddygirl'],
-    ['shettysaikumar', 'shettysaikumar'], ['saikumarshetty', 'shettysaikumar'], ['shettysrinivas', 'shettysrinivas'],
-    ['srinivasshetty', 'shettysrinivas'],
-];
 /**
- * One payee key for the screenshots of one payment: our banking name when the payee name shows one (the details page
- * and the success page both print it), else the UPI id the way sameUpiId compares it (a phone-number id by its 10
- * digits, "BHARATPE." and leading dots dropped, handle dropped), else the payee name as read, else '' (unknown).
- * Known gap: a receipt that shows only the UPI id and another that shows only the name give different keys.
+ * The payee part of servedMinuteKey, never broader than samePayee (rule 8): equal keys always mean samePayee is true.
+ * The UPI id when one was read (normalizePayeeUpi, then the sameUpiId reading: a phone-number id by its 10 digits,
+ * "BHARATPE." and leading dots dropped, "rn" read as "m"; the handle kept, since sameUpiId calls one local part under two
+ * handles two ids). Else the payee name as samePayee compares it (normalizePayeeName). Null when no payee was read, or
+ * the id has no local part: no key, so an unknown payee never collides with another user's receipt.
+ * Fix 2026-11-08 (R1): the key used to prefer our banking name over the UPI id and was '' with no payee, so two users
+ * paying ₹50 in one minute to two different UPI ids under one banking name collided (live arpitha / divya 2026-11-07:
+ * `paytmqr2810050501011wpidrl4um3d@paytm` vs `lakshmi.3365-10@waaxis`, both "LAKSHMI STORES"), and the loser was told
+ * "old payment".
  */
-function canonicalPayee(payeeUpiId, payeeName) {
-    const name = normalizePayeeName(payeeName);
-    const ours = name ? OUR_NAME_KEYS.find(([form]) => name.includes(form)) : undefined;
-    if (ours)
-        return ours[1];
+function minutePayeeKey(payeeUpiId, payeeName) {
     const upi = normalizePayeeUpi(payeeUpiId);
     if (upi) {
         const at = upi.lastIndexOf('@');
         const local = (at >= 0 ? upi.slice(0, at) : upi).replace(/^bharatpe\./, '').replace(/^[.\-_]+/, '').replace(/rn/g, 'm');
-        const phone = local.match(/^\d{10}$/);
-        if (local)
-            return phone ? phone[0] : local;
+        if (!local)
+            return null;
+        if (/^\d{10}$/.test(local))
+            return `upi:${local}`;
+        const handle = at >= 0 ? upi.slice(at + 1) : '';
+        return `upi:${local}${handle ? `@${handle}` : ''}`;
     }
-    return name ?? '';
+    const name = normalizePayeeName(payeeName);
+    return name ? `name:${name}` : null;
 }
 /**
- * The payment-minute claim key (owner rule 7, made atomic; v2 design 2026-11-07): canonical payee + amount (rupee-glyph
- * misread removed) + printed minute. Global: no chat id, no persona. Written with every credit whose payment time is
- * readable, UTR or not, in the same write as servedUtr / servedSha (unique index servedMin_unique), so two screenshots
- * of one payment credited at the same moment on two personas or clients cannot both win. Null without a readable time
- * or amount.
+ * The payment-minute claim key (owner rule 7, made atomic; v2 design 2026-11-07): payee (minutePayeeKey) + amount as
+ * read + printed minute: the exact amount, as rule 8's lookup (servedCandidates.payment) reads it, so a lost claim's
+ * re-check always finds its holder (the rupee-glyph form used to collide ₹250 with ₹50 there). Global: no chat id, no persona. Written with every credit whose payment
+ * time and payee are readable, UTR or not, in the same write as servedUtr / servedSha (unique index servedMin_unique), so
+ * two screenshots of one payment credited at the same moment on two personas or clients cannot both win. Null without a
+ * readable time, amount or payee. Rule 7 accepts a rare collision of two users on the same payee, ₹ and minute.
  */
 function servedMinuteKey(facts) {
     if (facts.timeMs === null || !Number.isFinite(facts.timeMs) || !(facts.amount > 0))
         return null;
-    return `${canonicalPayee(facts.payeeUpiId, facts.payeeName)}|${withoutGlyph(facts.amount)}|${Math.floor(facts.timeMs / MINUTE_MS)}`;
+    const payee = minutePayeeKey(facts.payeeUpiId, facts.payeeName);
+    if (!payee)
+        return null;
+    return `${payee}|${facts.amount}|${Math.floor(facts.timeMs / MINUTE_MS)}`;
 }
 
 
@@ -102439,6 +102476,27 @@ __webpack_require__.r(__webpack_exports__);
 
 
 const REPEAT_BY = { file: 'screenshot file', utr: 'UTR + amount', picture: 'picture + amount + time', time: 'amount + time (no UTR)', payee: 'amount + payee + minute (no UTR)', race: 'payment' };
+/**
+ * Messages whose claim may have landed while its answer was lost and could not be undone (release failed): held, never
+ * credited. Their re-check's `again` is their own claim, not a duplicate update (R3). Per process, bounded; a restart in
+ * between loses it (the re-check then reports "Dupe ignored" to ops).
+ */
+const UNSETTLED_CLAIMS_CAP = 500;
+const unsettledClaims = new Set();
+const claimKey = (f) => `${f.chatId}/${f.profile}/${f.msgId}`;
+function markUnsettledClaim(f) {
+    unsettledClaims.delete(claimKey(f));
+    unsettledClaims.add(claimKey(f));
+    while (unsettledClaims.size > UNSETTLED_CLAIMS_CAP) {
+        const oldest = unsettledClaims.values().next().value;
+        if (oldest === undefined)
+            break;
+        unsettledClaims.delete(oldest);
+    }
+}
+function takeUnsettledClaim(f) {
+    return unsettledClaims.delete(claimKey(f));
+}
 /** proof-check BLOCK reasons that rest on text printed on the screenshot (not on model judgement). */
 const TEXT_PROVEN_BLOCKS = new Set(['DISCLAIMER_LONG', 'DISCLAIMER_SHORT', 'BLOCKLIST_A', 'AI_WATERMARK']);
 /**
@@ -102621,6 +102679,36 @@ class PaymentFlow {
         return { handled: true, hold: true };
     }
     /**
+     * The claim write errored or timed out and may still have landed (R3, 2026-11-08). Re-read this message's own row:
+     * served by this claim = `won` (credit); not served = `unavailable` (held; the re-check claims afresh). Undetermined:
+     * undo the claim; if the undo fails too, remember the message so the held re-check's `again` (its own landed claim)
+     * is credited instead of being dropped as a duplicate update.
+     */
+    async settleUnavailableClaim(session) {
+        const since = session.claimStartedAt ?? Number.POSITIVE_INFINITY;
+        const state = await session.claimState(since);
+        if (state === 'mine') {
+            this.io.warn(`[payment-gate] ${session.facts.chatId}/${session.facts.msgId}: claim answer lost, but its write landed: crediting`);
+            return 'won';
+        }
+        if (state === 'earlier')
+            return 'again';
+        if (state === 'free')
+            return 'unavailable';
+        let released = false;
+        try {
+            released = await session.release();
+        }
+        catch {
+            released = false;
+        }
+        if (!released) {
+            markUnsettledClaim(session.facts);
+            this.io.warn(`[payment-gate] ${session.facts.chatId}/${session.facts.msgId}: claim state unknown and the undo failed: held; the re-check credits its own landed claim`);
+        }
+        return 'unavailable';
+    }
+    /**
      * The credit decision for a payment screenshot to us: the gate around `creditRules` (handleMyPayment).
      * `handled` = the gate already replied (repeat, fake/edited, old-time request, lost credit race): no credit.
      */
@@ -102701,24 +102789,39 @@ class PaymentFlow {
             }
         }
         if (verdict.isvalid && session) {
-            const claim = await session.claim();
+            let claim = await session.claim();
             if (claim === 'unavailable') {
-                // The claim write may have landed before the timeout: undo it, so the re-check is not called a repeat.
-                try {
-                    await session.release();
-                }
-                catch { /* the re-check then sees 'again': no credit either way */ }
-                return this.holdForStore(session, 'claim');
+                claim = await this.settleUnavailableClaim(session);
+                if (claim === 'unavailable')
+                    return this.holdForStore(session, 'claim');
+            }
+            // Any settled outcome ends the mark (a later duplicate update of a credited message stays "again").
+            const unsettled = takeUnsettledClaim(session.facts);
+            if (claim === 'again' && unsettled) {
+                // This message's own claim landed on an earlier pass whose answer was lost and could not be undone; that
+                // pass held the screenshot and credited nothing (R3, 2026-11-08): credit it now, once.
+                this.io.warn(`[payment-gate] ${session.facts.chatId}/${session.facts.msgId}: the claim of an earlier held pass had landed: crediting now`);
+                claim = 'won';
             }
             if (claim === 'lost') {
                 this.note('repeat', ['CREDIT_RACE_LOST']);
+                // The winner's row is served now: re-check to tell another chat/persona from this one.
+                const winner = await session.check();
+                if (winner.kind === 'unavailable')
+                    return this.holdForStore(session, 'race re-check');
+                if (winner.kind !== 'repeat') {
+                    // The claim lost (UTR, file or payment-minute index) but the re-check finds no credited screenshot
+                    // that this one repeats: never the "old payment" reply to a receipt nobody showed to be the same
+                    // payment (R1, 2026-11-08). Held like a store failure: the re-checks judge it again, then ops review.
+                    this.io.warn(`[payment-gate] ${session.facts.chatId}/${session.facts.msgId}: credit claim lost but no matching credited payment found (re-check ${winner.kind}): held, not crediting`);
+                    this.note('other', ['CREDIT_RACE_UNMATCHED']);
+                    await notify({ title: 'Held for review', summary: 'Credit claim lost, but no matching credited payment was found. Held; re-checked shortly, then please verify.' });
+                    return this.holdForStore(session, 'race re-check');
+                }
                 if (!blocked) {
-                    // The winner's row is served now: re-check to tell another chat/persona from this one.
-                    const winner = await session.check();
-                    if (winner.kind === 'repeat' && !winner.sameChat)
+                    if (!winner.sameChat)
                         await this.notMine(session.facts.chatId, 'race', `credited in ${winner.matched.profile}/${winner.matched.chatId} at the same moment`);
                     // Same chat: answered like any repeat (a payer still owed a call hears "calling you", not "old payment").
-                    // Also reached when the duplicate lookup timed out and failed open (nidhi1 2026-10-23).
                     else
                         await this.repeat(session.facts.chatId, 'race', 'credited at the same moment', args.answerResend);
                 }
@@ -102809,6 +102912,8 @@ class GateSession {
     constructor(deps, store, facts, creditAmount) {
         /** This user's newest rows as check() read them (sameAmountCreditedRecently). */
         this.recent = [];
+        /** When the last claim() started (claimState tells this claim's landed write from an earlier one). */
+        this.claimStartedAt = null;
         this.deps = deps;
         this.store = store;
         this.facts = facts;
@@ -102953,6 +103058,7 @@ class GateSession {
         // creditAmount goes on the row WITH servedAt (data-model review 2026-10-25): written at the credit decision,
         // never at begin, so a row carries it only when it was credited, and release removes both.
         const minuteKey = (0,_decide__WEBPACK_IMPORTED_MODULE_1__.servedMinuteKey)(this.facts);
+        this.claimStartedAt = this.deps.now();
         const r = await this.bound(this.store.markServed(this.facts.chatId, this.facts.profile, this.facts.msgId, 'other', this.creditAmount, minuteKey ?? undefined), 'error', 'markServed');
         if (r === 'duplicate')
             return 'lost';
@@ -102962,6 +103068,26 @@ class GateSession {
             return 'won';
         logger.warn(`[proof-gate] claim ${this.facts.chatId}/${this.facts.msgId} -> ${r}; not crediting, held for a re-check (fail closed)`);
         return 'unavailable';
+    }
+    /**
+     * After a claim came back `unavailable` (the write errored or timed out, and may still have landed): re-read this
+     * message's own row (recentForChat, bounded). `mine` = it is served at or after `sinceMs` (this claim landed: credit);
+     * `earlier` = served before `sinceMs` (an earlier claim of this same message); `free` = the row is there and not
+     * served (nothing landed); null = the row could not be read or found (undetermined).
+     */
+    async claimState(sinceMs) {
+        if (!this.store.recentForChat)
+            return null;
+        const rows = await this.bound(this.store.recentForChat(this.facts.chatId, CHAT_SERVED_SCAN), null, 'recentForChat(claim)');
+        const own = (rows ?? []).find((r) => r.chatId === this.facts.chatId && r.profile === this.facts.profile && r.telegramMsgId === this.facts.msgId);
+        if (!own)
+            return null;
+        if (!own.servedAt)
+            return 'free';
+        const served = new Date(own.servedAt).getTime();
+        if (!Number.isFinite(served))
+            return null;
+        return served >= sinceMs ? 'mine' : 'earlier';
     }
     /** The credit failed after the claim (service never started): free the claim so a retry is judged again. */
     async release() {
