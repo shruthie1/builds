@@ -31930,6 +31930,22 @@ class PaymentProofsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_
             .limit(n)
             .toArray());
     }
+    /**
+     * This chat's CREDITED rows (every persona) created since `since`, newest first (the gate's re-send rule, 48 h). Uses
+     * chatId_1_createdAt_-1 (chatId + createdAt range); servedAt is filtered on the few rows of one chat in that range.
+     * null on a failure (the gate fails closed), unlike recentForChat.
+     */
+    async creditedForChat(chatId, since, limit = 100) {
+        const id = String(chatId || '').trim();
+        if (!id)
+            return [];
+        const n = Math.max(1, Math.min(100, Math.floor(limit)));
+        return this.guard(`creditedForChat(${id})`, null, () => this.collection
+            .find({ chatId: id, createdAt: { $gte: since }, servedAt: { $exists: true }, ...NOT_RECORD_ONLY })
+            .sort({ createdAt: -1 })
+            .limit(n)
+            .toArray());
+    }
     /** Set the ASK_PROOF state of one row (section 8). Returns true when a row matched. */
     async markProof(chatId, telegramMsgId, proof) {
         const id = String(chatId || '').trim();
@@ -47854,8 +47870,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "6bc7d500f49e16bd378fd5b29209c7a325a594c2" : 0;
-    const builtAt =  true ? "2026-11-08T17:41:18.746Z" : 0;
+    const sha =  true ? "1eebe24a8269cfb567df6bfd3366e2cb207869cd" : 0;
+    const builtAt =  true ? "2026-11-08T18:15:50.480Z" : 0;
     return { sha, builtAt };
 }
 
