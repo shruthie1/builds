@@ -37706,7 +37706,7 @@ exports.JOIN_REQUEST_MODEL_NAME = 'joinRequestModule';
 
 
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.SnapshotCache = exports.ConcurrencyGate = exports.SwrCache = exports.TtlCache = void 0;
+exports.SnapshotWarmer = exports.SnapshotCache = exports.ConcurrencyGate = exports.SwrCache = exports.TtlCache = void 0;
 const monitor_util_1 = __webpack_require__(/*! ./monitor-util */ "./src/components/monitor/monitor-util.ts");
 class TtlCache {
     constructor(ttlMs, maxKeys = 50, now = () => Date.now()) {
@@ -37766,7 +37766,8 @@ class SwrCache {
             this.entries.delete(key);
         }
         else if (e) {
-            if (now - e.at < this.opts.freshMs)
+            const ahead = refresh ? Math.max(0, opts?.refreshAheadMs ?? 0) : 0;
+            if (now - e.at < this.opts.freshMs - ahead)
                 return { value: e.value, at: e.at, state: 'hit' };
             if (refresh) {
                 try {
@@ -37775,7 +37776,7 @@ class SwrCache {
                 }
                 catch (err) {
                     this.opts.onBackgroundError?.(key, err);
-                    return { value: e.value, at: e.at, state: 'stale' };
+                    return { value: e.value, at: e.at, state: now - e.at < this.opts.freshMs ? 'hit' : 'stale' };
                 }
             }
             if (!this.inflight.has(key)) {
@@ -37933,6 +37934,11 @@ class SnapshotCache {
     get size() {
         return this.entries.size;
     }
+    peek(name) {
+        const day = this.opts.day(this.now());
+        const e = this.entries.get(name);
+        return { at: e && e.day === day ? e.at : null, building: this.inflight.has(`${day}|${name}`) };
+    }
     start(name, build, background) {
         const at = this.now();
         const day = this.opts.day(at);
@@ -38034,6 +38040,68 @@ class SnapshotCache {
     }
 }
 exports.SnapshotCache = SnapshotCache;
+class SnapshotWarmer {
+    constructor(opts) {
+        this.opts = opts;
+        this.keys = new Map();
+        this.stopped = false;
+        this.now = opts.now ?? (() => Date.now());
+    }
+    touch(name) {
+        if (this.stopped)
+            return;
+        const now = this.now();
+        const prev = this.keys.get(name);
+        if (prev && now - prev.last < this.opts.ignoreGapMs)
+            return;
+        const gap = prev ? now - prev.last : Number.POSITIVE_INFINITY;
+        const interval = gap <= this.opts.maxIntervalMs ? Math.max(this.opts.minIntervalMs, gap) : this.opts.defaultIntervalMs;
+        if (prev?.timer)
+            clearTimeout(prev.timer);
+        const entry = { last: now, interval, timer: null };
+        this.keys.delete(name);
+        this.keys.set(name, entry);
+        while (this.keys.size > this.opts.maxKeys) {
+            const [oldest, e] = this.keys.entries().next().value;
+            if (e.timer)
+                clearTimeout(e.timer);
+            this.keys.delete(oldest);
+        }
+        entry.timer = setTimeout(() => this.fire(name, entry), Math.max(0, interval - this.opts.leadMs));
+        entry.timer.unref?.();
+    }
+    get pending() {
+        let n = 0;
+        for (const e of this.keys.values())
+            if (e.timer)
+                n += 1;
+        return n;
+    }
+    stop() {
+        this.stopped = true;
+        for (const e of this.keys.values())
+            if (e.timer)
+                clearTimeout(e.timer);
+        this.keys.clear();
+    }
+    fire(name, entry) {
+        entry.timer = null;
+        if (this.stopped)
+            return;
+        let p;
+        try {
+            if (!this.opts.needsRebuild(name, this.now() + this.opts.leadMs))
+                return;
+            p = this.opts.rebuild(name);
+        }
+        catch (err) {
+            this.opts.onError?.(name, err);
+            return;
+        }
+        p.catch((err) => this.opts.onError?.(name, err));
+    }
+}
+exports.SnapshotWarmer = SnapshotWarmer;
 
 
 /***/ },
@@ -40336,7 +40404,7 @@ var __param = (this && this.__param) || function (paramIndex, decorator) {
 };
 var MonitorService_1;
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.MonitorService = exports.UNASSIGNED_POOL_KEY = exports.FLEET_DETAIL_ID = exports.PAID_ENRICH_MAX = exports.PAID_HIST_KEYS = exports.RANGE_ONLY_NOTE_PREFIX = exports.CLIENT_AMOUNT_BUCKETS = exports.RANGE_ONLY_FIELDS = exports.RANGE_PAGE_RE = exports.RANGE_CLOSED_FRESH_MS = exports.PROMO_DAYS_HISTORY = exports.LIVE_SVCS = exports.HEARTBEAT_INDEX_KEY = exports.CLIENT_TTL_MS = exports.FLEET_TTL_MS = exports.PREWARM_PAGES = exports.MIDNIGHT_PREWARM_AFTER_MS = exports.PREWARM_DELAY_MS = exports.SNAPSHOT_TTL_SEC = exports.SNAPSHOT_KEY_PREFIX = exports.SNAPSHOT_MAX_SERVE_STALE_MS = exports.SNAPSHOT_FRESH_MS = exports.RESTRICTED_FRESH_MS = exports.LIVE_TTL_MS = exports.CHANNEL_CANDIDATES = exports.HISTORY_DAYS = exports.POOL_FRESH_MS = exports.HISTORY_FRESH_MS = exports.TODAY_MAX_STALE_MS = exports.TODAY_FRESH_MS = exports.LIVE_REDIS_DEADLINE_MS = exports.MONGO_TIMEOUT_MS = exports.PG_TIMEOUT_MS = exports.MONITOR_REDIS = void 0;
+exports.MonitorService = exports.UNASSIGNED_POOL_KEY = exports.FLEET_DETAIL_ID = exports.PAID_ENRICH_MAX = exports.PAID_HIST_KEYS = exports.RANGE_ONLY_NOTE_PREFIX = exports.RANGE_ONLY_FIELDS = exports.RANGE_PAGE_RE = exports.RANGE_CLOSED_FRESH_MS = exports.PROMO_DAYS_HISTORY = exports.LIVE_SVCS = exports.HEARTBEAT_INDEX_KEY = exports.CLIENT_TTL_MS = exports.FLEET_TTL_MS = exports.PREWARM_PAGES = exports.MIDNIGHT_PREWARM_AFTER_MS = exports.PREWARM_DELAY_MS = exports.SNAPSHOT_TTL_SEC = exports.SNAPSHOT_KEY_PREFIX = exports.PART_REFRESH_AHEAD_MS = exports.SNAPSHOT_WARM_MAX_KEYS = exports.SNAPSHOT_WARM_IGNORE_GAP_MS = exports.SNAPSHOT_WARM_MAX_INTERVAL_MS = exports.SNAPSHOT_WARM_MIN_INTERVAL_MS = exports.SNAPSHOT_WARM_DEFAULT_INTERVAL_MS = exports.SNAPSHOT_WARM_MARGIN_MS = exports.SNAPSHOT_WARM_LEAD_MS = exports.SNAPSHOT_MAX_SERVE_STALE_MS = exports.SNAPSHOT_FRESH_MS = exports.RESTRICTED_FRESH_MS = exports.LIVE_TTL_MS = exports.CHANNEL_CANDIDATES = exports.HISTORY_DAYS = exports.POOL_FRESH_MS = exports.HISTORY_FRESH_MS = exports.TODAY_MAX_STALE_MS = exports.TODAY_FRESH_MS = exports.LIVE_REDIS_DEADLINE_MS = exports.MONGO_TIMEOUT_MS = exports.PG_TIMEOUT_MS = exports.MONITOR_REDIS = void 0;
 exports.rangeOfPage = rangeOfPage;
 exports.legacyOf = legacyOf;
 exports.fleetSummaryRow = fleetSummaryRow;
@@ -40371,6 +40439,14 @@ exports.LIVE_TTL_MS = 5_000;
 exports.RESTRICTED_FRESH_MS = 60 * 60_000;
 exports.SNAPSHOT_FRESH_MS = exports.TODAY_FRESH_MS;
 exports.SNAPSHOT_MAX_SERVE_STALE_MS = 120_000;
+exports.SNAPSHOT_WARM_LEAD_MS = 15_000;
+exports.SNAPSHOT_WARM_MARGIN_MS = 5_000;
+exports.SNAPSHOT_WARM_DEFAULT_INTERVAL_MS = 60_000;
+exports.SNAPSHOT_WARM_MIN_INTERVAL_MS = 30_000;
+exports.SNAPSHOT_WARM_MAX_INTERVAL_MS = 5 * 60_000;
+exports.SNAPSHOT_WARM_IGNORE_GAP_MS = 10_000;
+exports.SNAPSHOT_WARM_MAX_KEYS = 20;
+exports.PART_REFRESH_AHEAD_MS = 30_000;
 exports.SNAPSHOT_KEY_PREFIX = 'monitor::snapshot::';
 exports.SNAPSHOT_TTL_SEC = 36 * 3600;
 exports.PREWARM_DELAY_MS = 5_000;
@@ -40384,13 +40460,6 @@ exports.PROMO_DAYS_HISTORY = 62;
 exports.RANGE_CLOSED_FRESH_MS = exports.HISTORY_FRESH_MS;
 exports.RANGE_PAGE_RE = /:r:(\d{4}-\d{2}-\d{2}):(\d{4}-\d{2}-\d{2})(?::|$)/;
 exports.RANGE_ONLY_FIELDS = ['rangeKind', 'clientsDaily', 'amountBuckets'];
-exports.CLIENT_AMOUNT_BUCKETS = [
-    { bucket: '<100', lo: 0, hi: 100 },
-    { bucket: '100-199', lo: 100, hi: 200 },
-    { bucket: '200-349', lo: 200, hi: 350 },
-    { bucket: '350-599', lo: 350, hi: 600 },
-    { bucket: '600-999', lo: 600, hi: 1000 },
-];
 function rangeOfPage(name) {
     const m = exports.RANGE_PAGE_RE.exec(name);
     return m ? { from: m[1], to: m[2] } : null;
@@ -40571,6 +40640,7 @@ let MonitorService = MonitorService_1 = class MonitorService {
             maxKeys: 2,
             onBackgroundError: (key, err) => this.logger.warn(`monitor paid-chats refresh ${key} failed: ${String(err?.message ?? err).slice(0, 200)}`),
         });
+        this.warmSnapshots = true;
         this.prewarmDelayMs = exports.PREWARM_DELAY_MS;
         this.prewarmTimer = null;
         this.prewarming = null;
@@ -40594,6 +40664,27 @@ let MonitorService = MonitorService_1 = class MonitorService {
             maxServeStaleMsOf: (name) => (this.closedRangePage(name) ? 2 * exports.RANGE_CLOSED_FRESH_MS : undefined),
             onError: (what, err) => this.logger.warn(`monitor snapshot ${what} failed: ${String(err?.message ?? err).slice(0, 200)}`),
         });
+        this.warmer = new monitor_cache_1.SnapshotWarmer({
+            leadMs: exports.SNAPSHOT_WARM_LEAD_MS,
+            defaultIntervalMs: exports.SNAPSHOT_WARM_DEFAULT_INTERVAL_MS,
+            minIntervalMs: exports.SNAPSHOT_WARM_MIN_INTERVAL_MS,
+            maxIntervalMs: exports.SNAPSHOT_WARM_MAX_INTERVAL_MS,
+            ignoreGapMs: exports.SNAPSHOT_WARM_IGNORE_GAP_MS,
+            maxKeys: exports.SNAPSHOT_WARM_MAX_KEYS,
+            needsRebuild: (name, at) => {
+                if (this.closedRangePage(name))
+                    return false;
+                const p = this.snapshots.peek(name);
+                if (p.building)
+                    return false;
+                return p.at === null || at + exports.SNAPSHOT_WARM_MARGIN_MS - p.at >= exports.SNAPSHOT_FRESH_MS;
+            },
+            rebuild: (name) => this.snapshots.refresh(name, (bg) => this.buildPage(name, bg)),
+            onError: (name, err) => this.logger.warn(`monitor snapshot warm ${name} failed: ${String(err?.message ?? err).slice(0, 200)}`),
+        });
+    }
+    get warmPending() {
+        return this.warmer.pending;
     }
     closedRangePage(name) {
         const r = rangeOfPage(name);
@@ -40606,6 +40697,7 @@ let MonitorService = MonitorService_1 = class MonitorService {
         this.schedulePrewarm(this.prewarmDelayMs, 'boot');
     }
     onModuleDestroy() {
+        this.warmer.stop();
         if (this.prewarmTimer)
             clearTimeout(this.prewarmTimer);
         this.prewarmTimer = null;
@@ -40688,7 +40780,9 @@ let MonitorService = MonitorService_1 = class MonitorService {
             return this.buildFunnel(a, b === '*' ? null : b, now, background);
         return this.buildDetail(a, Number(b), now, background);
     }
-    async snap(page) {
+    async snap(page, viewer = true) {
+        if (viewer && this.warmSnapshots && !this.closedRangePage(page))
+            this.warmer.touch(page);
         const r = await this.snapshots.get(page, (bg) => this.buildPage(page, bg));
         return withSnapshotCache(r, Date.now());
     }
@@ -40754,7 +40848,7 @@ let MonitorService = MonitorService_1 = class MonitorService {
             const timings = {};
             const value = await load(asOf, timings, background || ctx.background);
             return { value, asOf, timings };
-        }, (0, monitor_time_1.istDayStart)((0, monitor_time_1.addDays)(today, 1)), { refresh: ctx.background });
+        }, (0, monitor_time_1.istDayStart)((0, monitor_time_1.addDays)(today, 1)), { refresh: ctx.background, refreshAheadMs: exports.PART_REFRESH_AHEAD_MS });
         ctx.track(kind, r.state, r.at);
         Object.assign(ctx.timings, r.value.timings);
         return r.value;
@@ -41185,20 +41279,6 @@ let MonitorService = MonitorService_1 = class MonitorService {
         const credits = all.filter((c) => c.client && c.ms >= w.cur.start && c.ms < curEnd);
         const out = {};
         const sorted = [...ids].sort();
-        const bk = new Map();
-        for (const c of credits) {
-            if (!c.clean)
-                continue;
-            const b = exports.CLIENT_AMOUNT_BUCKETS.find((x) => c.amount >= x.lo && c.amount < x.hi);
-            if (!b)
-                continue;
-            const k = `${c.client}|${b.bucket}`;
-            const e = bk.get(k) ?? { count: 0, revenue: 0 };
-            e.count += 1;
-            e.revenue += c.revenue;
-            bk.set(k, e);
-        }
-        out.amountBuckets = sorted.flatMap((id) => exports.CLIENT_AMOUNT_BUCKETS.map((b) => ({ clientId: id, bucket: b.bucket, ...(bk.get(`${id}|${b.bucket}`) ?? { count: 0, revenue: 0 }) })));
         const add = (m, k, v) => m.set(k, (m.get(k) ?? 0) + v);
         const rev = new Map();
         const chats = new Map();
@@ -42100,7 +42180,7 @@ let MonitorService = MonitorService_1 = class MonitorService {
         const routed = await this.section('routed_columns', ctx, () => this.routedColumns(ctx));
         const routedCols = routed?.client ?? [];
         const [fleet, payH, payT, origin, dmsH, dmY, dmT, dcH, dcT, routedRows, routedToday, detail] = await Promise.all([
-            this.section('summary', ctx, () => this.snap(fleetPage)),
+            this.section('summary', ctx, () => this.snap(fleetPage, false)),
             this.section('revenue', ctx, () => this.payHist(ctx)),
             withToday ? this.section('revenue_today', ctx, () => this.payToday(ctx)) : null,
             this.section('paid_origin', ctx, () => this.paidOrigin(ctx)),
@@ -42111,7 +42191,7 @@ let MonitorService = MonitorService_1 = class MonitorService {
             withToday ? this.section('daily_client_today', ctx, () => this.dcToday(ctx)) : null,
             routedCols.length ? this.section('routed', ctx, () => this.routedDaily(ctx, intraday ? 'today' : 'hist', routedCols)) : null,
             routedCols.length && mixed ? this.section('routed', ctx, () => this.routedDaily(ctx, 'today', routedCols)) : null,
-            byDay ? this.section('detail', ctx, () => this.snap(detailPage)) : null,
+            byDay ? this.section('detail', ctx, () => this.snap(detailPage, false)) : null,
         ]);
         if (fleet)
             ctx.merge(fleet.cache, Date.now());
@@ -42568,7 +42648,6 @@ function classify(row) {
         amount,
         reviewed: stamp !== null,
         stamp,
-        review: false,
         flagged: exports.FLAGGED_OUTCOMES.has(outcome),
         credited,
         risk: 0,
@@ -42663,7 +42742,6 @@ function buildReviewModel(items, isMarked, options = exports.DEFAULT_REVIEW_OPTI
     const shaChats = new Map();
     const markedPayers = new Map();
     const fakeRows = new Map();
-    const overAlways = new Set();
     const utrOriginal = new Map();
     const utrCopies = new Set();
     const shaFirstChat = new Map();
@@ -42798,7 +42876,6 @@ function buildReviewModel(items, isMarked, options = exports.DEFAULT_REVIEW_OPTI
             const amount = x.c.amount;
             if (!x.c.repeat && amount !== null && amount > options.alwaysAmount) {
                 reasons.push(`Over ₹${options.alwaysAmount}`);
-                overAlways.add(x);
             }
             if (amount !== null) {
                 const d = distOf(String(r.clientId));
@@ -42831,33 +42908,6 @@ function buildReviewModel(items, isMarked, options = exports.DEFAULT_REVIEW_OPTI
             x.c.baseReasons = baseReasons;
         }
     }
-    const days = new Map();
-    for (const x of asc) {
-        if (!x.c.credited)
-            continue;
-        const d = istDay(msOf(x.row));
-        if (!days.has(d))
-            days.set(d, []);
-        days.get(d).push(x);
-    }
-    const thresholds = {};
-    for (const [d, list] of days) {
-        const strongN = list.filter((x) => x.c.strong).length;
-        const slots = Math.max(0, options.dailyTarget - strongN);
-        const ranked = list
-            .filter((x) => !x.c.strong && !overAlways.has(x) && (x.c.amount ?? 0) >= options.minAmount && x.c.risk >= options.riskFloor)
-            .sort((a, b) => b.c.risk - a.c.risk || (b.c.amount ?? 0) - (a.c.amount ?? 0) || (String(b.row._id) < String(a.row._id) ? -1 : 1))
-            .slice(0, slots);
-        thresholds[d] = ranked.length ? ranked[ranked.length - 1].c.risk : null;
-        const picked = new Set(ranked);
-        for (const x of list) {
-            x.c.review = !x.c.reviewed && !isMarked(String(x.row.chatId)) && (x.c.strong || overAlways.has(x) || picked.has(x));
-        }
-    }
-    for (const x of asc)
-        if (!x.c.credited)
-            x.c.review = false;
-    return { options, thresholds };
 }
 function encodeCursor(c) {
     return Buffer.from(JSON.stringify(c), 'utf8').toString('base64url');
@@ -42929,16 +42979,13 @@ __decorate([
         summary: 'Every payment screenshot (state=all, newest first): filtered, cursor-paged, with counts and userData/client join',
         description: 'Since 2026-11-07 the only state is all and the only sort time; the per-state lists and the risk order were removed ' +
             '(the views replace them). counts: flagged, not_credited, credited, marked, reviewed, all. ' +
-            'review rule (revenue + long-term blocking, post-hoc; nothing in tg-aut reads it) = CREDITED AND not reviewed AND chat not ' +
-            'marked fake AND (strong fake signal OR (credited ₹ >= REVIEW_MIN_AMOUNT (100) AND among the IST day\'s top ' +
-            'REVIEW_DAILY_TARGET (20) minus strong, by risk, with risk >= REVIEW_RISK_FLOOR (25))). Strong: fake reason code, ' +
-            'fakeScore >= 40, fakeSignals, chat sent a fake receipt, same image in another chat (not the first chat), reused UTR of an ' +
-            'earlier receipt (another chat or amount; the earliest proof with a UTR is the original), same receipt credited before, ' +
-            'payer of a marked-fake chat. Uncredited proofs (repeats, not_ours, not_receipt, old_time, over_limit, uncredited ' +
-            'fakes) never enter review. Items carry risk (0-100), riskReasons, atRiskAmount, strong, repeat, reusedFrom; ' +
+            'Items carry risk (0-100), atRiskAmount, strong, repeat, reusedFrom (signals from the whole 7-day collection; ' +
+            'strong: fake reason code, fakeScore >= 40, fakeSignals, chat sent a fake receipt, same image in another chat, reused ' +
+            'UTR of an earlier receipt, same receipt credited before, payer of a marked-fake chat). Not sent since 2026-11-08 ' +
+            '(no reader): reviewModel, riskReasons, imageSha256, ocr, time. ' +
             'flagged = outcome fraud_ask|fake_blocked|cross_client; marked = chat has userData.fakePaymentAt; reviewed = a stamp that still holds (item.stamp). ' +
             'Rows without verdict (before tg-aut wrote one) get an outcome derived from servedAt / ask / decision (legacy: true). ' +
-            'counts cover since/client/chat/minAmount (not cursor); the review model always uses the whole 7-day collection.',
+            'counts cover since/client/chat/minAmount (not cursor).',
     }),
     (0, swagger_1.ApiQuery)({ name: 'since', required: false, description: 'ISO date; default now - 7 days (the TTL)' }),
     (0, swagger_1.ApiQuery)({ name: 'client', required: false, description: 'clientId' }),
@@ -43073,7 +43120,7 @@ function listCacheMs(env = process.env) {
     const n = Number(raw);
     return Number.isFinite(n) && n >= 0 ? n : exports.DEFAULT_LIST_CACHE_MS;
 }
-const ROW_PROJECTION = { shadow: 0, imageHash: 0, servedUtr: 0, servedSha: 0 };
+const ROW_PROJECTION = { shadow: 0, imageHash: 0, servedUtr: 0, servedSha: 0, imageSha256: 0, ocr: 0, time: 0 };
 const CLASSIFY_PROJECTION = {
     _id: 1, chatId: 1, profile: 1, clientId: 1, telegramMsgId: 1, createdAt: 1, amount: 1, creditAmount: 1, decision: 1,
     reasons: 1, servedAt: 1, 'ask.kind': 1, 'ask.blockedAt': 1, 'ask.reasons': 1, proofId: 1,
@@ -43147,7 +43194,7 @@ let PaymentProofsService = PaymentProofsService_1 = class PaymentProofsService {
     }
     async list(q, now = Date.now()) {
         const p = this.parseQuery(q, now);
-        const { everything, chats, reviewModel, truncated } = await this.window(p.since, now);
+        const { everything, chats, truncated } = await this.window(p.since, now);
         const isMarked = (chatId) => !!chats.get(chatId)?.marked;
         const classified = everything.filter(({ row, c }) => new Date(row.createdAt).getTime() >= p.since
             && (!p.client || row.clientId === p.client)
@@ -43177,10 +43224,11 @@ let PaymentProofsService = PaymentProofsService_1 = class PaymentProofsService {
         }
         const items = page.map(({ row: slim, c }) => {
             const row = full.get(String(slim._id)) ?? slim;
+            const { imageSha256: _sha, ocr: _ocr, time: _time, ...sent } = row;
             const chat = chats.get(String(row.chatId));
             const ud = chat?.rows.get(String(row.profile));
             return {
-                ...row,
+                ...sent,
                 _id: String(row._id),
                 proofId: c.proofId,
                 outcome: c.outcome,
@@ -43191,7 +43239,6 @@ let PaymentProofsService = PaymentProofsService_1 = class PaymentProofsService {
                 stamp: c.stamp,
                 flagged: c.flagged,
                 risk: c.risk,
-                riskReasons: c.riskReasons,
                 atRiskAmount: c.atRiskAmount,
                 strong: c.strong,
                 repeat: c.repeat,
@@ -43205,7 +43252,7 @@ let PaymentProofsService = PaymentProofsService_1 = class PaymentProofsService {
         });
         const last = page[page.length - 1];
         const nextCursor = more && last ? (0, payment_proofs_classify_1.encodeCursor)({ t: last.t, id: String(last.row._id) }) : null;
-        return { items, nextCursor, counts, reviewModel, truncated };
+        return { items, nextCursor, counts, truncated };
     }
     async window(since, now) {
         const wide = since < now - exports.DEFAULT_WINDOW_MS;
@@ -43259,9 +43306,9 @@ let PaymentProofsService = PaymentProofsService_1 = class PaymentProofsService {
     derive(d) {
         const everything = d.rows.map((row) => ({ row, c: (0, payment_proofs_classify_1.classify)(row) }));
         const options = (0, payment_proofs_classify_1.reviewOptionsFromEnv)();
-        const reviewModel = (0, payment_proofs_classify_1.buildReviewModel)(everything, (chatId) => !!d.chats.get(chatId)?.marked, options);
+        (0, payment_proofs_classify_1.buildReviewModel)(everything, (chatId) => !!d.chats.get(chatId)?.marked, options);
         const users = new Map([...d.chats].map(([chatId, e]) => [chatId, [...e.rows.values()]]));
-        return { ...d, everything, reviewModel, views: (0, payment_proofs_views_1.buildViews)(everything, users, options) };
+        return { ...d, everything, views: (0, payment_proofs_views_1.buildViews)(everything, users, options) };
     }
     async patchWindows(what, apply) {
         this.gen++;
