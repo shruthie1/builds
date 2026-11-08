@@ -38256,6 +38256,335 @@ function addFamSplits(a, b) {
 
 /***/ },
 
+/***/ "./src/components/monitor/monitor-history.ts"
+/*!***************************************************!*\
+  !*** ./src/components/monitor/monitor-history.ts ***!
+  \***************************************************/
+(__unused_webpack_module, exports, __webpack_require__) {
+
+
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.HISTORY_SERIES = exports.HISTORY_PAGE_RE = exports.HISTORY_PAGE_MAX_STALE_MS = exports.HISTORY_PAGE_FRESH_MS = exports.HISTORY_GRAIN = exports.HISTORY_RANGES = void 0;
+exports.parseHistoryRange = parseHistoryRange;
+exports.historyWindow = historyWindow;
+exports.historyCoverSql = historyCoverSql;
+exports.historyRevenueSql = historyRevenueSql;
+exports.historyMonthlyRevenueSql = historyMonthlyRevenueSql;
+exports.historySendsRawSql = historySendsRawSql;
+exports.historyHourlyClientSql = historyHourlyClientSql;
+exports.historyDailyClientSql = historyDailyClientSql;
+exports.historyMonthlyClientSql = historyMonthlyClientSql;
+exports.historyPoolSnapshotSql = historyPoolSnapshotSql;
+exports.historyDailyPoolSql = historyDailyPoolSql;
+exports.historyMonthlyPoolSql = historyMonthlyPoolSql;
+exports.historySqls = historySqls;
+exports.chainSeries = chainSeries;
+exports.assembleHistory = assembleHistory;
+const common_1 = __webpack_require__(/*! @nestjs/common */ "@nestjs/common");
+const monitor_time_1 = __webpack_require__(/*! ./monitor-time */ "./src/components/monitor/monitor-time.ts");
+const monitor_util_1 = __webpack_require__(/*! ./monitor-util */ "./src/components/monitor/monitor-util.ts");
+exports.HISTORY_RANGES = ['7d', '90d', '24m'];
+exports.HISTORY_GRAIN = { '7d': 'hour', '90d': 'day', '24m': 'month' };
+exports.HISTORY_PAGE_FRESH_MS = 5 * 60_000;
+exports.HISTORY_PAGE_MAX_STALE_MS = 15 * 60_000;
+exports.HISTORY_PAGE_RE = /^history:(7d|90d|24m):/;
+function parseHistoryRange(range) {
+    if (range === undefined || range === '')
+        return '90d';
+    if (exports.HISTORY_RANGES.includes(range))
+        return range;
+    throw new common_1.BadRequestException(`range must be one of ${exports.HISTORY_RANGES.join('|')}`);
+}
+const pad2 = (n) => String(n).padStart(2, '0');
+function addMonths(month, n) {
+    const y = Number(month.slice(0, 4));
+    const m = Number(month.slice(5, 7)) - 1 + n;
+    const yy = y + Math.floor(m / 12);
+    return `${yy}-${pad2((((m % 12) + 12) % 12) + 1)}`;
+}
+function historyWindow(range, now) {
+    const today = (0, monitor_time_1.istDate)(now);
+    const grain = exports.HISTORY_GRAIN[range];
+    const buckets = [];
+    let fromDate;
+    if (range === '7d') {
+        fromDate = (0, monitor_time_1.addDays)(today, -6);
+        const last = `${today}T${pad2((0, monitor_time_1.istHour)(now))}`;
+        for (let t = (0, monitor_time_1.istDayStart)(fromDate);; t += 3_600_000) {
+            const b = `${(0, monitor_time_1.istDate)(t)}T${pad2((0, monitor_time_1.istHour)(t))}`;
+            buckets.push(b);
+            if (b >= last)
+                break;
+        }
+    }
+    else if (range === '90d') {
+        fromDate = (0, monitor_time_1.addDays)(today, -89);
+        for (let d = fromDate; d <= today; d = (0, monitor_time_1.addDays)(d, 1))
+            buckets.push(d);
+    }
+    else {
+        const cur = today.slice(0, 7);
+        fromDate = `${addMonths(cur, -23)}-01`;
+        for (let i = 23; i >= 0; i--)
+            buckets.push(addMonths(cur, -i));
+    }
+    return { range, grain, start: (0, monitor_time_1.istDayStart)(fromDate), end: now, fromDate, toDate: today, buckets };
+}
+const IST_TZ = `'Asia/Kolkata'`;
+const FMT = { hour: 'YYYY-MM-DD"T"HH24', day: 'YYYY-MM-DD', month: 'YYYY-MM' };
+const tsBucket = (col, g) => `to_char(${col} AT TIME ZONE ${IST_TZ}, '${FMT[g]}')`;
+const dayBucket = (col, g) => `to_char(${col}, '${FMT[g]}')`;
+const iso = (ms) => new Date(ms).toISOString();
+function q(name, sql, params) {
+    return { name, sql: `/* monitor.${name} */ ${sql}`, params };
+}
+function clientPred(clientId, params, col = 'client_id') {
+    if (clientId === null)
+        return '';
+    params.push(clientId);
+    return ` AND ${col} = $${params.length}`;
+}
+function historyCoverSql(w) {
+    const hour = w.grain === 'hour';
+    const params = hour ? [iso(w.start), iso(w.end), iso(w.start + 86_400_000)] : [];
+    const ps = (hi) => `(SELECT min(ts) FROM promotion_send WHERE ts >= $1::timestamptz AND ts < ${hi})`;
+    return q('history_cover', `SELECT
+  (SELECT ${tsBucket('min(ts)', 'hour')} FROM payment_event) AS payment_event,
+  (SELECT to_char(min(month), 'YYYY-MM') FROM monthly_revenue) AS monthly_revenue,
+  ${hour ? tsBucket(`coalesce(${ps('$3::timestamptz')}, ${ps('$2::timestamptz')})`, 'hour') : 'NULL::text'} AS promotion_send,
+  (SELECT to_char(min(day), 'YYYY-MM-DD') FROM daily_client) AS daily_client,
+  (SELECT to_char(min(month), 'YYYY-MM') FROM monthly_client) AS monthly_client,
+  (SELECT ${tsBucket('min(ts_hour)', 'hour')} FROM pool_snapshot) AS pool_snapshot,
+  (SELECT to_char(min(day), 'YYYY-MM-DD') FROM daily_pool) AS daily_pool,
+  (SELECT to_char(min(month), 'YYYY-MM') FROM monthly_pool) AS monthly_pool`, params);
+}
+function historyRevenueSql(w, clientId) {
+    const params = [iso(w.start), iso(w.end)];
+    const pred = clientPred(clientId, params);
+    return q(`history_revenue_${w.grain}`, `SELECT ${tsBucket('ts', w.grain)} AS b, coalesce(sum(owner_amount), 0) AS revenue,
+  count(DISTINCT chat_id) FILTER (WHERE NOT cheat_flagged) AS payers
+FROM payment_event_owner
+WHERE ts >= $1::timestamptz AND ts < $2::timestamptz AND amount > 0 AND amount < 1000${pred}
+GROUP BY 1`, params);
+}
+function historyMonthlyRevenueSql(w, clientId) {
+    const params = [w.fromDate, w.toDate];
+    const pred = clientPred(clientId, params);
+    return q('history_revenue_monthly', `SELECT ${dayBucket('month', 'month')} AS b, coalesce(sum(owner_revenue), 0) AS revenue, coalesce(sum(owner_payers), 0) AS payers
+FROM monthly_revenue
+WHERE month >= $1::date AND month <= $2::date${pred}
+GROUP BY 1`, params);
+}
+function historySendsRawSql(w, clientId) {
+    const params = [iso(w.start), iso(w.end)];
+    const pred = clientPred(clientId, params);
+    return q('history_sends_hour', `SELECT ${tsBucket('ts', 'hour')} AS b,
+  count(*) FILTER (WHERE outcome <> 'deleted') AS sent,
+  count(*) FILTER (WHERE outcome = 'delivered') AS delivered,
+  count(*) FILTER (WHERE outcome IN ('failed', 'banned')) AS failed
+FROM promotion_send
+WHERE ts >= $1::timestamptz AND ts < $2::timestamptz${pred}
+GROUP BY 1`, params);
+}
+const COUNTER_SUMS = `coalesce(sum(sent), 0) AS sent, coalesce(sum(delivered), 0) AS delivered, coalesce(sum(failed), 0) AS failed,
+  coalesce(sum(new_users) FILTER (WHERE namespace = 'tg-aut'), 0) AS new_users`;
+function historyHourlyClientSql(w, clientId) {
+    const params = [w.fromDate, w.toDate];
+    const pred = clientPred(clientId, params);
+    return q('history_hourly_client', `SELECT to_char(day, 'YYYY-MM-DD') || 'T' || lpad(hour::text, 2, '0') AS b, ${COUNTER_SUMS}
+FROM hourly_client
+WHERE day >= $1::date AND day <= $2::date${pred}
+GROUP BY day, hour`, params);
+}
+function historyDailyClientSql(w, clientId) {
+    const g = w.grain === 'month' ? 'month' : 'day';
+    const params = [w.fromDate, w.toDate];
+    const pred = clientPred(clientId, params);
+    return q(`history_daily_client_${g}`, `SELECT ${dayBucket('day', g)} AS b, ${COUNTER_SUMS}
+FROM daily_client
+WHERE day >= $1::date AND day <= $2::date${pred}
+GROUP BY 1`, params);
+}
+function historyMonthlyClientSql(w, clientId) {
+    const params = [w.fromDate, w.toDate];
+    const pred = clientPred(clientId, params);
+    return q('history_monthly_client', `SELECT ${dayBucket('month', 'month')} AS b, ${COUNTER_SUMS}
+FROM monthly_client
+WHERE month >= $1::date AND month <= $2::date${pred}
+GROUP BY 1`, params);
+}
+const POOL_SUMS = (total, active, c) => `coalesce(sum(${total}) FILTER (WHERE pool = 'b'${c}), 0) AS b_total,
+  coalesce(sum(${total}) FILTER (WHERE pool = 'p'${c}), 0) AS p_total,
+  coalesce(sum(${active}) FILTER (WHERE pool = 'p'${c}), 0) AS p_active`;
+function historyPoolSnapshotSql(w, clientId) {
+    const params = [iso(w.start), iso(w.end)];
+    const c = clientId === null ? '' : (params.push(clientId), ` AND client_id = $${params.length}`);
+    const sums = POOL_SUMS('total', 'active', c);
+    const inner = w.grain === 'hour'
+        ? `SELECT ${tsBucket('ts_hour', 'hour')} AS b, pool, client_id, total, active FROM pool_snapshot
+WHERE ts_hour >= $1::timestamptz AND ts_hour < $2::timestamptz`
+        : `SELECT DISTINCT ON (1, pool, client_id) ${tsBucket('ts_hour', w.grain)} AS b, pool, client_id, total, active FROM pool_snapshot
+WHERE ts_hour >= $1::timestamptz AND ts_hour < $2::timestamptz
+ORDER BY 1, pool, client_id, ts_hour DESC`;
+    return q(`history_pool_snapshot_${w.grain}`, `SELECT b, ${sums}\nFROM (${inner}) x\nGROUP BY b`, params);
+}
+function historyDailyPoolSql(w, clientId) {
+    const g = w.grain === 'month' ? 'month' : 'day';
+    const params = [w.fromDate, w.toDate];
+    const c = clientId === null ? '' : (params.push(clientId), ` AND client_id = $${params.length}`);
+    const sums = POOL_SUMS('total_last', 'active_last', c);
+    return q(`history_daily_pool_${g}`, `SELECT b, ${sums}
+FROM (SELECT DISTINCT ON (1, pool, client_id) ${dayBucket('day', g)} AS b, pool, client_id, total_last, active_last FROM daily_pool
+WHERE day >= $1::date AND day <= $2::date
+ORDER BY 1, pool, client_id, day DESC) x
+GROUP BY b`, params);
+}
+function historyMonthlyPoolSql(w, clientId) {
+    const params = [w.fromDate, w.toDate];
+    const c = clientId === null ? '' : (params.push(clientId), ` AND client_id = $${params.length}`);
+    const sums = POOL_SUMS('total_last', 'active_last', c);
+    return q('history_monthly_pool', `SELECT ${dayBucket('month', 'month')} AS b, ${sums}
+FROM monthly_pool
+WHERE month >= $1::date AND month <= $2::date
+GROUP BY 1`, params);
+}
+function historySqls(w, clientId) {
+    const s = {
+        cover: historyCoverSql(w),
+        revenue: historyRevenueSql(w, clientId),
+        pool: historyPoolSnapshotSql(w, clientId),
+    };
+    s.daily = historyDailyClientSql(w, clientId);
+    if (w.grain === 'hour') {
+        s.sendsRaw = historySendsRawSql(w, clientId);
+        s.hourly = historyHourlyClientSql(w, clientId);
+    }
+    else {
+        s.dailyPool = historyDailyPoolSql(w, clientId);
+    }
+    if (w.grain === 'month') {
+        s.monthlyRevenue = historyMonthlyRevenueSql(w, clientId);
+        s.monthly = historyMonthlyClientSql(w, clientId);
+        s.monthlyPool = historyMonthlyPoolSql(w, clientId);
+    }
+    return s;
+}
+exports.HISTORY_SERIES = [
+    'revenue',
+    'payers',
+    'sent',
+    'delivered',
+    'failed',
+    'newUsers',
+    'poolBufferTotal',
+    'poolPromoteTotal',
+    'poolPromoteActive',
+];
+const covers = (b, first) => b >= first.slice(0, Math.min(first.length, b.length));
+const startKey = (f) => (f.length === 7 ? `${f}-99T99` : f.length === 10 ? `${f}T99` : f);
+function chainSeries(buckets, chain) {
+    const maps = chain.map((l) => new Map((l.rows ?? []).map((r) => [String(r.b), r[l.col]])));
+    const used = new Set();
+    const values = buckets.map((b) => {
+        for (let i = 0; i < chain.length; i++) {
+            const first = chain[i].first;
+            if (!first || !covers(b, first))
+                continue;
+            if (chain[i].days && !chain[i].days.has(b.slice(0, 10)))
+                continue;
+            used.add(i);
+            const v = maps[i].get(b);
+            if (v === undefined || v === null)
+                return chain[i].gauge ? null : 0;
+            return (0, monitor_util_1.num)(v);
+        }
+        return null;
+    });
+    const firsts = chain.map((l) => l.first).filter((f) => !!f);
+    const from = firsts.length ? firsts.reduce((a, f) => (startKey(f) < startKey(a) ? f : a)) : null;
+    const order = chain.map((_, i) => i).reverse();
+    const names = order.filter((i) => used.has(i)).map((i) => chain[i].source);
+    return { values, source: names.length ? names.join('+') : chain[0].source, from };
+}
+function assembleHistory(w, clientId, rows, now, timings = {}) {
+    const cover = (rows.cover ?? [])[0] ?? {};
+    const B = w.buckets;
+    const revenueChain = (col) => [
+        { source: 'payment_event', first: cover.payment_event, rows: rows.revenue, col },
+        ...(w.grain === 'month' && col === 'revenue'
+            ? [{ source: 'monthly_revenue', first: cover.monthly_revenue, rows: rows.monthlyRevenue, col }]
+            : []),
+    ];
+    const verifiedDays = (col) => {
+        const days = new Set();
+        if (w.grain !== 'hour')
+            return { days, first: null };
+        const hourly = new Map();
+        for (const r of rows.hourly ?? [])
+            hourly.set(String(r.b).slice(0, 10), (hourly.get(String(r.b).slice(0, 10)) ?? 0) + (0, monitor_util_1.num)(r[col]));
+        const daily = new Map((rows.daily ?? []).map((r) => [String(r.b), (0, monitor_util_1.num)(r[col])]));
+        for (const d of hourly.keys()) {
+            if (d >= w.toDate || !cover.daily_client || d < cover.daily_client)
+                continue;
+            if (hourly.get(d) === (daily.get(d) ?? 0))
+                days.add(d);
+        }
+        const first = [...days].sort()[0];
+        return { days, first: first ? `${first}T00` : null };
+    };
+    const hourlyLink = (col) => {
+        const v = verifiedDays(col);
+        return { source: 'hourly_client', first: v.first, rows: rows.hourly, col, days: v.days };
+    };
+    const counterChain = (col, newUsers = false) => w.grain === 'hour'
+        ? newUsers
+            ? [hourlyLink(col)]
+            : [{ source: 'promotion_send', first: cover.promotion_send, rows: rows.sendsRaw, col }, hourlyLink(col)]
+        : [
+            { source: 'daily_client', first: cover.daily_client, rows: rows.daily, col },
+            ...(w.grain === 'month' ? [{ source: 'monthly_client', first: cover.monthly_client, rows: rows.monthly, col }] : []),
+        ];
+    const poolChain = (col) => [
+        { source: 'pool_snapshot', first: cover.pool_snapshot, rows: rows.pool, col, gauge: true },
+        ...(w.grain !== 'hour' ? [{ source: 'daily_pool', first: cover.daily_pool, rows: rows.dailyPool, col, gauge: true }] : []),
+        ...(w.grain === 'month' ? [{ source: 'monthly_pool', first: cover.monthly_pool, rows: rows.monthlyPool, col, gauge: true }] : []),
+    ];
+    const series = {
+        revenue: chainSeries(B, revenueChain('revenue')),
+        payers: chainSeries(B, revenueChain('payers')),
+        sent: chainSeries(B, counterChain('sent')),
+        delivered: chainSeries(B, counterChain('delivered')),
+        failed: chainSeries(B, counterChain('failed')),
+        newUsers: chainSeries(B, counterChain('new_users', true)),
+        poolBufferTotal: chainSeries(B, poolChain('b_total')),
+        poolPromoteTotal: chainSeries(B, poolChain('p_total')),
+        poolPromoteActive: chainSeries(B, poolChain('p_active')),
+    };
+    const notes = [`payers are distinct per ${w.grain}; not summable across ${w.grain}s`];
+    if (w.grain === 'hour')
+        notes.push('hourly new users only on closed days whose hours add up to daily_client');
+    if (series.revenue.source.includes('monthly_revenue'))
+        notes.push('monthly_revenue months include credits of ₹1,000 or more');
+    return {
+        range: w.range,
+        grain: w.grain,
+        tz: 'Asia/Kolkata',
+        clientId,
+        from: w.fromDate,
+        to: w.toDate,
+        buckets: B,
+        partialLast: true,
+        series,
+        notes,
+        generatedAt: new Date(now).toISOString(),
+        timingsMs: timings,
+        cache: { history: null, today: null, ageSec: null, historyAgeSec: null },
+    };
+}
+
+
+/***/ },
+
 /***/ "./src/components/monitor/monitor-merge.ts"
 /*!*************************************************!*\
   !*** ./src/components/monitor/monitor-merge.ts ***!
@@ -40057,6 +40386,7 @@ exports.parseOptionalClientId = parseOptionalClientId;
 const common_1 = __webpack_require__(/*! @nestjs/common */ "@nestjs/common");
 const swagger_1 = __webpack_require__(/*! @nestjs/swagger */ "@nestjs/swagger");
 const monitor_time_1 = __webpack_require__(/*! ./monitor-time */ "./src/components/monitor/monitor-time.ts");
+const monitor_history_1 = __webpack_require__(/*! ./monitor-history */ "./src/components/monitor/monitor-history.ts");
 const monitor_promotions_1 = __webpack_require__(/*! ./monitor-promotions */ "./src/components/monitor/monitor-promotions.ts");
 const monitor_reactions_1 = __webpack_require__(/*! ./monitor-reactions */ "./src/components/monitor/monitor-reactions.ts");
 const monitor_util_1 = __webpack_require__(/*! ./monitor-util */ "./src/components/monitor/monitor-util.ts");
@@ -40163,6 +40493,9 @@ let MonitorController = class MonitorController {
     paidChats(date, clientId) {
         return this.service.paidChats(parsePaidDate(date, Date.now()), parseOptionalClientId(clientId));
     }
+    history(range, clientId, client) {
+        return this.service.history((0, monitor_history_1.parseHistoryRange)(range), parseOptionalClientId(clientId || client));
+    }
     promotions(window, client, from, to) {
         const r = parseRange(from, to, Date.now());
         const c = parseOptionalClientId(client);
@@ -40228,6 +40561,17 @@ __decorate([
     __metadata("design:paramtypes", [String, String]),
     __metadata("design:returntype", void 0)
 ], MonitorController.prototype, "paidChats", null);
+__decorate([
+    (0, common_1.Get)('history'),
+    (0, swagger_1.ApiQuery)({ name: 'range', required: false, enum: monitor_history_1.HISTORY_RANGES }),
+    (0, swagger_1.ApiQuery)({ name: 'clientId', required: false }),
+    __param(0, (0, common_1.Query)('range')),
+    __param(1, (0, common_1.Query)('clientId')),
+    __param(2, (0, common_1.Query)('client')),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [String, String, String]),
+    __metadata("design:returntype", void 0)
+], MonitorController.prototype, "history", null);
 __decorate([
     (0, common_1.Get)('promotions'),
     (0, swagger_1.ApiQuery)({ name: 'window', required: false, enum: monitor_promotions_1.PROMO_WINDOWS }),
@@ -40392,6 +40736,7 @@ const monitor_reactions_1 = __webpack_require__(/*! ./monitor-reactions */ "./sr
 const monitor_mongo_1 = __webpack_require__(/*! ./monitor-mongo */ "./src/components/monitor/monitor-mongo.ts");
 const monitor_sql_1 = __webpack_require__(/*! ./monitor-sql */ "./src/components/monitor/monitor-sql.ts");
 const monitor_time_1 = __webpack_require__(/*! ./monitor-time */ "./src/components/monitor/monitor-time.ts");
+const monitor_history_1 = __webpack_require__(/*! ./monitor-history */ "./src/components/monitor/monitor-history.ts");
 const monitor_util_1 = __webpack_require__(/*! ./monitor-util */ "./src/components/monitor/monitor-util.ts");
 exports.MONITOR_REDIS = 'MONITOR_REDIS';
 exports.PG_TIMEOUT_MS = 10_500;
@@ -40628,8 +40973,8 @@ let MonitorService = MonitorService_1 = class MonitorService {
             maxKeys: 100,
             complete: (v) => !(v?.notes ?? []).some((n) => typeof n === 'string' && / unavailable: /.test(n)),
             persist: (name) => !this.closedRangePage(name),
-            freshMsOf: (name) => (this.closedRangePage(name) ? exports.RANGE_CLOSED_FRESH_MS : undefined),
-            maxServeStaleMsOf: (name) => (this.closedRangePage(name) ? 2 * exports.RANGE_CLOSED_FRESH_MS : undefined),
+            freshMsOf: (name) => (this.closedRangePage(name) ? exports.RANGE_CLOSED_FRESH_MS : monitor_history_1.HISTORY_PAGE_RE.test(name) ? monitor_history_1.HISTORY_PAGE_FRESH_MS : undefined),
+            maxServeStaleMsOf: (name) => this.closedRangePage(name) ? 2 * exports.RANGE_CLOSED_FRESH_MS : monitor_history_1.HISTORY_PAGE_RE.test(name) ? monitor_history_1.HISTORY_PAGE_MAX_STALE_MS : undefined,
             onError: (what, err) => this.logger.warn(`monitor snapshot ${what} failed: ${String(err?.message ?? err).slice(0, 200)}`),
         });
         this.warmer = new monitor_cache_1.SnapshotWarmer({
@@ -40736,6 +41081,8 @@ let MonitorService = MonitorService_1 = class MonitorService {
             throw new Error(`unknown monitor page ${page}`);
         }
         const [kind, a, b] = page.split(':');
+        if (kind === 'history')
+            return this.buildHistory(a, b === '*' ? null : b, now, background);
         if (kind === 'fleet')
             return this.buildFleet(a, now, background);
         if (kind === 'detail')
@@ -41759,6 +42106,29 @@ let MonitorService = MonitorService_1 = class MonitorService {
             this.logger.warn(`monitor promotions ${window} failed: ${msg}`);
             throw new common_1.ServiceUnavailableException(`promotions unavailable: ${msg}`);
         }
+    }
+    async history(range, client) {
+        try {
+            return await this.snap(`history:${range}:${client ?? '*'}`, false);
+        }
+        catch (err) {
+            if (err instanceof common_1.ServiceUnavailableException)
+                throw err;
+            const msg = String(err?.message ?? err).slice(0, 200);
+            this.logger.warn(`monitor history ${range} failed: ${msg}`);
+            throw new common_1.ServiceUnavailableException(`history unavailable: ${msg}`);
+        }
+    }
+    async buildHistory(range, client, now, background) {
+        const w = (0, monitor_history_1.historyWindow)(range, now);
+        const timings = {};
+        const t0 = Date.now();
+        const rows = {};
+        await Promise.all(Object.entries((0, monitor_history_1.historySqls)(w, client)).map(async ([k, q]) => {
+            rows[k] = await this.pgRows(q, timings, background);
+        }));
+        timings.total = Date.now() - t0;
+        return (0, monitor_history_1.assembleHistory)(w, client, rows, now, timings);
     }
     promoSends(ctx, window) {
         return this.part(ctx, 'today', `promo_sends:${window}`, (now, t, bg) => {
