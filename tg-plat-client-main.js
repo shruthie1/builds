@@ -58682,8 +58682,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "ff4fecd882102c3a87e9e56934e410f906b4b5a3" : 0;
-    const builtAt =  true ? "2026-11-08T13:37:18.068Z" : 0;
+    const sha =  true ? "ce8f90b8699f9c2dea12bb8ffc5ad152c36f2886" : 0;
+    const builtAt =  true ? "2026-11-08T13:58:02.249Z" : 0;
     return { sha, builtAt };
 }
 
@@ -62484,7 +62484,7 @@ class InHouseCallService {
         this.unreachableNotices = new Map();
         /** Last time each chat was sent the Zoom link because calls are paused (once per cooldown episode). */
         this.floodLinks = new _call_notes__WEBPACK_IMPORTED_MODULE_7__.NoteMap('floodLinks', () => this.deps?.notes);
-        /** Running progress checkpoints per chat. */
+        /** Running progress checkpoints per chat: stop() resolves with the position reached (after any write in flight). */
         this.checkpoints = new Map();
         this.notesHydrated = false;
         /**
@@ -62682,9 +62682,11 @@ class InHouseCallService {
         this.showPaid.clear();
         this.pitchCalls.clear();
         this.voiceProofCalls.clear();
-        for (const stop of this.checkpoints.values())
-            void stop();
-        this.checkpoints.clear();
+        // Checkpoints stop now; each settle below still awaits its chat's write in flight before the final save.
+        for (const [chatId, stop] of this.checkpoints) {
+            const reached = stop();
+            this.checkpoints.set(chatId, () => reached);
+        }
         this.deps.allowList?.stop();
         if (engine) {
             try {
@@ -63400,7 +63402,11 @@ class InHouseCallService {
             record = await engine.call(peer, { file: plan.url, video: true, startSec: plan.startSec, size: plan.size, ...(plan.audio === false ? { audio: false } : {}) }, this.callOptions(plan));
         }
         catch (error) {
-            void this.stopCheckpoint(chatId);
+            // Threw after the show connected (checkpoints were running): the stored entry must say it ended, at the
+            // position reached, or a reader would take it for a show still playing until its heartbeat goes stale.
+            const reached = await this.stopCheckpoint(chatId);
+            if (reached !== null)
+                await this.saveEnded(plan, reached, false, 'error');
             const failed = this.setupFailed(chatId, plan, error, requesting);
             // No engine record: the call failed before (or while) it was requested.
             this.logSummary({ ...this.showSummary(plan, null, failed), direction: 'out' });
@@ -63886,13 +63892,7 @@ class InHouseCallService {
             startSec: plan.startSec,
             count: plan.attempts,
         }, plan.durationSec);
-        await this.safeSaveProgress(chatId, plan.videoId, {
-            positionSec: outcome.positionSec,
-            durationSec: plan.durationSec,
-            updatedAt: this.now(),
-            completed: outcome.complete,
-            attempts: plan.attempts,
-        });
+        await this.saveEnded(plan, outcome.positionSec, outcome.complete, (0,_video_policy__WEBPACK_IMPORTED_MODULE_1__.progressEndReason)(outcome.endCall, record.endReason, this.stopped));
         if (outcome.complete) {
             if (plan.service !== 'other' && (await this.servedElsewhere(plan))) {
                 this.safeWarn({ title: 'Already served', summary: 'Recorded by another path during the call; not recording it twice.', fields: [{ label: 'Chat', value: chatId, code: false }, { label: 'Service', value: plan.service, code: false }] }, `already served:${chatId}`);
@@ -63941,30 +63941,52 @@ class InHouseCallService {
         }
         return { status: 'partial', videoId: plan.videoId, outcome };
     }
+    /**
+     * The call's terminal progress: final position, completed, endedAt and endReason in ONE write (one `$set` of the whole
+     * `callProgress.<videoId>` entry), after any checkpoint in flight, so no reader ever sees a half-ended entry.
+     */
+    async saveEnded(plan, positionSec, completed, endReason) {
+        const now = this.now();
+        await this.safeSaveProgress(plan.chatId, plan.videoId, {
+            positionSec,
+            durationSec: plan.durationSec,
+            updatedAt: now,
+            completed,
+            attempts: plan.attempts,
+            endedAt: now,
+            endReason,
+        });
+    }
+    /**
+     * Heartbeat of a playing show: one write at connect (it replaces an earlier call's ended entry for this video, so the
+     * show reads as playing from its first second), then every PROGRESS_CHECKPOINT_MS. Each write is the whole entry
+     * without endedAt. Stopping waits for a write in flight, so none can land after the final save.
+     */
     startCheckpoint(plan) {
         void this.stopCheckpoint(plan.chatId);
         const connectedAt = this.now();
         let live = true;
         let writing = Promise.resolve();
-        const cancel = (this.deps.setTimer ?? defaultTimer)(() => {
+        const reached = () => {
+            const positionSec = Math.round(plan.startSec + (this.now() - connectedAt) / 1000);
+            return plan.durationSec ? Math.min(positionSec, plan.durationSec) : positionSec;
+        };
+        const beat = () => {
             if (!live)
                 return;
-            const positionSec = Math.round(plan.startSec + (this.now() - connectedAt) / 1000);
-            writing = writing.then(() => (live ? this.safeSaveProgress(plan.chatId, plan.videoId, {
-                positionSec: plan.durationSec ? Math.min(positionSec, plan.durationSec) : positionSec,
-                durationSec: plan.durationSec,
-                updatedAt: this.now(),
-                completed: false,
-                attempts: plan.attempts,
-            }) : undefined));
-        }, PROGRESS_CHECKPOINT_MS);
-        // Stopping waits for a checkpoint write already in flight, so it can never land after the final save.
-        this.checkpoints.set(plan.chatId, () => { live = false; cancel(); return writing; });
+            // Taken now (the beat's moment), written after any earlier write.
+            const entry = { positionSec: reached(), durationSec: plan.durationSec, updatedAt: this.now(), completed: false, attempts: plan.attempts };
+            writing = writing.then(() => (live ? this.safeSaveProgress(plan.chatId, plan.videoId, entry) : undefined));
+        };
+        beat();
+        const cancel = (this.deps.setTimer ?? defaultTimer)(beat, PROGRESS_CHECKPOINT_MS);
+        this.checkpoints.set(plan.chatId, () => { live = false; cancel(); return writing.then(reached); });
     }
+    /** Stops the chat's checkpoints; resolves with the position reached, or null when none were running (never connected). */
     async stopCheckpoint(chatId) {
         const stop = this.checkpoints.get(chatId);
         this.checkpoints.delete(chatId);
-        await stop?.();
+        return stop ? stop() : null;
     }
     /** True when the show this call was for got recorded by another path (VCUI) while we were calling. */
     async servedElsewhere(plan) {
@@ -64719,6 +64741,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   paidSinceLastShow: () => (/* binding */ paidSinceLastShow),
 /* harmony export */   pickCallVideoSize: () => (/* binding */ pickCallVideoSize),
 /* harmony export */   priorAttempts: () => (/* binding */ priorAttempts),
+/* harmony export */   progressEndReason: () => (/* binding */ progressEndReason),
 /* harmony export */   resumeOffset: () => (/* binding */ resumeOffset),
 /* harmony export */   selectNextVideo: () => (/* binding */ selectNextVideo),
 /* harmony export */   summariseOtherProfiles: () => (/* binding */ summariseOtherProfiles),
@@ -64941,6 +64964,20 @@ function classifyService(videoType, user) {
     if (videoType === '3')
         return 'full-show';
     return 'other';
+}
+/** The stored end reason of a connected call: media finished, user hung up, our stop(), a safety timeout, an error, else a drop. */
+function progressEndReason(endCall, engineEndReason, stopping) {
+    if (endCall === 'videoEnd')
+        return 'completed';
+    if (endCall === 'Manual End')
+        return 'hangup';
+    if (stopping)
+        return 'stopped';
+    if (engineEndReason === 'max_duration')
+        return 'timeout';
+    if (engineEndReason === 'error' || engineEndReason === 'media_failed')
+        return 'error';
+    return 'dropped';
 }
 const RESUME_MAX_AGE_MS = DAY_MS;
 /** Rewind a little on resume so the viewer gets context back after a drop. */
