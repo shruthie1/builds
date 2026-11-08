@@ -56353,7 +56353,9 @@ function parseTimeString(raw, nowMs) {
         const clock = { h: to24h(parseInt(m[4], 10), m[7]), mi: parseInt(m[5], 10), s: m[6] ? parseInt(m[6], 10) : 0 };
         return isValidHms(clock.h, clock.mi, clock.s) ? { date, yearMissing: false, clock } : null;
     }
-    m = s.match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM)?$/i);
+    // A bare clock, also after "Today" ("Today, 11:58 PM", "Today at 10:03 AM": Paytm / PhonePe; replay ampm-fix2 found
+    // that shape parsed to no time when the model gave timeRaw without clock24). "Today" is the arrival day: clock only.
+    m = s.match(/^(?:today\s*[,·•|-]?\s*(?:at\s+)?)?(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM)?$/i);
     if (m && (m[4] || m[1].length === 2)) {
         const clock = { h: to24h(parseInt(m[1], 10), m[4]), mi: parseInt(m[2], 10), s: m[3] ? parseInt(m[3], 10) : 0 };
         return isValidHms(clock.h, clock.mi, clock.s) ? { date: null, yearMissing: false, clock } : null;
@@ -59291,8 +59293,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "68672a082dc67ec2455fb0d4610c8dde08d84ea1" : 0;
-    const builtAt =  true ? "2026-11-08T09:24:35.159Z" : 0;
+    const sha =  true ? "3ee6d63cf28a1d519d9fd2665e1c728ab14a81f7" : 0;
+    const builtAt =  true ? "2026-11-08T10:08:04.203Z" : 0;
     return { sha, builtAt };
 }
 
@@ -101279,10 +101281,9 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _upi_ownership__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./upi-ownership */ "./src/payments/proof-check/upi-ownership.ts");
 /* harmony import */ var _screenshot_paid_to_us__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../screenshot/paid-to-us */ "./src/payments/screenshot/paid-to-us.ts");
 /* harmony import */ var _code_checks__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ./code-checks */ "./src/payments/proof-check/code-checks.ts");
-/* harmony import */ var _payment_time__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ../payment-time */ "./src/payments/payment-time.ts");
-/* harmony import */ var _proof_gate_signals__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ../proof-gate/signals */ "./src/payments/proof-gate/signals.ts");
-/* harmony import */ var _thresholds__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ./thresholds */ "./src/payments/proof-check/thresholds.ts");
-/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _proof_gate_signals__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ../proof-gate/signals */ "./src/payments/proof-gate/signals.ts");
+/* harmony import */ var _thresholds__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ./thresholds */ "./src/payments/proof-check/thresholds.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
 
 
 
@@ -101291,8 +101292,7 @@ __webpack_require__.r(__webpack_exports__);
 
 
 
-
-const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_8__.Logger("tg-aut:proof-decision");
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_7__.Logger("tg-aut:proof-decision");
 const IST_OFFSET_MS = 330 * 60000;
 /** Lowercased OCR-Space text + model fullText, whitespace collapsed. Payee matching elsewhere keeps using the whole text. */
 function buildOcrAndText(vision) {
@@ -101315,13 +101315,8 @@ function hasHardTextSignal(vision, dbcoll) {
         return false;
     }
 }
-/** An AM time read as PM (~12 h ahead, e.g. 12:28 AM stored as 12:28 PM), unless the text prints that PM clock. */
-function isAmPmMisread(epochMs, nowMs, text) {
-    if ((0,_payment_time__WEBPACK_IMPORTED_MODULE_5__.correctAmPmAhead)(epochMs, nowMs) === null)
-        return false;
-    const ist = new Date(epochMs + IST_OFFSET_MS);
-    return !(0,_proof_gate_signals__WEBPACK_IMPORTED_MODULE_6__.clockPrintedAs)(text, ist.getUTCHours(), ist.getUTCMinutes());
-}
+/** The IST wall clock of an epoch as the legacy time string the proof gate reads ("YYYY-MM-DDTHH:MM:SS"). */
+const istIso = (epochMs) => new Date(epochMs + IST_OFFSET_MS).toISOString().slice(0, 19);
 /**
  * Pure rule engine (design 6 + LLM authenticity). Runs only on tg-vision category 'payment' (anything else is ACCEPT:
  * no proof rule can fire on a chat page, meme or unclear image; owner 2026-10-19: classification keeps non-payments
@@ -101378,7 +101373,9 @@ function decide(input) {
     const payeeTampered = (0,_screenshot_paid_to_us__WEBPACK_IMPORTED_MODULE_3__.payeeVerdict)({ text, payeeName: e.payeeName, payeeUpiId: e.payeeUpiId, payerName: e.payerName, note: e.note }, { ownUpiIds: input.ownUpiIds ?? [], personaNames: input.personaNames ?? [] }).reasons.includes('UPI_NOT_OURS');
     const utrMalformed = (0,_code_checks__WEBPACK_IMPORTED_MODULE_4__.isUtrMalformed)(e.utr);
     const now = input.ctx?.now ?? 0;
-    const futureDated = (0,_code_checks__WEBPACK_IMPORTED_MODULE_4__.isFutureDated)(e.time, now) && !isAmPmMisread(e.time.epochMs, now, text);
+    // Future only when the proof gate also calls it future (signals.ts futurePaymentTimeReasons: the AM/PM flip, a
+    // misread day and the leads excused the same way), so the two never disagree on one receipt (replay ampm-fix2).
+    const futureDated = (0,_code_checks__WEBPACK_IMPORTED_MODULE_4__.isFutureDated)(e.time, now) && (0,_proof_gate_signals__WEBPACK_IMPORTED_MODULE_5__.futurePaymentTimeReasons)({ time: istIso(e.time.epochMs), text }, now).length > 0;
     if (utrMalformed)
         info.push('UTR_MALFORMED');
     if (futureDated)
@@ -101387,10 +101384,10 @@ function decide(input) {
         const a = e.authenticity ?? null;
         const s = so?.authenticity ?? null;
         const score = a?.fakeScore ?? 0;
-        const secondFake = !!s && (s.verdict === 'fake' || s.fakeScore >= _thresholds__WEBPACK_IMPORTED_MODULE_7__.SECOND_OPINION_FAKE_SCORE);
-        const concrete = [...(a?.signals ?? []), ...(s?.signals ?? [])].some(sig => _thresholds__WEBPACK_IMPORTED_MODULE_7__.CONCRETE_FAKE_SIGNALS.includes(sig));
-        const secondSuspicious = !!s && (s.verdict !== 'genuine' || s.fakeScore >= _thresholds__WEBPACK_IMPORTED_MODULE_7__.SECOND_OPINION_ASK_SCORE);
-        if (a && score >= _thresholds__WEBPACK_IMPORTED_MODULE_7__.FAKE_BLOCK_SCORE) {
+        const secondFake = !!s && (s.verdict === 'fake' || s.fakeScore >= _thresholds__WEBPACK_IMPORTED_MODULE_6__.SECOND_OPINION_FAKE_SCORE);
+        const concrete = [...(a?.signals ?? []), ...(s?.signals ?? [])].some(sig => _thresholds__WEBPACK_IMPORTED_MODULE_6__.CONCRETE_FAKE_SIGNALS.includes(sig));
+        const secondSuspicious = !!s && (s.verdict !== 'genuine' || s.fakeScore >= _thresholds__WEBPACK_IMPORTED_MODULE_6__.SECOND_OPINION_ASK_SCORE);
+        if (a && score >= _thresholds__WEBPACK_IMPORTED_MODULE_6__.FAKE_BLOCK_SCORE) {
             // corroboration by an independent check; the first matching rule names the BLOCK
             if (secondFake && concrete)
                 block.push('LLM_FAKE_CONFIRMED_SECOND_OPINION');
@@ -101402,7 +101399,7 @@ function decide(input) {
                 block.push('LLM_FAKE_FUTURE_DATE');
         }
         if (a && !block.some(r => r.startsWith('LLM_FAKE_'))) {
-            if (score >= _thresholds__WEBPACK_IMPORTED_MODULE_7__.FAKE_ASK_SCORE)
+            if (score >= _thresholds__WEBPACK_IMPORTED_MODULE_6__.FAKE_ASK_SCORE)
                 ask.push('LLM_FAKE_SUSPECTED');
             else if (a.verdict === 'fake')
                 ask.push('LLM_FAKE_UNCORROBORATED');
@@ -103465,6 +103462,7 @@ const STORE_HOLD_MESSAGES = [
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   amPmFlipConfirmed: () => (/* binding */ amPmFlipConfirmed),
 /* harmony export */   clockPrintedAs: () => (/* binding */ clockPrintedAs),
 /* harmony export */   fabricatedTextReasons: () => (/* binding */ fabricatedTextReasons),
 /* harmony export */   futurePaymentTimeReasons: () => (/* binding */ futurePaymentTimeReasons),
@@ -103501,6 +103499,7 @@ const IST_OFFSET_MS = 330 * 60000;
 // The PhonePe transaction-id time is parsed in payment-time.ts (the time check trusts it too); re-exported here for the gate.
 
 const TWELVE_HOURS_MS = 12 * 60 * 60000;
+const DAY_MS = 24 * 60 * 60000;
 const MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
 const MONTH = '(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\\.?';
 const DAY_MONTH = new RegExp(`(?<!\\d)(\\d{1,2})(?:st|nd|rd|th)?\\s*(?:of\\s+)?${MONTH}`, 'gi');
@@ -103508,6 +103507,26 @@ const MONTH_DAY = new RegExp(`${MONTH}\\s+(\\d{1,2})(?!\\d)`, 'gi');
 const NUMERIC_DATE = /(?<!\d)(\d{1,2})[/-](\d{1,2})[/-](\d{2}|\d{4})(?!\d)/g;
 const ISO_DATE = /(?<!\d)(\d{4})-(\d{2})-(\d{2})(?!\d)/g;
 const CLOCK = /(?<![\d:])(\d{1,2}):(\d{2})(?::\d{2})?(?:\s*([ap])\.?\s?m\b\.?)?/gi;
+/** A dot clock with its AM/PM ("7.24pm", Paytm 2026-11, replay ampm-fix2): read as "7:24pm". Without AM/PM "10.00" is an amount. */
+const DOT_CLOCK = /(?<![\d.:₹])(\d{1,2})\.(\d{2})(?=\s*[ap]\.?\s?m\b)/gi;
+/**
+ * Hindi month names after a day ("05 नवंबर 2026", PhonePe Hindi "08 नव॰ 2026", OCR "नव°" / "नव०"; replay ampm-fix2: 20
+ * real proofs). Longest form first, and no Devanagari letter after the name (Devanagari has no \b); the abbreviation
+ * mark "॰" (U+0970) and an OCR'd Devanagari zero "०" may follow it.
+ */
+const HINDI_MONTHS = [
+    [/जनवरी|जन/, 1], [/फ़रवरी|फरवरी|फ़र|फर/, 2], [/मार्च|मार्/, 3], [/अप्रैल|अप्रै/, 4], [/मई/, 5], [/जून/, 6],
+    [/जुलाई|जुल/, 7], [/अगस्त|अग/, 8], [/सितंबर|सितम्बर|सित/, 9], [/अक्टूबर|अक्तूबर|अक्टू|अक्तू/, 10], [/नवंबर|नवम्बर|नव/, 11],
+    [/दिसंबर|दिसम्बर|दिस/, 12],
+];
+const HINDI_DAY_MONTH = new RegExp(`(?<!\\d)(\\d{1,2})\\s*(${HINDI_MONTHS.map(([re]) => re.source).join('|')})(?![\\u0900-\\u0965\\u0971-\\u097F])`, 'g');
+/**
+ * A transaction-id T-number: "T" + 12 or more digits, PhonePe's form ("T" + YYMMDDhhmmss IST + 8-10 digits). Replay
+ * ampm-fix2 (1,126 real proofs with text): 337 carried one, every one on a PhonePe receipt (or one whose app was not
+ * named); no other app prints a T-number (GPay / BHIM / Paytm / Navi / Kotak ... show 12-digit UTRs or ids like
+ * "CICAgP..", "PTM..", "K81..", none of which match), so another app's id never counts here.
+ */
+const TXN_T_NUMBER = /\bt\s?\d{12,}\b/i;
 /** Day and month of every date printed in the screenshot text (named month, DD/MM/YY(YY), YYYY-MM-DD). */
 function printedDates(text) {
     const out = [];
@@ -103523,6 +103542,11 @@ function printedDates(text) {
         out.push({ d: Number(m[1]), mo: Number(m[2]) });
     for (const m of text.matchAll(ISO_DATE))
         out.push({ d: Number(m[3]), mo: Number(m[2]) });
+    for (const m of text.matchAll(HINDI_DAY_MONTH)) {
+        const mo = HINDI_MONTHS.find(([re]) => new RegExp(`^(?:${re.source})$`).test(m[2]))?.[1];
+        if (mo)
+            out.push({ d: Number(m[1]), mo });
+    }
     return out;
 }
 /**
@@ -103530,7 +103554,7 @@ function printedDates(text) {
  * ("00:40", "14:40"). "2:40" with no AM/PM, or a missing clock, is not.
  */
 function clockPrintedAs(text, hour, minute) {
-    for (const m of text.matchAll(CLOCK)) {
+    for (const m of text.replace(DOT_CLOCK, '$1:$2').matchAll(CLOCK)) {
         const h = Number(m[1]);
         if (Number(m[2]) !== minute)
             continue;
@@ -103551,6 +103575,25 @@ function istParts(ms) {
     return { day: t.getUTCFullYear() * 10000 + mo * 100 + d, d, mo, h: t.getUTCHours(), mi: t.getUTCMinutes() };
 }
 /**
+ * The printed clock `readMs` is the AM/PM flip of a payment made 12 h earlier (owner rule 6: the flip ± RESEND_WINDOW_MS
+ * is the only excuse besides the leads).
+ *  - With a T-number on the receipt (TXN_T_NUMBER) only the id can confirm it: it must parse as a valid PhonePe time
+ *    (phonePeTxnTimeMs), not be ahead, and sit within the window of the flipped clock (divya2 2026-11-04 "01:30 pm", id
+ *    T2611040130.., 13 min old). An id that does not parse, or says another time, keeps the clock as printed: divya2
+ *    119464 (₹600) "01:47 pm" at 01:47 IST carried T + 23 digits with seconds "70" and was cleared by the flip alone.
+ *  - Without one: the flipped reading is within the window of the arrival (correctAmPmAhead; nidhi1 63833
+ *    "Today, 12:50 PM" sent 00:58 IST). Not correctAmPmAhead's whole lead: that would excuse a clock up to 15 h ahead.
+ */
+function amPmFlipConfirmed(readMs, arrivalMs, text) {
+    const flippedMs = readMs - TWELVE_HOURS_MS;
+    if (TXN_T_NUMBER.test(String(text ?? ''))) {
+        const txnMs = (0,_payment_time__WEBPACK_IMPORTED_MODULE_0__.phonePeTxnTimeMs)(text);
+        return txnMs !== null && (0,_payment_time__WEBPACK_IMPORTED_MODULE_0__.paymentDay)(txnMs, arrivalMs) !== 'future' && Math.abs(flippedMs - txnMs) <= _payment_time__WEBPACK_IMPORTED_MODULE_0__.RESEND_WINDOW_MS;
+    }
+    const amPmMs = (0,_payment_time__WEBPACK_IMPORTED_MODULE_0__.correctAmPmAhead)(readMs, arrivalMs);
+    return amPmMs !== null && Math.abs(amPmMs - arrivalMs) <= _payment_time__WEBPACK_IMPORTED_MODULE_0__.RESEND_WINDOW_MS;
+}
+/**
  * Owner 2026-10-22: a payment time after the picture's arrival (`arrivalMs`) means an edited screenshot, judged like the
  * other fake signals. "Future" is the same-day rule's (paymentDay, payment-time.ts): more than FUTURE_LEAD_MS (3 h) ahead.
  * Up to 3 h ahead is a phone clock ahead of IST (Nepal .. Singapore) or running fast, also when its date already reads
@@ -103559,12 +103602,13 @@ function istParts(ms) {
  *    (the model misread the day: nidhi1 2026-10-20 "21st Oct 26" read as 26 Oct).
  *  - FUTURE_TIME: same day, later clock. Not when the AM/PM is not printed with that clock and the other half of the
  *    day is not in the future: the earlier reading is taken (a genuine payer is never called fake on an AM/PM misread).
- *    Not either when the 12 h earlier reading is within RESEND_WINDOW_MS (10 min) of the arrival (correctAmPmAhead):
- *    the time check credits that receipt as an AM read as PM, so the gate must not call it fake first. Live 2026-11-06 nidhi1 63833: "Today, 12:50 PM" sent 00:58 IST got the fake warning (the clock was printed as PM).
- *    Nor when the PhonePe transaction id (server time, IST) is not ahead and the printed clock is its time + 12 h
- *    (± 10 min): the same flip, confirmed by the machine time (divya2 2026-11-04 "01:30 pm", id T2611040130.., 13 min
- *    old). A fresh id under any other lead is no excuse.
- * Owner rule 6: future-dated receipts are fake; only the 12 h AM/PM flip (± the 10 min window) and the leads are excused.
+ *    Not either when the clock is the 12 h AM/PM flip of the payment (amPmFlipConfirmed: by the PhonePe T-number when
+ *    the receipt carries one, else the earlier reading within RESEND_WINDOW_MS of the arrival): the time check credits
+ *    that receipt as an AM read as PM, so the gate must not call it fake first.
+ *    Nor when no printed date is the day read and the clock 24 h earlier is within RESEND_WINDOW_MS of the arrival: a
+ *    dateless "11:58 pm" sent 00:02 IST, which the time check credits as yesterday.
+ * Owner rule 6: future-dated receipts are fake; only the 12 h AM/PM flip, the dateless clock across midnight (each ± the
+ * 10 min window) and the leads are excused.
  * The time is read as the time check reads it (parsePaymentTime: IST wall clock, current year, New Year roll-back).
  */
 function futurePaymentTimeReasons(details, arrivalMs) {
@@ -103582,16 +103626,13 @@ function futurePaymentTimeReasons(details, arrivalMs) {
     const otherHalfMs = readMs + (read.h >= 12 ? -TWELVE_HOURS_MS : TWELVE_HOURS_MS);
     if ((0,_payment_time__WEBPACK_IMPORTED_MODULE_0__.paymentDay)(otherHalfMs, arrivalMs) !== 'future' && !clockPrintedAs(text, read.h, read.mi))
         return [];
-    // 12 h ± RESEND_WINDOW_MS only: correctAmPmAhead also lets the earlier reading run up to FUTURE_LEAD_MS ahead, which
-    // here would excuse a printed clock up to 15 h ahead (owner rule 6: never widen the future excuse beyond the flip).
-    const amPmMs = (0,_payment_time__WEBPACK_IMPORTED_MODULE_0__.correctAmPmAhead)(readMs, arrivalMs);
-    if (amPmMs !== null && Math.abs(amPmMs - arrivalMs) <= _payment_time__WEBPACK_IMPORTED_MODULE_0__.RESEND_WINDOW_MS)
+    if (amPmFlipConfirmed(readMs, arrivalMs, details.text))
         return [];
-    // The same flip confirmed by the PhonePe transaction id: the printed clock is the id's time + 12 h (± the window)
-    // and the id is not ahead. A fresh id under any other lead is no excuse (journey L3: printed 5 h ahead = fake).
-    const txnMs = (0,_payment_time__WEBPACK_IMPORTED_MODULE_0__.phonePeTxnTimeMs)(details.text);
-    if (txnMs !== null && (0,_payment_time__WEBPACK_IMPORTED_MODULE_0__.paymentDay)(txnMs, arrivalMs) !== 'future'
-        && Math.abs(readMs - TWELVE_HOURS_MS - txnMs) <= _payment_time__WEBPACK_IMPORTED_MODULE_0__.RESEND_WINDOW_MS)
+    // A clock printed without its date is dated on the arrival's IST day (visionTimeToLegacyString), so a payment at
+    // 23:58 sent at 00:02 reads ~24 h ahead; the time check credits it as yesterday (correctFutureMisread "Date
+    // adjusted", the same RESEND_WINDOW_MS). Only when no printed date is the day read, and only that 24 h ± the window.
+    if (!printedDates(text).some((p) => p.d === read.d && p.mo === read.mo)
+        && Math.abs(readMs - DAY_MS - arrivalMs) <= _payment_time__WEBPACK_IMPORTED_MODULE_0__.RESEND_WINDOW_MS)
         return [];
     return ['FUTURE_TIME'];
 }
