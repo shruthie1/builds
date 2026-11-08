@@ -31923,7 +31923,9 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   PaymentProofsRepository: () => (/* binding */ PaymentProofsRepository),
 /* harmony export */   SERVED_NEAR_SCAN_LIMIT: () => (/* binding */ SERVED_NEAR_SCAN_LIMIT),
 /* harmony export */   SERVED_NEAR_SCAN_MAX_MS: () => (/* binding */ SERVED_NEAR_SCAN_MAX_MS),
-/* harmony export */   hexHamming: () => (/* binding */ hexHamming)
+/* harmony export */   hexHamming: () => (/* binding */ hexHamming),
+/* harmony export */   isRealPaymentReference: () => (/* binding */ isRealPaymentReference),
+/* harmony export */   otherRealReference: () => (/* binding */ otherRealReference)
 /* harmony export */ });
 /* harmony import */ var _base_repository__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../base-repository */ "../../packages/tg-db/src/base-repository.ts");
 
@@ -31955,6 +31957,33 @@ const REVIEW_FIELDS = ['proofId', 'verdict', 'image', 'ocr'];
 const SERVED_NEAR_SCAN_LIMIT = 600;
 /** The near-picture scan gives up after this (the exact UTR / file lookups still answer). */
 const SERVED_NEAR_SCAN_MAX_MS = 1500;
+/** Copy of tg-aut proof-gate/decide.ts isRealReference (tg-db cannot import apps): a reference real apps print. */
+function isRealPaymentReference(raw) {
+    if (typeof raw !== 'string')
+        return false;
+    const u = raw.replace(/[\s\-.:]/g, '').toUpperCase();
+    if (/^\d{12}$/.test(u) || /^\d{18}$/.test(u) || /^T?\d{20,22}$/.test(u))
+        return true;
+    return /^[A-Z0-9]{12,35}$/.test(u) && /[A-Z]/.test(u) && /\d/.test(u) && !/^T\d+$/.test(u);
+}
+/**
+ * A minute-key collision that is another payment, claimed without the key: THIS receipt shows a real reference that is
+ * not the holder's reference and not a cut (prefix / suffix, 8+ characters) of it. Owner rule 7 makes only a receipt
+ * with no UTR a re-send, so a real UTR beside a no-UTR holder is a different user's payment (journey L6 q: both
+ * credited). A short / odd reference here counts as none (hole 1, nidhi1 `21992078` beside `219920787057`).
+ */
+function otherRealReference(mine, holder) {
+    if (!isRealPaymentReference(mine))
+        return false;
+    const a = String(mine).replace(/[\s\-.:]/g, '').toUpperCase();
+    const b = typeof holder === 'string' ? holder.replace(/[\s\-.:]/g, '').toUpperCase() : '';
+    if (b.length < 8)
+        return true;
+    if (a === b)
+        return false;
+    const [short, long] = a.length <= b.length ? [a, b] : [b, a];
+    return !long.startsWith(short) && !long.endsWith(short);
+}
 /** Hamming distance between two equal-length hex strings; Infinity when lengths differ or non-hex. */
 function hexHamming(a, b) {
     if (a.length !== b.length)
@@ -32010,9 +32039,11 @@ class PaymentProofsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_
         delete doc.servedService;
         delete doc.servedUtr;
         delete doc.servedSha;
+        delete doc.servedMin;
         delete doc.creditAmount; // credit state too: only markServed writes it (at the credit decision)
         for (const k of REVIEW_FIELDS)
             delete doc[k]; // review fields: recordReview only
+        delete doc.review; // the operator's review stamp: written by CMS only, never by tg-aut
         const key = { chatId, profile: input.profile, telegramMsgId: input.telegramMsgId };
         return this.guardWrite(`insert(${chatId})`, async () => {
             let upserted = false;
@@ -32061,7 +32092,8 @@ class PaymentProofsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_
             delete base.imageHash;
         if (typeof base.imageSha256 === 'string' && !HEX64.test(base.imageSha256))
             delete base.imageSha256;
-        for (const k of ['servedAt', 'servedService', 'servedUtr', 'servedSha', 'creditAmount', 'ask', 'proof'])
+        // 'review' = the operator's stamp: written by CMS only, never by tg-aut.
+        for (const k of ['servedAt', 'servedService', 'servedUtr', 'servedSha', 'servedMin', 'creditAmount', 'ask', 'proof', 'review'])
             delete base[k];
         const key = { chatId, profile: input.profile, telegramMsgId: input.telegramMsgId };
         return this.guardWrite(`recordReview(${chatId})`, async () => {
@@ -32203,8 +32235,37 @@ class PaymentProofsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_
      * The partial UNIQUE index on servedUtr (served rows only) makes the claim race-safe across chats:
      * the loser gets 'duplicate' and must be treated as REJECT_DUPLICATE.
      * 'already_served' = this very message was already claimed (replay), idempotent.
+     * `minuteKey` (payee + amount + printed minute, owner payee rule 7) is claimed in the same update under the global
+     * partial unique index servedMin_unique: a second no-UTR credit of the same receipt loses, in any chat / persona.
+     * A receipt with a REAL UTR that collides only on the key is another payment in the same minute and is claimed
+     * without the key (otherRealReference), unless its reference is the holder's or a cut of it (nidhi1 2026-11-06:
+     * `21992078` then `219920787057`, ₹25 twice). A receipt with no UTR or a short / odd one loses (owner rule 7).
      */
-    async markServed(chatId, profile, telegramMsgId, service, creditAmount) {
+    async markServed(chatId, profile, telegramMsgId, service, creditAmount, minuteKey) {
+        const first = await this.markServedOnce(chatId, profile, telegramMsgId, service, creditAmount, minuteKey);
+        if (first !== 'duplicate_minute')
+            return first;
+        const id = String(chatId || '').trim();
+        try {
+            const mine = await this.collection.find({ chatId: id, profile, telegramMsgId }).limit(1).next();
+            const holder = await this.collection.find({ servedMin: minuteKey }).limit(1).next();
+            if (!holder) {
+                // The holder's claim was released in between (its credit failed): claim the key again, once.
+                const retry = await this.markServedOnce(chatId, profile, telegramMsgId, service, creditAmount, minuteKey);
+                return retry === 'duplicate_minute' ? 'duplicate' : retry;
+            }
+            if (!otherRealReference(mine?.utr, holder?.utr))
+                return 'duplicate';
+            // A real reference that is not the holder's: another payment in this minute (same UTR: servedUtr_unique).
+            const again = await this.markServedOnce(chatId, profile, telegramMsgId, service, creditAmount, undefined);
+            return again === 'duplicate_minute' ? 'duplicate' : again;
+        }
+        catch (error) {
+            this.logger.error(`[${this.collectionName}] markServed(${id}) minute-key check failed: ${String(error?.message ?? error)}`);
+            return 'error';
+        }
+    }
+    async markServedOnce(chatId, profile, telegramMsgId, service, creditAmount, minuteKey) {
         const id = String(chatId || '').trim();
         if (!id || !profile)
             return 'missing';
@@ -32215,7 +32276,8 @@ class PaymentProofsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_
             // Pipeline update so servedUtr copies this row's own utr (absent when the row has none). creditAmount is
             // set here, at the credit decision, never at insert ($literal: a pipeline value is never a field path).
             [{ $set: { servedAt: new Date(), servedService: service, servedUtr: '$utr', servedSha: '$imageSha256',
-                        ...(Number.isFinite(credit) && credit > 0 ? { creditAmount: { $literal: credit } } : {}) } }]);
+                        ...(Number.isFinite(credit) && credit > 0 ? { creditAmount: { $literal: credit } } : {}),
+                        ...(minuteKey ? { servedMin: { $literal: minuteKey } } : {}) } }]);
             if (res.matchedCount > 0)
                 return 'served';
             const existing = await this.collection.find(filter).limit(1).next();
@@ -32223,7 +32285,7 @@ class PaymentProofsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_
         }
         catch (error) {
             if (isDuplicateKey(error))
-                return 'duplicate';
+                return minuteKey && /servedMin/.test(String(error?.message ?? '')) ? 'duplicate_minute' : 'duplicate';
             this.logger.error(`[${this.collectionName}] markServed(${id}) failed: ${String(error?.message ?? error)}`);
             return 'error';
         }
@@ -32336,13 +32398,16 @@ class PaymentProofsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_
             return res.matchedCount > 0;
         });
     }
-    /** Open requests of this chat + persona created at or after `since`, newest first. Null when the store failed. */
-    async openAsks(chatId, profile, since) {
+    /**
+     * Open requests of this user (chatId = the Telegram user id, the same on every client and persona) created at or
+     * after `since`, newest first. Null when the store failed.
+     */
+    async openAsks(chatId, since) {
         const id = String(chatId || '').trim();
-        if (!id || !profile)
+        if (!id)
             return [];
         return this.guard(`openAsks(${id})`, null, () => this.collection
-            .find({ chatId: id, profile, createdAt: { $gte: since }, 'ask.state': 'open' })
+            .find({ chatId: id, createdAt: { $gte: since }, 'ask.state': 'open' })
             .sort({ createdAt: -1 })
             .limit(10)
             .toArray());
@@ -32364,8 +32429,9 @@ class PaymentProofsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_
             return false;
         return this.guard(`markAskBlocked(${id})`, false, async () => {
             const res = await this.collection.updateOne(
-            // Only while the warning is still open: a credit that closed it in the meantime wins (no block).
-            { chatId: id, profile, telegramMsgId, 'ask.kind': 'fraud', 'ask.state': 'open' }, { $set: { 'ask.blockedAt': new Date() } });
+            // Only while the warning is still open (a credit that closed it in the meantime wins: no block), and once:
+            // the deadline is checked on every touch from any client, only the first caller blocks.
+            { chatId: id, profile, telegramMsgId, 'ask.kind': 'fraud', 'ask.state': 'open', 'ask.blockedAt': { $exists: false } }, { $set: { 'ask.blockedAt': new Date() } });
             return res.matchedCount > 0;
         });
     }
@@ -32378,7 +32444,7 @@ class PaymentProofsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_
         if (!id || !profile)
             return false;
         return this.guard(`releaseServed(${id})`, false, async () => {
-            const res = await this.collection.updateOne({ chatId: id, profile, telegramMsgId, servedAt: { $exists: true } }, { $unset: { servedAt: '', servedService: '', servedUtr: '', servedSha: '', creditAmount: '' } });
+            const res = await this.collection.updateOne({ chatId: id, profile, telegramMsgId, servedAt: { $exists: true } }, { $unset: { servedAt: '', servedService: '', servedUtr: '', servedSha: '', servedMin: '', creditAmount: '' } });
             return res.matchedCount > 0;
         });
     }
@@ -32423,6 +32489,9 @@ class PaymentProofsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_
         await this.guardWrite('ensureIndexes(servedUtr unique)', () => c.createIndex({ servedUtr: 1 }, { name: 'servedUtr_unique', unique: true, partialFilterExpression: { servedUtr: { $exists: true } } }));
         // Same guard per screenshot file: two personas crediting the same file at the same moment (no UTR read).
         await this.guardWrite('ensureIndexes(servedSha unique)', () => c.createIndex({ servedSha: 1 }, { name: 'servedSha_unique', unique: true, partialFilterExpression: { servedSha: { $exists: true } } }));
+        // Same guard per receipt (payee + amount + printed minute, owner payee rule 7), global: a no-UTR re-send of a
+        // credited receipt loses the claim in any chat / persona (markServed).
+        await this.guardWrite('ensureIndexes(servedMin unique)', () => c.createIndex({ servedMin: 1 }, { name: 'servedMin_unique', unique: true, partialFilterExpression: { servedMin: { $exists: true } } }));
         await this.guardWrite('ensureIndexes(ttl)', () => this.ensureTtlIndex());
     }
 }
@@ -48132,8 +48201,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "27dcf07047cf139471beabe4851944fcb281314d" : 0;
-    const builtAt =  true ? "2026-11-08T04:31:29.695Z" : 0;
+    const sha =  true ? "c73e4e34298fb34e5d2dc56e5978f706e7c098da" : 0;
+    const builtAt =  true ? "2026-11-08T05:02:57.141Z" : 0;
     return { sha, builtAt };
 }
 
