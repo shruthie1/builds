@@ -38927,8 +38927,9 @@ function aggregate(rows) {
         a.delivered += r.delivered;
         a.banned += r.banned;
         a.failed += r.failed;
-        if (r.errorType && r.failed > 0)
-            a.errors.set(r.errorType, (a.errors.get(r.errorType) ?? 0) + r.failed);
+        const otherFailed = r.failed - r.banned;
+        if (r.errorType && otherFailed > 0)
+            a.errors.set(r.errorType, (a.errors.get(r.errorType) ?? 0) + otherFailed);
         if (r.lastAt !== null && (a.lastAt === null || r.lastAt > a.lastAt))
             a.lastAt = r.lastAt;
         if (r.lastDay !== null && (a.lastDay === null || r.lastDay > a.lastDay))
@@ -39640,7 +39641,7 @@ function sendsLiveSql(today, cut) {
   count(*) FILTER (WHERE outcome <> 'deleted') AS sent,
   count(*) FILTER (WHERE outcome = 'delivered') AS delivered,
   count(*) FILTER (WHERE outcome = 'banned') AS banned,
-  count(*) FILTER (WHERE outcome = 'failed') AS failed
+  count(*) FILTER (WHERE outcome IN ('failed', 'banned')) AS failed
 FROM promotion_send
 WHERE ts >= $2::timestamptz AND ts < $3::timestamptz AND (ts >= $1::timestamptz OR ts < $4::timestamptz)
 GROUP BY 1, 2, 3, 4`, [iso(today.start), iso(today.start - 86_400_000), iso(today.end), iso(cut)]);
@@ -39728,7 +39729,7 @@ function promoSendsSql(cur, prev) {
   count(*) FILTER (WHERE outcome <> 'deleted') AS sent,
   count(*) FILTER (WHERE outcome = 'delivered') AS delivered,
   count(*) FILTER (WHERE outcome = 'banned') AS banned,
-  count(*) FILTER (WHERE outcome = 'failed') AS failed,
+  count(*) FILTER (WHERE outcome IN ('failed', 'banned')) AS failed,
   max(ts) FILTER (WHERE outcome <> 'deleted') AS last_ts
 FROM promotion_send
 WHERE ts >= $2::timestamptz AND ts < $3::timestamptz AND (ts >= $1::timestamptz OR ts < $4::timestamptz)
