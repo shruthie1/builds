@@ -39053,6 +39053,7 @@ function bufferPoolPipeline(now, todayIst, clientId) {
                 total: { $sum: 1 },
                 harsh: HARSH_SUM,
                 warming: WARMING_SUM,
+                active: { $sum: { $cond: [{ $eq: ['$status', 'active'] }, 1, 0] } },
                 eligible: {
                     $sum: {
                         $cond: [{ $and: eligibleConds(now, todayIst) }, 1, 0],
@@ -39109,6 +39110,7 @@ function bufferPoolRowsPipeline(now, todayIst, clientId) {
                 h: HARSH_COND,
                 sg: { $and: [conds[5], conds[6]] },
                 g: { $and: [...conds.slice(0, 5), conds[7]] },
+                a: { $eq: ['$status', 'active'] },
                 w: WARMING_COND,
             },
         },
@@ -39138,7 +39140,7 @@ function poolCountsFromRows(kind, rows, verdicts, now) {
         const key = r.c ?? null;
         let g = out.get(key);
         if (!g) {
-            g = kind === 'buffer' ? { _id: key, total: 0, harsh: 0, warming: 0, eligible: 0 } : { _id: key, active: 0, total: 0, harsh: 0, warming: 0 };
+            g = kind === 'buffer' ? { _id: key, total: 0, harsh: 0, warming: 0, eligible: 0, active: 0 } : { _id: key, active: 0, total: 0, harsh: 0, warming: 0 };
             out.set(key, g);
         }
         const v = verdicts[i];
@@ -39149,11 +39151,10 @@ function poolCountsFromRows(kind, rows, verdicts, now) {
             g.harsh++;
         if (r.w === true)
             g.warming++;
-        if (kind === 'promote') {
-            if (r.a === true)
-                g.active++;
+        if (r.a === true)
+            g.active++;
+        if (kind === 'promote')
             return;
-        }
         const spamGates = facet
             ? (!harsh || (v.verdictAtMs ?? 0) <= now - 30 * DAY_MS) && !((v.limitedUntilMs ?? 0) > now)
             : r.sg === true;
@@ -41422,7 +41423,7 @@ let MonitorService = MonitorService_1 = class MonitorService {
         const get = (id) => {
             const key = typeof id === 'string' && id ? id : exports.UNASSIGNED_POOL_KEY;
             if (!out.has(key)) {
-                out.set(key, { total: 0, eligible: 0, harsh: 0, warming: 0, promoteActive: 0, promoteTotal: 0, promoteHarsh: 0, promoteWarming: 0 });
+                out.set(key, { total: 0, eligible: 0, harsh: 0, warming: 0, active: 0, promoteActive: 0, promoteTotal: 0, promoteHarsh: 0, promoteWarming: 0 });
             }
             return out.get(key);
         };
@@ -41432,6 +41433,7 @@ let MonitorService = MonitorService_1 = class MonitorService {
             c.eligible += (0, monitor_util_1.num)(b.eligible);
             c.harsh += (0, monitor_util_1.num)(b.harsh);
             c.warming += (0, monitor_util_1.num)(b.warming);
+            c.active += (0, monitor_util_1.num)(b.active);
         }
         for (const p of prom) {
             const c = get(p._id);
@@ -42935,7 +42937,7 @@ function poolSnapshotRows(pool) {
     const ids = [...pool.keys()].sort();
     for (const id of ids) {
         const c = pool.get(id);
-        rows.push({ pool: 'b', client_id: id, total: c.total, eligible: c.eligible, harsh: c.harsh, active: 0, warming: c.warming });
+        rows.push({ pool: 'b', client_id: id, total: c.total, eligible: c.eligible, harsh: c.harsh, active: c.active, warming: c.warming });
     }
     for (const id of ids) {
         const c = pool.get(id);
