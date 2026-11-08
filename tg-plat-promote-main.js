@@ -15,6 +15,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   childBatchId: () => (/* binding */ childBatchId),
 /* harmony export */   classifyAnalyticsError: () => (/* binding */ classifyAnalyticsError),
 /* harmony export */   defaultSpoolDir: () => (/* binding */ defaultSpoolDir),
+/* harmony export */   hourForIstDay: () => (/* binding */ hourForIstDay),
+/* harmony export */   istDayHour: () => (/* binding */ istDayHour),
 /* harmony export */   sanitizeInstanceKey: () => (/* binding */ sanitizeInstanceKey)
 /* harmony export */ });
 /* harmony import */ var crypto__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! crypto */ "crypto");
@@ -29,7 +31,7 @@ __webpack_require__.r(__webpack_exports__);
 
 
 
-/** Batch kind of the combined daily_client + daily_mobile statement. */
+/** Batch kind of the combined daily_client + daily_mobile (+ hourly_client) statement. */
 const COUNTERS_KIND = "daily_counters";
 const DEFAULTS = {
     maxBufferedRows: 10000,
@@ -81,6 +83,7 @@ const REQUIRED_COLUMNS = {
     cheat_flag: new Set(["ts", "chat_id", "client_id", "persona_id", "cheat_count"]),
     daily_client: new Set(["day", "client_id", "namespace"]),
     daily_mobile: new Set(["day", "client_id", "namespace", "mobile"]),
+    hourly_client: new Set(["day", "hour", "client_id", "namespace"]),
 };
 /** The 11 original accumulating counters shared by daily_client and daily_mobile (revenue deliberately absent). */
 const BASE_COUNTER_COLUMNS = [
@@ -114,6 +117,49 @@ const COUNTER_FIELDS = [
 ];
 const accumulate = (t, cols = COUNTER_COLUMNS) => cols.map((c) => `${c} = ${t}.${c} + EXCLUDED.${c}`).join(", ");
 const DAILY_CLIENT_KEY = ["day", "client_id", "namespace"];
+/**
+ * hourly_client counters fed by the daily counters (sends come from promotion_send instead, see the
+ * header). Same order as HOURLY_COUNTER_FIELDS.
+ */
+const HOURLY_KEY = ["day", "hour", "client_id", "namespace"];
+const HOURLY_COUNTER_COLUMNS = [
+    "new_users", "reactions_success", "reactions_restricted", "reactions_failed", "reactions_floods",
+];
+const HOURLY_COUNTER_FIELDS = [
+    "newUsers", "reactionsSuccess", "reactionsRestricted", "reactionsFailed", "reactionsFloods",
+];
+const HOURLY_CONFLICT = "ON CONFLICT (day, hour, client_id, namespace) DO UPDATE SET "
+    + accumulate("hourly_client", HOURLY_COUNTER_COLUMNS);
+/** promotion_send outcome -> hourly_client sends, IST hour: history.sql 'hourly_sends' verbatim. */
+const IST_TS = "ts AT TIME ZONE 'Asia/Kolkata'";
+const HOURLY_SENDS_UPSERT = "INSERT INTO hourly_client (day,hour,client_id,namespace,sent,delivered,banned,failed) "
+    + `SELECT (${IST_TS})::date, extract(hour FROM ${IST_TS})::smallint, client_id, `
+    + "CASE service WHEN 't' THEN 'tg-aut' WHEN 'p' THEN 'promote-clients' END, "
+    + "count(*)::integer, "
+    + "count(*) FILTER (WHERE outcome = 'delivered')::integer, "
+    + "count(*) FILTER (WHERE outcome = 'banned')::integer, "
+    + "count(*) FILTER (WHERE outcome IN ('failed', 'banned'))::integer "
+    + `FROM _p WHERE outcome <> 'deleted' AND service IN ('t', 'p') AND (${IST_TS})::date >= ist_today() - 7 `
+    + "GROUP BY 1, 2, 3, 4 ORDER BY 1, 2, 3, 4 " // stable row-lock order across processes (no 40P01)
+    + "ON CONFLICT (day, hour, client_id, namespace) DO UPDATE SET "
+    + accumulate("hourly_client", ["sent", "delivered", "banned", "failed"]);
+const IST_OFFSET_MS = 5.5 * 3600000;
+/** IST day (YYYY-MM-DD) and hour (0-23) of an epoch-ms instant. IST has no DST. */
+function istDayHour(ms) {
+    const d = new Date(ms + IST_OFFSET_MS);
+    return { day: d.toISOString().slice(0, 10), hour: d.getUTCHours() };
+}
+/**
+ * The IST hour for a counter whose IST `day` key the caller took a moment ago (DailyStatsRepository
+ * .todayKey). Same day: the current hour. The key is an earlier day (the call straddled midnight):
+ * 23, so a 23:59:59.999 event never lands in hour 0 of the next day. A later day (clock skew): 0.
+ */
+function hourForIstDay(day, ms) {
+    const now = istDayHour(ms);
+    if (now.day === day)
+        return now.hour;
+    return day < now.day ? 23 : 0;
+}
 const DAILY_MOBILE_KEY = ["day", "client_id", "namespace", "mobile", "profile"];
 const DAILY_CLIENT_CONFLICT = "ON CONFLICT (day, client_id, namespace) DO UPDATE SET ";
 const DAILY_MOBILE_CONFLICT = "ON CONFLICT (day, client_id, namespace, mobile) DO UPDATE SET "
@@ -188,6 +234,11 @@ const TABLES = {
                 conflict: DAILY_MOBILE_CONFLICT + accumulate("daily_mobile", [...BASE_COUNTER_COLUMNS, ...ROUTE_COUNTER_COLUMNS]),
             },
         ],
+    },
+    hourly_client: {
+        columns: [...HOURLY_KEY, ...HOURLY_COUNTER_COLUMNS],
+        keyCount: 4,
+        conflict: HOURLY_CONFLICT,
     },
 };
 /**
@@ -302,7 +353,7 @@ function defaultSpoolDir() {
     return path__WEBPACK_IMPORTED_MODULE_3__.join(os__WEBPACK_IMPORTED_MODULE_2__.homedir(), ".tg-analytics-spool", sanitizeInstanceKey(path__WEBPACK_IMPORTED_MODULE_3__.basename(process.cwd())));
 }
 function batchKind(table) {
-    return table === "daily_client" || table === "daily_mobile" ? COUNTERS_KIND : table;
+    return table === "daily_client" || table === "daily_mobile" || table === "hourly_client" ? COUNTERS_KIND : table;
 }
 /** Reads /proc/<pid>/environ; null when unavailable (non-Linux, permissions). */
 function defaultReadProcEnviron(pid) {
@@ -367,6 +418,9 @@ class AnalyticsSink {
         this.lastRescanAt = 0;
         this.enabled = false;
         this.disabledReason = "not started";
+        /** Why the hourly writer is off for this process (null = on). See the header, BLAST RADIUS. */
+        this.hourlyOff = null;
+        this.droppedHourly = 0;
         this.enqueued = 0;
         this.written = 0;
         this.droppedOverflow = 0;
@@ -540,7 +594,38 @@ class AnalyticsSink {
      * (revenue comes from payment_event).
      */
     recordDailyClient(row) {
-        this.recordCounters("daily_client", [row.day, row.clientId, row.namespace], null, row);
+        if (!this.recordCounters("daily_client", [row.day, row.clientId, row.namespace], null, row))
+            return;
+        this.recordHourly(row);
+    }
+    /**
+     * The hourly_client share of an ACCEPTED daily_client delta: new_users and reactions_* only (sends
+     * come from promotion_send). Keyed by the caller's IST day plus the hour of the same instant, so
+     * Σ hourly = daily_client for these columns. Not counted again in `enqueued` (one record call).
+     */
+    recordHourly(row) {
+        const counters = HOURLY_COUNTER_FIELDS.map((f) => {
+            const v = row[f];
+            return typeof v === "number" && Number.isFinite(v) ? v : 0;
+        });
+        if (counters.every((v) => v === 0))
+            return;
+        if (this.hourlyOff) {
+            this.droppedHourly += 1;
+            return;
+        }
+        const hour = typeof row.hour === "number" && Number.isInteger(row.hour) && row.hour >= 0 && row.hour <= 23
+            ? row.hour
+            : hourForIstDay(row.day, this.opts.now());
+        const key = [row.day, hour, row.clientId, row.namespace];
+        const keyStr = `hourly_client\u0000${key.join("\u0000")}`;
+        const seen = this.counters.get(keyStr);
+        if (!seen) {
+            this.counters.set(keyStr, { table: "hourly_client", key, profile: null, counters });
+            return;
+        }
+        for (let i = 0; i < counters.length; i += 1)
+            seen.counters[i] += counters[i];
     }
     /** Per-mobile daily rollup: daily_client's counters keyed additionally by mobile. */
     recordDailyMobile(row) {
@@ -565,33 +650,35 @@ class AnalyticsSink {
         this.reportLoss("recorded after the analytics sink stopped", rows);
         return false;
     }
+    /** True when the delta was taken into the coalesced counters. */
     recordCounters(table, key, profile, row) {
         if (!this.enabled && !this.everEnabled)
-            return;
+            return false;
         const counters = COUNTER_FIELDS.map((f) => {
             const v = row[f];
             return typeof v === "number" && Number.isFinite(v) ? v : 0;
         });
         // An all-zero row would still create the key and inflate row counts for a client that did nothing.
         if (counters.every((v) => v === 0))
-            return;
+            return false;
         if (key.some((v) => typeof v !== "string" || v === "")) {
             this.droppedInvalid += 1;
-            return;
+            return false;
         }
         if (!this.accepting())
-            return;
+            return false;
         this.enqueued += 1;
         const keyStr = `${table}\u0000${key.join("\u0000")}`;
         const seen = this.counters.get(keyStr);
         if (!seen) {
             this.counters.set(keyStr, { table, key: key, profile, counters });
-            return;
+            return true;
         }
         for (let i = 0; i < counters.length; i += 1)
             seen.counters[i] += counters[i];
         if (!seen.profile && profile)
             seen.profile = profile;
+        return true;
     }
     recordPayment(row) {
         this.enqueue({
@@ -823,7 +910,7 @@ class AnalyticsSink {
     }
     /**
      * Moves the coalesced counters into id-carrying `daily_counters` batches (end of the retry
-     * queue): daily_client and daily_mobile rows share ONE statement and ONE ledger id.
+     * queue): daily_client, daily_mobile and hourly_client rows share ONE statement and ONE ledger id.
      */
     drainCounters() {
         this.lastCounterDrainAt = this.opts.now();
@@ -1020,19 +1107,66 @@ class AnalyticsSink {
     }
     /**
      * ONE statement: the batch marker and the rows commit or fail together. $1 is the batch id.
-     * A `daily_counters` batch writes daily_client AND daily_mobile in that same statement:
+     * A `daily_counters` batch writes daily_client, daily_mobile AND hourly_client (when it has hourly
+     * rows) in that same statement:
      *   WITH _b AS (INSERT INTO analytics_batch ...), _c AS (INSERT INTO daily_client ... ON CONFLICT ...)
-     *   INSERT INTO daily_mobile ... ON CONFLICT ...
+     *   , _c1 AS (INSERT INTO daily_mobile ...) INSERT INTO hourly_client ... ON CONFLICT ...
+     * A promotion_send batch also upserts hourly_client's sends from the rows it inserted:
+     *   WITH _b AS (...), _p AS (INSERT INTO promotion_send ... RETURNING ts, client_id, outcome, service)
+     *   INSERT INTO hourly_client ... SELECT ... FROM _p ... ON CONFLICT ...
      */
     async insertBatch(batch) {
+        const withHourly = this.hourlyOff === null;
+        const first = this.buildStatement(batch, withHourly);
+        try {
+            if (first)
+                await this.runStatement(first.sql, first.params);
+        }
+        catch (err) {
+            // BLAST RADIUS (header): never let the hourly part hold back promotion_send / daily_*.
+            if (!first?.hourly || !isHourlySchemaError(err))
+                throw err;
+            const plain = this.buildStatement(batch, false);
+            if (plain)
+                await this.runStatement(plain.sql, plain.params); // throws -> normal path, hourly stays on
+            this.disableHourly(err);
+            this.droppedHourly += first.hourly;
+            return;
+        }
+        if (!withHourly)
+            this.droppedHourly += hourlyDeltas(batch); // written without its hourly part
+    }
+    /** Turns the hourly writer off for this process (once), with one warn line. */
+    disableHourly(err) {
+        if (this.hourlyOff !== null)
+            return;
+        this.hourlyOff = describe(err).slice(0, 300);
+        this.log("warn", `[analytics] hourly_client writer OFF until restart (promotion_send and daily_* keep writing): ${this.hourlyOff}`);
+    }
+    /**
+     * The batch's ONE statement; `hourly` = how many hourly deltas it carries (0 = none). Without
+     * withHourly, hourly_client rows are left out (counted by the caller) and promotion_send is a plain
+     * INSERT. Null when nothing is left to write.
+     */
+    buildStatement(batch, withHourly) {
         const params = [batch.id];
         const inserts = [];
-        const tables = batch.table === COUNTERS_KIND ? ["daily_client", "daily_mobile"] : [batch.table];
+        let hourly = 0;
+        const tables = batch.table === COUNTERS_KIND ? ["daily_client", "daily_mobile", "hourly_client"] : [batch.table];
         for (const table of tables) {
-            const own = batch.table === COUNTERS_KIND ? batch.rows.filter((r) => r.table === table) : batch.rows;
+            let own = batch.table === COUNTERS_KIND ? batch.rows.filter((r) => r.table === table) : batch.rows;
+            if (table === "hourly_client") {
+                if (!withHourly)
+                    continue;
+                hourly += own.length;
+            }
             if (own.length === 0)
                 continue;
-            const shaped = counterStatementShape(table, coalesceOnConflictKey(own, TABLES[table]?.keyCount ?? 0));
+            own = coalesceOnConflictKey(own, TABLES[table]?.keyCount ?? 0);
+            // Stable row-lock order across processes (two processes upserting the same hours, no 40P01).
+            if (table === "hourly_client")
+                own = [...own].sort((a, b) => compareKey(a.values, b.values, 4));
+            const shaped = counterStatementShape(table, own);
             const rows = shaped.rows;
             const tuples = [];
             for (const row of rows) {
@@ -1046,10 +1180,17 @@ class AnalyticsSink {
             inserts.push(`INSERT INTO ${table} (${rows[0].columns.join(",")}) VALUES ${tuples.join(",")}${conflict}`);
         }
         if (inserts.length === 0)
-            return;
+            return null;
         const ctes = ["_b AS (INSERT INTO analytics_batch (batch_id) VALUES ($1))"];
+        if (batch.table === "promotion_send" && withHourly) {
+            ctes.push(`_p AS (${inserts[0]} RETURNING ts, client_id, outcome, service)`);
+            inserts[0] = HOURLY_SENDS_UPSERT;
+            hourly += batch.rows.length;
+        }
         inserts.slice(0, -1).forEach((sql, i) => ctes.push(`_c${i || ""} AS (${sql})`));
-        const sql = `WITH ${ctes.join(", ")} ${inserts[inserts.length - 1]}`;
+        return { sql: `WITH ${ctes.join(", ")} ${inserts[inserts.length - 1]}`, params, hourly };
+    }
+    async runStatement(sql, params) {
         await withTimeout(Promise.resolve().then(() => this.pool.query(sql, params)), this.opts.queryTimeoutMs, `analytics query timed out after ${this.opts.queryTimeoutMs}ms`);
     }
     // ── spool ────────────────────────────────────────────────────────────────────────────────────
@@ -1946,7 +2087,7 @@ class AnalyticsSink {
     maybeLogSummary(force = false) {
         const s = this.stats();
         const sig = [s.droppedOverflow, s.droppedError, s.droppedSpoolFull, s.retryPending,
-            s.spooledRows, s.replayedRows, s.alreadyCommitted, s.flushFailures, s.spoolErrors].join(",");
+            s.spooledRows, s.replayedRows, s.alreadyCommitted, s.flushFailures, s.spoolErrors, s.droppedHourly ?? 0].join(",");
         if (sig === this.lastSummarySig)
             return;
         const now = this.opts.now();
@@ -1958,7 +2099,7 @@ class AnalyticsSink {
             this.log("info", `[analytics] summary written=${s.written} buffered=${s.buffered} retryPending=${s.retryPending} `
                 + `spooled=${s.spooledRows} replayed=${s.replayedRows} alreadyCommitted=${s.alreadyCommitted} `
                 + `droppedOverflow=${s.droppedOverflow} droppedError=${s.droppedError} droppedSpoolFull=${s.droppedSpoolFull} `
-                + `droppedInvalid=${s.droppedInvalid} flushFailures=${s.flushFailures} spoolErrors=${s.spoolErrors} internalErrors=${s.internalErrors}`);
+                + `droppedInvalid=${s.droppedInvalid} flushFailures=${s.flushFailures} spoolErrors=${s.spoolErrors} internalErrors=${s.internalErrors} droppedHourly=${s.droppedHourly ?? 0}`);
         }
         catch { /* never */ }
     }
@@ -1984,8 +2125,35 @@ class AnalyticsSink {
             droppedSpoolFull: this.droppedSpoolFull,
             alreadyCommitted: this.alreadyCommitted,
             spoolErrors: this.spoolErrors,
+            droppedHourly: this.droppedHourly,
         };
     }
+}
+/**
+ * Errors that a missing or forbidden hourly part raises: undefined table (42P01), undefined function
+ * (42883, ist_today()), undefined column (42703), insufficient privilege (42501). insertBatch proves the
+ * cause by re-running without the hourly part before turning it off.
+ */
+function isHourlySchemaError(err) {
+    const code = err?.code;
+    return code === "42P01" || code === "42883" || code === "42703" || code === "42501";
+}
+/** hourly_client deltas a batch carries: its hourly_client rows, or every promotion_send row. */
+function hourlyDeltas(batch) {
+    if (batch.table === "promotion_send")
+        return batch.rows.length;
+    return batch.rows.filter((r) => r.table === "hourly_client").length;
+}
+function compareKey(a, b, n) {
+    for (let i = 0; i < n; i += 1) {
+        const x = a[i];
+        const y = b[i];
+        if (x < y)
+            return -1;
+        if (x > y)
+            return 1;
+    }
+    return 0;
 }
 /**
  * Sums rows that share a conflict key, so a multi-row upsert never names the same key twice
@@ -2101,6 +2269,8 @@ __webpack_require__.r(__webpack_exports__);
  *     getAnalytics().recordPromotionSend({ ... });   // safe whether or not it is configured
  */
 let instance = null;
+/** DailyClientRow fields that also feed hourly_client (analytics-sink.ts HOURLY_COUNTER_FIELDS). */
+const HOURLY_FIELDS = ["newUsers", "reactionsSuccess", "reactionsRestricted", "reactionsFailed", "reactionsFloods"];
 let initInFlight = null;
 /** Bounds of the pre-init buffer (event rows; distinct counter keys). */
 const PRE_INIT_MAX_ROWS = 5000;
@@ -2116,6 +2286,7 @@ const PRE_INIT_MAX_COUNTER_KEYS = 5000;
 class PreInitRecorder {
     constructor() {
         this.events = [];
+        /** `hours`: daily_client only, the hourly_client fields per IST hour of record time (see counter()). */
         this.counters = new Map();
         this.dropped = 0;
     }
@@ -2127,23 +2298,37 @@ class PreInitRecorder {
         this.events.push({ method, row: { ...row, ts: row.ts ?? new Date() } });
     }
     counter(method, row) {
+        // The key has NO hour, so the hourly split never adds keys (never a daily delta lost to the key
+        // cap). daily_client's hourly_client fields are also summed per IST hour of record time (stamped
+        // NOW), so a row drained later keeps its real hour; drainInto re-splits them.
         const key = [method, row.day, row.clientId, row.namespace, row.mobile ?? ""].join("\u0000");
-        const seen = this.counters.get(key);
+        let seen = this.counters.get(key);
         if (!seen) {
             if (this.counters.size >= PRE_INIT_MAX_COUNTER_KEYS) {
                 this.dropped += 1;
                 return;
             }
-            this.counters.set(key, { method, row: { ...row } });
-            return;
+            seen = { method, row: { day: row.day, clientId: row.clientId, namespace: row.namespace } };
+            this.counters.set(key, seen);
         }
         for (const [k, v] of Object.entries(row)) {
-            if (typeof v !== "number" || !Number.isFinite(v))
+            if (k === "hour")
                 continue;
+            if (typeof v !== "number" || !Number.isFinite(v)) {
+                if (seen.row[k] === undefined || seen.row[k] === null)
+                    seen.row[k] = v;
+                continue;
+            }
+            if (method === "recordDailyClient" && HOURLY_FIELDS.includes(k)) {
+                const h = typeof row.hour === "number" ? row.hour : (0,_analytics_sink__WEBPACK_IMPORTED_MODULE_0__.hourForIstDay)(row.day, Date.now());
+                seen.hours ?? (seen.hours = new Map());
+                const bucket = seen.hours.get(h) ?? {};
+                bucket[k] = (bucket[k] ?? 0) + v;
+                seen.hours.set(h, bucket);
+                continue;
+            }
             seen.row[k] = (typeof seen.row[k] === "number" ? seen.row[k] : 0) + v;
         }
-        if (!seen.row.profile && row.profile)
-            seen.row.profile = row.profile;
     }
     recordPromotionSend(row) { this.event("recordPromotionSend", row); }
     recordConversion(row) { this.event("recordConversion", row); }
@@ -2164,11 +2349,19 @@ class PreInitRecorder {
             }
             catch { /* rule 3 */ }
         }
-        for (const { method, row } of counters) {
-            try {
-                target[method](row);
+        for (const { method, row, hours } of counters) {
+            // daily_client: one call per recorded hour; the non-hourly counters ride the first one only, so
+            // the daily totals are exactly what was recorded.
+            const parts = hours && hours.size > 0
+                ? [...hours].map(([hour, fields], i) => (i === 0 ? { ...row, hour, ...fields }
+                    : { day: row.day, clientId: row.clientId, namespace: row.namespace, hour, ...fields }))
+                : [row];
+            for (const part of parts) {
+                try {
+                    target[method](part);
+                }
+                catch { /* rule 3 */ }
             }
-            catch { /* rule 3 */ }
         }
     }
     /** Empties the buffer; returns how many entries (rows + counter keys) were discarded. */
@@ -48240,8 +48433,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "04b728d657cad59da03a87a6bf9aeab7a4b38248" : 0;
-    const builtAt =  true ? "2026-11-08T09:16:34.725Z" : 0;
+    const sha =  true ? "c19246d2efc16ad53778ef58e1d305b1a8a74fd4" : 0;
+    const builtAt =  true ? "2026-11-08T09:17:32.153Z" : 0;
     return { sha, builtAt };
 }
 
