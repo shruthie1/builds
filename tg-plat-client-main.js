@@ -38526,7 +38526,9 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   PaymentProofsRepository: () => (/* binding */ PaymentProofsRepository),
 /* harmony export */   SERVED_NEAR_SCAN_LIMIT: () => (/* binding */ SERVED_NEAR_SCAN_LIMIT),
 /* harmony export */   SERVED_NEAR_SCAN_MAX_MS: () => (/* binding */ SERVED_NEAR_SCAN_MAX_MS),
-/* harmony export */   hexHamming: () => (/* binding */ hexHamming)
+/* harmony export */   hexHamming: () => (/* binding */ hexHamming),
+/* harmony export */   isRealPaymentReference: () => (/* binding */ isRealPaymentReference),
+/* harmony export */   otherRealReference: () => (/* binding */ otherRealReference)
 /* harmony export */ });
 /* harmony import */ var _base_repository__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../base-repository */ "../../packages/tg-db/src/base-repository.ts");
 
@@ -38558,6 +38560,33 @@ const REVIEW_FIELDS = ['proofId', 'verdict', 'image', 'ocr'];
 const SERVED_NEAR_SCAN_LIMIT = 600;
 /** The near-picture scan gives up after this (the exact UTR / file lookups still answer). */
 const SERVED_NEAR_SCAN_MAX_MS = 1500;
+/** Copy of tg-aut proof-gate/decide.ts isRealReference (tg-db cannot import apps): a reference real apps print. */
+function isRealPaymentReference(raw) {
+    if (typeof raw !== 'string')
+        return false;
+    const u = raw.replace(/[\s\-.:]/g, '').toUpperCase();
+    if (/^\d{12}$/.test(u) || /^\d{18}$/.test(u) || /^T?\d{20,22}$/.test(u))
+        return true;
+    return /^[A-Z0-9]{12,35}$/.test(u) && /[A-Z]/.test(u) && /\d/.test(u) && !/^T\d+$/.test(u);
+}
+/**
+ * A minute-key collision that is another payment, claimed without the key: THIS receipt shows a real reference that is
+ * not the holder's reference and not a cut (prefix / suffix, 8+ characters) of it. Owner rule 7 makes only a receipt
+ * with no UTR a re-send, so a real UTR beside a no-UTR holder is a different user's payment (journey L6 q: both
+ * credited). A short / odd reference here counts as none (hole 1, nidhi1 `21992078` beside `219920787057`).
+ */
+function otherRealReference(mine, holder) {
+    if (!isRealPaymentReference(mine))
+        return false;
+    const a = String(mine).replace(/[\s\-.:]/g, '').toUpperCase();
+    const b = typeof holder === 'string' ? holder.replace(/[\s\-.:]/g, '').toUpperCase() : '';
+    if (b.length < 8)
+        return true;
+    if (a === b)
+        return false;
+    const [short, long] = a.length <= b.length ? [a, b] : [b, a];
+    return !long.startsWith(short) && !long.endsWith(short);
+}
 /** Hamming distance between two equal-length hex strings; Infinity when lengths differ or non-hex. */
 function hexHamming(a, b) {
     if (a.length !== b.length)
@@ -38613,9 +38642,11 @@ class PaymentProofsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_
         delete doc.servedService;
         delete doc.servedUtr;
         delete doc.servedSha;
+        delete doc.servedMin;
         delete doc.creditAmount; // credit state too: only markServed writes it (at the credit decision)
         for (const k of REVIEW_FIELDS)
             delete doc[k]; // review fields: recordReview only
+        delete doc.review; // the operator's review stamp: written by CMS only, never by tg-aut
         const key = { chatId, profile: input.profile, telegramMsgId: input.telegramMsgId };
         return this.guardWrite(`insert(${chatId})`, async () => {
             let upserted = false;
@@ -38664,7 +38695,8 @@ class PaymentProofsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_
             delete base.imageHash;
         if (typeof base.imageSha256 === 'string' && !HEX64.test(base.imageSha256))
             delete base.imageSha256;
-        for (const k of ['servedAt', 'servedService', 'servedUtr', 'servedSha', 'creditAmount', 'ask', 'proof'])
+        // 'review' = the operator's stamp: written by CMS only, never by tg-aut.
+        for (const k of ['servedAt', 'servedService', 'servedUtr', 'servedSha', 'servedMin', 'creditAmount', 'ask', 'proof', 'review'])
             delete base[k];
         const key = { chatId, profile: input.profile, telegramMsgId: input.telegramMsgId };
         return this.guardWrite(`recordReview(${chatId})`, async () => {
@@ -38806,8 +38838,37 @@ class PaymentProofsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_
      * The partial UNIQUE index on servedUtr (served rows only) makes the claim race-safe across chats:
      * the loser gets 'duplicate' and must be treated as REJECT_DUPLICATE.
      * 'already_served' = this very message was already claimed (replay), idempotent.
+     * `minuteKey` (payee + amount + printed minute, owner payee rule 7) is claimed in the same update under the global
+     * partial unique index servedMin_unique: a second no-UTR credit of the same receipt loses, in any chat / persona.
+     * A receipt with a REAL UTR that collides only on the key is another payment in the same minute and is claimed
+     * without the key (otherRealReference), unless its reference is the holder's or a cut of it (nidhi1 2026-11-06:
+     * `21992078` then `219920787057`, ₹25 twice). A receipt with no UTR or a short / odd one loses (owner rule 7).
      */
-    async markServed(chatId, profile, telegramMsgId, service, creditAmount) {
+    async markServed(chatId, profile, telegramMsgId, service, creditAmount, minuteKey) {
+        const first = await this.markServedOnce(chatId, profile, telegramMsgId, service, creditAmount, minuteKey);
+        if (first !== 'duplicate_minute')
+            return first;
+        const id = String(chatId || '').trim();
+        try {
+            const mine = await this.collection.find({ chatId: id, profile, telegramMsgId }).limit(1).next();
+            const holder = await this.collection.find({ servedMin: minuteKey }).limit(1).next();
+            if (!holder) {
+                // The holder's claim was released in between (its credit failed): claim the key again, once.
+                const retry = await this.markServedOnce(chatId, profile, telegramMsgId, service, creditAmount, minuteKey);
+                return retry === 'duplicate_minute' ? 'duplicate' : retry;
+            }
+            if (!otherRealReference(mine?.utr, holder?.utr))
+                return 'duplicate';
+            // A real reference that is not the holder's: another payment in this minute (same UTR: servedUtr_unique).
+            const again = await this.markServedOnce(chatId, profile, telegramMsgId, service, creditAmount, undefined);
+            return again === 'duplicate_minute' ? 'duplicate' : again;
+        }
+        catch (error) {
+            this.logger.error(`[${this.collectionName}] markServed(${id}) minute-key check failed: ${String(error?.message ?? error)}`);
+            return 'error';
+        }
+    }
+    async markServedOnce(chatId, profile, telegramMsgId, service, creditAmount, minuteKey) {
         const id = String(chatId || '').trim();
         if (!id || !profile)
             return 'missing';
@@ -38818,7 +38879,8 @@ class PaymentProofsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_
             // Pipeline update so servedUtr copies this row's own utr (absent when the row has none). creditAmount is
             // set here, at the credit decision, never at insert ($literal: a pipeline value is never a field path).
             [{ $set: { servedAt: new Date(), servedService: service, servedUtr: '$utr', servedSha: '$imageSha256',
-                        ...(Number.isFinite(credit) && credit > 0 ? { creditAmount: { $literal: credit } } : {}) } }]);
+                        ...(Number.isFinite(credit) && credit > 0 ? { creditAmount: { $literal: credit } } : {}),
+                        ...(minuteKey ? { servedMin: { $literal: minuteKey } } : {}) } }]);
             if (res.matchedCount > 0)
                 return 'served';
             const existing = await this.collection.find(filter).limit(1).next();
@@ -38826,7 +38888,7 @@ class PaymentProofsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_
         }
         catch (error) {
             if (isDuplicateKey(error))
-                return 'duplicate';
+                return minuteKey && /servedMin/.test(String(error?.message ?? '')) ? 'duplicate_minute' : 'duplicate';
             this.logger.error(`[${this.collectionName}] markServed(${id}) failed: ${String(error?.message ?? error)}`);
             return 'error';
         }
@@ -38939,13 +39001,16 @@ class PaymentProofsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_
             return res.matchedCount > 0;
         });
     }
-    /** Open requests of this chat + persona created at or after `since`, newest first. Null when the store failed. */
-    async openAsks(chatId, profile, since) {
+    /**
+     * Open requests of this user (chatId = the Telegram user id, the same on every client and persona) created at or
+     * after `since`, newest first. Null when the store failed.
+     */
+    async openAsks(chatId, since) {
         const id = String(chatId || '').trim();
-        if (!id || !profile)
+        if (!id)
             return [];
         return this.guard(`openAsks(${id})`, null, () => this.collection
-            .find({ chatId: id, profile, createdAt: { $gte: since }, 'ask.state': 'open' })
+            .find({ chatId: id, createdAt: { $gte: since }, 'ask.state': 'open' })
             .sort({ createdAt: -1 })
             .limit(10)
             .toArray());
@@ -38967,8 +39032,9 @@ class PaymentProofsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_
             return false;
         return this.guard(`markAskBlocked(${id})`, false, async () => {
             const res = await this.collection.updateOne(
-            // Only while the warning is still open: a credit that closed it in the meantime wins (no block).
-            { chatId: id, profile, telegramMsgId, 'ask.kind': 'fraud', 'ask.state': 'open' }, { $set: { 'ask.blockedAt': new Date() } });
+            // Only while the warning is still open (a credit that closed it in the meantime wins: no block), and once:
+            // the deadline is checked on every touch from any client, only the first caller blocks.
+            { chatId: id, profile, telegramMsgId, 'ask.kind': 'fraud', 'ask.state': 'open', 'ask.blockedAt': { $exists: false } }, { $set: { 'ask.blockedAt': new Date() } });
             return res.matchedCount > 0;
         });
     }
@@ -38981,7 +39047,7 @@ class PaymentProofsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_
         if (!id || !profile)
             return false;
         return this.guard(`releaseServed(${id})`, false, async () => {
-            const res = await this.collection.updateOne({ chatId: id, profile, telegramMsgId, servedAt: { $exists: true } }, { $unset: { servedAt: '', servedService: '', servedUtr: '', servedSha: '', creditAmount: '' } });
+            const res = await this.collection.updateOne({ chatId: id, profile, telegramMsgId, servedAt: { $exists: true } }, { $unset: { servedAt: '', servedService: '', servedUtr: '', servedSha: '', servedMin: '', creditAmount: '' } });
             return res.matchedCount > 0;
         });
     }
@@ -39026,6 +39092,9 @@ class PaymentProofsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_
         await this.guardWrite('ensureIndexes(servedUtr unique)', () => c.createIndex({ servedUtr: 1 }, { name: 'servedUtr_unique', unique: true, partialFilterExpression: { servedUtr: { $exists: true } } }));
         // Same guard per screenshot file: two personas crediting the same file at the same moment (no UTR read).
         await this.guardWrite('ensureIndexes(servedSha unique)', () => c.createIndex({ servedSha: 1 }, { name: 'servedSha_unique', unique: true, partialFilterExpression: { servedSha: { $exists: true } } }));
+        // Same guard per receipt (payee + amount + printed minute, owner payee rule 7), global: a no-UTR re-send of a
+        // credited receipt loses the claim in any chat / persona (markServed).
+        await this.guardWrite('ensureIndexes(servedMin unique)', () => c.createIndex({ servedMin: 1 }, { name: 'servedMin_unique', unique: true, partialFilterExpression: { servedMin: { $exists: true } } }));
         await this.guardWrite('ensureIndexes(ttl)', () => this.ensureTtlIndex());
     }
 }
@@ -52856,15 +52925,18 @@ STATUS (status)
   - isPayment: true for confirmation / receipt / bank debit screens; false for chat, home screens, ads; null if you cannot tell.
 
 TIME (copy exactly what is printed)
+  - Only the transaction's own date/time. Ignore dates and times in notification banners, offers, ads, chat bubbles and the status bar.
   - dateDay and dateMonth: the day digits and month (Jul -> 7) shown for the transaction. Never default to day 1.
   - dateYear: the year ONLY if the image shows one; otherwise null. Never invent a year.
   - A trailing 2-digit number is the YEAR, not the day: "21st Oct 26" or "21/10/26" -> dateDay 21, dateMonth 10, dateYear 20 + those 2 digits.
   - clock24: the transaction clock converted to 24 h (05:36 PM -> 17:36, 12:05 AM -> 00:05, 12:30 PM -> 12:30). Ignore the phone status-bar clock.
+  - AM/PM: use the AM or PM printed next to that clock, exactly as printed; never infer it from the hour or the light in the image. No AM/PM printed: copy the clock as printed.
   - timeRaw: the visible date/time copied verbatim.
   - Output only a date or clock you can actually read; null for anything else.
 
 TEXT
   - All readable text from the image, newline separated, top to bottom, in the original language. Include amount, names, time and any reference/UTR numbers.
+  - Copy every character exactly as printed (digits, spelling, case, AM/PM); never correct, complete or reformat anything.
   - Also copy any watermark, logo or overlay text, even small, faint or semi-transparent (for example a photo/text editor app name such as "PhoText").
 
 FAKE MARKERS
@@ -52877,7 +52949,7 @@ AUTHENTICITY (fakeScore, fakeVerdict, fakeSignals, fakeEvidence) - is this a rea
   - fakeScore 0.0-1.0 (0 certainly genuine, 1 certainly fake). fakeVerdict genuine | suspicious | fake. Genuine: fakeScore < 0.4.
   - A genuine screenshot of a real bank/UPI app (GPay, PhonePe, Paytm, BHIM, bank apps) scores LOW (0.0-0.2). Banners, ads, offers, cashback cards, the "Gemini" button or other app UI in a real app are NOT fake signals.
   - Many real UPI apps look different from GPay/PhonePe: Fam/FamX ("Paid with fam", "Powered by trio"), CRED, Amazon Pay, MobiKwik, Navi, super.money, slice, POP, bank apps and Paytm QR receipts. A ticket, receipt or torn-paper style card is how some of them draw a payment; an unfamiliar or receipt-style layout is NOT evidence of a fake (not_real_app_layout only for a layout that copies a known app and gets it visibly wrong).
-  - fakeScore >= 0.85 ONLY with concrete visible evidence, for example: a stamp/watermark/text saying entertainment, sample, demo, prank, not real, or the name of a receipt-generator or photo/text editor app (e.g. a "PhoText" watermark: signal generator_stamp); visibly edited or pasted digits; mismatched fonts or alignment in the amount/name/UTR; a layout that is not the real app; values that are impossible on their face (a UTR that is not 12 digits, a time like 25:70); a photo of another screen.
+  - fakeScore >= 0.85 ONLY with concrete visible evidence, for example: a stamp/watermark/text saying entertainment, sample, demo, prank, not real, or the name of a receipt-generator or photo/text editor app (e.g. a "PhoText" watermark: signal generator_stamp); visibly edited or pasted digits; mismatched fonts or alignment in the amount/name/UTR; a layout that is not the real app; values that are impossible on their face (a time like 25:70); a photo of another screen.
   - You do NOT know today's date. Never treat a date or year as future, past or impossible; dates are checked by code.
   - Unsure or just low quality / cropped: fakeScore 0.3-0.5, verdict suspicious or genuine. Low quality alone is not evidence of fraud.
   - fakeSignals: only these values: disclaimer_text, generator_stamp, ai_watermark, edited_amount, font_mismatch, not_real_app_layout, impossible_values, photo_of_screen, cropped_or_missing_status, other. [] if none.
@@ -55939,7 +56011,15 @@ function extractFromText(text) {
     }
     return null;
 }
-/** R58: the most recent "N minutes/hours ago" (or "just now") on a history screen, as an IST moment. */
+/**
+ * R58: the most recent "N minutes/hours ago" (or "just now") on a history screen, as an IST moment. Day units too
+ * (hole 2, sowmya1 8296621331 2026-11-08: a PhonePe History list whose newest row said "1 day ago" was read with no time
+ * and credited as a new ₹350): "N day(s) ago" / "a day ago" / "yesterday" give that past IST date, with the clock printed
+ * after "yesterday" when there is one, else the start of that day, so the same-day rule calls it an old payment (start
+ * of day is always more than YESTERDAY_GRACE_MS old). The most recent row wins: any minutes/hours row beats a day row,
+ * and an undated "today" row on the screen means no day row is the newest (null, as before). `relativeDays` marks a
+ * day result (resolveVisionTime keeps the model's own date over it).
+ */
 function relativeFromText(text, nowMs) {
     const t = text.toLowerCase();
     let agoMs = /\bjust now\b/.test(t) ? 0 : null;
@@ -55948,10 +56028,34 @@ function relativeFromText(text, nowMs) {
         if (agoMs === null || ms < agoMs)
             agoMs = ms;
     }
-    if (agoMs === null)
+    if (agoMs !== null) {
+        const p = istParts(nowMs - agoMs);
+        return { date: { y: p.y, mo: p.mo, d: p.d }, clock: { h: p.h, mi: p.mi, s: 0 } };
+    }
+    if (/\btoday\b/.test(t))
         return null;
-    const p = istParts(nowMs - agoMs);
-    return { date: { y: p.y, mo: p.mo, d: p.d }, clock: { h: p.h, mi: p.mi, s: 0 } };
+    let days = null;
+    for (const m of t.matchAll(/\b(\d{1,2}|a|one)\s*(?:day|days)\s+ago\b/g)) {
+        const n = /^\d+$/.test(m[1]) ? parseInt(m[1], 10) : 1;
+        if (n >= 1 && (days === null || n < days))
+            days = n;
+    }
+    const yesterday = /\byesterday\b/.test(t);
+    if (yesterday)
+        days = 1;
+    if (days === null)
+        return null;
+    const today = istParts(nowMs);
+    const p = istParts(Date.UTC(today.y, today.mo - 1, today.d) - days * DAY_MS);
+    let clock = { h: 0, mi: 0, s: 0 };
+    const at = yesterday ? t.match(/\byesterday\b[\s,]*(?:at\s+)?(\d{1,2})[:.](\d{2})\s*(am|pm|a\.m\.|p\.m\.)?/) : null;
+    if (at) {
+        const h = to24h(parseInt(at[1], 10), at[3]?.replace(/\./g, ''));
+        const mi = parseInt(at[2], 10);
+        if (isValidHms(h, mi, 0))
+            clock = { h, mi, s: 0 };
+    }
+    return { date: { y: p.y, mo: p.mo, d: p.d }, clock, relativeDays: true };
 }
 /** Manual (host-TZ independent) parse of a model-supplied time string. Zone-carrying ISO strings are converted to IST. */
 function parseTimeString(raw, nowMs) {
@@ -56081,6 +56185,9 @@ function resolveVisionTime(input, contextText, nowMs, v2 = _v2__WEBPACK_IMPORTED
     // A bare text date (no clock printed with it) on another day than the model's own date is a banner or offer line
     // ("Validity: 31 Oct-8 Nov 2026"), not the receipt date: the model's date stands (sowmya2 2026-11-08, FUTURE_TIME).
     if (ctx && !ctx.clock && modelDate && (modelDate.mo !== ctx.date.mo || modelDate.d !== ctx.date.d))
+        ctx = null;
+    // A day-relative row ("1 day ago", "yesterday") only dates a screen whose own date the model did not read.
+    if (ctx && ctx.relativeDays && modelDate)
         ctx = null;
     let date;
     let clock;
@@ -58925,8 +59032,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "27dcf07047cf139471beabe4851944fcb281314d" : 0;
-    const builtAt =  true ? "2026-11-08T04:31:22.477Z" : 0;
+    const sha =  true ? "c73e4e34298fb34e5d2dc56e5978f706e7c098da" : 0;
+    const builtAt =  true ? "2026-11-08T05:02:52.166Z" : 0;
     return { sha, builtAt };
 }
 
@@ -69836,10 +69943,12 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _calls_call_attempt_cap__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ../../calls/call-attempt-cap */ "./src/calls/call-attempt-cap.ts");
 /* harmony import */ var _greetings_send_greetings__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ../../greetings/send-greetings */ "./src/greetings/send-greetings.ts");
 /* harmony import */ var _state_user_state__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! ../state/user-state */ "./src/conversation/state/user-state.ts");
+/* harmony import */ var _imageUtils_processImage__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! ../../imageUtils/processImage */ "./src/imageUtils/processImage.ts");
 /**
  * Private Message Handler
  * Main handler for private messages from users
  */
+
 
 
 
@@ -69867,13 +69976,23 @@ async function handlePrivateMessage(event) {
         ? senderJson.username
         : senderJson.firstName;
     const text = event.message.text?.toLowerCase() || "";
-    const userDetails = (await db.read(chatId));
+    let userDetails = (await db.read(chatId));
     // The operator's fake-payment mark on ANY persona row of the chat (payments/fake-payer.ts) = canReply 0 for the
     // whole chat: ignored here, before the existing-user path (whose per-row canReply 0 branch has a photo bypass and
     // the 5-day auto-unblock) and before the new-user path (which would create a row and greet). Covers a persona row
     // created after the mark and a row unblocked by hand (review 2026-11-02). The only inbound read of the mark.
     if (await db.isFakePayer(chatId)) {
         (0,_inbound_decision__WEBPACK_IMPORTED_MODULE_7__.markInbound)(event, "ignored", "canReply=0 (fake-payment mark)");
+        return;
+    }
+    // A fake-payment warning of this user (any client / persona) past its 15 min blocks on this touch, on every persona
+    // (owner 2026-11-07); the deadline lives in paymentProofs, so no sweeper is needed. While such a block stands, a
+    // persona with no row yet does not greet (it would create a row and talk to a blocked user).
+    const fraud = await (0,_imageUtils_processImage__WEBPACK_IMPORTED_MODULE_13__.fraudDeadlineOnTouch)(event.client, chatId);
+    if (fraud.fired)
+        userDetails = (await db.read(chatId));
+    if (!userDetails && fraud.blocked) {
+        (0,_inbound_decision__WEBPACK_IMPORTED_MODULE_7__.markInbound)(event, "ignored", "canReply=0 (fake-payment block on another persona)");
         return;
     }
     if (userDetails) {
@@ -84737,6 +84856,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   ANALYSIS_HOLD_DELAYS_MS: () => (/* binding */ ANALYSIS_HOLD_DELAYS_MS),
 /* harmony export */   UNCLEAR_SCREENSHOT_MESSAGES: () => (/* binding */ UNCLEAR_SCREENSHOT_MESSAGES),
+/* harmony export */   fraudDeadlineOnTouch: () => (/* binding */ fraudDeadlineOnTouch),
 /* harmony export */   handleSmallPicsPayment: () => (/* binding */ handleSmallPicsPayment),
 /* harmony export */   processImage: () => (/* binding */ processImage),
 /* harmony export */   resetUnservedCredits: () => (/* binding */ resetUnservedCredits),
@@ -84792,11 +84912,13 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _payments_proof_gate_gate__WEBPACK_IMPORTED_MODULE_41__ = __webpack_require__(/*! ../payments/proof-gate/gate */ "./src/payments/proof-gate/gate.ts");
 /* harmony import */ var _payments_proof_gate_decide__WEBPACK_IMPORTED_MODULE_42__ = __webpack_require__(/*! ../payments/proof-gate/decide */ "./src/payments/proof-gate/decide.ts");
 /* harmony import */ var _payments_proof_gate_flow__WEBPACK_IMPORTED_MODULE_43__ = __webpack_require__(/*! ../payments/proof-gate/flow */ "./src/payments/proof-gate/flow.ts");
-/* harmony import */ var _payments_proof_gate_signals__WEBPACK_IMPORTED_MODULE_44__ = __webpack_require__(/*! ../payments/proof-gate/signals */ "./src/payments/proof-gate/signals.ts");
-/* harmony import */ var _payments_screenshot_paid_to_us__WEBPACK_IMPORTED_MODULE_45__ = __webpack_require__(/*! ../payments/screenshot/paid-to-us */ "./src/payments/screenshot/paid-to-us.ts");
-/* harmony import */ var _payments_upi__WEBPACK_IMPORTED_MODULE_46__ = __webpack_require__(/*! ../payments/upi */ "./src/payments/upi.ts");
-/* harmony import */ var _tg_vision__WEBPACK_IMPORTED_MODULE_47__ = __webpack_require__(/*! @tg/vision */ "../../packages/tg-vision/src/index.ts");
-/* harmony import */ var _jobs_delayed__WEBPACK_IMPORTED_MODULE_48__ = __webpack_require__(/*! ../jobs/delayed */ "./src/jobs/delayed.ts");
+/* harmony import */ var _payments_proof_gate_messages__WEBPACK_IMPORTED_MODULE_44__ = __webpack_require__(/*! ../payments/proof-gate/messages */ "./src/payments/proof-gate/messages.ts");
+/* harmony import */ var _payments_proof_gate_signals__WEBPACK_IMPORTED_MODULE_45__ = __webpack_require__(/*! ../payments/proof-gate/signals */ "./src/payments/proof-gate/signals.ts");
+/* harmony import */ var _payments_screenshot_paid_to_us__WEBPACK_IMPORTED_MODULE_46__ = __webpack_require__(/*! ../payments/screenshot/paid-to-us */ "./src/payments/screenshot/paid-to-us.ts");
+/* harmony import */ var _payments_upi__WEBPACK_IMPORTED_MODULE_47__ = __webpack_require__(/*! ../payments/upi */ "./src/payments/upi.ts");
+/* harmony import */ var _tg_vision__WEBPACK_IMPORTED_MODULE_48__ = __webpack_require__(/*! @tg/vision */ "../../packages/tg-vision/src/index.ts");
+/* harmony import */ var _jobs_delayed__WEBPACK_IMPORTED_MODULE_49__ = __webpack_require__(/*! ../jobs/delayed */ "./src/jobs/delayed.ts");
+
 
 
 
@@ -84872,7 +84994,7 @@ function scheduleProcessImageTask(callback, delayMs, context) {
 }
 function scheduleImageFollowup(event, chatId, kind, delayMs, extra = {}) {
     const msgId = Number(event.message?.id) || 0;
-    (0,_jobs_delayed__WEBPACK_IMPORTED_MODULE_48__.scheduleDelayed)(chatId, 'imageFollowup', { kind, msgId, ...extra }, delayMs);
+    (0,_jobs_delayed__WEBPACK_IMPORTED_MODULE_49__.scheduleDelayed)(chatId, 'imageFollowup', { kind, msgId, ...extra }, delayMs);
 }
 /** Delayed record 'imageFollowup'. Never throws (same reporting as the old timer wrapper). */
 async function runImageFollowup(client, chatId, params) {
@@ -85191,7 +85313,11 @@ function restoreHolds(records) {
 }
 /** Fallback "not a payment" verdicts needed before the final give-up deletes the photo and asks to pay (review 2026-10-20). */
 const MIN_NOT_PAYMENT_VERDICTS_TO_ASK = 2;
-async function holdForLaterAnalysis(event, chatId, held) {
+/**
+ * `cause` 'store': the proof store (paymentProofs) failed or timed out while judging a payment. Same bounded re-checks,
+ * never a credit without the store; the give-up is the ops notice "Proof store down" (manual review), never a user ask.
+ */
+async function holdForLaterAnalysis(event, chatId, held, cause = 'analysis') {
     const msgId = Number(event.message.id) || 0;
     const existing = pendingHolds.get(chatId);
     const sameMessage = existing !== undefined && existing.msgId === msgId;
@@ -85202,7 +85328,7 @@ async function holdForLaterAnalysis(event, chatId, held) {
     const note = delay !== undefined
         ? `rechecking in ${Math.round(delay / 60000)} min`
         : 'giving up; please verify manually';
-    logger.warn(`[ProcessImage] analysis unavailable for ${chatId} msg ${msgId}: ${note}`);
+    logger.warn(`[ProcessImage] ${cause === 'store' ? 'proof store' : 'analysis'} unavailable for ${chatId} msg ${msgId}: ${note}`);
     if (delay === undefined) {
         if (sameMessage)
             pendingHolds.delete(chatId);
@@ -85218,12 +85344,16 @@ async function holdForLaterAnalysis(event, chatId, held) {
         if (holdTimer)
             holdTimer(() => { void runHoldRecheck(client, chatId, args); }, delay);
         else
-            (0,_jobs_delayed__WEBPACK_IMPORTED_MODULE_48__.scheduleDelayed)(chatId, 'holdRecheck', args, delay);
+            (0,_jobs_delayed__WEBPACK_IMPORTED_MODULE_49__.scheduleDelayed)(chatId, 'holdRecheck', args, delay);
     }
     // Ops hear about it only when the last re-check also failed (2026-10-19: one slow call fired "Analysis down" for a
     // screenshot the 3-min re-check then read fine). The holds before that are the log line above.
     if (delay !== undefined)
         return;
+    if (cause === 'store') {
+        await sendAnalysisUnavailableNotice(chatId, note, [], 'Proof store down');
+        return;
+    }
     // Final give-up. What the fallback image models saw decides the message (only the primary's verdict is final, so none
     // of this is a reject):
     //  - any model saw a PAYMENT screen but no usable amount -> evidence only (never deleted: it may be a real payment) and
@@ -85366,9 +85496,9 @@ async function screenshotEvent(client, chatId, msgId) {
     const message = Array.isArray(found) ? found[0] : undefined;
     return message ? { message, client, chatId: message.chatId, isPrivate: true } : null;
 }
-async function sendAnalysisUnavailableNotice(chatId, note, extra = []) {
+async function sendAnalysisUnavailableNotice(chatId, note, extra = [], title = "Analysis down") {
     try {
-        await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_22__.BotConfig.getInstance().sendMessage(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_22__.ChannelCategory.CLIENT_UPDATES, analysisUnavailableNotice(chatId, note, extra));
+        await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_22__.BotConfig.getInstance().sendMessage(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_22__.ChannelCategory.CLIENT_UPDATES, { ...analysisUnavailableNotice(chatId, note, extra), title });
     }
     catch (error) {
         logger.error('[ProcessImage] analysis-unavailable notice failed', error);
@@ -85481,14 +85611,14 @@ function paymentFlowWith(client, chatId, db, amountRead, proof) {
         }),
         fraudWarned: () => (0,_payments_payment_chat_guard__WEBPACK_IMPORTED_MODULE_1__.noteFraudWarning)(chatId),
         fraudCleared: () => (0,_payments_payment_chat_guard__WEBPACK_IMPORTED_MODULE_1__.clearFraudWarning)(chatId),
-        block: () => db.updateSingleKey(chatId, _data_user_data_crud__WEBPACK_IMPORTED_MODULE_0__.user.canReply, 0),
+        block: () => blockOnEveryPersona(db, chatId),
         unblock: () => db.update(chatId, { canReply: 1, limitTime: 0 }),
         readCanReply: async () => (await db.read(chatId))?.canReply,
         schedule: (task, delayMs, context) => scheduleProcessImageTask(task, delayMs, context),
         // The 15-min block after a fake-payment warning: a delayed record (restart-safe; markAskBlocked is atomic).
         scheduleFraudBlock: (due, delayMs) => {
             const args = { profile: due.profile, msgId: due.msgId, label: due.label, amountRead };
-            (0,_jobs_delayed__WEBPACK_IMPORTED_MODULE_48__.scheduleDelayed)(due.chatId, 'fraudBlock', args, delayMs, `pifraud::${due.chatId}::${due.msgId}`);
+            (0,_jobs_delayed__WEBPACK_IMPORTED_MODULE_49__.scheduleDelayed)(due.chatId, 'fraudBlock', args, delayMs, `pifraud::${due.chatId}::${due.msgId}`);
         },
         log: (m) => logger.log(m),
         warn: (m) => logger.warn(m),
@@ -85509,13 +85639,14 @@ function startProofRecord(event, chatId, db, photoBuffer, imageDetails) {
         photo: photoBuffer,
         details: imageDetails,
         rawText: String(imageDetails.text ?? ""),
+        caption: String(event.message?.text ?? ""),
         receivedAtMs: pictureArrivalMs(event),
         vision: (0,_payments_vision_shadow__WEBPACK_IMPORTED_MODULE_15__.proofVisionOf)(imageDetails),
         store: () => (db.getRepositories?.()?.paymentProofs ?? null),
         // The same payee rules the payment branch applies (paid-to-us.ts), read only for the review's payee class.
-        payee: () => (0,_payments_proof_archive_verdict__WEBPACK_IMPORTED_MODULE_17__.payeeClassOf)((0,_payments_screenshot_paid_to_us__WEBPACK_IMPORTED_MODULE_45__.payeeVerdict)(imageDetails, {
-            ownUpiIds: (0,_payments_proof_check_upi_ownership__WEBPACK_IMPORTED_MODULE_19__.ourUpiIds)(_payments_upi__WEBPACK_IMPORTED_MODULE_46__.UpiIds),
-            upiListLoaded: (0,_payments_proof_check_upi_ownership__WEBPACK_IMPORTED_MODULE_19__.ownIdsFrom)(_payments_upi__WEBPACK_IMPORTED_MODULE_46__.UpiIds).length > 0,
+        payee: () => (0,_payments_proof_archive_verdict__WEBPACK_IMPORTED_MODULE_17__.payeeClassOf)((0,_payments_screenshot_paid_to_us__WEBPACK_IMPORTED_MODULE_46__.payeeVerdict)(imageDetails, {
+            ownUpiIds: (0,_payments_proof_check_upi_ownership__WEBPACK_IMPORTED_MODULE_19__.ourUpiIds)(_payments_upi__WEBPACK_IMPORTED_MODULE_47__.UpiIds),
+            upiListLoaded: (0,_payments_proof_check_upi_ownership__WEBPACK_IMPORTED_MODULE_19__.ownIdsFrom)(_payments_upi__WEBPACK_IMPORTED_MODULE_47__.UpiIds).length > 0,
             personaNames: [...db.getOwnClientNames(), ...db.getClientFirstNames()],
         })),
         paymentMs: () => printedPaymentMs(imageDetails),
@@ -85539,6 +85670,57 @@ function rejectOutcome(title) {
     return ["other", "REJECTED"];
 }
 /** Delayed record 'fraudBlock'. */
+/**
+ * The fake-payment block (owner 2026-11-07): this persona's row, then every other persona row of the same Telegram user
+ * that is not blocked yet (chatId is the user id on every client). The other rows are best effort: the open fraud
+ * request in paymentProofs is per user, so the next touch from any client also finds it (fraudDeadlineOnTouch).
+ */
+async function blockOnEveryPersona(db, chatId) {
+    await db.updateSingleKey(chatId, _data_user_data_crud__WEBPACK_IMPORTED_MODULE_0__.user.canReply, 0);
+    let others = [];
+    try {
+        others = await db.readOtherPersonaRows(chatId);
+    }
+    catch (error) {
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_21__.parseError)(error, `[payment-gate] ${chatId}: reading the other persona rows to block failed`, false);
+        return;
+    }
+    for (const row of others) {
+        const profile = row.profile;
+        if (!profile || row.canReply === 0)
+            continue;
+        try {
+            await db.updateOtherPersonaRow(chatId, profile, { canReply: 0 });
+        }
+        catch (error) {
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_21__.parseError)(error, `[payment-gate] ${chatId}: blocking the ${profile} row failed`, false);
+        }
+    }
+}
+/**
+ * The fraud deadline, checked on every inbound touch from any client (no sweeper): an open fake-payment warning of this
+ * user (any persona) past FRAUD_GRACE_MS blocks now, on every persona, once (markAskBlocked is conditional). The Redis
+ * delayed record still fires on the warning's own client; whichever comes first blocks. `blocked`: a block from such a
+ * warning stands (answerable for 24 h), so a new persona must not greet. Never throws.
+ */
+async function fraudDeadlineOnTouch(client, chatId) {
+    try {
+        const db = _data_user_data_crud__WEBPACK_IMPORTED_MODULE_0__.UserDataDtoCrud.getInstance();
+        const gate = (0,_payments_proof_gate_gate__WEBPACK_IMPORTED_MODULE_41__.proofGateFrom)(() => db.getRepositories?.() ?? null);
+        const { due, blocked } = await gate.fraudDeadline(chatId);
+        if (!due)
+            return { fired: false, blocked };
+        const label = (due.ask?.reasons ?? []).join(',') || 'fraud';
+        const own = (process.env.dbcoll || '').toLowerCase();
+        await paymentFlowWith(client, chatId, db, Number(due.amount) || 0)
+            .fraudBlockDue({ chatId, profile: due.profile, msgId: due.telegramMsgId, label, quiet: due.profile !== own });
+        return { fired: true, blocked: true };
+    }
+    catch (error) {
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_21__.parseError)(error, `paymentGate.fraudDeadlineOnTouch.${chatId}`, false);
+        return { fired: false, blocked: false };
+    }
+}
 async function runFraudBlock(client, chatId, args) {
     try {
         await paymentFlowWith(client, chatId, _data_user_data_crud__WEBPACK_IMPORTED_MODULE_0__.UserDataDtoCrud.getInstance(), Number(args.amountRead) || 0)
@@ -85561,7 +85743,7 @@ function screenshotRef(event, chatId, photoBuffer, imageDetails, paymentMs) {
 }
 /** Payment moment as printed (no AM/PM correction): used where the time check did not run. */
 function printedPaymentMs(imageDetails) {
-    return (0,_payments_proof_gate_signals__WEBPACK_IMPORTED_MODULE_44__.phonePeTxnTimeMs)(imageDetails.text) ?? (0,_payments_payment_time__WEBPACK_IMPORTED_MODULE_20__.parsePaymentTime)(imageDetails.time || "", new Date(), imageDetails.text)?.getTime() ?? null;
+    return (0,_payments_proof_gate_signals__WEBPACK_IMPORTED_MODULE_45__.phonePeTxnTimeMs)(imageDetails.text) ?? (0,_payments_payment_time__WEBPACK_IMPORTED_MODULE_20__.parsePaymentTime)(imageDetails.time || "", new Date(), imageDetails.text)?.getTime() ?? null;
 }
 /** A proof-blocked screenshot: never credited. */
 async function handleProofBlockedImage(event, chatId, db, imageDetails, photoBuffer, proof) {
@@ -85585,7 +85767,9 @@ async function handleProofBlockedImage(event, chatId, db, imageDetails, photoBuf
         return;
     }
     const flow = paymentFlowFor(event, chatId, db, imageDetails, proof);
-    const session = await flow.begin(screenshotRef(event, chatId, photoBuffer, imageDetails, printedPaymentMs(imageDetails)));
+    const begun = await flow.begin(screenshotRef(event, chatId, photoBuffer, imageDetails, printedPaymentMs(imageDetails)));
+    // Store down: the previous behaviour (never a credit on this path).
+    const session = begun === 'unavailable' ? null : begun;
     // A model-only block on a payment already credited in this chat is a resend: the gate's repeat reply and notice,
     // not a fake (live keerthi2 8895791565 2026-10-20). A fake proven by text still gets the fraud flow below.
     if (textProven.length === 0 && await flow.resendOfCredited(session, answerResendFor(event, chatId, db)))
@@ -85659,7 +85843,8 @@ async function blockFakePaymentScreenshot(event, chatId, db, imageDetails, photo
     // Without the store the old rude reply + block below; with it the flow records its own outcome (warning / block).
     proof?.outcome("fake_blocked", fraudReasons);
     const flow = paymentFlowFor(event, chatId, db, imageDetails, proof);
-    const session = await flow.begin(screenshotRef(event, chatId, photoBuffer, imageDetails, printedPaymentMs(imageDetails)));
+    const begun = await flow.begin(screenshotRef(event, chatId, photoBuffer, imageDetails, printedPaymentMs(imageDetails)));
+    const session = begun === 'unavailable' ? null : begun; // store down: the previous behaviour (never a credit here)
     await flow.fraud(session, userDetails.canReply, fraudReasons, async () => {
         await sendMessageWithTimeout(event.client, chatId, {
             message: (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_12__.pickOneMsg)([
@@ -85924,7 +86109,7 @@ async function recordValidPaymentCredit(event, chatId, db, userDetails, amount, 
     // re-screenshot of the same payment has a new message id; nothing written; the write threw) is left undefined:
     // the legacy rise-over-highest rule, which never double-books.
     let credit;
-    if ((0,_tg_vision__WEBPACK_IMPORTED_MODULE_47__.isCreditableAmount)(amount)) {
+    if ((0,_tg_vision__WEBPACK_IMPORTED_MODULE_48__.isCreditableAmount)(amount)) {
         creditedSeq.delete(chatId);
         creditedSeq.set(chatId, ++holdSeq);
         capMap(creditedSeq);
@@ -85939,7 +86124,7 @@ async function recordValidPaymentCredit(event, chatId, db, userDetails, amount, 
         }
     }
     // Same-day unserved sum: the balance is the summed tier, not this screenshot alone.
-    if ((0,_tg_vision__WEBPACK_IMPORTED_MODULE_47__.isCreditableAmount)(amount) && tierAmount > currentUserDetails.payAmount) {
+    if ((0,_tg_vision__WEBPACK_IMPORTED_MODULE_48__.isCreditableAmount)(amount) && tierAmount > currentUserDetails.payAmount) {
         // Only update if amount is greater than current payAmount
         // This automatically skips if payAmount was already updated to a higher value (e.g., 50 for demo)
         userDetails = await db.update(chatId, {
@@ -86056,6 +86241,10 @@ async function processImage(event) {
             return;
         }
         proof = startProofRecord(event, chatId, db, photoBuffer, imageDetails);
+        // Every held outcome (status unclear, not finished, no amount, failed, a credit-rule reject) stores a 'held' request
+        // on its paymentProofs row, so the next touch from any client sees it (gate.ts). Best effort: never blocks the reply.
+        const storeHeldAsk = (code) => paymentFlowFor(event, chatId, db, imageDetails, proof).storeHeld(screenshotRef(event, chatId, photoBuffer, imageDetails, printedPaymentMs(imageDetails)), code)
+            .catch((error) => (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_21__.parseError)(error, `[ProcessImage] ${chatId}: storing the held request failed`, false));
         if (imageDetails.proofBlocked) {
             await handleProofBlockedImage(event, chatId, db, imageDetails, photoBuffer, proof);
             return;
@@ -86089,9 +86278,9 @@ async function processImage(event) {
         }
         const processedAmount = (0,_payments_screenshot_normalise_amount__WEBPACK_IMPORTED_MODULE_28__.normalizeAmount)(imageDetails.amount, userDetails.payAmount);
         const amount = processedAmount;
-        if (blockedAnswering && !(amount > 11 && (0,_tg_vision__WEBPACK_IMPORTED_MODULE_47__.isCreditableAmount)(amount))) {
+        if (blockedAnswering && !(amount > 11 && (0,_tg_vision__WEBPACK_IMPORTED_MODULE_48__.isCreditableAmount)(amount))) {
             logger.warn(`[ProcessImage] blocked user ${chatId}: amount ${amount} out of range, ignored silently`);
-            proof.outcome((0,_tg_vision__WEBPACK_IMPORTED_MODULE_47__.isCreditableAmount)(amount) ? "other" : "over_limit", [(0,_tg_vision__WEBPACK_IMPORTED_MODULE_47__.isCreditableAmount)(amount) ? "AMOUNT_TOO_SMALL" : "OVER_1000", "BLOCKED_IGNORED"]);
+            proof.outcome((0,_tg_vision__WEBPACK_IMPORTED_MODULE_48__.isCreditableAmount)(amount) ? "other" : "over_limit", [(0,_tg_vision__WEBPACK_IMPORTED_MODULE_48__.isCreditableAmount)(amount) ? "AMOUNT_TOO_SMALL" : "OVER_1000", "BLOCKED_IGNORED"]);
             return;
         }
         const text = imageDetails.text.toLowerCase().replace(/(\r\n|\n|\r)/g, " ");
@@ -86131,7 +86320,7 @@ async function processImage(event) {
         const callOwed = !blockedAnswering && (0,_payments_service_eligibility__WEBPACK_IMPORTED_MODULE_3__.canProceedWithService)(userDetails);
         // A resend of a payment credited in this chat was answered from the chat's state (call requested / "call soon").
         let resendAnswered = false;
-        const judgePaymentFirst = callOwed && amount > 11 && (0,_tg_vision__WEBPACK_IMPORTED_MODULE_47__.isCreditableAmount)(amount)
+        const judgePaymentFirst = callOwed && amount > 11 && (0,_tg_vision__WEBPACK_IMPORTED_MODULE_48__.isCreditableAmount)(amount)
             && reachesPaymentGate(imageDetails, sanitizedData, event.message?.text);
         if (callOwed && !judgePaymentFirst) {
             const callRequested = await (0,_calls_call_initiation__WEBPACK_IMPORTED_MODULE_29__.proceedWithCall)(userDetails, chatId, "Image Processed");
@@ -86174,23 +86363,24 @@ async function processImage(event) {
                         (isLocalFailedImg && !sanitizedData.isFinishedPayment)) {
                         proof.outcome("not_receipt", ["FAILED_PAYMENT"]);
                         await rejectFailedPaymentScreenshot(event, chatId, imageDetails, photoBuffer, broadcastName);
+                        await storeHeldAsk("FAILED_PAYMENT");
                     }
                     else {
                         // Who it was paid to is decided in one place (paid-to-us.ts payeeVerdict); this is its context.
                         const payeeCtx = {
-                            ownUpiIds: (0,_payments_proof_check_upi_ownership__WEBPACK_IMPORTED_MODULE_19__.ourUpiIds)(_payments_upi__WEBPACK_IMPORTED_MODULE_46__.UpiIds),
-                            upiListLoaded: (0,_payments_proof_check_upi_ownership__WEBPACK_IMPORTED_MODULE_19__.ownIdsFrom)(_payments_upi__WEBPACK_IMPORTED_MODULE_46__.UpiIds).length > 0,
+                            ownUpiIds: (0,_payments_proof_check_upi_ownership__WEBPACK_IMPORTED_MODULE_19__.ourUpiIds)(_payments_upi__WEBPACK_IMPORTED_MODULE_47__.UpiIds),
+                            upiListLoaded: (0,_payments_proof_check_upi_ownership__WEBPACK_IMPORTED_MODULE_19__.ownIdsFrom)(_payments_upi__WEBPACK_IMPORTED_MODULE_47__.UpiIds).length > 0,
                             personaNames: [...db.getOwnClientNames(), ...db.getClientFirstNames()],
                         };
                         const fraudReasons = [
                             ...((0,_payments_screenshot_detect_fake__WEBPACK_IMPORTED_MODULE_37__.detectFakeScreenshot)(imageDetails.text) ? ["FAKE_TEXT"] : []),
-                            ...(0,_payments_proof_gate_signals__WEBPACK_IMPORTED_MODULE_44__.fabricatedTextReasons)(imageDetails.text),
+                            ...(0,_payments_proof_gate_signals__WEBPACK_IMPORTED_MODULE_45__.fabricatedTextReasons)(imageDetails.text),
                             // Who it was paid to (paid-to-us.ts payeeVerdict): only a TAMPERED payee is a fraud reason. Someone else's
                             // payment (NOT_OURS) falls through to the "not my payment" branch below. Foreign ids are judged only
                             // against the fetched /upi-ids list: without it our shared ids are unknown.
-                            ...tamperedPayeeReasons((0,_payments_screenshot_paid_to_us__WEBPACK_IMPORTED_MODULE_45__.payeeVerdict)(imageDetails, payeeCtx)),
+                            ...tamperedPayeeReasons((0,_payments_screenshot_paid_to_us__WEBPACK_IMPORTED_MODULE_46__.payeeVerdict)(imageDetails, payeeCtx)),
                             // Owner 2026-10-22 "future dates are fake!": a payment time after the picture arrived (beyond the clock tolerance).
-                            ...(0,_payments_proof_gate_signals__WEBPACK_IMPORTED_MODULE_44__.futurePaymentTimeReasons)(imageDetails, pictureArrivalMs(event)),
+                            ...(0,_payments_proof_gate_signals__WEBPACK_IMPORTED_MODULE_45__.futurePaymentTimeReasons)(imageDetails, pictureArrivalMs(event)),
                         ];
                         if (fraudReasons.length > 0) {
                             await blockFakePaymentScreenshot(event, chatId, db, imageDetails, photoBuffer, userDetails, fraudReasons, proof);
@@ -86199,7 +86389,7 @@ async function processImage(event) {
                             // Owner 2026-10-25: a receipt of ₹1,000 or more is never credited, with or without UTR (the one threshold,
                             // @tg/vision isCreditableAmount). Same reply as the old 15,000 ceiling; no cheat / fraud mark (a misread of a
                             // genuine receipt must not punish the payer).
-                            if (!(0,_tg_vision__WEBPACK_IMPORTED_MODULE_47__.isCreditableAmount)(amount)) {
+                            if (!(0,_tg_vision__WEBPACK_IMPORTED_MODULE_48__.isCreditableAmount)(amount)) {
                                 proof.outcome("over_limit", ["OVER_1000"]);
                                 await (0,_telegram_delete_messages__WEBPACK_IMPORTED_MODULE_6__.deleteMessage)(event);
                                 await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_31__.notifyChat)(chatId, { title: 'Amount rejected', summary: 'Told user it seems fake.' });
@@ -86219,14 +86409,26 @@ async function processImage(event) {
                                     // screenshot it has already replied and nothing below runs.
                                     const flow = paymentFlowFor(event, chatId, db, imageDetails, proof);
                                     const paymentMs = isWithinPastTenMinutesImage.isValid ? (isWithinPastTenMinutesImage.paymentMs ?? null) : null;
-                                    const session = await flow.begin({ ...screenshotRef(event, chatId, photoBuffer, imageDetails, paymentMs), creditAmount: amount, arrivalMs });
-                                    const judged = await flow.judge({
+                                    const begun = await flow.begin({ ...screenshotRef(event, chatId, photoBuffer, imageDetails, paymentMs), creditAmount: amount, arrivalMs });
+                                    const session = begun === 'unavailable' ? null : begun;
+                                    const judged = begun === 'unavailable' ? flow.storeUnavailable(chatId) : await flow.judge({
                                         session,
                                         canReply: userDetails.canReply,
                                         // No store (outage): no re-send check, so the credit rules judge on the old 10-minute view.
                                         creditRules: () => (0,_payments_screenshot_helpers__WEBPACK_IMPORTED_MODULE_32__.handleMyPayment)(imageDetails, userDetails, session ? isWithinPastTenMinutesImage : (0,_payments_payment_time__WEBPACK_IMPORTED_MODULE_20__.withoutProofStore)(isWithinPastTenMinutesImage, arrivalMs), didPayOthers, arrivalMs),
                                         answerResend: async () => (resendAnswered = await answerResendFor(event, chatId, db)()),
                                     });
+                                    if ("hold" in judged && judged.hold) {
+                                        // Store error / timeout: never credited. Bounded re-checks, then the ops notice (fail closed).
+                                        proof.outcome("other", ["STORE_UNAVAILABLE"]);
+                                        // One "checking" line per chat while held (a re-check or a second copy held after it says nothing).
+                                        const firstHold = !pendingHolds.has(chatId);
+                                        await holdForLaterAnalysis(event, chatId, undefined, 'store');
+                                        if (firstHold && userDetails.canReply !== 0) {
+                                            await sendMessageWithTimeout(event.client, chatId, { message: (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_12__.pickOneMsg)(_payments_proof_gate_messages__WEBPACK_IMPORTED_MODULE_44__.STORE_HOLD_MESSAGES) });
+                                        }
+                                        return;
+                                    }
                                     const isPaymentProperlyMine = "verdict" in judged ? judged.verdict : null;
                                     releaseClaim = "verdict" in judged ? judged.release : undefined;
                                     // The gate claimed this payment's own identity (UTR / picture hash): its full amount is new revenue.
@@ -86236,6 +86438,8 @@ async function processImage(event) {
                                     else if (isPaymentProperlyMine) {
                                         const [outcome, code] = rejectOutcome(isPaymentProperlyMine.title);
                                         proof.outcome(outcome, blockedAnswering ? [code, "BLOCKED_IGNORED"] : [code]);
+                                        if (session)
+                                            await session.openAsk('held', [code]);
                                     }
                                     if (blockedAnswering && !isPaymentProperlyMine?.isvalid) {
                                         logger.warn(`[ProcessImage] blocked user ${chatId}: payment not accepted, ignored silently`);
@@ -86275,7 +86479,7 @@ async function processImage(event) {
                                         if (tierAmount !== payAmount && tierAmount < _payments_ladder__WEBPACK_IMPORTED_MODULE_4__.PAID_MIN) {
                                             await handleLowAmountPayment(event, chatId, db, imageDetails, userDetails, tierAmount, payAmount, isWithinPastTenMinutesImage, userChatState, initiateCallKeepingClaim);
                                         }
-                                        else if (tierAmount >= _payments_ladder__WEBPACK_IMPORTED_MODULE_4__.DEMO_GRANT_MIN && tierAmount <= _tg_vision__WEBPACK_IMPORTED_MODULE_47__.MAX_PAYMENT_AMOUNT) {
+                                        else if (tierAmount >= _payments_ladder__WEBPACK_IMPORTED_MODULE_4__.DEMO_GRANT_MIN && tierAmount <= _tg_vision__WEBPACK_IMPORTED_MODULE_48__.MAX_PAYMENT_AMOUNT) {
                                             if (usedUpBeforeCredit) {
                                                 logger.log(`[used-up-credit] ${chatId}: new service cycle at ₹${tierAmount}`);
                                                 userDetails = await (0,_payments_service_cycle__WEBPACK_IMPORTED_MODULE_5__.startServiceCycle)(chatId, tierAmount);
@@ -86333,6 +86537,7 @@ async function processImage(event) {
                             // like the no-amount branch (RCA 2026-10-21: 62 such deletes since 10-10, 3 confirmed false rejects).
                             proof.outcome("not_receipt", ["STATUS_UNCLEAR"]);
                             await sendMessageWithTimeout(event.client, chatId, { message: (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_12__.pickOneMsg)(UNCLEAR_SCREENSHOT_MESSAGES) });
+                            await storeHeldAsk("STATUS_UNCLEAR");
                             await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_31__.notifyChat)(chatId, {
                                 title: 'Status unclear (asked again)',
                                 summary: 'Payment to us, but the payment status could not be read; asked for the full screenshot.',
@@ -86351,11 +86556,13 @@ async function processImage(event) {
                 else {
                     proof.outcome("not_receipt", ["NOT_FINISHED"]);
                     await (0,_payments_screenshot_helpers__WEBPACK_IMPORTED_MODULE_32__.askToFinishPayment)(event);
+                    await storeHeldAsk("NOT_FINISHED");
                 }
             }
         }
         else if (askFullScreenshot) {
             proof.outcome("not_receipt", ["NO_AMOUNT"]);
+            await storeHeldAsk("NO_AMOUNT");
             // Never a reject: one ask for the full payment screenshot plus one ops notice (the photo card above). No delete,
             // no invalid-photo count, no re-check timer: the next screenshot the user sends is judged on its own.
             await sendMessageWithTimeout(event.client, chatId, { message: (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_12__.pickOneMsg)(UNCLEAR_SCREENSHOT_MESSAGES) });
@@ -86365,6 +86572,7 @@ async function processImage(event) {
             if (sanitizedData.isPaymentMine) {
                 proof.outcome("not_receipt", ["NOT_FINISHED"]);
                 await (0,_payments_screenshot_helpers__WEBPACK_IMPORTED_MODULE_32__.askToFinishPayment)(event);
+                await storeHeldAsk("NOT_FINISHED");
             }
             else {
                 await replyToNonPaymentPicture(event, chatId, imageDetails, userDetails);
@@ -99324,7 +99532,7 @@ function hasOpenPaymentAsk(db, chatId, kind) {
         return Promise.resolve(false);
     try {
         const gate = (0,_proof_gate_gate__WEBPACK_IMPORTED_MODULE_0__.proofGateFrom)(() => getRepositories.call(db));
-        return gate.hasAnswerableAsk(chatId, (process.env.dbcoll || '').toLowerCase(), kind).catch(() => false);
+        return gate.hasAnswerableAsk(chatId, kind).catch(() => false);
     }
     catch {
         return Promise.resolve(false);
@@ -99960,7 +100168,7 @@ class ProofRecord {
         const verdict = (0,_verdict__WEBPACK_IMPORTED_MODULE_2__.buildVerdict)({ outcome: this.result.outcome, reasons: this.result.reasons, payee, vision: i.vision });
         const { mime, ext } = (0,_verdict__WEBPACK_IMPORTED_MODULE_2__.sniffImage)(i.photo);
         const image = { host: i.clientId, bytes: i.photo.length, mime, sha256: (0,_verdict__WEBPACK_IMPORTED_MODULE_2__.sha256Hex)(i.photo), stored: false };
-        const ocr = (0,_verdict__WEBPACK_IMPORTED_MODULE_2__.ocrFieldsOf)(i.details, i.vision, i.rawText);
+        const ocr = (0,_verdict__WEBPACK_IMPORTED_MODULE_2__.ocrFieldsOf)(i.details, i.vision, i.rawText, i.caption);
         let store = null;
         try {
             store = i.store();
@@ -100480,8 +100688,10 @@ async function thumbFor(imagePath) {
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   MAX_CAPTION_BYTES: () => (/* binding */ MAX_CAPTION_BYTES),
 /* harmony export */   MAX_FAKE_SIGNALS: () => (/* binding */ MAX_FAKE_SIGNALS),
 /* harmony export */   MAX_OCR_TEXT_BYTES: () => (/* binding */ MAX_OCR_TEXT_BYTES),
+/* harmony export */   MAX_PRECHECK_TEXT_BYTES: () => (/* binding */ MAX_PRECHECK_TEXT_BYTES),
 /* harmony export */   MAX_VERDICT_REASONS: () => (/* binding */ MAX_VERDICT_REASONS),
 /* harmony export */   buildSidecar: () => (/* binding */ buildSidecar),
 /* harmony export */   buildVerdict: () => (/* binding */ buildVerdict),
@@ -100504,6 +100714,9 @@ __webpack_require__.r(__webpack_exports__);
  * The verdict only DESCRIBES what the payment path already decided; nothing here feeds back into a reply or a credit.
  */
 
+/** Review-only context caps (bytes): ~0.8 KB per row worst case, at 7 days' retention. */
+const MAX_CAPTION_BYTES = 200;
+const MAX_PRECHECK_TEXT_BYTES = 600;
 const MAX_VERDICT_REASONS = 8;
 const MAX_FAKE_SIGNALS = 8;
 /** Sidecar `ocrText` cap (bytes, UTF-8). */
@@ -100593,8 +100806,14 @@ function txnIdOf(text) {
     return m ? m[1].toUpperCase() : undefined;
 }
 /** The row's short `ocr` fields. payerUpiId is not read by any model today (always absent). */
-function ocrFieldsOf(details, vision, rawText) {
+function ocrFieldsOf(details, vision, rawText, caption) {
     const out = {};
+    const cap = String(caption ?? '').trim();
+    if (cap)
+        out.caption = capUtf8(cap, MAX_CAPTION_BYTES);
+    const pre = String(vision?.ocrText ?? '').trim();
+    if (pre)
+        out.precheckText = capUtf8(pre, MAX_PRECHECK_TEXT_BYTES);
     const payerName = short(vision?.payerName ?? details.payerName);
     if (payerName)
         out.payerName = payerName;
@@ -101295,8 +101514,9 @@ const SECOND_OPINION_ASK_SCORE = 0.5;
 /** Visible-manipulation signals that let two models' "fake" BLOCK. Layout, "impossible values" (UTR/date are checked
  *  by code), cropped and "other" alone only ask for proof: live 2026-10-11..19, 26 of 67 model-pair blocks rested on
  *  those alone (a Fam torn-paper receipt, "year 2026 is future", an iPhone ad) and 4 of them were the same image
- *  accepted on a later send. */
-const CONCRETE_FAKE_SIGNALS = ['edited_amount', 'font_mismatch', 'generator_stamp', 'disclaimer_text', 'ai_watermark', 'photo_of_screen'];
+ *  accepted on a later send. A photo of a screen is how many genuine payers send proof (phone photographing a laptop /
+ *  another phone): it says nothing about an edit, so it only asks for proof too (claude-review F3). */
+const CONCRETE_FAKE_SIGNALS = ['edited_amount', 'font_mismatch', 'generator_stamp', 'disclaimer_text', 'ai_watermark'];
 /** A payment dated further than this after the extraction time cannot be real (IST/UTC mix-ups are 5.5 h). */
 const FUTURE_DATE_SKEW_MS = 6 * 60 * 60 * 1000;
 /** UPI UTR / reference = 12 digits. Digits-only values of this length range that are NOT 12 digits are "clearly malformed";
@@ -101594,13 +101814,18 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   CONFIRM_TIME_MS: () => (/* binding */ CONFIRM_TIME_MS),
 /* harmony export */   FRAUD_GRACE_MS: () => (/* binding */ FRAUD_GRACE_MS),
 /* harmony export */   NEAR_PICTURE_BITS: () => (/* binding */ NEAR_PICTURE_BITS),
+/* harmony export */   NEEDS_REAL_REFERENCE_REASONS: () => (/* binding */ NEEDS_REAL_REFERENCE_REASONS),
 /* harmony export */   SAME_TIME_MS: () => (/* binding */ SAME_TIME_MS),
 /* harmony export */   askAnswerable: () => (/* binding */ askAnswerable),
+/* harmony export */   canonicalPayee: () => (/* binding */ canonicalPayee),
 /* harmony export */   classifyAgainstServed: () => (/* binding */ classifyAgainstServed),
 /* harmony export */   confirmsAsk: () => (/* binding */ confirmsAsk),
+/* harmony export */   creditedSameAmountWithin: () => (/* binding */ creditedSameAmountWithin),
+/* harmony export */   dedupeReference: () => (/* binding */ dedupeReference),
 /* harmony export */   differentFormatSamePayment: () => (/* binding */ differentFormatSamePayment),
 /* harmony export */   findConfirmedAsk: () => (/* binding */ findConfirmedAsk),
 /* harmony export */   fraudAskAnswerable: () => (/* binding */ fraudAskAnswerable),
+/* harmony export */   fraudDeadlinePassed: () => (/* binding */ fraudDeadlinePassed),
 /* harmony export */   fraudGraceOpen: () => (/* binding */ fraudGraceOpen),
 /* harmony export */   gateBlockAnswerable: () => (/* binding */ gateBlockAnswerable),
 /* harmony export */   heldSameFile: () => (/* binding */ heldSameFile),
@@ -101612,10 +101837,12 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   normalizePayeeUpi: () => (/* binding */ normalizePayeeUpi),
 /* harmony export */   normalizeUtr: () => (/* binding */ normalizeUtr),
 /* harmony export */   pictureDistance: () => (/* binding */ pictureDistance),
+/* harmony export */   referenceCutOf: () => (/* binding */ referenceCutOf),
 /* harmony export */   referenceFormat: () => (/* binding */ referenceFormat),
 /* harmony export */   sameAmount: () => (/* binding */ sameAmount),
 /* harmony export */   samePayee: () => (/* binding */ samePayee),
 /* harmony export */   sameUpiId: () => (/* binding */ sameUpiId),
+/* harmony export */   servedMinuteKey: () => (/* binding */ servedMinuteKey),
 /* harmony export */   utrOneDigitOff: () => (/* binding */ utrOneDigitOff)
 /* harmony export */ });
 /* harmony import */ var _payment_time__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../payment-time */ "./src/payments/payment-time.ts");
@@ -101641,6 +101868,8 @@ const CONFIRM_TIME_MS = 15 * MINUTE_MS;
 const FRAUD_GRACE_MS = 15 * MINUTE_MS;
 /** An open request can be answered for this long (also after the block). */
 const ASK_ANSWER_WINDOW_MS = 24 * 60 * MINUTE_MS;
+/** old_time reasons only a real reference answers (confirmsAsk). */
+const NEEDS_REAL_REFERENCE_REASONS = new Set(['IMPOSSIBLE_REFERENCE', 'NO_UTR_NO_TIME_SAME_AMOUNT']);
 /** Uppercase, separators removed. Null for masked ("XXXX", "****"), too short, or no digits at all. */
 function normalizeUtr(raw) {
     if (typeof raw !== 'string')
@@ -101708,6 +101937,29 @@ function utrOneDigitOff(a, b) {
         if (a[i] !== b[i])
             diff++;
     return diff === 1;
+}
+/**
+ * The reference the re-send rules (rule 8 and rule 4 in classifyAgainstServed, the gate's minute lookup) compare: a
+ * real one (isRealReference) or none. A short or odd reference is not a UTR for them: live nidhi1 5816603243 (2026-11-06)
+ * was credited ₹25 on `21992078` (8 digits) and again on the same payment's full RRN `219920787057`, same payee and
+ * printed minute, because the 8-digit read counted as "has a UTR" and the two "UTRs" differed. An exact repeat of any
+ * reference is still the UTR rule's (same UTR = the same payment).
+ */
+function dedupeReference(utr) {
+    return isRealReference(utr) ? utr : null;
+}
+/**
+ * One reference is a cut of the other (prefix or suffix, at least 8 characters, not equal): the same reference read
+ * whole once and cut once (nidhi1: `21992078` is the head of `219920787057`). With the same payee, amount and printed
+ * minute that is the same payment.
+ */
+function referenceCutOf(a, b) {
+    const x = normalizeUtr(a);
+    const y = normalizeUtr(b);
+    if (!x || !y || x === y)
+        return false;
+    const [short, long] = x.length <= y.length ? [x, y] : [y, x];
+    return long.startsWith(short) || long.endsWith(short);
 }
 /** Not the same file and not the same picture: a different screenshot. */
 function isDifferentPicture(facts, row) {
@@ -101891,11 +102143,16 @@ function classifyAgainstServed(facts, matches, chatServed = [], nowMs = Date.now
     // client: the same payment re-captured. Same chat = the repeat reply; another user, or this user on another
     // persona = "not my Payment" (the elsewhere reply, as for a UTR). Both times must be readable: with no time on
     // either side this rule is off (rule 4 still covers this user).
-    if (!facts.utr && facts.timeMs !== null) {
+    // A reference that is not real (dedupeReference) counts as none here; a credited reference that this one cuts or
+    // extends (referenceCutOf) is the same payment too (hole 1, nidhi1 2026-11-06).
+    const factsRef = dedupeReference(facts.utr);
+    if (facts.timeMs !== null) {
         const arrival = facts.arrivalMs ?? nowMs;
         const minute = Math.floor(facts.timeMs / MINUTE_MS);
         for (const m of matches) {
             const row = m.doc;
+            if (factsRef && !referenceCutOf(facts.utr, row.utr))
+                continue;
             const theirTime = rowTimeMs(row);
             if (theirTime === null || Math.floor(theirTime / MINUTE_MS) !== minute)
                 continue;
@@ -101944,14 +102201,17 @@ function classifyAgainstServed(facts, matches, chatServed = [], nowMs = Date.now
         const withinWindow = Math.abs(theirTime - facts.timeMs) <= SAME_TIME_MS;
         const sameMinute = Math.floor(theirTime / MINUTE_MS) === Math.floor(facts.timeMs / MINUTE_MS);
         const repeat = { kind: 'repeat', by: 'time', sameChat: sameChat(facts, row), matched: row };
-        const rowUtr = normalizeUtr(row.utr);
+        // Only real references count (dedupeReference): a short read on either side is "no UTR" (hole 1).
+        const rowUtr = dedupeReference(normalizeUtr(row.utr));
+        if (sameMinute && referenceCutOf(facts.utr, row.utr))
+            return repeat;
         if (!rowUtr) {
             // No UTR on either side: this chat keeps the 2-min window; another persona only the same minute (rule 7).
-            if (!facts.utr ? (sameChat(facts, row) ? withinWindow : sameMinute) : sameMinute)
+            if (!factsRef ? (sameChat(facts, row) ? withinWindow : sameMinute) : sameMinute)
                 return repeat;
             continue;
         }
-        if (facts.utr) {
+        if (factsRef) {
             // Both show a real reference but of DIFFERENT formats (RRN vs app txn-id): one payment's two screens, not
             // two payments. Same amount + same payee (already checked) + same printed minute = a repeat (live: divya2
             // ₹25, RRN then T-id). The same-format case is decided by the owner rule just below.
@@ -101997,7 +102257,8 @@ function confirmsAsk(facts, asked) {
     // Answering a fake/edited warning needs a real UPI reference on the page: a genuine details page always shows
     // one; the faker's next template did not (live: sowmya1 1118222077 sent a second ₹350 fake, 13-digit "UTR").
     // Same for a request raised over an impossible reference (11 / 13 digits).
-    const needsReal = asked.ask?.kind === 'fraud' || (asked.ask?.reasons ?? []).includes('IMPOSSIBLE_REFERENCE');
+    // Same for a request raised over a crop with no UTR and no time while the same amount was credited (item 8).
+    const needsReal = asked.ask?.kind === 'fraud' || (asked.ask?.reasons ?? []).some((r) => NEEDS_REAL_REFERENCE_REASONS.has(r));
     if (needsReal && !isRealReference(facts.utr))
         return false;
     if (!isDifferentPicture(facts, asked))
@@ -102024,7 +102285,7 @@ function heldSameFile(facts, rows) {
         return null;
     let resolved = null;
     for (const row of rows) {
-        if (row.imageSha256 !== facts.sha256 || row.servedAt || !row.ask)
+        if (row.imageSha256 !== facts.sha256 || row.servedAt || !row.ask || row.ask.kind === 'held')
             continue;
         if (row.profile === facts.profile && row.telegramMsgId === facts.msgId)
             continue;
@@ -102037,7 +102298,11 @@ function heldSameFile(facts, rows) {
 /** The newest open request (within ASK_ANSWER_WINDOW_MS) this screenshot confirms, if any. */
 function findConfirmedAsk(facts, open, nowMs) {
     for (const row of open) {
-        if (row.telegramMsgId === facts.msgId || row.ask?.state !== 'open')
+        if ((row.profile === facts.profile && row.telegramMsgId === facts.msgId) || row.ask?.state !== 'open')
+            continue;
+        // Held-screenshot requests (`held`) are closed by the next credit, never "confirmed": confirming one would
+        // skip the fake-warning checks below it in GateSession.check.
+        if (row.ask.kind === 'held')
             continue;
         const opened = new Date(row.ask.openedAt).getTime();
         if (!Number.isFinite(opened) || nowMs - opened > ASK_ANSWER_WINDOW_MS)
@@ -102054,9 +102319,22 @@ function fraudGraceOpen(row, nowMs) {
     const opened = new Date(row.ask.openedAt).getTime();
     return Number.isFinite(opened) && nowMs - opened < FRAUD_GRACE_MS;
 }
+/**
+ * An open fraud request whose 15-min deadline (ask.openedAt + FRAUD_GRACE_MS, both on the Mongo row) has passed and
+ * that has not blocked the user yet: the block is due now (checked on the user's next touch, any persona).
+ */
+function fraudDeadlinePassed(row, nowMs) {
+    if (row.ask?.kind !== 'fraud' || row.ask.state !== 'open' || row.ask.blockedAt)
+        return false;
+    const opened = new Date(row.ask.openedAt).getTime();
+    return Number.isFinite(opened) && nowMs - opened >= FRAUD_GRACE_MS;
+}
 /** An open request (optionally of one kind) that can still be answered. */
 function askAnswerable(row, nowMs, kind) {
     if (row.ask?.state !== 'open' || (kind && row.ask.kind !== kind))
+        return false;
+    // A 'held' record is not a request the user was asked to answer: only an explicit kind reads it.
+    if (!kind && row.ask.kind === 'held')
         return false;
     const opened = new Date(row.ask.openedAt).getTime();
     return Number.isFinite(opened) && nowMs - opened <= ASK_ANSWER_WINDOW_MS;
@@ -102078,6 +102356,59 @@ function fraudAskAnswerable(row, nowMs) {
 /** An answerable fraud request over which the fake/edited flow BLOCKED the user (only those let a blocked user's photo in). */
 function gateBlockAnswerable(row, nowMs) {
     return fraudAskAnswerable(row, nowMs) && !!row.ask?.blockedAt;
+}
+/** This user (any persona) has a row credited within `windowMs` before `nowMs` with the same amount. */
+function creditedSameAmountWithin(facts, rows, nowMs, windowMs) {
+    return rows.some((r) => {
+        if (r.chatId !== facts.chatId || (r.profile === facts.profile && r.telegramMsgId === facts.msgId) || !r.servedAt)
+            return false;
+        // The same file is a repeat (servedSha claim), not a "maybe new payment".
+        if (facts.sha256 && r.imageSha256 === facts.sha256)
+            return false;
+        const served = new Date(r.servedAt).getTime();
+        return Number.isFinite(served) && nowMs - served <= windowMs && sameAmount(r.amount, facts.amount);
+    });
+}
+/** Our banking names (paid-to-us.ts OUR_PAYEE_NAMES) as letters only, and the cut-off "Ravva Laksh..." read. */
+const OUR_NAME_KEYS = [
+    ['ravvalakshmi', 'ravvalakshmi'], ['lakshmiravva', 'ravvalakshmi'], ['ravvalaksh', 'ravvalakshmi'],
+    ['lakshmistores', 'lakshmistores'], ['storeslakshmi', 'lakshmistores'], ['girlscommunity', 'girlscommunity'],
+    ['communitygirls', 'girlscommunity'], ['reddygirl', 'reddygirl'], ['girlreddy', 'reddygirl'],
+    ['shettysaikumar', 'shettysaikumar'], ['saikumarshetty', 'shettysaikumar'], ['shettysrinivas', 'shettysrinivas'],
+    ['srinivasshetty', 'shettysrinivas'],
+];
+/**
+ * One payee key for the screenshots of one payment: our banking name when the payee name shows one (the details page
+ * and the success page both print it), else the UPI id the way sameUpiId compares it (a phone-number id by its 10
+ * digits, "BHARATPE." and leading dots dropped, handle dropped), else the payee name as read, else '' (unknown).
+ * Known gap: a receipt that shows only the UPI id and another that shows only the name give different keys.
+ */
+function canonicalPayee(payeeUpiId, payeeName) {
+    const name = normalizePayeeName(payeeName);
+    const ours = name ? OUR_NAME_KEYS.find(([form]) => name.includes(form)) : undefined;
+    if (ours)
+        return ours[1];
+    const upi = normalizePayeeUpi(payeeUpiId);
+    if (upi) {
+        const at = upi.lastIndexOf('@');
+        const local = (at >= 0 ? upi.slice(0, at) : upi).replace(/^bharatpe\./, '').replace(/^[.\-_]+/, '').replace(/rn/g, 'm');
+        const phone = local.match(/^\d{10}$/);
+        if (local)
+            return phone ? phone[0] : local;
+    }
+    return name ?? '';
+}
+/**
+ * The payment-minute claim key (owner rule 7, made atomic; v2 design 2026-11-07): canonical payee + amount (rupee-glyph
+ * misread removed) + printed minute. Global: no chat id, no persona. Written with every credit whose payment time is
+ * readable, UTR or not, in the same write as servedUtr / servedSha (unique index servedMin_unique), so two screenshots
+ * of one payment credited at the same moment on two personas or clients cannot both win. Null without a readable time
+ * or amount.
+ */
+function servedMinuteKey(facts) {
+    if (facts.timeMs === null || !Number.isFinite(facts.timeMs) || !(facts.amount > 0))
+        return null;
+    return `${canonicalPayee(facts.payeeUpiId, facts.payeeName)}|${withoutGlyph(facts.amount)}|${Math.floor(facts.timeMs / MINUTE_MS)}`;
 }
 
 
@@ -102148,7 +102479,10 @@ class PaymentFlow {
     pick(pool) {
         return this.io.pick ? this.io.pick(pool) : pool[Math.floor(Math.random() * pool.length)];
     }
-    /** Store the screenshot's row; null = no store (callers keep the previous behaviour). Never throws. */
+    /**
+     * Store the screenshot's row; null = no store configured (callers keep the previous behaviour), 'unavailable' = the
+     * store failed or timed out (the credit path holds; other paths treat it as no store). Never throws.
+     */
     async begin(ref) {
         try {
             if (!Buffer.isBuffer(ref.photo) || ref.photo.length === 0)
@@ -102166,8 +102500,20 @@ class PaymentFlow {
         }
     }
     /**
+     * A held screenshot (not finished, status unclear, no amount, failed, old or unconfirmed time): its row carries a
+     * `held` request, so the user's next screenshot on any persona sees it and the next credit closes it (v2 item 3).
+     * Best effort: false when no row or request could be stored. Never throws.
+     */
+    async storeHeld(ref, reason) {
+        const session = await this.begin(ref);
+        if (!session || session === 'unavailable')
+            return false;
+        return session.openAsk('held', [reason]);
+    }
+    /**
      * Fake or edited screenshot: rude warning + block after FRAUD_GRACE_MS unless the real payment page arrives; a
-     * second fake inside the grace period blocks at once; an already-blocked user is ignored silently.
+     * second fake inside the grace period (from any persona of this user) blocks at once, on every persona; an
+     * already-blocked user is ignored silently.
      * Without the store, `legacy()` keeps the previous behaviour for that signal.
      */
     async fraud(session, canReply, reasons, legacy) {
@@ -102221,7 +102567,9 @@ class PaymentFlow {
             return;
         await this.io.block();
         this.io.fraudCleared?.();
-        await this.io.reply(this.pick(_messages__WEBPACK_IMPORTED_MODULE_1__.FRAUD_BLOCKED_MESSAGES));
+        // Fired by a touch on another persona than the one that warned: block silently there (that persona never warned).
+        if (!due.quiet)
+            await this.io.reply(this.pick(_messages__WEBPACK_IMPORTED_MODULE_1__.FRAUD_BLOCKED_MESSAGES));
         await this.io.notifyOps({ title: 'No pay in 15 min', fields: [{ label: 'Reason', value: label, code: false }] });
     }
     /**
@@ -102262,6 +102610,16 @@ class PaymentFlow {
         await this.io.reply(_messages__WEBPACK_IMPORTED_MODULE_1__.NOT_MY_PAYMENT_MESSAGE);
         await this.io.notifyOps({ title: 'Not my payment', fields: [{ label: 'Same', value: REPEAT_BY[by] ?? by, code: false }, { label: 'Where', value: where, code: false }] });
     }
+    /** Store error / timeout: never credit; the caller holds the picture for a bounded re-check (then ops review). */
+    holdForStore(session, step) {
+        return this.storeUnavailable(`${session.facts.chatId}/${session.facts.msgId}`, step);
+    }
+    /** `begin` returned 'unavailable' (the row insert failed / timed out): held like any store failure. */
+    storeUnavailable(what, step = 'begin') {
+        this.io.warn(`[payment-gate] ${what}: proof store unavailable at ${step}, held for a re-check, not crediting`);
+        this.note('other', ['STORE_UNAVAILABLE']);
+        return { handled: true, hold: true };
+    }
     /**
      * The credit decision for a payment screenshot to us: the gate around `creditRules` (handleMyPayment).
      * `handled` = the gate already replied (repeat, fake/edited, old-time request, lost credit race): no credit.
@@ -102273,6 +102631,8 @@ class PaymentFlow {
         const blocked = canReply === 0;
         const notify = (notice) => (blocked ? Promise.resolve() : this.io.notifyOps(notice));
         const gate = session ? await session.check() : { kind: 'clear' };
+        if (session && gate.kind === 'unavailable')
+            return this.holdForStore(session, 'check');
         if (session && blocked && (gate.kind === 'repeat' || gate.kind === 'needs-real-page')) {
             this.io.warn(`[payment-gate] blocked user ${session.facts.chatId}: ${gate.kind}, ignored silently`);
             if (gate.kind === 'repeat')
@@ -102315,25 +102675,41 @@ class PaymentFlow {
         if (session && confirmed) {
             this.io.log(`[payment-gate] payment for ${session.facts.chatId} confirmed by a second screenshot (request on msg ${confirmed.telegramMsgId}, ${confirmed.ask?.kind})`);
             confirmedBlocked = !!confirmed.ask?.blockedAt;
-            verdict = { isvalid: true, msg: '' };
         }
-        if (!verdict) {
-            verdict = await creditRules();
-            if (verdict.isvalid && session) {
-                const f = session.facts;
-                if ((0,_decide__WEBPACK_IMPORTED_MODULE_0__.isImpossibleReference)(f.utr)) {
-                    // 11 / 13 digits: an edited number (7/7 this week) or a misread. Polite: the details page decides.
-                    await session.openAsk('old_time', ['IMPOSSIBLE_REFERENCE']);
-                    this.note('old_time', ['IMPOSSIBLE_REFERENCE']);
-                    this.io.warn(`[payment-gate] ${f.chatId}: reference ${f.utr} has an impossible length, asked for the details page, not crediting yet`);
-                    await this.io.reply(this.pick(_messages__WEBPACK_IMPORTED_MODULE_1__.OLD_TIME_ASK_MESSAGES));
-                    await notify({ title: 'Asked pay page', summary: `Reference ${f.utr} has ${f.utr?.length} digits (real ones have 12).` });
-                    return { handled: true };
-                }
+        // A confirming screenshot runs the same credit rules as any other (an old receipt after a warning is still old).
+        verdict = await creditRules();
+        if (verdict.isvalid && session) {
+            const f = session.facts;
+            if ((0,_decide__WEBPACK_IMPORTED_MODULE_0__.isImpossibleReference)(f.utr)) {
+                // 11 / 13 digits: an edited number (7/7 this week) or a misread. Polite: the details page decides.
+                await session.openAsk('old_time', ['IMPOSSIBLE_REFERENCE']);
+                this.note('old_time', ['IMPOSSIBLE_REFERENCE']);
+                this.io.warn(`[payment-gate] ${f.chatId}: reference ${f.utr} has an impossible length, asked for the details page, not crediting yet`);
+                await this.io.reply(this.pick(_messages__WEBPACK_IMPORTED_MODULE_1__.OLD_TIME_ASK_MESSAGES));
+                await notify({ title: 'Asked pay page', summary: `Reference ${f.utr} has ${f.utr?.length} digits (real ones have 12).` });
+                return { handled: true };
+            }
+            if (session.sameAmountCreditedRecently()) {
+                // No UTR, no readable time, and this amount was already credited to this user in the last 24 h: a
+                // re-send cannot be told from a new payment, so the details page decides.
+                await session.openAsk('old_time', ['NO_UTR_NO_TIME_SAME_AMOUNT']);
+                this.note('old_time', ['NO_UTR_NO_TIME_SAME_AMOUNT']);
+                this.io.warn(`[payment-gate] ${f.chatId}: no reference, no time, same amount credited within 24 h: asked for the details page, not crediting yet`);
+                await this.io.reply(this.pick(_messages__WEBPACK_IMPORTED_MODULE_1__.DETAILS_PAGE_ASK_MESSAGES));
+                await notify({ title: 'Asked pay page', summary: 'No reference, no time, and the same amount was credited in the last 24 h.' });
+                return { handled: true };
             }
         }
         if (verdict.isvalid && session) {
             const claim = await session.claim();
+            if (claim === 'unavailable') {
+                // The claim write may have landed before the timeout: undo it, so the re-check is not called a repeat.
+                try {
+                    await session.release();
+                }
+                catch { /* the re-check then sees 'again': no credit either way */ }
+                return this.holdForStore(session, 'claim');
+            }
             if (claim === 'lost') {
                 this.note('repeat', ['CREDIT_RACE_LOST']);
                 if (!blocked) {
@@ -102399,8 +102775,10 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _payment_time__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../payment-time */ "./src/payments/payment-time.ts");
 /**
  * Payment-screenshot gate: the I/O around ./decide over the `paymentProofs` collection (one row per payment
- * screenshot, 7-day TTL, shared by every persona process). Every call is time-bounded and FAILS OPEN: when the
- * store is missing, slow or erroring the payment path behaves exactly as it did before the gate existed.
+ * screenshot, 90-day TTL, shared by every persona process). Every call is time-bounded. No store configured at all
+ * (`store()` null) keeps the behaviour from before the gate existed. A store that is there but errors or times out
+ * FAILS CLOSED on the credit path (v2 design 2026-11-07): begin / check / claim come back `unavailable` and the caller
+ * holds the screenshot for a bounded re-check (processImage holdForLaterAnalysis); it is never credited on a guess.
  */
 
 
@@ -102418,9 +102796,9 @@ const CHAT_SERVED_SCAN = 50;
 function withTimeout(work, ms, fallback, what) {
     let timer;
     return Promise.race([
-        work.catch((error) => { logger.warn(`[proof-gate] ${what} failed, failing open: ${String(error?.message ?? error)}`); return fallback; }),
+        work.catch((error) => { logger.warn(`[proof-gate] ${what} failed: ${String(error?.message ?? error)}`); return fallback; }),
         new Promise((resolve) => {
-            timer = setTimeout(() => { logger.warn(`[proof-gate] ${what} timed out after ${ms}ms, failing open`); resolve(fallback); }, ms);
+            timer = setTimeout(() => { logger.warn(`[proof-gate] ${what} timed out after ${ms}ms`); resolve(fallback); }, ms);
             timer.unref?.();
         }),
     ]).finally(() => { if (timer)
@@ -102429,6 +102807,8 @@ function withTimeout(work, ms, fallback, what) {
 /** One screenshot's pass through the gate. Created only when its row was stored. */
 class GateSession {
     constructor(deps, store, facts, creditAmount) {
+        /** This user's newest rows as check() read them (sameAmountCreditedRecently). */
+        this.recent = [];
         this.deps = deps;
         this.store = store;
         this.facts = facts;
@@ -102437,12 +102817,17 @@ class GateSession {
     bound(work, fallback, what) {
         return withTimeout(work, this.deps.timeoutMs, fallback, `${what}(${this.facts.chatId}/${this.facts.msgId})`);
     }
-    /** Repeat / edited against credited rows, else whether it answers an open request, else clear. Fails open to clear. */
+    /**
+     * Repeat / edited against credited rows, else whether it answers an open request, else clear. `unavailable` when
+     * the credited-row lookup, this user's recent rows or the open requests could not be read (fail closed).
+     */
     async check() {
         const f = this.facts;
-        // Rule 8 (decide.ts): with no UTR read, look for the same payment (amount + printed minute) credited today anywhere.
+        // Rule 8 (decide.ts): look for the same payment (amount + printed minute) credited today anywhere. Read for every
+        // receipt with a readable time: a receipt with no real reference is judged on it (rule 7), one with a reference
+        // only against a credited reference it cuts or extends (decide.ts referenceCutOf, hole 1).
         const minuteMs = f.timeMs !== null ? Math.floor(f.timeMs / 60000) * 60000 : null;
-        const payment = !f.utr && minuteMs !== null && f.amount > 0
+        const payment = minuteMs !== null && f.amount > 0
             ? { amount: f.amount, sinceMs: (0,_payment_time__WEBPACK_IMPORTED_MODULE_2__.istDayStartMs)(f.arrivalMs ?? this.deps.now()), fromMs: minuteMs, toMs: minuteMs + 60000 }
             : null;
         const [served, recent] = await Promise.all([
@@ -102453,16 +102838,20 @@ class GateSession {
             }), null, 'servedCandidates'),
             this.recentRows(),
         ]);
-        const chatServed = this.chatServed(recent);
-        const verdict = served || chatServed.length > 0 ? (0,_decide__WEBPACK_IMPORTED_MODULE_1__.classifyAgainstServed)(f, served ?? [], chatServed, this.deps.now()) : { kind: 'clear' };
+        if (served === null || recent === null)
+            return { kind: 'unavailable' };
+        this.recent = recent;
+        const verdict = (0,_decide__WEBPACK_IMPORTED_MODULE_1__.classifyAgainstServed)(f, served, this.chatServed(recent), this.deps.now());
         if (verdict.kind !== 'clear')
             return verdict;
-        const open = await this.openAsks();
+        const open = await this.readOpenAsks();
+        if (open === null)
+            return { kind: 'unavailable' };
         const now = this.deps.now();
         // The very same file was held with a request (any persona of this user) and not credited: whatever this read
         // says (a 12-digit reference now), it is that screenshot again (decide.ts heldSameFile, kavya2 2026-11-04).
         const held = (0,_decide__WEBPACK_IMPORTED_MODULE_1__.heldSameFile)(f, [...open, ...recent]);
-        if (held?.ask) {
+        if (held?.ask && held.ask.kind !== 'held') { // heldSameFile never returns a 'held' request
             return held.ask.state === 'open'
                 ? { kind: 'needs-real-page', ask: held.ask.kind }
                 : { kind: 'repeat', by: 'file', sameChat: held.chatId === f.chatId && held.profile === f.profile, matched: held };
@@ -102473,7 +102862,7 @@ class GateSession {
         // Only inside the 15-min grace period or while the flow's block stands: a later, unrelated genuine payment
         // whose UTR was not read must not be refused for the rest of the day.
         if (!(0,_decide__WEBPACK_IMPORTED_MODULE_1__.isRealReference)(f.utr)) {
-            const others = open.filter((r) => r.telegramMsgId !== f.msgId);
+            const others = open.filter((r) => !(r.profile === f.profile && r.telegramMsgId === f.msgId));
             if (others.some((r) => (0,_decide__WEBPACK_IMPORTED_MODULE_1__.fraudGraceOpen)(r, now) || (0,_decide__WEBPACK_IMPORTED_MODULE_1__.gateBlockAnswerable)(r, now)))
                 return { kind: 'needs-real-page', ask: 'fraud' };
             // A details-page request over an impossible reference (11 / 13 digits) is answered only by a real reference
@@ -102484,11 +102873,11 @@ class GateSession {
         }
         return verdict;
     }
-    /** This user's newest rows (every persona, served or not), newest first. [] on failure or without the read. */
+    /** This user's newest rows (every persona, served or not), newest first. [] without the read, null on a timeout. */
     async recentRows() {
         if (!this.store.recentForChat)
             return [];
-        return this.bound(this.store.recentForChat(this.facts.chatId, CHAT_SERVED_SCAN), [], 'recentForChat');
+        return this.bound(this.store.recentForChat(this.facts.chatId, CHAT_SERVED_SCAN), null, 'recentForChat');
     }
     /**
      * This user's own credited rows (every persona), for a different screenshot of a credited payment, with or without a
@@ -102500,15 +102889,29 @@ class GateSession {
             return [];
         return recent.filter((r) => !!r.servedAt && !(r.profile === f.profile && r.telegramMsgId === f.msgId));
     }
-    /** Open requests of this chat (answer window), newest first; [] on failure. */
-    async openAsks() {
+    /** Open requests of this user on every persona (answer window), newest first; null on failure. */
+    async readOpenAsks() {
         const since = new Date(this.deps.now() - _decide__WEBPACK_IMPORTED_MODULE_1__.ASK_ANSWER_WINDOW_MS);
-        return (await this.bound(this.store.openAsks(this.facts.chatId, this.facts.profile, since), null, 'openAsks')) ?? [];
+        return this.bound(this.store.openAsks(this.facts.chatId, since), null, 'openAsks');
     }
-    /** An earlier fake/edited warning from this chat is still in its grace period. */
+    /** Open requests of this user on every persona (answer window), newest first; [] on failure. */
+    async openAsks() {
+        return (await this.readOpenAsks()) ?? [];
+    }
+    /** An earlier fake/edited warning from this user (any persona) is still in its grace period. */
     async fraudGraceOpen() {
         const now = this.deps.now();
-        return (await this.openAsks()).some((r) => r.telegramMsgId !== this.facts.msgId && (0,_decide__WEBPACK_IMPORTED_MODULE_1__.fraudGraceOpen)(r, now));
+        return (await this.openAsks()).some((r) => !(r.profile === this.facts.profile && r.telegramMsgId === this.facts.msgId) && (0,_decide__WEBPACK_IMPORTED_MODULE_1__.fraudGraceOpen)(r, now));
+    }
+    /**
+     * No UTR and no readable time, and this user (any persona) was credited the same amount in the last 24 h (as
+     * check() read the rows): the crop could be that payment again, every identity key is gone. Ask, never credit.
+     */
+    sameAmountCreditedRecently() {
+        const f = this.facts;
+        if ((0,_decide__WEBPACK_IMPORTED_MODULE_1__.isRealReference)(f.utr) || f.timeMs !== null)
+            return false;
+        return (0,_decide__WEBPACK_IMPORTED_MODULE_1__.creditedSameAmountWithin)(f, this.recent, this.deps.now(), _decide__WEBPACK_IMPORTED_MODULE_1__.ASK_ANSWER_WINDOW_MS);
     }
     async openAsk(kind, reasons) {
         return this.bound(this.store.openAsk(this.facts.chatId, this.facts.profile, this.facts.msgId, kind, reasons), false, 'openAsk');
@@ -102518,18 +102921,20 @@ class GateSession {
         return this.bound(this.store.resolveAsk(asked.chatId, asked.profile, asked.telegramMsgId, this.facts.msgId), false, 'resolveAsk');
     }
     /**
-     * A credited payment closes every open fake/edited warning of this chat (the delayed block then does nothing).
-     * `gateBlocked` = one of them had blocked the user, so the block this flow set may be lifted.
+     * A credited payment closes every open fake/edited warning of this user, on every persona (the delayed block then
+     * does nothing), and every held-screenshot request (`held`: answered by this payment). `closed` counts the
+     * warnings; `gateBlocked` = one of them had blocked the user, so the block this flow set may be lifted.
      */
     async resolveOpenFraudAsks() {
         let closed = 0;
         let gateBlocked = false;
         for (const r of await this.openAsks()) {
-            if (r.ask?.kind !== 'fraud' || r.ask.state !== 'open' || r.telegramMsgId === this.facts.msgId)
+            const kind = r.ask?.kind;
+            if ((kind !== 'fraud' && kind !== 'held') || r.ask?.state !== 'open' || (r.profile === this.facts.profile && r.telegramMsgId === this.facts.msgId))
                 continue;
-            if (await this.resolve(r)) {
+            if (await this.resolve(r) && kind === 'fraud') {
                 closed += 1;
-                if (r.ask.blockedAt)
+                if (r.ask?.blockedAt)
                     gateBlocked = true;
             }
         }
@@ -102541,20 +102946,22 @@ class GateSession {
     }
     /**
      * Claim the credit BEFORE any service starts. `lost` when another chat/persona already holds a credit for the
-     * same UTR or file (unique indexes); `again` when this message itself was already credited. Every store problem
-     * counts as `won` (fail open).
+     * same UTR, file or payment minute (unique indexes; servedMinuteKey); `again` when this message itself was already
+     * credited. Every store problem (error, timeout, row missing) is `unavailable`: never credited (fail closed).
      */
     async claim() {
         // creditAmount goes on the row WITH servedAt (data-model review 2026-10-25): written at the credit decision,
         // never at begin, so a row carries it only when it was credited, and release removes both.
-        const r = await this.bound(this.store.markServed(this.facts.chatId, this.facts.profile, this.facts.msgId, 'other', this.creditAmount), 'error', 'markServed');
+        const minuteKey = (0,_decide__WEBPACK_IMPORTED_MODULE_1__.servedMinuteKey)(this.facts);
+        const r = await this.bound(this.store.markServed(this.facts.chatId, this.facts.profile, this.facts.msgId, 'other', this.creditAmount, minuteKey ?? undefined), 'error', 'markServed');
         if (r === 'duplicate')
             return 'lost';
         if (r === 'already_served')
             return 'again';
-        if (r !== 'served')
-            logger.warn(`[proof-gate] claim ${this.facts.chatId}/${this.facts.msgId} -> ${r}; crediting anyway (fail open)`);
-        return 'won';
+        if (r === 'served')
+            return 'won';
+        logger.warn(`[proof-gate] claim ${this.facts.chatId}/${this.facts.msgId} -> ${r}; not crediting, held for a re-check (fail closed)`);
+        return 'unavailable';
     }
     /** The credit failed after the claim (service never started): free the claim so a retry is judged again. */
     async release() {
@@ -102565,7 +102972,10 @@ class ProofGate {
     constructor(deps) {
         this.deps = deps;
     }
-    /** Store this screenshot's row and start its session; null = no store (the caller keeps today's behaviour). */
+    /**
+     * Store this screenshot's row and start its session. null = no store configured (the caller keeps the behaviour
+     * from before the gate); 'unavailable' = the store is there but the row could not be written (fail closed: hold).
+     */
     async begin(facts, extra = { clientId: '' }) {
         const store = safeStore(this.deps);
         if (!store)
@@ -102583,22 +102993,36 @@ class ProofGate {
         };
         const stored = await withTimeout(store.insert(row), this.deps.timeoutMs, false, `insert(${facts.chatId}/${facts.msgId})`);
         if (!stored)
-            return null;
+            return 'unavailable';
         return new GateSession(this.deps, store, facts, extra.creditAmount);
     }
     /**
-     * An open request from this chat that can still be answered (24 h). Its photos must reach the gate even when the
-     * user is blocked (`kind: 'fraud'`), over the daily photo cap, or inside the photo cooldown.
+     * An open request from this user (any persona) that can still be answered (24 h). Its photos must reach the gate
+     * even when the user is blocked (`kind: 'fraud'`), over the daily photo cap, or inside the photo cooldown.
      */
-    async hasAnswerableAsk(chatId, profile, kind) {
+    async hasAnswerableAsk(chatId, kind) {
         const store = safeStore(this.deps);
         if (!store)
             return false;
         const now = this.deps.now();
-        const rows = await withTimeout(store.openAsks(chatId, profile, new Date(now - _decide__WEBPACK_IMPORTED_MODULE_1__.ASK_ANSWER_WINDOW_MS)), this.deps.timeoutMs, null, `openAsks(${chatId})`);
+        const rows = await withTimeout(store.openAsks(chatId, new Date(now - _decide__WEBPACK_IMPORTED_MODULE_1__.ASK_ANSWER_WINDOW_MS)), this.deps.timeoutMs, null, `openAsks(${chatId})`);
         return (rows ?? []).some((r) => (kind === 'gate-blocked' ? (0,_decide__WEBPACK_IMPORTED_MODULE_1__.gateBlockAnswerable)(r, now)
             : kind === 'impossible-reference' ? (0,_decide__WEBPACK_IMPORTED_MODULE_1__.impossibleReferenceAskOpen)(r, now)
                 : kind === 'fraud' ? (0,_decide__WEBPACK_IMPORTED_MODULE_1__.fraudAskAnswerable)(r, now) : (0,_decide__WEBPACK_IMPORTED_MODULE_1__.askAnswerable)(r, now, kind)));
+    }
+    /**
+     * The fraud deadline, read from Mongo on a touch (any persona): this user's open fake warnings (24 h), the first
+     * one past its 15-min deadline and not blocked yet (`due`: block now), and whether one already blocked the user
+     * (`blocked`). Restart-safe: no timer is needed. Nothing on a store problem (a missed touch is caught by the next).
+     */
+    async fraudDeadline(chatId) {
+        const store = safeStore(this.deps);
+        if (!store)
+            return { due: null, blocked: false };
+        const now = this.deps.now();
+        const rows = await withTimeout(store.openAsks(chatId, new Date(now - _decide__WEBPACK_IMPORTED_MODULE_1__.ASK_ANSWER_WINDOW_MS)), this.deps.timeoutMs, null, `openAsks(${chatId})`);
+        const open = (rows ?? []).filter((r) => (0,_decide__WEBPACK_IMPORTED_MODULE_1__.fraudAskAnswerable)(r, now));
+        return { due: open.find((r) => (0,_decide__WEBPACK_IMPORTED_MODULE_1__.fraudDeadlinePassed)(r, now)) ?? null, blocked: open.some((r) => !!r.ask?.blockedAt) };
     }
     /** The delayed block fired over this warning. */
     async markAskBlocked(chatId, profile, msgId) {
@@ -102637,13 +103061,15 @@ function proofGateFrom(getRepositories) {
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   DETAILS_PAGE_ASK_MESSAGES: () => (/* binding */ DETAILS_PAGE_ASK_MESSAGES),
 /* harmony export */   FRAUD_BLOCKED_MESSAGES: () => (/* binding */ FRAUD_BLOCKED_MESSAGES),
 /* harmony export */   FRAUD_BLOCK_SOON_MESSAGES: () => (/* binding */ FRAUD_BLOCK_SOON_MESSAGES),
 /* harmony export */   FRAUD_REMINDER_MESSAGES: () => (/* binding */ FRAUD_REMINDER_MESSAGES),
 /* harmony export */   FRAUD_WARNING_MESSAGES: () => (/* binding */ FRAUD_WARNING_MESSAGES),
 /* harmony export */   NOT_MY_PAYMENT_MESSAGE: () => (/* binding */ NOT_MY_PAYMENT_MESSAGE),
 /* harmony export */   OLD_TIME_ASK_MESSAGES: () => (/* binding */ OLD_TIME_ASK_MESSAGES),
-/* harmony export */   PAYMENT_ASK_REPEAT_MESSAGES: () => (/* binding */ PAYMENT_ASK_REPEAT_MESSAGES)
+/* harmony export */   PAYMENT_ASK_REPEAT_MESSAGES: () => (/* binding */ PAYMENT_ASK_REPEAT_MESSAGES),
+/* harmony export */   STORE_HOLD_MESSAGES: () => (/* binding */ STORE_HOLD_MESSAGES)
 /* harmony export */ });
 /** A payment to someone else, or one already credited in another chat / persona (screenshot/helpers.ts otherClient). */
 const NOT_MY_PAYMENT_MESSAGE = "**This is not my Payment!!\nBye!!**";
@@ -102693,6 +103119,17 @@ const PAYMENT_ASK_REPEAT_MESSAGES = [
     "Not showing on my side yet baby..\n\nSend me the History page from your payment app na\n\nThen I'll check fast",
     "Arre wait baby, I still can't see it yaar\n\nJust send the payment details page from History\n\nThen we start 😘",
     "Haan haan I know baby\n\nBut I need the History page na\n\nTap the payment in your app and send me that screenshot",
+];
+/** No reference and no readable time, same amount credited in the last 24 h: polite details-page request. */
+const DETAILS_PAGE_ASK_MESSAGES = [
+    "Baby I can't see the time on this one 🤔\n\nOpen your payment app History, tap the payment and send me that page..",
+    "Hmm this pic has no time on it 🙈\n\nSend me the payment page from your History na..",
+    "I can't read when you paid 🤔\n\nGo to History in your payment app, open the payment and send that screen..",
+];
+/** The proof store was unreachable: the picture is held for a re-check (never credited without it). */
+const STORE_HOLD_MESSAGES = [
+    "Checking your payment baby.. give me a few mins 🙈",
+    "Wait baby, checking your payment.. few mins 💕",
 ];
 
 
@@ -104215,6 +104652,8 @@ function buildShadowDoc(args) {
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   JUDGED_FILE_CACHE_MAX: () => (/* binding */ JUDGED_FILE_CACHE_MAX),
+/* harmony export */   JUDGED_FILE_TTL_MS: () => (/* binding */ JUDGED_FILE_TTL_MS),
 /* harmony export */   MAX_RECORD_IN_FLIGHT: () => (/* binding */ MAX_RECORD_IN_FLIGHT),
 /* harmony export */   SHADOW_TIMEOUT_MS: () => (/* binding */ SHADOW_TIMEOUT_MS),
 /* harmony export */   analyzeImage: () => (/* binding */ analyzeImage),
@@ -104275,6 +104714,7 @@ const defaultDeps = () => ({
     }),
     getRepositories: () => null,
     now: Date.now,
+    judgedFileCache: true,
     getOwnUpiIds: () => (0,_proof_check__WEBPACK_IMPORTED_MODULE_5__.ownIdsFrom)(_upi__WEBPACK_IMPORTED_MODULE_3__.UpiIds, (0,_proof_check__WEBPACK_IMPORTED_MODULE_5__.clientUpiIds)()),
     getPersonaNames: () => {
         const db = _data_user_data_crud__WEBPACK_IMPORTED_MODULE_4__.UserDataDtoCrud.getInstance();
@@ -104286,10 +104726,35 @@ const timeoutNow = () => deps.timeoutMs ?? shadowTimeoutMs();
 let deps = defaultDeps();
 /** Test hook. Pass nothing to restore the defaults. */
 function setShadowDeps(over) {
-    deps = { ...defaultDeps(), ...(over ?? {}) };
+    deps = { ...defaultDeps(), ...(over ?? {}), judgedFileCache: over === undefined || over.judgedFileCache === true };
     recordInFlight = 0;
     recordDropped = 0;
     pending.clear();
+    judgedFiles.clear();
+}
+/**
+ * Exact-file short-circuit (P1 item 11): the model's read of a file already judged is reused (same bytes = same read)
+ * instead of a second vision call, e.g. a re-send of the same screenshot or a hold re-check. Only good reads are kept
+ * (an outage is never cached); per process, bounded, 24 h. Each hit gets its own copy.
+ */
+const JUDGED_FILE_CACHE_MAX = 500;
+const JUDGED_FILE_TTL_MS = 24 * 60 * 60 * 1000;
+const judgedFiles = new Map();
+function judgedFile(sha) {
+    const hit = judgedFiles.get(sha);
+    if (!hit)
+        return null;
+    if (deps.now() - hit.at > JUDGED_FILE_TTL_MS) {
+        judgedFiles.delete(sha);
+        return null;
+    }
+    return structuredClone(hit.vision);
+}
+function rememberJudgedFile(sha, vision) {
+    judgedFiles.delete(sha);
+    judgedFiles.set(sha, { at: deps.now(), vision: structuredClone(vision) });
+    while (judgedFiles.size > JUDGED_FILE_CACHE_MAX)
+        judgedFiles.delete(judgedFiles.keys().next().value);
 }
 const pending = new Set();
 /** Test hook: resolves when every scheduled visionShadow row write has settled. */
@@ -104494,6 +104959,12 @@ function analysisUnavailableDetails(fallbackNotPayment = 0, fallbackUnclearPayme
 async function tryLocalDecision(photoBuffer) {
     const t0 = deps.now();
     try {
+        const sha = deps.judgedFileCache && Buffer.isBuffer(photoBuffer) && photoBuffer.length > 0 ? (0,_fingerprint__WEBPACK_IMPORTED_MODULE_2__.imageFingerprint)(photoBuffer).sha256 : '';
+        const cached = sha ? judgedFile(sha) : null;
+        if (cached) {
+            logger.log(`[vision-shadow] same file judged before (${sha.slice(0, 12)}): reusing its read, no vision call`);
+            return { ok: true, vision: cached, legacy: (0,_tg_vision__WEBPACK_IMPORTED_MODULE_0__.toLegacyImageDetails)(cached, { nowMs: deps.now() }), ms: deps.now() - t0 };
+        }
         let timer;
         const vision = await Promise.race([
             deps.analyze(photoBuffer),
@@ -104504,6 +104975,8 @@ async function tryLocalDecision(photoBuffer) {
             return { ok: false, vision, error: new Error(`local outage: ${vision.outcome}`), ms: deps.now() - t0 };
         }
         const legacy = (0,_tg_vision__WEBPACK_IMPORTED_MODULE_0__.toLegacyImageDetails)(vision, { nowMs: deps.now() });
+        if (sha)
+            rememberJudgedFile(sha, vision);
         return { ok: true, vision, legacy, ms: deps.now() - t0 };
     }
     catch (error) {
