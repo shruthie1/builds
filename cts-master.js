@@ -34243,8 +34243,8 @@ let FileController = FileController_1 = class FileController {
     listFiles(folder) {
         return this.fileService.listFiles(folder);
     }
-    getThumbnail(folder, filename, res) {
-        return this.fileService.getThumbnail(folder, filename, res);
+    getThumbnail(folder, filename, res, w) {
+        return this.fileService.getThumbnail(folder, filename, res, w);
     }
     getFile(folder, filename, res) {
         return this.fileService.getFile(folder, filename, res);
@@ -34750,14 +34750,20 @@ __decorate([
 ], FileController.prototype, "listFiles", null);
 __decorate([
     (0, common_1.Get)('folders/:folder/files/:filename/thumbnail'),
-    (0, swagger_1.ApiOperation)({ summary: 'Get a thumbnail of an image or video file' }),
+    (0, swagger_1.ApiOperation)({ summary: 'Get a resized webp thumbnail of an image file' }),
     (0, swagger_1.ApiParam)({ name: 'folder', description: 'Folder name' }),
     (0, swagger_1.ApiParam)({ name: 'filename', description: 'File name' }),
+    (0, swagger_1.ApiQuery)({
+        name: 'w',
+        required: false,
+        description: 'Longest side in px (default 128, clamped 64..512); webp output',
+    }),
     __param(0, (0, common_1.Param)('folder')),
     __param(1, (0, common_1.Param)('filename')),
     __param(2, (0, common_1.Res)()),
+    __param(3, (0, common_1.Query)('w')),
     __metadata("design:type", Function),
-    __metadata("design:paramtypes", [String, String, Object]),
+    __metadata("design:paramtypes", [String, String, Object, String]),
     __metadata("design:returntype", void 0)
 ], FileController.prototype, "getThumbnail", null);
 __decorate([
@@ -35171,11 +35177,15 @@ const mime_1 = __importDefault(__webpack_require__(/*! mime */ "mime"));
 const stream_1 = __webpack_require__(/*! stream */ "stream");
 const util_1 = __webpack_require__(/*! util */ "util");
 const helper_1 = __webpack_require__(/*! ./utils/helper */ "./src/components/files/utils/helper.ts");
+const thumbnail_1 = __webpack_require__(/*! ./utils/thumbnail */ "./src/components/files/utils/thumbnail.ts");
 const streamPipeline = (0, util_1.promisify)(stream_1.pipeline);
 let FileService = FileService_1 = class FileService {
     constructor(options) {
         this.options = options;
         this.logger = new common_1.Logger(FileService_1.name);
+        this.thumbCache = new thumbnail_1.ByteLru(thumbnail_1.THUMB_CACHE_MAX_BYTES);
+        this.thumbInFlight = new Map();
+        this.thumbFallbackLogged = new Set();
         this.config = {
             storagePath: options?.storagePath || file_config_1.FILE_CONFIG.STORAGE_PATH,
             maxFileSize: options?.maxFileSize || file_config_1.FILE_CONFIG.MAX_FILE_SIZE,
@@ -35782,7 +35792,7 @@ let FileService = FileService_1 = class FileService {
             throw new common_1.InternalServerErrorException('Error generating file preview');
         }
     }
-    async getThumbnail(folder, filename, res) {
+    async getThumbnail(folder, filename, res, rawWidth) {
         const filePath = this.getSafePath(this.config.storagePath, folder, filename);
         if (!fs.existsSync(filePath)) {
             this.logger.error(`File not found: ${filename} in folder: ${folder}`);
@@ -35790,28 +35800,67 @@ let FileService = FileService_1 = class FileService {
         }
         const mimeType = (0, mime_types_1.lookup)(filePath) || 'application/octet-stream';
         const stats = fs.statSync(filePath);
-        const etag = `"thumb-${stats.mtimeMs.toString(36)}-${stats.size.toString(36)}"`;
-        res.set({
-            'Cache-Control': 'public, max-age=3600, s-maxage=86400',
-            'ETag': etag,
-            'Last-Modified': stats.mtime.toUTCString(),
-        });
-        try {
-            if (view_config_1.VIEW_CONFIG.IMAGE_TYPES.includes(mimeType)) {
-                const thumbnail = fs.readFileSync(filePath);
-                res.setHeader('Content-Type', 'image/jpeg');
-                return res.send(thumbnail);
-            }
+        const width = (0, thumbnail_1.clampThumbWidth)(rawWidth);
+        const fileTag = `${stats.mtimeMs.toString(36)}-${stats.size.toString(36)}`;
+        if (!view_config_1.VIEW_CONFIG.IMAGE_TYPES.includes(mimeType)) {
             if (view_config_1.VIEW_CONFIG.VIDEO_TYPES.includes(mimeType)) {
                 res.setHeader('Content-Type', 'image/jpeg');
                 return res.send(undefined);
             }
             throw new common_1.BadRequestException('Thumbnail not available for this file type');
         }
-        catch (error) {
-            this.logger.error(`Error generating thumbnail for ${filename}: ${error.message}`);
-            throw new common_1.InternalServerErrorException('Error generating thumbnail');
+        const loaded = (0, thumbnail_1.loadSharp)();
+        let thumb = null;
+        if ('sharp' in loaded) {
+            const cacheKey = `${filePath}|${fileTag}|${width}`;
+            thumb = this.thumbCache.get(cacheKey) ?? null;
+            if (!thumb) {
+                try {
+                    let pending = this.thumbInFlight.get(cacheKey);
+                    if (!pending) {
+                        pending = (0, thumbnail_1.renderThumbnail)(loaded.sharp, filePath, width);
+                        this.thumbInFlight.set(cacheKey, pending);
+                    }
+                    try {
+                        thumb = await pending;
+                    }
+                    finally {
+                        this.thumbInFlight.delete(cacheKey);
+                    }
+                    this.thumbCache.set(cacheKey, thumb);
+                }
+                catch (error) {
+                    this.logThumbFallbackOnce(filePath, `resize failed for ${folder}/${filename}: ${error.message}`);
+                }
+            }
         }
+        else {
+            this.logThumbFallbackOnce('<sharp>', `sharp unavailable, thumbnails send originals: ${loaded.error.message}`);
+        }
+        if (thumb) {
+            res.set({
+                'Content-Type': 'image/webp',
+                'Cache-Control': 'public, max-age=86400',
+                ETag: `"thumb-${fileTag}-w${width}"`,
+                'Last-Modified': stats.mtime.toUTCString(),
+            });
+            return res.send(thumb);
+        }
+        res.set({
+            'Content-Type': mimeType,
+            'Cache-Control': 'public, max-age=3600',
+            ETag: `"thumb-${fileTag}-orig"`,
+            'Last-Modified': stats.mtime.toUTCString(),
+        });
+        return res.send(fs.readFileSync(filePath));
+    }
+    logThumbFallbackOnce(key, message) {
+        if (this.thumbFallbackLogged.has(key))
+            return;
+        if (this.thumbFallbackLogged.size >= 1000)
+            this.thumbFallbackLogged.clear();
+        this.thumbFallbackLogged.add(key);
+        this.logger.warn(`thumbnail fallback to original: ${message}`);
     }
     isPreviewSupported(mimeType) {
         const supportedTypes = [
@@ -36417,6 +36466,94 @@ class JsonPathValidator {
     }
 }
 exports.JsonPathValidator = JsonPathValidator;
+
+
+/***/ },
+
+/***/ "./src/components/files/utils/thumbnail.ts"
+/*!*************************************************!*\
+  !*** ./src/components/files/utils/thumbnail.ts ***!
+  \*************************************************/
+(__unused_webpack_module, exports, __webpack_require__) {
+
+
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.ByteLru = exports.THUMB_WEBP_QUALITY = exports.THUMB_CACHE_MAX_BYTES = exports.THUMB_MAX_WIDTH = exports.THUMB_MIN_WIDTH = exports.THUMB_DEFAULT_WIDTH = void 0;
+exports.clampThumbWidth = clampThumbWidth;
+exports.loadSharp = loadSharp;
+exports.renderThumbnail = renderThumbnail;
+exports.THUMB_DEFAULT_WIDTH = 128;
+exports.THUMB_MIN_WIDTH = 64;
+exports.THUMB_MAX_WIDTH = 512;
+exports.THUMB_CACHE_MAX_BYTES = 16 * 1024 * 1024;
+exports.THUMB_WEBP_QUALITY = 72;
+function clampThumbWidth(raw) {
+    const value = Array.isArray(raw) ? raw[0] : raw;
+    if (value === undefined || value === null || value === '')
+        return exports.THUMB_DEFAULT_WIDTH;
+    const n = Math.round(Number(value));
+    if (!Number.isFinite(n))
+        return exports.THUMB_DEFAULT_WIDTH;
+    return Math.min(exports.THUMB_MAX_WIDTH, Math.max(exports.THUMB_MIN_WIDTH, n));
+}
+class ByteLru {
+    constructor(maxBytes) {
+        this.maxBytes = maxBytes;
+        this.map = new Map();
+        this.bytes = 0;
+    }
+    get(key) {
+        const hit = this.map.get(key);
+        if (hit) {
+            this.map.delete(key);
+            this.map.set(key, hit);
+        }
+        return hit;
+    }
+    set(key, value) {
+        if (value.length > this.maxBytes)
+            return;
+        const old = this.map.get(key);
+        if (old) {
+            this.bytes -= old.length;
+            this.map.delete(key);
+        }
+        this.map.set(key, value);
+        this.bytes += value.length;
+        while (this.bytes > this.maxBytes) {
+            const oldestKey = this.map.keys().next().value;
+            this.bytes -= this.map.get(oldestKey).length;
+            this.map.delete(oldestKey);
+        }
+    }
+    get size() {
+        return this.map.size;
+    }
+    get totalBytes() {
+        return this.bytes;
+    }
+}
+exports.ByteLru = ByteLru;
+let sharpLoad;
+function loadSharp() {
+    if (!sharpLoad) {
+        try {
+            const mod = __webpack_require__(/*! sharp */ "sharp");
+            sharpLoad = { sharp: (mod && mod.default) || mod };
+        }
+        catch (error) {
+            sharpLoad = { error: error };
+        }
+    }
+    return sharpLoad;
+}
+async function renderThumbnail(sharp, filePath, width) {
+    return sharp(filePath, { failOn: 'error' })
+        .rotate()
+        .resize({ width, height: width, fit: 'inside', withoutEnlargement: true })
+        .webp({ quality: exports.THUMB_WEBP_QUALITY })
+        .toBuffer();
+}
 
 
 /***/ },
@@ -67541,6 +67678,16 @@ module.exports = require("rxjs");
 (module) {
 
 module.exports = require("rxjs/operators");
+
+/***/ },
+
+/***/ "sharp"
+/*!************************!*\
+  !*** external "sharp" ***!
+  \************************/
+(module) {
+
+module.exports = require("sharp");
 
 /***/ },
 
