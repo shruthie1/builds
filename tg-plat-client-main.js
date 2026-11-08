@@ -58900,8 +58900,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "6f9b4a28f9d5f982309b12d061115e28f079a138" : 0;
-    const builtAt =  true ? "2026-11-07T19:50:43.161Z" : 0;
+    const sha =  true ? "a71557c426229f707c873569860af7f90fa26a61" : 0;
+    const builtAt =  true ? "2026-11-08T03:42:53.941Z" : 0;
     return { sha, builtAt };
 }
 
@@ -79132,8 +79132,9 @@ class UserDataDtoCrud {
                         // docs/design/2026-10-25-postgres-review-fixes.md section C.
                         balanceAfter: null,
                         lifetimeAfter: null,
-                        // Fixed at credit time, so it cannot express "flagged later": cheat state comes
-                        // from cheat_flag (mirrorCheatCount) via the payment_event_owner view.
+                        // Fixed at credit time, so it cannot express "flagged later". Owner revenue
+                        // excludes chats via payment_event.is_fake (fake_payment_mark, 2026-11-02) in the
+                        // payment_event_owner view; cheat_flag is no longer read there.
                         isCheat: false,
                         source: 'screenshot',
                     });
@@ -79321,8 +79322,9 @@ class UserDataDtoCrud {
      * the optional analytics store as an append-only `cheat_flag` row (2026-10-25). The owner's
      * revenue rule is "credited minus ALL credits of a chat with cheatCount > 0 on any persona doc";
      * payment_event.is_cheat could not express that (it is fixed at credit time, and the flag can
-     * come later or be reset). The latest row per (chat, persona) is the doc's current value; see the
-     * `payment_event_owner` view. Every cheatCount writer goes through update()/updateSingleKey(), so
+     * come later or be reset). The latest row per (chat, persona) is the doc's current value. Since
+     * 2026-11-02 the `payment_event_owner` view reads payment_event.is_fake instead, so this row is an
+     * audit trail with no reader. Every cheatCount writer goes through update()/updateSingleKey(), so
      * this is the one place that sees them all. Never throws, never awaited.
      */
     mirrorCheatCount(chatId, value) {
