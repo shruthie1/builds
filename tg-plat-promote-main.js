@@ -736,8 +736,41 @@ class AnalyticsSink {
         if (!this.accepting())
             return;
         this.enqueued += 1;
+        if (row.table === "payment_event" && this.spoolAtEnqueue(row))
+            return;
         this.buffer.push(row);
         this.enforceCap();
+    }
+    /**
+     * PAYMENT ROWS (see the header): the row's own batch is on disk before this returns, then queued
+     * for the next flush with that file, which release() unlinks once the INSERT commits. Never throws:
+     * false (counted, logged) sends the row to the in-memory buffer as before.
+     */
+    spoolAtEnqueue(row) {
+        const firstAt = Date.now();
+        const batch = { id: (0,crypto__WEBPACK_IMPORTED_MODULE_0__.randomUUID)(), table: batchKind(row.table), rows: [row], firstAt };
+        const base = path__WEBPACK_IMPORTED_MODULE_3__.basename(this.newSpoolPath());
+        const tmp = path__WEBPACK_IMPORTED_MODULE_3__.join(this.spoolDir, `${base}.tmp-${process.pid}`);
+        const file = path__WEBPACK_IMPORTED_MODULE_3__.join(this.spoolDir, `${base}.claimed-${process.pid}-${this.instanceKey}`);
+        try {
+            const line = JSON.stringify({ b: batch.id, f: firstAt, t: row.table, c: row.columns, v: row.values });
+            fs__WEBPACK_IMPORTED_MODULE_1__.mkdirSync(this.spoolDir, { recursive: true });
+            fs__WEBPACK_IMPORTED_MODULE_1__.writeFileSync(tmp, `${line}\n${spoolEndMarker(1)}`);
+            fs__WEBPACK_IMPORTED_MODULE_1__.renameSync(tmp, file);
+        }
+        catch (err) {
+            this.spoolErrors += 1;
+            try {
+                fs__WEBPACK_IMPORTED_MODULE_1__.unlinkSync(tmp);
+            }
+            catch { /* never written */ }
+            this.log("warn", `[analytics] payment row kept in memory only (spool write failed): ${describe(err)}`);
+            return false;
+        }
+        batch.file = file;
+        this.fileRefs.set(file, 1);
+        this.retryQueue.push(batch);
+        return true;
     }
     retryRows() {
         let n = 0;
@@ -47824,8 +47857,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "ce8f90b8699f9c2dea12bb8ffc5ad152c36f2886" : 0;
-    const builtAt =  true ? "2026-11-08T13:58:00.267Z" : 0;
+    const sha =  true ? "1c0ffb898c32d994f30ff6867a6ec727583b2e8e" : 0;
+    const builtAt =  true ? "2026-11-08T15:32:11.570Z" : 0;
     return { sha, builtAt };
 }
 
