@@ -59358,8 +59358,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "5f0a98baf394c30212bfdd3879842f3b0243006b" : 0;
-    const builtAt =  true ? "2026-11-08T10:57:03.380Z" : 0;
+    const sha =  true ? "091919c9420f2ad24f406804a036e5762d905eb7" : 0;
+    const builtAt =  true ? "2026-11-08T12:50:01.946Z" : 0;
     return { sha, builtAt };
 }
 
@@ -100476,7 +100476,8 @@ class ProofRecord {
             ...(ocr.app ? { app: ocr.app } : {}),
             decision: 'ACCEPT', reasons: [], mode: 'record', provider: 'tg-aut', source: 'local',
             imageSha256: image.sha256,
-            proofId, verdict, image, ocr,
+            // imageSha256 is the one home for the file hash; the row's image meta omits it (owner rule 2026-11-08).
+            proofId, verdict, image: { host: image.host, bytes: image.bytes, mime: image.mime, stored: image.stored }, ocr,
         };
         const rowWritten = store?.recordReview
             ? await bounded(store.recordReview(row), false, `recordReview(${proofId})`)
