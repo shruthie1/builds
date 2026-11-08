@@ -44556,9 +44556,14 @@ let PaymentUncreditService = PaymentUncreditService_1 = class PaymentUncreditSer
             throw new common_1.ConflictException({ code: 'fake_marked', message: 'the chat is marked fake: no payment of it counts already' });
         }
         const user = await this.users.findOne({ chatId: proof.chatId, profile: proof.profile });
-        const live = !!user && (0, uncredit_plan_1.callInProgress)(user.callProgress, nowMs);
-        if (live && !force)
-            throw new common_1.ConflictException({ code: 'call_in_progress', message: 'a show is running for this payment; Uncredit anyway treats it as delivered' });
+        const live = user ? (0, uncredit_plan_1.liveCall)(user.callProgress, nowMs) : null;
+        if (live && !force) {
+            throw new common_1.ConflictException({
+                code: 'call_in_progress',
+                message: `a show is playing in this chat right now (last heartbeat ${live.secondsSinceHeartbeat} s ago); Uncredit anyway treats it as delivered`,
+                secondsSinceHeartbeat: live.secondsSinceHeartbeat,
+            });
+        }
         let journal;
         const resumed = !!proof.uncredited;
         if (proof.uncredited) {
@@ -44856,10 +44861,11 @@ exports.PaymentUncreditService = PaymentUncreditService = PaymentUncreditService
 
 
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.TIER_FIELDS = exports.LIVE_CALL_MS = exports.DEMO_BALANCE = void 0;
+exports.TIER_FIELDS = exports.LIVE_HEARTBEAT_MS = exports.PROGRESS_CHECKPOINT_MS = exports.DEMO_BALANCE = void 0;
 exports.amountOf = amountOf;
 exports.countOf = countOf;
 exports.owedShowCap = owedShowCap;
+exports.liveCall = liveCall;
 exports.callInProgress = callInProgress;
 exports.planUncredit = planUncredit;
 exports.planRecredit = planRecredit;
@@ -44876,11 +44882,22 @@ function owedShowCap(highest) {
     const h = amountOf(highest);
     return OWED_SHOW_ROWS.reduce((cap, [min, owed]) => (h >= min ? Math.max(cap, owed) : cap), 0);
 }
-exports.LIVE_CALL_MS = 10 * 60_000;
-function callInProgress(callProgress, now) {
+exports.PROGRESS_CHECKPOINT_MS = 15_000;
+exports.LIVE_HEARTBEAT_MS = 3 * exports.PROGRESS_CHECKPOINT_MS;
+function liveCall(callProgress, now) {
     if (!callProgress || typeof callProgress !== 'object')
-        return false;
-    return Object.values(callProgress).some((p) => p && typeof p === 'object' && p.completed !== true && now - amountOf(p.updatedAt) < exports.LIVE_CALL_MS);
+        return null;
+    for (const [videoId, p] of Object.entries(callProgress)) {
+        if (!p || typeof p !== 'object' || p.completed === true || p.endedAt != null)
+            continue;
+        const sinceMs = now - amountOf(p.updatedAt);
+        if (sinceMs < exports.LIVE_HEARTBEAT_MS)
+            return { videoId, secondsSinceHeartbeat: Math.max(0, Math.floor(sinceMs / 1000)) };
+    }
+    return null;
+}
+function callInProgress(callProgress, now) {
+    return liveCall(callProgress, now) !== null;
 }
 exports.TIER_FIELDS = ['highestPayAmount', 'payAmount', 'fullShow', 'showsPaidTo', 'secondShow', 'demoGiven'];
 const raw = (row, f) => (row[f] === undefined ? null : row[f]);
