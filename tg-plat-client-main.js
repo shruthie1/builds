@@ -11468,6 +11468,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _flow_runner_heartbeat__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ./flow-runner/heartbeat */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/heartbeat.ts");
 /* harmony import */ var _flow_runner_send_budget__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ./flow-runner/send-budget */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/send-budget.ts");
 /* harmony import */ var _flow_runner_formatting__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! ./flow-runner/formatting */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/formatting.ts");
+/* harmony import */ var _tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! @tg/core/utils/dc-ip-family */ "../../packages/tg-core/src/utils/dc-ip-family.ts");
+
 
 
 
@@ -11556,7 +11558,7 @@ class PromotionFlowRunner {
                 spamStatus = null;
             }
             this.log('info', (0,_flow_runner_heartbeat__WEBPACK_IMPORTED_MODULE_10__.formatPromoHeartbeat)({
-                mobile: this.options.account.mobile,
+                mobile: (0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_13__.maskMobile)(this.options.account.mobile),
                 intervalMs: this.heartbeat.intervalMs,
                 sends,
                 capCount: budget ? budget.count : null,
@@ -11827,7 +11829,7 @@ class PromotionFlowRunner {
             // Per-mobile cycle-end line (no new Redis reads: reuses this cycle's budget snapshot + stats). The
             // timed `promo heartbeat` (flow-runner/heartbeat.ts) covers the hours inside a long paced cycle.
             this.log('info', [
-                `[${this.options.account.mobile}] promo cycle end`,
+                `[${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_13__.maskMobile)(this.options.account.mobile)}] promo cycle end`,
                 `sends(cycle)=${cycleTally.sent}`,
                 `capCount=${budgetSnapshot ? budgetSnapshot.count : 'n/a'}/cap=${budgetSnapshot ? budgetSnapshot.cap : 'n/a'}`,
                 `daysLeft=${stats.daysLeft}`,
@@ -14517,6 +14519,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _selection__WEBPACK_IMPORTED_MODULE_21__ = __webpack_require__(/*! ../selection */ "../../packages/tg-channel-state/src/channel-message-promotions/selection/index.ts");
 /* harmony import */ var _logging_promo_logger__WEBPACK_IMPORTED_MODULE_22__ = __webpack_require__(/*! ../logging/promo-logger */ "../../packages/tg-channel-state/src/channel-message-promotions/logging/promo-logger.ts");
 /* harmony import */ var _tg_core_utils_sanitizePromotionRendering__WEBPACK_IMPORTED_MODULE_23__ = __webpack_require__(/*! @tg/core/utils/sanitizePromotionRendering */ "../../packages/tg-core/src/utils/sanitizePromotionRendering.ts");
+/* harmony import */ var _tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_24__ = __webpack_require__(/*! @tg/core/utils/dc-ip-family */ "../../packages/tg-core/src/utils/dc-ip-family.ts");
 
 
 
@@ -14541,6 +14544,7 @@ function readPromoteRestartState(mobile, clientId) {
         .then((raw) => (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_11__.classifyPromoteRestart)(raw, clientId))
         .catch(() => ({ mode: 'unknown', snapshot: null }));
 }
+
 
 
 
@@ -14690,15 +14694,15 @@ class BasePromotionEngine {
             if (snap.lastAttemptAt !== null)
                 this.lastAttemptAt = snap.lastAttemptAt;
             this.durabilityPausedAt = snap.durabilityPausedAt;
-            this.logRunnerMessage('info', `[${this.mobile}] PROMO restart state restored | lastMain ${(0,_tg_core_utils_readbleTimeDifference__WEBPACK_IMPORTED_MODULE_10__.getReadableTimeDifference)(this.stats.lastMainMessageTime)} | failStreak ${this.stats.failStreak}${this.durabilityPausedAt ? ` | durability pause since ${new Date(this.durabilityPausedAt).toISOString()}` : ''}`);
+            this.logRunnerMessage('info', `[${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_24__.maskMobile)(this.mobile)}] PROMO restart state restored | lastMain ${(0,_tg_core_utils_readbleTimeDifference__WEBPACK_IMPORTED_MODULE_10__.getReadableTimeDifference)(this.stats.lastMainMessageTime)} | failStreak ${this.stats.failStreak}${this.durabilityPausedAt ? ` | durability pause since ${new Date(this.durabilityPausedAt).toISOString()}` : ''}`);
         }
         else if (state.mode === 'unknown') {
             this.stats.lastMainMessageTime = now;
             this.stats.lastFollowUpMessageTime = now;
-            this.logRunnerMessage('warn', `[${this.mobile}] PROMO restart state unreadable (Redis unavailable): starting as if a message was just sent`);
+            this.logRunnerMessage('warn', `[${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_24__.maskMobile)(this.mobile)}] PROMO restart state unreadable (Redis unavailable): starting as if a message was just sent`);
         }
         else {
-            this.logRunnerMessage('info', `[${this.mobile}] PROMO new run: no recent restart state, default grace`);
+            this.logRunnerMessage('info', `[${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_24__.maskMobile)(this.mobile)}] PROMO new run: no recent restart state, default grace`);
         }
     }
     getRestartMode() {
@@ -14770,7 +14774,7 @@ class BasePromotionEngine {
             outcomes = await this.readRecentSendOutcomes(BAN_RATE_GATE_WINDOW);
         }
         catch (error) {
-            this.logRunnerMessage('debug', `[${this.mobile}] PROMO ban-rate read failed; continuing: ${error instanceof Error ? error.message : String(error)}`);
+            this.logRunnerMessage('debug', `[${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_24__.maskMobile)(this.mobile)}] PROMO ban-rate read failed; continuing: ${error instanceof Error ? error.message : String(error)}`);
         }
         if (!outcomes) {
             if (gate?.tripped)
@@ -14791,13 +14795,13 @@ class BasePromotionEngine {
             probePending: probe,
         };
         if (tripped && !gate?.tripped) {
-            this.logRunnerMessage('warn', `[${this.mobile}] PROMO ban-rate gate: ${outcomes.failed}/${outcomes.total} recent sends permanently banned (>= ${Math.round(BAN_RATE_GATE_THRESHOLD * 100)}%); stopping the round and asking for a swap`);
+            this.logRunnerMessage('warn', `[${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_24__.maskMobile)(this.mobile)}] PROMO ban-rate gate: ${outcomes.failed}/${outcomes.total} recent sends permanently banned (>= ${Math.round(BAN_RATE_GATE_THRESHOLD * 100)}%); stopping the round and asking for a swap`);
         }
         else if (probe) {
-            this.logRunnerMessage('info', `[${this.mobile}] PROMO ban-rate gate still tripped (${outcomes.failed}/${outcomes.total}); allowing one probe send`);
+            this.logRunnerMessage('info', `[${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_24__.maskMobile)(this.mobile)}] PROMO ban-rate gate still tripped (${outcomes.failed}/${outcomes.total}); allowing one probe send`);
         }
         else if (!tripped && gate?.tripped) {
-            this.logRunnerMessage('info', `[${this.mobile}] PROMO ban-rate gate cleared (${outcomes.failed}/${outcomes.total})`);
+            this.logRunnerMessage('info', `[${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_24__.maskMobile)(this.mobile)}] PROMO ban-rate gate cleared (${outcomes.failed}/${outcomes.total})`);
         }
         return !tripped || probe;
     }
@@ -14825,7 +14829,7 @@ class BasePromotionEngine {
         const store = this.getChannelStore();
         const normalizedChannelId = this.normalizeChannelId(channelId);
         if (!this.isValidNormalizedChannelId(normalizedChannelId)) {
-            this.logRunnerMessage('warn', `[${this.mobile}] Skipping promotion channel with invalid channelId: ${channelId}`);
+            this.logRunnerMessage('warn', `[${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_24__.maskMobile)(this.mobile)}] Skipping promotion channel with invalid channelId: ${channelId}`);
             return null;
         }
         try {
@@ -14838,16 +14842,16 @@ class BasePromotionEngine {
                 shouldHydrate: _channel_state__WEBPACK_IMPORTED_MODULE_16__.shouldHydrateBeforeFinalReject,
             }, this.mergeCallerLiveFacts ? liveChannelInfo : undefined);
             if (outcome.status === 'debounced') {
-                this.logRunnerMessage('debug', `[${this.mobile}] ⏳ PROMO hydrate debounced | ${normalizedChannelId} | skip stale DB decision for ${Math.round(this.CHANNEL_REHYDRATION_DEBOUNCE_MS / 1000)}s window`);
+                this.logRunnerMessage('debug', `[${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_24__.maskMobile)(this.mobile)}] ⏳ PROMO hydrate debounced | ${normalizedChannelId} | skip stale DB decision for ${Math.round(this.CHANNEL_REHYDRATION_DEBOUNCE_MS / 1000)}s window`);
                 return null;
             }
             if (outcome.status === 'unavailable') {
-                this.logRunnerMessage('error', `[${this.mobile}] Could not get channel info for ${channelId}`);
+                this.logRunnerMessage('error', `[${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_24__.maskMobile)(this.mobile)}] Could not get channel info for ${channelId}`);
                 return null;
             }
             let channelInfo = outcome.doc;
             if (outcome.recoveredSendability) {
-                this.logRunnerMessage('info', `[${this.mobile}] ♻️ PROMO stale doc repaired | ${normalizedChannelId} | ${channelInfo.lastHydrationReason || 'hydrated'}`);
+                this.logRunnerMessage('info', `[${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_24__.maskMobile)(this.mobile)}] ♻️ PROMO stale doc repaired | ${normalizedChannelId} | ${channelInfo.lastHydrationReason || 'hydrated'}`);
             }
             const migratedDoc = await this.ensureChannelIntelligence(channelInfo);
             if (migratedDoc)
@@ -14959,7 +14963,7 @@ class BasePromotionEngine {
                 // Keep the raw resolution error (CHANNEL_INVALID/CHAT_ID_INVALID...) so the failure is
                 // classified and the dead channel blocked per-mobile instead of retried every cycle.
                 const reason = this.lastEntityResolutionError || 'Telegram entity not found';
-                this.logRunnerMessage('warn', `[${this.mobile}] Send skipped: Telegram entity not found for ${channelInfo.channelId} (${reason})`);
+                this.logRunnerMessage('warn', `[${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_24__.maskMobile)(this.mobile)}] Send skipped: Telegram entity not found for ${channelInfo.channelId} (${reason})`);
                 throw new Error(reason);
             }
             // Re-check on the sanitized text: a dropped line can leave an odd `**` -> send plain instead.
@@ -14982,16 +14986,16 @@ class BasePromotionEngine {
                     }
                     break;
                 case 'PEER_FLOOD':
-                    this.logRunnerMessage('warn', `[${this.mobile}] [LIMIT] PEER_FLOOD in ${channelInfo.channelId}; skipping channel only`);
+                    this.logRunnerMessage('warn', `[${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_24__.maskMobile)(this.mobile)}] [LIMIT] PEER_FLOOD in ${channelInfo.channelId}; skipping channel only`);
                     break;
                 case 'FLOOD_WAIT':
-                    this.logRunnerMessage('warn', `[${this.mobile}] Flood wait ${parsed.seconds}s in ${channelInfo.channelId}; skipping channel only`);
+                    this.logRunnerMessage('warn', `[${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_24__.maskMobile)(this.mobile)}] Flood wait ${parsed.seconds}s in ${channelInfo.channelId}; skipping channel only`);
                     break;
                 case 'SLOWMODE_WAIT':
-                    this.logRunnerMessage('debug', `[${this.mobile}] Slowmode wait ${parsed.seconds}s in ${channelInfo.channelId}`);
+                    this.logRunnerMessage('debug', `[${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_24__.maskMobile)(this.mobile)}] Slowmode wait ${parsed.seconds}s in ${channelInfo.channelId}`);
                     break;
                 case 'AUTH_ERROR':
-                    this.logRunnerMessage('error', `[${this.mobile}] Auth error: ${parsed.code}`);
+                    this.logRunnerMessage('error', `[${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_24__.maskMobile)(this.mobile)}] Auth error: ${parsed.code}`);
                     break;
                 default:
                     break;
@@ -15024,7 +15028,7 @@ class BasePromotionEngine {
         }
         catch (error) {
             this.promotionContext = null;
-            this.logRunnerMessage('error', `Promotion runtime context unavailable for ${this.mobile}: ${error}`);
+            this.logRunnerMessage('error', `Promotion runtime context unavailable for ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_24__.maskMobile)(this.mobile)}: ${error}`);
             throw error;
         }
     }
@@ -15215,14 +15219,14 @@ class BasePromotionEngine {
                 return this.shouldActivateSupervisor();
             },
             onRestart: (health) => {
-                this.logRunnerMessage('warn', `[${this.mobile}] Promotion helper runner restarted: restarts=${health.restartCount} failures=${health.consecutiveRunnerFailures}`);
+                this.logRunnerMessage('warn', `[${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_24__.maskMobile)(this.mobile)}] Promotion helper runner restarted: restarts=${health.restartCount} failures=${health.consecutiveRunnerFailures}`);
             },
             onStuck: (health) => {
                 const runner = health.runner;
-                this.logRunnerMessage('warn', `[${this.mobile}] Promotion helper runner appears stuck (no send progress and no active sleep); stopping current runner for restart. lastCycle=${runner?.lastCycleFinishedAt ?? 'n/a'} lastQueue=${runner?.lastQueueCheckFinishedAt ?? 'n/a'}`);
+                this.logRunnerMessage('warn', `[${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_24__.maskMobile)(this.mobile)}] Promotion helper runner appears stuck (no send progress and no active sleep); stopping current runner for restart. lastCycle=${runner?.lastCycleFinishedAt ?? 'n/a'} lastQueue=${runner?.lastQueueCheckFinishedAt ?? 'n/a'}`);
             },
             onError: (error) => {
-                this.logRunnerMessage('error', `[${this.mobile}] Promotion helper supervisor error: ${error}`);
+                this.logRunnerMessage('error', `[${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_24__.maskMobile)(this.mobile)}] Promotion helper supervisor error: ${error}`);
             },
             sleep: async (ms) => { await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_1__.sleep)(ms); },
             minRestartDelayMs: 1000,
@@ -15240,7 +15244,7 @@ class BasePromotionEngine {
                 this.promotionSupervisorPromise = null;
                 this.promotionRunner = null;
                 this.promotionActive = false;
-                this.logRunnerMessage('info', `[${this.mobile}] Promotion helper supervisor stopped.`);
+                this.logRunnerMessage('info', `[${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_24__.maskMobile)(this.mobile)}] Promotion helper supervisor stopped.`);
             }
         });
     }
@@ -15269,7 +15273,7 @@ class BasePromotionEngine {
             return;
         if (health.status !== 'running' && health.status !== 'stopping')
             return;
-        this.logRunnerMessage('warn', `[${this.mobile}] Stopping inactive promotion supervisor before start; reason=${reason} status=${health.status} runner=${health.runner?.status ?? 'none'}`);
+        this.logRunnerMessage('warn', `[${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_24__.maskMobile)(this.mobile)}] Stopping inactive promotion supervisor before start; reason=${reason} status=${health.status} runner=${health.runner?.status ?? 'none'}`);
         this.promotionRunId++;
         supervisor.stop();
         this.promotionRunner?.stop();
@@ -15346,7 +15350,7 @@ class BasePromotionEngine {
                 this.promotionActive = false;
                 this.durabilityPausedAt = Date.now();
                 this.schedulePromotionStatePersist();
-                this.logRunnerMessage('error', `[${this.mobile}] Promotion paused: accepted send could not be persisted for verification; error=${error instanceof Error ? error.message : String(error)}`);
+                this.logRunnerMessage('error', `[${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_24__.maskMobile)(this.mobile)}] Promotion paused: accepted send could not be persisted for verification; error=${error instanceof Error ? error.message : String(error)}`);
             },
             onSendFailure: async (channel, result, isFollowUp) => {
                 try {
@@ -15378,7 +15382,7 @@ class BasePromotionEngine {
         };
         const runtime = ___WEBPACK_IMPORTED_MODULE_14__.PromotionRuntime.getInstance();
         const attributionEnabled = !!runtime.tracker && !!runtime.attribution;
-        this.logRunnerMessage('info', `[${this.mobile}] PROMO features | scoring ${extras.runnerOptions.scoringEnabled} | poolLearning=true | attribution ${attributionEnabled}`);
+        this.logRunnerMessage('info', `[${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_24__.maskMobile)(this.mobile)}] PROMO features | scoring ${extras.runnerOptions.scoringEnabled} | poolLearning=true | attribution ${attributionEnabled}`);
         return new ___WEBPACK_IMPORTED_MODULE_14__.PromotionFlowRunner(adapter, {
             account,
             scoringEnabled: extras.runnerOptions.scoringEnabled,
@@ -15599,7 +15603,7 @@ class BasePromotionEngine {
     }
     /** Message-check log hooks; default no-op (promote provides its own simpler logging via overrides). */
     onCheckEntityNotFound(messageItem) {
-        this.logRunnerMessage('warn', `[${this.mobile}] ⚠️ PROMO message check | ${messageItem.channelId} | msg ${messageItem.messageId} | entity_not_found | removing from queue`);
+        this.logRunnerMessage('warn', `[${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_24__.maskMobile)(this.mobile)}] ⚠️ PROMO message check | ${messageItem.channelId} | msg ${messageItem.messageId} | entity_not_found | removing from queue`);
     }
     onCheckMissing(_messageItem, _status) { }
     onCheckTerminalFailure(_messageItem, _parsed) { }
@@ -15908,11 +15912,13 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   resolveDeletionPolicy: () => (/* binding */ resolveDeletionPolicy)
 /* harmony export */ });
 /* harmony import */ var _channel_state__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../../channel-state */ "../../packages/tg-channel-state/src/channel-state/index.ts");
+/* harmony import */ var _tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! @tg/core/utils/dc-ip-family */ "../../packages/tg-core/src/utils/dc-ip-family.ts");
+
 
 async function loadPromoteMessagesFromStore(deps, store, mobile, log) {
     try {
         const messages = (await store.getPromoteMsgs()) ?? {};
-        log('info', `[${mobile}] Loaded ${Object.keys(messages).length} promotion messages`);
+        log('info', `[${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_1__.maskMobile)(mobile)}] Loaded ${Object.keys(messages).length} promotion messages`);
         return messages;
     }
     catch (error) {
@@ -15937,12 +15943,12 @@ async function loadStoredChannelForMessageCheck(deps, store, channelId, mobile) 
 async function persistPromotionFailureState(deps, store, channelId, errorMsg, mobile, log) {
     const action = deps.resolveFailureAction({ error: errorMsg, channelId });
     if (action.skipPersist || !action.channelUpdate) {
-        log('debug', `[${mobile}] PROMO failure scoped locally | ${channelId} | ${action.code} | ${action.reason} | scope=${action.scope}`);
+        log('debug', `[${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_1__.maskMobile)(mobile)}] PROMO failure scoped locally | ${channelId} | ${action.code} | ${action.reason} | scope=${action.scope}`);
         return;
     }
     try {
         await store.updateActiveChannel(channelId, action.channelUpdate);
-        log('debug', `[${mobile}] PROMO failure persisted | ${channelId} | ${action.code} | ${action.reason} | scope=${action.scope}`);
+        log('debug', `[${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_1__.maskMobile)(mobile)}] PROMO failure persisted | ${channelId} | ${action.code} | ${action.reason} | scope=${action.scope}`);
     }
     catch (error) {
         deps.parseError(error, `[${mobile}] Failed to persist promotion failure state for ${channelId}`, false);
@@ -16874,6 +16880,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _utils_channel_id__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../utils/channel-id */ "../../packages/tg-channel-state/src/channel-message-promotions/utils/channel-id.ts");
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
 /* harmony import */ var _redis_utils__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./redis-utils */ "../../packages/tg-channel-state/src/channel-message-promotions/redis/redis-utils.ts");
+/* harmony import */ var _tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! @tg/core/utils/dc-ip-family */ "../../packages/tg-core/src/utils/dc-ip-family.ts");
 /**
  * Per-mobile exploration budget: how many UNPROVEN channels an account may try right now.
  *
@@ -16899,6 +16906,7 @@ __webpack_require__.r(__webpack_exports__);
  *
  * Emergency rollback only: env PROMOTION_EXPLORATION_BUDGET=off.
  */
+
 
 
 
@@ -16993,7 +17001,7 @@ class RedisAccountExploration {
             return denied;
         }
         catch (error) {
-            logger.warn(`deniedChannels failed for ${safeMobile}; failing open`, error);
+            logger.warn(`deniedChannels failed for ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_3__.maskMobile)(safeMobile)}; failing open`, error);
             return new Set();
         }
     }
@@ -17931,6 +17939,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _utils_channel_id__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ../utils/channel-id */ "../../packages/tg-channel-state/src/channel-message-promotions/utils/channel-id.ts");
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
 /* harmony import */ var _utils_guards__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! ../../utils/guards */ "../../packages/tg-channel-state/src/utils/guards.ts");
+/* harmony import */ var _tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! @tg/core/utils/dc-ip-family */ "../../packages/tg-core/src/utils/dc-ip-family.ts");
+
 
 
 
@@ -17972,7 +17982,7 @@ class PromotionAccountContext {
             await this.runtime.channelBlock.blockTemporary(this.mobile, channelId);
         }
         if (this.runtime.exploration) {
-            await this.runtime.exploration.recordBan(this.mobile, channelId).catch((error) => { logger.warn(`exploration.recordBan failed for ${this.mobile}/${channelId}`, error); });
+            await this.runtime.exploration.recordBan(this.mobile, channelId).catch((error) => { logger.warn(`exploration.recordBan failed for ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_13__.maskMobile)(this.mobile)}/${channelId}`, error); });
         }
     }
     /** Which of these channelIds are currently blocked for THIS mobile (pre-flight filter). */
@@ -17988,7 +17998,7 @@ class PromotionAccountContext {
     async explorationDeniedForMobile(channelIds, options = {}) {
         if (!this.runtime.exploration)
             return new Set();
-        return this.runtime.exploration.deniedChannels(this.mobile, channelIds, options).catch((error) => { logger.warn(`exploration.deniedChannels failed for ${this.mobile}; failing open`, error); return new Set(); });
+        return this.runtime.exploration.deniedChannels(this.mobile, channelIds, options).catch((error) => { logger.warn(`exploration.deniedChannels failed for ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_13__.maskMobile)(this.mobile)}; failing open`, error); return new Set(); });
     }
     async recordSuccess(channelId, isFollowup) {
         const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_10__.normalizeChannelId)(channelId);
@@ -17998,10 +18008,10 @@ class PromotionAccountContext {
         // leave a delivered pair unproven or its ban strikes in place.
         if (this.runtime.channelBlock) {
             // A delivery ends this pair's ban history (no-op under the PROMOTION_BAN_LADDER=legacy rollback).
-            await this.runtime.channelBlock.clearStrikes(this.mobile, safeChannelId).catch((error) => { logger.warn(`channelBlock.clearStrikes failed for ${this.mobile}/${safeChannelId}`, error); });
+            await this.runtime.channelBlock.clearStrikes(this.mobile, safeChannelId).catch((error) => { logger.warn(`channelBlock.clearStrikes failed for ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_13__.maskMobile)(this.mobile)}/${safeChannelId}`, error); });
         }
         if (this.runtime.exploration) {
-            await this.runtime.exploration.recordDelivery(this.mobile, safeChannelId).catch((error) => { logger.warn(`exploration.recordDelivery failed for ${this.mobile}/${safeChannelId}`, error); });
+            await this.runtime.exploration.recordDelivery(this.mobile, safeChannelId).catch((error) => { logger.warn(`exploration.recordDelivery failed for ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_13__.maskMobile)(this.mobile)}/${safeChannelId}`, error); });
         }
         await this.runtime.intelligence.recordSuccess(safeChannelId, isFollowup);
         if (this.runtime.accountHealth) {
@@ -18109,7 +18119,7 @@ class PromotionAccountContext {
             return await this.runtime.accountHealth.getAccountHealth(this.mobile);
         }
         catch (error) {
-            logger.warn(`getAccountHealth failed for ${this.mobile}`, error);
+            logger.warn(`getAccountHealth failed for ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_13__.maskMobile)(this.mobile)}`, error);
             return null;
         }
     }
@@ -20912,6 +20922,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ });
 /* harmony import */ var node_os__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! node:os */ "node:os");
 /* harmony import */ var node_os__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(node_os__WEBPACK_IMPORTED_MODULE_0__);
+/* harmony import */ var _utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../utils/dc-ip-family */ "../../packages/tg-core/src/utils/dc-ip-family.ts");
+
 
 /**
  * Lease rules (design §4.4). No I/O of their own: every read/write goes through the LeaseStore port.
@@ -21073,19 +21085,19 @@ function reportLiveOverride(mobile, where, holder, overrode, env, logger, alert)
     if (cls === 'parked')
         return cls;
     if (cls === 'stale_same_host') {
-        logger?.info(`[lease] live ${where} for ${mobile} took over from ${holderLabel(overrode)}: same host, pid gone (restart)`);
+        logger?.info(`[lease] live ${where} for ${(0,_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_1__.maskMobile)(mobile)} took over from ${holderLabel(overrode)}: same host, pid gone (restart)`);
         return cls;
     }
-    logger?.warn(`${LIVE_OVERRIDE_TAG} live ${where} for ${mobile} overrode ${holderLabel(overrode)}; now ${holder.owner}. Two live clients may be on this account.`);
+    logger?.warn(`${LIVE_OVERRIDE_TAG} live ${where} for ${(0,_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_1__.maskMobile)(mobile)} overrode ${holderLabel(overrode)}; now ${holder.owner}. Two live clients may be on this account.`);
     if (alert) {
         try {
             const sent = alert({ mobile, where, holder, overrode, class: cls });
             if (sent && typeof sent.catch === 'function') {
-                sent.catch((error) => logger?.warn(`${LIVE_OVERRIDE_TAG} alert failed for ${mobile}: ${describe(error)}`));
+                sent.catch((error) => logger?.warn(`${LIVE_OVERRIDE_TAG} alert failed for ${(0,_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_1__.maskMobile)(mobile)}: ${describe(error)}`));
             }
         }
         catch (error) {
-            logger?.warn(`${LIVE_OVERRIDE_TAG} alert failed for ${mobile}: ${describe(error)}`);
+            logger?.warn(`${LIVE_OVERRIDE_TAG} alert failed for ${(0,_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_1__.maskMobile)(mobile)}: ${describe(error)}`);
         }
     }
     return cls;
@@ -21137,7 +21149,7 @@ class LiveLeaseKeeper {
                     return;
             }
             catch (error) {
-                this.opts.logger?.warn(`[lease] renew failed for ${this.mobile}: ${describe(error)}; re-acquiring`);
+                this.opts.logger?.warn(`[lease] renew failed for ${(0,_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_1__.maskMobile)(this.mobile)}: ${describe(error)}; re-acquiring`);
             }
         }
         const result = await acquireLiveLease(this.store, this.mobile, this.holder, {
@@ -21155,14 +21167,14 @@ class LiveLeaseKeeper {
             return;
         }
         if (result.fence === null) {
-            this.opts.logger?.warn(`[lease] live re-acquire for ${this.mobile} proceeded without a lease: ${result.error ?? 'unknown'}`);
+            this.opts.logger?.warn(`[lease] live re-acquire for ${(0,_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_1__.maskMobile)(this.mobile)} proceeded without a lease: ${result.error ?? 'unknown'}`);
             return;
         }
         if (result.overrode) {
             reportLiveOverride(this.mobile, 'renew', this.holder, result.overrode, this.opts.overrideEnv ?? DEFAULT_LIVE_OVERRIDE_ENV, this.opts.logger, this.opts.alert);
         }
         if (result.fence !== this.currentFence || result.overrode) {
-            this.opts.logger?.info(`[lease] live re-acquired ${this.mobile} fence ${String(this.currentFence)} -> ${result.fence}${result.overrode ? ` (overrode ${result.overrode.kind} ${result.overrode.owner})` : ''}`);
+            this.opts.logger?.info(`[lease] live re-acquired ${(0,_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_1__.maskMobile)(this.mobile)} fence ${String(this.currentFence)} -> ${result.fence}${result.overrode ? ` (overrode ${result.overrode.kind} ${result.overrode.owner})` : ''}`);
         }
         this.currentFence = result.fence;
     }
@@ -21210,6 +21222,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var node_crypto__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! node:crypto */ "node:crypto");
 /* harmony import */ var node_crypto__WEBPACK_IMPORTED_MODULE_1___default = /*#__PURE__*/__webpack_require__.n(node_crypto__WEBPACK_IMPORTED_MODULE_1__);
 /* harmony import */ var _lease__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./lease */ "../../packages/tg-core/src/account-lease/lease.ts");
+/* harmony import */ var _utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../utils/dc-ip-family */ "../../packages/tg-core/src/utils/dc-ip-family.ts");
+
 
 
 
@@ -21299,7 +21313,7 @@ class LiveLeaseBinding {
         const token = { cancelled: false };
         this.tokens.set(mobile, token);
         const run = this.acquire(mobile, token).catch((error) => {
-            this.opts.logger.warn(`[lease] live hold for ${mobile} failed unexpectedly, connecting without a lease: ${String(error)}`);
+            this.opts.logger.warn(`[lease] live hold for ${(0,_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_3__.maskMobile)(mobile)} failed unexpectedly, connecting without a lease: ${String(error)}`);
             return 'no_lease';
         }).finally(() => { this.pending.delete(mobile); });
         this.pending.set(mobile, run);
@@ -21335,7 +21349,7 @@ class LiveLeaseBinding {
             await keeper.stop(opts?.final ? { final: true } : undefined);
         }
         catch (error) {
-            this.opts.logger.warn(`[lease] live release for ${mobile} failed: ${String(error)}`);
+            this.opts.logger.warn(`[lease] live release for ${(0,_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_3__.maskMobile)(mobile)} failed: ${String(error)}`);
         }
     }
     /**
@@ -21347,7 +21361,7 @@ class LiveLeaseBinding {
     releaseLate(mobile, token, owner, fence) {
         const current = this.tokens.get(mobile);
         if (current !== undefined && current !== token) {
-            this.opts.logger.info(`[lease] late acquire for ${mobile} (fence ${fence}) left to the newer hold`);
+            this.opts.logger.info(`[lease] late acquire for ${(0,_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_3__.maskMobile)(mobile)} (fence ${fence}) left to the newer hold`);
             return Promise.resolve();
         }
         const previous = this.releasing.get(mobile);
@@ -21434,7 +21448,7 @@ class LiveLeaseBinding {
         this.keepers.set(mobile, keeper);
         keeper.start();
         if (first === 'timeout') {
-            this.opts.logger.warn(`[lease] live acquire for ${mobile} timed_out after ${deadlineMs} ms; connecting without a lease`);
+            this.opts.logger.warn(`[lease] live acquire for ${(0,_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_3__.maskMobile)(mobile)} timed_out after ${deadlineMs} ms; connecting without a lease`);
             // The acquire keeps running. When it lands, let the keeper adopt it (same owner keeps the fence),
             // or release it if this mobile was released meanwhile, so no lease is orphaned until its TTL.
             void acquiring.then(async (late) => {
@@ -21451,20 +21465,20 @@ class LiveLeaseBinding {
         }
         const ms = now() - startedAt;
         if (first.fence === null) {
-            this.opts.logger.warn(`[lease] live acquire for ${mobile} proceeded without a lease (${first.error ?? 'store error'}); renew retries`);
+            this.opts.logger.warn(`[lease] live acquire for ${(0,_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_3__.maskMobile)(mobile)} proceeded without a lease (${first.error ?? 'store error'}); renew retries`);
             return 'no_lease';
         }
         if (first.overrode) {
             const cls = (0,_lease__WEBPACK_IMPORTED_MODULE_2__.reportLiveOverride)(mobile, 'acquire', holder, first.overrode, env, this.opts.logger, this.opts.alert);
             if (cls === 'parked') {
-                this.opts.logger.warn(`[lease] live acquire for ${mobile} overrode ${first.overrode.kind} ${first.overrode.owner} after waited=${first.waitedMs} ms (fence ${first.fence})`);
+                this.opts.logger.warn(`[lease] live acquire for ${(0,_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_3__.maskMobile)(mobile)} overrode ${first.overrode.kind} ${first.overrode.owner} after waited=${first.waitedMs} ms (fence ${first.fence})`);
             }
         }
         else if (first.waitedMs > 0) {
-            this.opts.logger.info(`[lease] live acquire for ${mobile} waited=${first.waitedMs} ms (fence ${first.fence})`);
+            this.opts.logger.info(`[lease] live acquire for ${(0,_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_3__.maskMobile)(mobile)} waited=${first.waitedMs} ms (fence ${first.fence})`);
         }
         else {
-            this.opts.logger.info(`[lease] live lease held for ${mobile} (fence ${first.fence}, ${ms} ms)`);
+            this.opts.logger.info(`[lease] live lease held for ${(0,_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_3__.maskMobile)(mobile)} (fence ${first.fence}, ${ms} ms)`);
         }
         return 'held';
     }
@@ -24080,6 +24094,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! telegram */ "telegram");
 /* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_3___default = /*#__PURE__*/__webpack_require__.n(telegram__WEBPACK_IMPORTED_MODULE_3__);
 /* harmony import */ var _utils_logger__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ../utils/dc-ip-family */ "../../packages/tg-core/src/utils/dc-ip-family.ts");
+
 
 
 
@@ -24144,7 +24160,7 @@ async function checktghealth(client, mobile, force, deps) {
     try {
         if (!client) {
             errorMessage = "Client instance does not exist";
-            logger.warn(`[HEALTH] Liveness audit skipped for ${mobile}: ${errorMessage}`);
+            logger.warn(`[HEALTH] Liveness audit skipped for ${(0,_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_5__.maskMobile)(mobile)}: ${errorMessage}`);
             if (onMissingClient) {
                 await onMissingClient(mobile);
             }
@@ -24155,7 +24171,7 @@ async function checktghealth(client, mobile, force, deps) {
         else {
             await client.sendMessage('@spambot', { message: '/start' });
             result = true;
-            logger.debug(`[HEALTH] Liveness audit passed for ${mobile}`);
+            logger.debug(`[HEALTH] Liveness audit passed for ${(0,_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_5__.maskMobile)(mobile)}`);
         }
     }
     catch (error) {
@@ -25554,6 +25570,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../utils/TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
 /* harmony import */ var _utils_parseError__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
 /* harmony import */ var _utils_logger__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../utils/dc-ip-family */ "../../packages/tg-core/src/utils/dc-ip-family.ts");
+
 
 
 
@@ -25772,10 +25790,10 @@ async function reportManualSpamBotProbe(mobile, probeStartedAt, client) {
         ? Date.parse(latestReply.receivedAt) >= probeStartedAt
         : false;
     if (!latestReply) {
-        logger.warn(`[SpamBot probe] ${mobile}: probe sent; no reply is available in the current dialog yet`);
+        logger.warn(`[SpamBot probe] ${(0,_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_4__.maskMobile)(mobile)}: probe sent; no reply is available in the current dialog yet`);
         return { latestReply: null, replyIsFresh: false };
     }
-    logger.info(`[SpamBot probe] ${mobile}: ${latestReply.text}`);
+    logger.info(`[SpamBot probe] ${(0,_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_4__.maskMobile)(mobile)}: ${latestReply.text}`);
     if (!claimSpamBotNotification(mobile, latestReply.messageId)) {
         return { latestReply, replyIsFresh };
     }
@@ -29212,6 +29230,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var http__WEBPACK_IMPORTED_MODULE_3___default = /*#__PURE__*/__webpack_require__.n(http__WEBPACK_IMPORTED_MODULE_3__);
 /* harmony import */ var _logger__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ./logger */ "../../packages/tg-core/src/utils/logger.ts");
 /* harmony import */ var _Redis_Redis_Client__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ./Redis/Redis.Client */ "../../packages/tg-core/src/utils/Redis/Redis.Client.ts");
+/* harmony import */ var _dc_ip_family__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ./dc-ip-family */ "../../packages/tg-core/src/utils/dc-ip-family.ts");
+
 
 
 
@@ -29372,7 +29392,7 @@ async function cacheProxyMapping(mobile, key, proxy, source) {
     }
     catch (error) {
         logger.warn("Redis SET failed for proxy map; using proxy anyway", {
-            mobile,
+            mobile: (0,_dc_ip_family__WEBPACK_IMPORTED_MODULE_6__.maskMobile)(mobile),
             source,
             error: errorMessage(error),
         });
@@ -29384,7 +29404,7 @@ async function cacheTelegramConfig(mobile, key, config, ttl, source) {
     }
     catch (error) {
         logger.warn("Redis SET failed for config cache; using config anyway", {
-            mobile,
+            mobile: (0,_dc_ip_family__WEBPACK_IMPORTED_MODULE_6__.maskMobile)(mobile),
             source,
             error: errorMessage(error),
         });
@@ -29473,7 +29493,7 @@ async function _resolveProxy(mobile) {
     // 1. Redis sticky cache
     const cached = await _Redis_Redis_Client__WEBPACK_IMPORTED_MODULE_5__.RedisClient.getObject(mapKey);
     if (cached && cached.ip) {
-        logger.debug("Proxy cache hit", { mobile, ip: cached.ip, port: cached.port });
+        logger.debug("Proxy cache hit", { mobile: (0,_dc_ip_family__WEBPACK_IMPORTED_MODULE_6__.maskMobile)(mobile), ip: cached.ip, port: cached.port });
         const proxy = { ...cached, socksType: proxySocksType(cached) };
         _registerMobile(mobile, proxy);
         return proxy;
@@ -29483,18 +29503,18 @@ async function _resolveProxy(mobile) {
     try {
         const proxy = await fetchNextProxy(clientId || undefined);
         await cacheProxyMapping(mobile, mapKey, proxy, "api-next");
-        logger.info("Assigned proxy via /next", { mobile, ip: proxy.ip, port: proxy.port, clientId: clientId || "none" });
+        logger.info("Assigned proxy via /next", { mobile: (0,_dc_ip_family__WEBPACK_IMPORTED_MODULE_6__.maskMobile)(mobile), ip: proxy.ip, port: proxy.port, clientId: clientId || "none" });
         _registerMobile(mobile, proxy);
         return proxy;
     }
     catch (err) {
-        logger.warn("IP Management /next failed", { mobile, error: err.message });
+        logger.warn("IP Management /next failed", { mobile: (0,_dc_ip_family__WEBPACK_IMPORTED_MODULE_6__.maskMobile)(mobile), error: err.message });
     }
     // 3. Env fallback
     const envProxy = resolveProxyFromEnv();
     if (envProxy) {
         await cacheProxyMapping(mobile, mapKey, envProxy, "env-fallback");
-        logger.info("Assigned proxy from env", { mobile, ip: envProxy.ip });
+        logger.info("Assigned proxy from env", { mobile: (0,_dc_ip_family__WEBPACK_IMPORTED_MODULE_6__.maskMobile)(mobile), ip: envProxy.ip });
         _registerMobile(mobile, envProxy);
         return envProxy;
     }
@@ -29538,14 +29558,14 @@ async function rotateProxy(mobile) {
             if (proxyKey(candidate) !== currentKey) {
                 await cacheProxyMapping(mobile, mapKey, candidate, "rotation-api");
                 await updateCachedProxy(mobile, candidate);
-                logger.info("Rotated proxy", { mobile, from: current?.ip, to: candidate.ip, port: candidate.port, attempt });
+                logger.info("Rotated proxy", { mobile: (0,_dc_ip_family__WEBPACK_IMPORTED_MODULE_6__.maskMobile)(mobile), from: current?.ip, to: candidate.ip, port: candidate.port, attempt });
                 _registerMobile(mobile, candidate);
                 return candidate;
             }
-            logger.debug("Got same proxy from /next, retrying", { mobile, attempt, ip: candidate.ip });
+            logger.debug("Got same proxy from /next, retrying", { mobile: (0,_dc_ip_family__WEBPACK_IMPORTED_MODULE_6__.maskMobile)(mobile), attempt, ip: candidate.ip });
         }
         catch (err) {
-            logger.warn("IP Management /next failed during rotation", { mobile, attempt, error: err.message });
+            logger.warn("IP Management /next failed during rotation", { mobile: (0,_dc_ip_family__WEBPACK_IMPORTED_MODULE_6__.maskMobile)(mobile), attempt, error: err.message });
         }
     }
     // Env fallback
@@ -29553,11 +29573,11 @@ async function rotateProxy(mobile) {
     if (envProxy && proxyKey(envProxy) !== currentKey) {
         await cacheProxyMapping(mobile, mapKey, envProxy, "rotation-env");
         await updateCachedProxy(mobile, envProxy);
-        logger.info("Rotated proxy", { mobile, from: current?.ip, to: envProxy.ip, source: "env" });
+        logger.info("Rotated proxy", { mobile: (0,_dc_ip_family__WEBPACK_IMPORTED_MODULE_6__.maskMobile)(mobile), from: current?.ip, to: envProxy.ip, source: "env" });
         _registerMobile(mobile, envProxy);
         return envProxy;
     }
-    logger.error("No alternative proxy available for rotation", { mobile, deadProxy: current?.ip });
+    logger.error("No alternative proxy available for rotation", { mobile: (0,_dc_ip_family__WEBPACK_IMPORTED_MODULE_6__.maskMobile)(mobile), deadProxy: current?.ip });
     throw new Error(`No alternative proxy available for mobile ${mobile}`);
 }
 async function removeProxyMapping(mobile) {
@@ -29565,7 +29585,7 @@ async function removeProxyMapping(mobile) {
     await deleteCachedKey(mobile, mapKey, "remove-proxy-mapping");
     await invalidateConfig(mobile);
     _unregisterMobile(mobile);
-    logger.info("Removed proxy mapping + invalidated config", { mobile });
+    logger.info("Removed proxy mapping + invalidated config", { mobile: (0,_dc_ip_family__WEBPACK_IMPORTED_MODULE_6__.maskMobile)(mobile) });
 }
 const _activeMap = new Map();
 let _healthInterval = null;
@@ -29587,7 +29607,7 @@ function _registerMobile(mobile, proxy) {
         lastLatency: 0,
         status: "healthy",
     });
-    logger.debug("Mobile registered for health monitoring", { mobile, ip: proxy.ip, port: proxy.port, totalTracked: _activeMap.size });
+    logger.debug("Mobile registered for health monitoring", { mobile: (0,_dc_ip_family__WEBPACK_IMPORTED_MODULE_6__.maskMobile)(mobile), ip: proxy.ip, port: proxy.port, totalTracked: _activeMap.size });
     // Auto-start monitor on first registration (requires explicit opt-in)
     if (!_isHandlingDeath && !_healthInterval && isProxyEnabled() && isHealthCheckEnabled()) {
         const interval = envInt("PROXY_HEALTH_INTERVAL", 30000);
@@ -29598,7 +29618,7 @@ function _registerMobile(mobile, proxy) {
 }
 function _unregisterMobile(mobile) {
     _activeMap.delete(mobile);
-    logger.debug("Mobile unregistered", { mobile, totalTracked: _activeMap.size });
+    logger.debug("Mobile unregistered", { mobile: (0,_dc_ip_family__WEBPACK_IMPORTED_MODULE_6__.maskMobile)(mobile), totalTracked: _activeMap.size });
     if (_activeMap.size === 0) {
         stopHealthMonitor();
     }
@@ -29644,7 +29664,7 @@ function _startHealthMonitor(intervalMs) {
                         m.lastLatency = result.latencyMs;
                         m.status = "healthy";
                     }
-                    logger.debug(`✓ ${pKey} (${result.latencyMs}ms) — ${mobiles.map((m) => m.mobile).join(", ")}`);
+                    logger.debug(`✓ ${pKey} (${result.latencyMs}ms) — ${mobiles.map((m) => (0,_dc_ip_family__WEBPACK_IMPORTED_MODULE_6__.maskMobile)(m.mobile)).join(", ")}`);
                     continue;
                 }
                 // Failed
@@ -29677,7 +29697,7 @@ async function _handleProxyDeath(deadProxy, affectedMobiles, source = "health-mo
     stopHealthMonitor();
     try {
         const deadKey = proxyKey(deadProxy);
-        logger.error(`PROXY DEAD: ${deadKey} — affects ${affectedMobiles.length} mobiles: ${affectedMobiles.map((m) => m.mobile).join(", ")}`);
+        logger.error(`PROXY DEAD: ${deadKey} — affects ${affectedMobiles.length} mobiles: ${affectedMobiles.map((m) => (0,_dc_ip_family__WEBPACK_IMPORTED_MODULE_6__.maskMobile)(m.mobile)).join(", ")}`);
         // 1. Report to API
         const reported = await reportProxyInactive(deadProxy.ip, deadProxy.port);
         logger.info("Reported to API", { ip: deadProxy.ip, port: deadProxy.port, reported });
@@ -29686,7 +29706,7 @@ async function _handleProxyDeath(deadProxy, affectedMobiles, source = "health-mo
             try {
                 const newProxy = await rotateProxy(tracked.mobile);
                 logger.info("Rotated mobile", {
-                    mobile: tracked.mobile,
+                    mobile: (0,_dc_ip_family__WEBPACK_IMPORTED_MODULE_6__.maskMobile)(tracked.mobile),
                     from: `${deadProxy.ip}:${deadProxy.port}`,
                     to: `${newProxy.ip}:${newProxy.port}`,
                 });
@@ -29704,7 +29724,7 @@ async function _handleProxyDeath(deadProxy, affectedMobiles, source = "health-mo
                 }
             }
             catch (err) {
-                logger.error("Rotation failed for mobile — no alternative proxy", { mobile: tracked.mobile, error: err.message });
+                logger.error("Rotation failed for mobile — no alternative proxy", { mobile: (0,_dc_ip_family__WEBPACK_IMPORTED_MODULE_6__.maskMobile)(tracked.mobile), error: err.message });
                 if (_onAllFailedCallback) {
                     try {
                         _onAllFailedCallback(tracked.mobile);
@@ -29770,18 +29790,18 @@ function setBeforeProxyRestartCallback(fn) {
 async function handleMobileProxyFailure(mobile, error) {
     const tracked = _activeMap.get(mobile);
     if (!tracked) {
-        logger.warn("handleMobileProxyFailure called for untracked mobile", { mobile });
+        logger.warn("handleMobileProxyFailure called for untracked mobile", { mobile: (0,_dc_ip_family__WEBPACK_IMPORTED_MODULE_6__.maskMobile)(mobile) });
         return { rotated: false, reportedToAPI: false };
     }
     logger.warn("Manual proxy failure reported", {
-        mobile,
+        mobile: (0,_dc_ip_family__WEBPACK_IMPORTED_MODULE_6__.maskMobile)(mobile),
         proxy: proxyKey(tracked.proxy),
         error: error instanceof Error ? error.message : String(error || "unknown"),
     });
     // Verify: is the proxy actually dead?
     const health = await checkProxyHealth(tracked.proxy);
     if (health.healthy) {
-        logger.info("Proxy is healthy — error was not proxy-related", { mobile, latency: health.latencyMs });
+        logger.info("Proxy is healthy — error was not proxy-related", { mobile: (0,_dc_ip_family__WEBPACK_IMPORTED_MODULE_6__.maskMobile)(mobile), latency: health.latencyMs });
         return { rotated: false, reportedToAPI: false };
     }
     // Find ALL mobiles on the same dead proxy (not just this one)
@@ -29888,7 +29908,7 @@ async function generateTGConfig(mobile, ttl = CONFIG_TTL_SECONDS) {
                     // Proxy map was updated (rotation) but config cache is stale
                     const reconciled = { ...cached, proxy: currentProxy };
                     await cacheTelegramConfig(mobile, redisKey, reconciled, ttl, "reconcile-proxy-map");
-                    logger.info("Reconciled stale proxy in config cache", { mobile, from: cachedKey, to: mapKey });
+                    logger.info("Reconciled stale proxy in config cache", { mobile: (0,_dc_ip_family__WEBPACK_IMPORTED_MODULE_6__.maskMobile)(mobile), from: cachedKey, to: mapKey });
                     _registerMobile(mobile, currentProxy);
                     return cachedToResult(reconciled);
                 }
@@ -29910,7 +29930,7 @@ async function generateTGConfig(mobile, ttl = CONFIG_TTL_SECONDS) {
             proxy = await getProxyForMobile(mobile);
         }
         catch (err) {
-            logger.warn("No proxy available — proceeding without", { mobile, error: err.message });
+            logger.warn("No proxy available — proceeding without", { mobile: (0,_dc_ip_family__WEBPACK_IMPORTED_MODULE_6__.maskMobile)(mobile), error: err.message });
         }
     }
     const realisticConfig = (0,_tg_config__WEBPACK_IMPORTED_MODULE_0__.generateRealisticConfig)(mobile, proxy
@@ -29926,7 +29946,7 @@ async function generateTGConfig(mobile, ttl = CONFIG_TTL_SECONDS) {
     const toStore = tgConfigToCached(realisticConfig);
     await cacheTelegramConfig(mobile, redisKey, toStore, ttl, "generate-config");
     logger.info("Generated and cached config", {
-        mobile,
+        mobile: (0,_dc_ip_family__WEBPACK_IMPORTED_MODULE_6__.maskMobile)(mobile),
         device: realisticConfig.deviceModel,
         system: realisticConfig.systemVersion,
         app: realisticConfig.appVersion,
@@ -29939,7 +29959,7 @@ async function updateCachedProxy(mobile, proxy, ttl = CONFIG_TTL_SECONDS) {
     const redisKey = `${CONFIG_PREFIX}${mobile}`;
     const cached = await _Redis_Redis_Client__WEBPACK_IMPORTED_MODULE_5__.RedisClient.getObject(redisKey);
     if (!cached || !cached._apiId) {
-        logger.debug("No cached config to update proxy on", { mobile });
+        logger.debug("No cached config to update proxy on", { mobile: (0,_dc_ip_family__WEBPACK_IMPORTED_MODULE_6__.maskMobile)(mobile) });
         return;
     }
     if (proxy) {
@@ -29949,18 +29969,18 @@ async function updateCachedProxy(mobile, proxy, ttl = CONFIG_TTL_SECONDS) {
         delete cached.proxy;
     }
     await cacheTelegramConfig(mobile, redisKey, cached, ttl, "update-cached-proxy");
-    logger.info("Updated proxy in cached config", { mobile, proxy: proxy ? `${proxy.ip}:${proxy.port}` : "none" });
+    logger.info("Updated proxy in cached config", { mobile: (0,_dc_ip_family__WEBPACK_IMPORTED_MODULE_6__.maskMobile)(mobile), proxy: proxy ? `${proxy.ip}:${proxy.port}` : "none" });
 }
 /** Invalidate config cache entirely. Use resetMobileIdentity for full reset. */
 async function invalidateConfig(mobile) {
     const redisKey = `${CONFIG_PREFIX}${mobile}`;
     await deleteCachedKey(mobile, redisKey, "invalidate-config");
-    logger.info("Config invalidated", { mobile });
+    logger.info("Config invalidated", { mobile: (0,_dc_ip_family__WEBPACK_IMPORTED_MODULE_6__.maskMobile)(mobile) });
 }
 /** Full identity reset — new fingerprint + new proxy. */
 async function resetMobileIdentity(mobile) {
     await removeProxyMapping(mobile);
-    logger.info("Full identity reset", { mobile });
+    logger.info("Full identity reset", { mobile: (0,_dc_ip_family__WEBPACK_IMPORTED_MODULE_6__.maskMobile)(mobile) });
 }
 
 
@@ -37771,6 +37791,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! @tg/core/state/state-redis */ "../../packages/tg-core/src/state/state-redis.ts");
 /* harmony import */ var _account_facet_read__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ./account-facet-read */ "../../packages/tg-db/src/collections/account-facet-read.ts");
 /* harmony import */ var _account_role_events_repository__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ./account-role-events.repository */ "../../packages/tg-db/src/collections/account-role-events.repository.ts");
+/* harmony import */ var _tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! @tg/core/utils/dc-ip-family */ "../../packages/tg-core/src/utils/dc-ip-family.ts");
+
 
 
 
@@ -37897,7 +37919,7 @@ class ParkedAccountsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE
                 }
             }
         }
-        this.logger.warn(`[${this.collectionName}] openEpisode(${seed._id}): another open episode holds ${seed.mobile} (other app or a race); not opened`);
+        this.logger.warn(`[${this.collectionName}] openEpisode(${seed._id}): another open episode holds ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_6__.maskMobile)(seed.mobile)} (other app or a race); not opened`);
         return 'failed';
     }
     /** Claim the most overdue open episode of this app + clientId for `owner` (server time). Null when none. */
@@ -39195,6 +39217,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _account_role_events_repository__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./account-role-events.repository */ "../../packages/tg-db/src/collections/account-role-events.repository.ts");
 /* harmony import */ var _account_pool_facets__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ./account-pool-facets */ "../../packages/tg-db/src/collections/account-pool-facets.ts");
 /* harmony import */ var _promote_stats_normalize__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ./promote-stats.normalize */ "../../packages/tg-db/src/collections/promote-stats.normalize.ts");
+/* harmony import */ var _tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! @tg/core/utils/dc-ip-family */ "../../packages/tg-core/src/utils/dc-ip-family.ts");
+
 
 
 
@@ -39632,10 +39656,10 @@ class PromoteRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_1__.Ba
     }
     /** THROWS on a read failure (the persona flow must see it); logs what was loaded. */
     async getPromoteClientDoc(mobile) {
-        this.logger.debug?.(`[Persona] Loading promote client doc for ${mobile}`);
+        this.logger.debug?.(`[Persona] Loading promote client doc for ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_5__.maskMobile)(mobile)}`);
         const doc = await this.promoteClients.findOne({ mobile });
         if (doc) {
-            this.logger.debug?.(`[Persona] Loaded promote client doc for ${mobile}`, {
+            this.logger.debug?.(`[Persona] Loaded promote client doc for ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_5__.maskMobile)(mobile)}`, {
                 hasAssignedFirstName: !!doc.assignedFirstName,
                 hasAssignedLastName: !!doc.assignedLastName,
                 hasAssignedBio: !!doc.assignedBio,
@@ -39647,13 +39671,13 @@ class PromoteRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_1__.Ba
             });
         }
         else {
-            this.logger.warn(`[Persona] Promote client doc not found for ${mobile}`);
+            this.logger.warn(`[Persona] Promote client doc not found for ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_5__.maskMobile)(mobile)}`);
         }
         return doc;
     }
     /** THROWS on a write failure (the persona flow must see it). */
     async updatePromoteClientAssignment(mobile, update) {
-        this.info(`[Persona] Persisting promote client assignment update for ${mobile}`, {
+        this.info(`[Persona] Persisting promote client assignment update for ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_5__.maskMobile)(mobile)}`, {
             keys: Object.keys(update),
         });
         // findOneAndUpdate (one round trip, like the updateOne it replaces) returns the AFTER doc for the S3 snapshot
@@ -46949,6 +46973,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ });
 /* harmony import */ var _tg_core_account_lease__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/core/account-lease */ "../../packages/tg-core/src/account-lease/index.ts");
 /* harmony import */ var _constants__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../constants */ "../../packages/tg-parked/src/constants.ts");
+/* harmony import */ var _tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! @tg/core/utils/dc-ip-family */ "../../packages/tg-core/src/utils/dc-ip-family.ts");
+
 
 
 class PassAborted extends Error {
@@ -47048,7 +47074,7 @@ class PassGuard {
         if (this.reason || this.stopped)
             return;
         this.reason = reason;
-        this.opts.logger.warn(`[parked] lease watcher: ${reason} on ${this.opts.mobile}; disposing the parked client now`);
+        this.opts.logger.warn(`[parked] lease watcher: ${reason} on ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_2__.maskMobile)(this.opts.mobile)}; disposing the parked client now`);
         this.clearTimers();
         this.resolveTrip(reason);
         try {
@@ -47117,14 +47143,14 @@ class LeaseRenewer {
             return;
         }
         if (ok === false) {
-            opts.logger.warn(`[parked] parked lease on ${opts.mobile} could not be renewed (lost); the pass ends on the watcher's trip`);
+            opts.logger.warn(`[parked] parked lease on ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_2__.maskMobile)(opts.mobile)} could not be renewed (lost); the pass ends on the watcher's trip`);
             return;
         }
         const left = this.expiresAtMs - opts.now();
         if (left > 0)
             this.schedule(Math.min(_constants__WEBPACK_IMPORTED_MODULE_1__.LEASE_WATCH_MS * 5, left));
         else
-            opts.logger.warn(`[parked] parked lease on ${opts.mobile} could not be renewed (store error) before its TTL`);
+            opts.logger.warn(`[parked] parked lease on ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_2__.maskMobile)(opts.mobile)} could not be renewed (store error) before its TTL`);
     }
 }
 
@@ -48269,6 +48295,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   openParkedSession: () => (/* binding */ openParkedSession)
 /* harmony export */ });
 /* harmony import */ var _constants__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../constants */ "../../packages/tg-parked/src/constants.ts");
+/* harmony import */ var _tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! @tg/core/utils/dc-ip-family */ "../../packages/tg-core/src/utils/dc-ip-family.ts");
+
 
 /** Error contexts, kept identical to the promote scraper's (its tests and log searches use them). */
 const SESSION_CONTEXTS = {
@@ -48285,7 +48313,7 @@ async function openParkedSession(mobile, session, deps, opts = {}) {
     const timeoutMs = opts.connectTimeoutMs ?? _constants__WEBPACK_IMPORTED_MODULE_0__.CONNECT_TIMEOUT_MS;
     let client = null;
     try {
-        deps.logger.info(`🔗 Creating Telegram client for ${mobile}`);
+        deps.logger.info(`🔗 Creating Telegram client for ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_1__.maskMobile)(mobile)}`);
         // A reader keeps session-read failures on the same error path (and log context) as connect failures.
         const sessionString = typeof session === 'function' ? await session() : session;
         const config = await deps.generateTGConfig(mobile);
@@ -48315,7 +48343,7 @@ async function openParkedSession(mobile, session, deps, opts = {}) {
             if (connectTimeout)
                 clearTimeout(connectTimeout);
         }
-        deps.logger.info(`✅ Successfully connected client for ${mobile}`);
+        deps.logger.info(`✅ Successfully connected client for ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_1__.maskMobile)(mobile)}`);
         return client;
     }
     catch (error) {
@@ -48325,10 +48353,10 @@ async function openParkedSession(mobile, session, deps, opts = {}) {
                 await client.destroy();
             }
             catch (destroyError) {
-                deps.logger.warn(`Failed to destroy partially-created client for ${mobile}`, deps.reportError(destroyError, SESSION_CONTEXTS.openCleanup, false));
+                deps.logger.warn(`Failed to destroy partially-created client for ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_1__.maskMobile)(mobile)}`, deps.reportError(destroyError, SESSION_CONTEXTS.openCleanup, false));
             }
         }
-        deps.logger.error(`❌ Failed to create client for ${mobile}:`, deps.reportError(error, SESSION_CONTEXTS.openFailed));
+        deps.logger.error(`❌ Failed to create client for ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_1__.maskMobile)(mobile)}:`, deps.reportError(error, SESSION_CONTEXTS.openFailed));
         throw error;
     }
 }
@@ -48336,7 +48364,7 @@ async function openParkedSession(mobile, session, deps, opts = {}) {
 async function disposeParkedSession(client, mobile, deps) {
     const internals = client;
     try {
-        deps.logger.info(`🗑️ Disposing Telegram client for ${mobile}`);
+        deps.logger.info(`🗑️ Disposing Telegram client for ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_1__.maskMobile)(mobile)}`);
         if (client && !internals._destroyed) {
             try {
                 if (internals._eventBuilders && Array.isArray(internals._eventBuilders)) {
@@ -48348,14 +48376,14 @@ async function disposeParkedSession(client, mobile, deps) {
                         await sender.disconnect();
                     }
                     catch (error) {
-                        deps.logger.warn(`⚠️ Error disconnecting sender for ${mobile}:`, deps.reportError(error, SESSION_CONTEXTS.senderDisconnect));
+                        deps.logger.warn(`⚠️ Error disconnecting sender for ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_1__.maskMobile)(mobile)}:`, deps.reportError(error, SESSION_CONTEXTS.senderDisconnect));
                     }
                 }
                 // GramJS destroy() leaves exported (file / other-DC) senders connected.
                 await deps.closeExportedSenders(client, mobile);
                 await client.destroy();
                 await deps.sleep(1000);
-                deps.logger.info(`✅ Client destroyed for ${mobile}`);
+                deps.logger.info(`✅ Client destroyed for ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_1__.maskMobile)(mobile)}`);
             }
             catch (error) {
                 deps.reportError(error, `${mobile}: Error during client cleanup`);
@@ -48365,11 +48393,11 @@ async function disposeParkedSession(client, mobile, deps) {
             }
         }
         else if (internals?._destroyed) {
-            deps.logger.info(`ℹ️ Client already destroyed for ${mobile}`);
+            deps.logger.info(`ℹ️ Client already destroyed for ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_1__.maskMobile)(mobile)}`);
         }
     }
     catch (error) {
-        deps.logger.warn(`⚠️ Error disposing client for ${mobile}:`, deps.reportError(error, SESSION_CONTEXTS.disposeFailed));
+        deps.logger.warn(`⚠️ Error disposing client for ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_1__.maskMobile)(mobile)}:`, deps.reportError(error, SESSION_CONTEXTS.disposeFailed));
     }
 }
 /**
@@ -48384,7 +48412,7 @@ async function forceCloseParkedSession(client, mobile, deps) {
             await run();
         }
         catch (error) {
-            deps.logger.warn(`⚠️ Force-close ${what} failed for ${mobile}:`, deps.reportError(error, SESSION_CONTEXTS.disposeFailed, false));
+            deps.logger.warn(`⚠️ Force-close ${what} failed for ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_1__.maskMobile)(mobile)}:`, deps.reportError(error, SESSION_CONTEXTS.disposeFailed, false));
         }
     };
     if (Array.isArray(internals._eventBuilders))
@@ -48833,6 +48861,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! @tg/core/utils/TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
 /* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
 /* harmony import */ var _tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! @tg/core/state/state-redis */ "../../packages/tg-core/src/state/state-redis.ts");
+/* harmony import */ var _tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! @tg/core/utils/dc-ip-family */ "../../packages/tg-core/src/utils/dc-ip-family.ts");
 /**
  * Persona Verifier
  *
@@ -48849,6 +48878,7 @@ __webpack_require__.r(__webpack_exports__);
  *  - Profile photo refresh is delegated to CommonTgService when needed
  *  - skips reassignment once an assignment already exists
  */
+
 
 
 
@@ -48888,12 +48918,12 @@ async function notifyPersonaWrite(mobile, summary, details) {
             timestamp: true,
         });
         if (!(0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.logUnsentNotification)(sent, 'Persona update notification returned false', `PersonaVerifier.notification.${mobile}`)) {
-            logger.debug(`[Persona] [${mobile}] Failed to send persona update notification`);
+            logger.debug(`[Persona] [${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_9__.maskMobile)(mobile)}] Failed to send persona update notification`);
         }
     }
     catch (error) {
         (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_7__.parseError)(error, `PersonaVerifier.notification.${mobile}`, false);
-        logger.debug(`[Persona] [${mobile}] Failed to send persona update notification`);
+        logger.debug(`[Persona] [${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_9__.maskMobile)(mobile)}] Failed to send persona update notification`);
     }
 }
 // ─── Organic preamble ─────────────────────────────────────────────────────────
@@ -48994,15 +49024,15 @@ async function ensurePrivacy(client, mobile, expectations) {
             const hasDisallowAll = current.rules.some((r) => r.className === 'PrivacyValueDisallowAll');
             const isCorrect = desired === 'allow' ? hasAllowAll : hasDisallowAll;
             if (isCorrect) {
-                logger.debug(`[Persona] [${mobile}] ${label}: OK (${desired})`);
+                logger.debug(`[Persona] [${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_9__.maskMobile)(mobile)}] ${label}: OK (${desired})`);
             }
             else {
-                logger.info(`[Persona] [${mobile}] ${label}: mismatch → need ${desired} (was ${hasAllowAll ? 'allow' : hasDisallowAll ? 'disallow' : 'other'})`);
+                logger.info(`[Persona] [${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_9__.maskMobile)(mobile)}] ${label}: mismatch → need ${desired} (was ${hasAllowAll ? 'allow' : hasDisallowAll ? 'disallow' : 'other'})`);
                 mismatches.push(expectation);
             }
         }
         catch (err) {
-            logger.warn(`[Persona] [${mobile}] ${label}: read failed — ${err.message}`);
+            logger.warn(`[Persona] [${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_9__.maskMobile)(mobile)}] ${label}: read failed — ${err.message}`);
             readFailures++;
         }
         await delay(gaussianRandom(1500, 500, 800, 3000));
@@ -49018,11 +49048,11 @@ async function ensurePrivacy(client, mobile, expectations) {
                 ? [new telegram__WEBPACK_IMPORTED_MODULE_0__.Api.InputPrivacyValueAllowAll()]
                 : [new telegram__WEBPACK_IMPORTED_MODULE_0__.Api.InputPrivacyValueDisallowAll()];
             await client.invoke(new telegram__WEBPACK_IMPORTED_MODULE_0__.Api.account.SetPrivacy({ key, rules }));
-            logger.info(`[Persona] [${mobile}] ${label}: fixed → ${desired}`);
+            logger.info(`[Persona] [${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_9__.maskMobile)(mobile)}] ${label}: fixed → ${desired}`);
             updated++;
         }
         catch (err) {
-            logger.warn(`[Persona] [${mobile}] ${label}: write failed — ${err.message}`);
+            logger.warn(`[Persona] [${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_9__.maskMobile)(mobile)}] ${label}: write failed — ${err.message}`);
             writeFailures++;
         }
         await delay(gaussianRandom(5000, 2000, 3000, 10000));
@@ -49040,7 +49070,7 @@ async function verifyAndCorrectPersona(client, mobile, pool, doc, saveAssignment
     };
     // Failure budget guard
     if (await loadFailureCount(mobile) >= MAX_PERSONA_FAILURES) {
-        logger.warn(`[Persona] [${mobile}] Failure budget exhausted, skipping verification`);
+        logger.warn(`[Persona] [${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_9__.maskMobile)(mobile)}] Failure budget exhausted, skipping verification`);
         return result;
     }
     try {
@@ -49051,32 +49081,32 @@ async function verifyAndCorrectPersona(client, mobile, pool, doc, saveAssignment
         await delay(gaussianRandom(10000, 3000, 5000, 15000));
         const privacyRules = doc.privacyUpdatedAt ? ACTIVE_PRIVACY : FULL_PRIVACY;
         const privacyLabel = doc.privacyUpdatedAt ? 'activate (2 rules)' : 'full setup (5 rules)';
-        logger.info(`[Persona] [${mobile}] Checking privacy: ${privacyLabel}`);
+        logger.info(`[Persona] [${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_9__.maskMobile)(mobile)}] Checking privacy: ${privacyLabel}`);
         const privacyResult = await ensurePrivacy(client, mobile, privacyRules);
         if (!doc.privacyUpdatedAt && privacyResult.allConfirmed) {
             await saveAssignment(mobile, { privacyUpdatedAt: new Date() });
             await notifyPersonaWrite(mobile, 'Applied initial privacy settings');
         }
         else if (!doc.privacyUpdatedAt && !privacyResult.allConfirmed) {
-            logger.warn(`[Persona] [${mobile}] Privacy: NOT stamping privacyUpdatedAt — ${privacyResult.readFailures} read failure(s), ${privacyResult.writeFailures} write failure(s)`);
+            logger.warn(`[Persona] [${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_9__.maskMobile)(mobile)}] Privacy: NOT stamping privacyUpdatedAt — ${privacyResult.readFailures} read failure(s), ${privacyResult.writeFailures} write failure(s)`);
         }
         if (privacyResult.updated > 0) {
-            logger.info(`[Persona] [${mobile}] Privacy: ${privacyResult.updated} rule(s) corrected`);
+            logger.info(`[Persona] [${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_9__.maskMobile)(mobile)}] Privacy: ${privacyResult.updated} rule(s) corrected`);
         }
         else {
-            logger.debug(`[Persona] [${mobile}] Privacy: all rules already correct`);
+            logger.debug(`[Persona] [${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_9__.maskMobile)(mobile)}] Privacy: all rules already correct`);
         }
         // ── Step 1: Assign persona once if missing ───────────────────────────
         let assignment = { ...doc };
         if (!hasAssignment(doc)) {
-            logger.info(`[Persona] [${mobile}] No assignment present, assigning persona`);
+            logger.info(`[Persona] [${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_9__.maskMobile)(mobile)}] No assignment present, assigning persona`);
             let existingAssignments = [];
             try {
                 existingAssignments = await fetchExisting();
-                logger.debug(`🧍 PERSONA assignments existing | ${mobile} | count ${existingAssignments.length}`);
+                logger.debug(`🧍 PERSONA assignments existing | ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_9__.maskMobile)(mobile)} | count ${existingAssignments.length}`);
             }
             catch {
-                logger.warn(`[Persona] [${mobile}] Failed to fetch existing assignments, continuing with fallback dedupe`);
+                logger.warn(`[Persona] [${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_9__.maskMobile)(mobile)}] Failed to fetch existing assignments, continuing with fallback dedupe`);
                 existingAssignments = [];
             }
             const candidates = (0,_persona_assignment__WEBPACK_IMPORTED_MODULE_3__.generateCandidateCombinations)(pool, mobile);
@@ -49089,7 +49119,7 @@ async function verifyAndCorrectPersona(client, mobile, pool, doc, saveAssignment
                 profilePics: a.assignedProfilePics || [],
             })));
             const chosen = candidates.find(c => !usedKeys.has((0,_persona_assignment__WEBPACK_IMPORTED_MODULE_3__.personaKey)(c))) ?? candidates[0];
-            logger.debug(`🧍 PERSONA candidates | ${mobile} | candidates ${candidates.length} | used ${usedKeys.size}`);
+            logger.debug(`🧍 PERSONA candidates | ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_9__.maskMobile)(mobile)} | candidates ${candidates.length} | used ${usedKeys.size}`);
             assignment = {
                 ...doc,
                 assignedFirstName: chosen.firstName || null,
@@ -49103,7 +49133,7 @@ async function verifyAndCorrectPersona(client, mobile, pool, doc, saveAssignment
                 assignedBio: assignment.assignedBio,
                 assignedProfilePics: assignment.assignedProfilePics,
             });
-            logger.info(`🧍 PERSONA assigned | ${mobile} | first ${assignment.assignedFirstName || 'none'} | photos ${assignment.assignedProfilePics.length}`);
+            logger.info(`🧍 PERSONA assigned | ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_9__.maskMobile)(mobile)} | first ${assignment.assignedFirstName || 'none'} | photos ${assignment.assignedProfilePics.length}`);
             await notifyPersonaWrite(mobile, 'Assigned persona', {
                 assignedFirstName: assignment.assignedFirstName,
                 assignedLastName: assignment.assignedLastName,
@@ -49113,17 +49143,17 @@ async function verifyAndCorrectPersona(client, mobile, pool, doc, saveAssignment
         }
         // Early return if still no assignment after initial check
         if (!hasAssignment(assignment)) {
-            logger.debug(`[Persona] [${mobile}] No assignment present, skipping verification`);
+            logger.debug(`[Persona] [${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_9__.maskMobile)(mobile)}] No assignment present, skipping verification`);
             return result;
         }
         result.workingName = assignment.assignedFirstName || '';
         const isWithinThreshold = (0,_persona_timestamps__WEBPACK_IMPORTED_MODULE_4__.isWithinRecentNameBioSkipWindow)(doc.nameBioUpdatedAt);
-        logger.debug(`🧍 PERSONA name-bio timestamp | ${mobile} | ${(0,_persona_timestamps__WEBPACK_IMPORTED_MODULE_4__.formatPersonaTimestampShort)(doc.nameBioUpdatedAt)} | threshold ${isWithinThreshold} | mismatch still corrected`);
+        logger.debug(`🧍 PERSONA name-bio timestamp | ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_9__.maskMobile)(mobile)} | ${(0,_persona_timestamps__WEBPACK_IMPORTED_MODULE_4__.formatPersonaTimestampShort)(doc.nameBioUpdatedAt)} | threshold ${isWithinThreshold} | mismatch still corrected`);
         if (doc.nameBioUpdatedAt) {
-            logger.debug(`🧍 PERSONA name-bio present | ${mobile} | age ${(0,_persona_timestamps__WEBPACK_IMPORTED_MODULE_4__.getPersonaTimestampAgeDays)(doc.nameBioUpdatedAt) ?? 'unknown'}d | threshold ${_persona_timestamps__WEBPACK_IMPORTED_MODULE_4__.NAME_BIO_SKIP_THRESHOLD_DAYS}d`);
+            logger.debug(`🧍 PERSONA name-bio present | ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_9__.maskMobile)(mobile)} | age ${(0,_persona_timestamps__WEBPACK_IMPORTED_MODULE_4__.getPersonaTimestampAgeDays)(doc.nameBioUpdatedAt) ?? 'unknown'}d | threshold ${_persona_timestamps__WEBPACK_IMPORTED_MODULE_4__.NAME_BIO_SKIP_THRESHOLD_DAYS}d`);
         }
         else {
-            logger.debug(`[Persona] [${mobile}] nameBioUpdatedAt missing; mismatches will be corrected if found`);
+            logger.debug(`[Persona] [${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_9__.maskMobile)(mobile)}] nameBioUpdatedAt missing; mismatches will be corrected if found`);
         }
         // ── Step 2: Read current profile (getMe + GetFullUser) ──────────────
         const me = await client.getMe();
@@ -49139,19 +49169,19 @@ async function verifyAndCorrectPersona(client, mobile, pool, doc, saveAssignment
         let needsProfileUpdate = false;
         const profileUpdate = {};
         if (assignment.assignedFirstName && !(0,_homoglyph_normalizer__WEBPACK_IMPORTED_MODULE_2__.nameMatchesAssignment)(currentFirstName, assignment.assignedFirstName)) {
-            logger.info(`🧍 PERSONA correct first | ${mobile} | ${currentFirstName || 'empty'} -> ${assignment.assignedFirstName}`);
+            logger.info(`🧍 PERSONA correct first | ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_9__.maskMobile)(mobile)} | ${currentFirstName || 'empty'} -> ${assignment.assignedFirstName}`);
             profileUpdate.firstName = assignment.assignedFirstName;
             needsProfileUpdate = true;
             result.correctedName = true;
         }
         if (!(0,_homoglyph_normalizer__WEBPACK_IMPORTED_MODULE_2__.lastNameMatches)(currentLastName, assignment.assignedLastName)) {
-            logger.info(`🧍 PERSONA correct last | ${mobile} | ${currentLastName || 'empty'} -> ${assignment.assignedLastName || 'empty'}`);
+            logger.info(`🧍 PERSONA correct last | ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_9__.maskMobile)(mobile)} | ${currentLastName || 'empty'} -> ${assignment.assignedLastName || 'empty'}`);
             profileUpdate.lastName = assignment.assignedLastName ?? '';
             needsProfileUpdate = true;
             result.correctedLastName = true;
         }
         if (!(0,_homoglyph_normalizer__WEBPACK_IMPORTED_MODULE_2__.bioMatches)(currentBio, assignment.assignedBio)) {
-            logger.info(`[Persona] [${mobile}] Correcting bio`);
+            logger.info(`[Persona] [${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_9__.maskMobile)(mobile)}] Correcting bio`);
             profileUpdate.about = assignment.assignedBio ?? '';
             needsProfileUpdate = true;
             result.correctedBio = true;
@@ -49176,7 +49206,7 @@ async function verifyAndCorrectPersona(client, mobile, pool, doc, saveAssignment
             }
         }
         if (assignment.assignedProfilePics.length > 0) {
-            logger.debug(`🧍 PERSONA photos assigned | ${mobile} | count ${assignment.assignedProfilePics.length} | refresh delegated`);
+            logger.debug(`🧍 PERSONA photos assigned | ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_9__.maskMobile)(mobile)} | count ${assignment.assignedProfilePics.length} | refresh delegated`);
         }
         if (result.correctedName || result.correctedLastName || result.correctedBio) {
             await notifyPersonaWrite(mobile, 'Corrected persona fields', {
@@ -49191,12 +49221,12 @@ async function verifyAndCorrectPersona(client, mobile, pool, doc, saveAssignment
         const lastNameStat = result.correctedLastName ? 'CORRECTED' : 'ok';
         const bioStat = result.correctedBio ? 'CORRECTED' : 'ok';
         const photoStat = result.correctedPhotos ? 'CORRECTED' : 'ok';
-        logger.debug(`🧍 PERSONA summary | ${mobile} | name ${nameStat} | last ${lastNameStat} | bio ${bioStat} | photos ${photoStat}`);
+        logger.debug(`🧍 PERSONA summary | ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_9__.maskMobile)(mobile)} | name ${nameStat} | last ${lastNameStat} | bio ${bioStat} | photos ${photoStat}`);
         return result;
     }
     catch (err) {
         const failures = incrementFailure(mobile);
-        logger.error(`[Persona] [${mobile}] Verification error (${failures}/${MAX_PERSONA_FAILURES})`, err.message, err?.stack);
+        logger.error(`[Persona] [${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_9__.maskMobile)(mobile)}] Verification error (${failures}/${MAX_PERSONA_FAILURES})`, err.message, err?.stack);
         // Return best-effort working name on failure
         result.workingName = doc.assignedFirstName || '';
         return result;
@@ -59068,8 +59098,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "53d974d781c974ff124591501afbd04cbcdebb9d" : 0;
-    const builtAt =  true ? "2026-11-08T07:00:42.195Z" : 0;
+    const sha =  true ? "8be629a33ffbff19717b995a44ba0dc34327adc0" : 0;
+    const builtAt =  true ? "2026-11-08T07:37:48.753Z" : 0;
     return { sha, builtAt };
 }
 
@@ -70101,10 +70131,12 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _telegram_spam_state__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! ../../telegram/spam-state */ "./src/telegram/spam-state.ts");
 /* harmony import */ var _tg_core_utils_fetchWithTimeout__WEBPACK_IMPORTED_MODULE_17__ = __webpack_require__(/*! @tg/core/utils/fetchWithTimeout */ "../../packages/tg-core/src/utils/fetchWithTimeout.ts");
 /* harmony import */ var _tg_core_telegram_utils_declinePasswordReset__WEBPACK_IMPORTED_MODULE_18__ = __webpack_require__(/*! @tg/core/telegram-utils/declinePasswordReset */ "../../packages/tg-core/src/telegram-utils/declinePasswordReset.ts");
+/* harmony import */ var _tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_19__ = __webpack_require__(/*! @tg/core/utils/dc-ip-family */ "../../packages/tg-core/src/utils/dc-ip-family.ts");
 /**
  * System Message Handler
  * Handles system messages from Telegram (SpamBot, system notifications, etc.)
  */
+
 
 
 
@@ -70169,7 +70201,7 @@ function persistSpamStatus(mobile, spamStatus, limitedUntil) {
         })
             .then((recorded) => {
             if (!recorded)
-                logger.warn(`Spam status '${spamStatus}' not recorded for ${mobile}: no bufferClients row or DB unavailable`);
+                logger.warn(`Spam status '${spamStatus}' not recorded for ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_19__.maskMobile)(mobile)}: no bufferClients row or DB unavailable`);
         })
             .catch(error => (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "Failed to persist bufferClients spam status", false));
     }
@@ -79745,40 +79777,6 @@ class UserDataDtoCrud {
     async updateTimestamps() {
         await this.getRepositories()?.clients.touchHeartbeat(process.env.clientId ?? '');
     }
-    // async getAvgCalculatedChannels() {
-    //     const channelStatsDb = this.client.db("tgclients").collection('channelStats');
-    //     const results = await channelStatsDb.find({ averageCalculated: true }, { projection: { channelId: 1, _id: 0 } }).toArray();
-    //     const ids = [];
-    //     results.map(doc => {
-    //         ids.push(doc.channelId)
-    //     })
-    //     return ids;
-    // }
-    // async saveChannelStatsToDB(chatRequestCounts: { [chatId: string]: number }): Promise<void> {
-    //     try {
-    //         const channelStatsDb = this.client.db("tgclients").collection('channelStats');
-    //         // Calculate the time 1 minutes ago
-    //         for (const chatId in chatRequestCounts) {
-    //             const channelId = chatId.replace(/^-100/, "")
-    //             const existingStats = await channelStatsDb.findOne({ channelId });
-    //             const oneMinutesAgo = new Date(Date.now() - 1 * 60 * 1000);
-    //             if (!existingStats || existingStats?.updatedAt <= oneMinutesAgo) {
-    //                 const requestCount: number = chatRequestCounts[chatId];
-    //                 const chatStats = await channelStatsDb.updateOne(
-    //                     { channelId },
-    //                     {
-    //                         $push: { requestCounts: requestCount },
-    //                         $set: { updatedAt: Date.now() }
-    //                     },
-    //                     { upsert: true }
-    //                 );
-    //             }
-    //             chatRequestCounts[chatId] = 0;
-    //         }
-    //     } catch (error) {
-    //         parseError(error)
-    //     }
-    // }
     async closeConnection() {
         try {
             this.connectionGeneration++;
@@ -79853,10 +79851,12 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _conversation_state_user_state__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../conversation/state/user-state */ "./src/conversation/state/user-state.ts");
 /* harmony import */ var _replier__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../replier */ "./src/replier/index.ts");
 /* harmony import */ var _config_redis_uri__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../config/redis-uri */ "./src/config/redis-uri.ts");
+/* harmony import */ var _tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! @tg/core/utils/dc-ip-family */ "../../packages/tg-core/src/utils/dc-ip-family.ts");
 /**
  * Memory Diagnostics Utility
  * Helps identify memory consumption differences across VPS instances
  */
+
 
 
 
@@ -79962,7 +79962,7 @@ async function logMemoryDiagnostics() {
     logger.log("=== MEMORY DIAGNOSTICS ===");
     logger.log("Environment Variables:");
     logger.log(`  clientId: ${diagnostics.environment.clientId}`);
-    logger.log(`  mobile: ${diagnostics.environment.mobile}`);
+    logger.log(`  mobile: ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_5__.maskMobile)(diagnostics.environment.mobile)}`);
     logger.log(`  REDIS_URI: ${diagnostics.environment.redisUri}`);
     logger.log(`  NODE_ENV: ${diagnostics.environment.nodeEnv}`);
     logger.log("\nRedis Memory:");
@@ -86888,6 +86888,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _telegram_spam_state__WEBPACK_IMPORTED_MODULE_27__ = __webpack_require__(/*! ../telegram/spam-state */ "./src/telegram/spam-state.ts");
 /* harmony import */ var _tg_core_utils_fetchWithTimeout__WEBPACK_IMPORTED_MODULE_28__ = __webpack_require__(/*! @tg/core/utils/fetchWithTimeout */ "../../packages/tg-core/src/utils/fetchWithTimeout.ts");
 /* harmony import */ var _parked_accounts__WEBPACK_IMPORTED_MODULE_29__ = __webpack_require__(/*! ./parked-accounts */ "./src/jobs/parked-accounts.ts");
+/* harmony import */ var _tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_30__ = __webpack_require__(/*! @tg/core/utils/dc-ip-family */ "../../packages/tg-core/src/utils/dc-ip-family.ts");
+
 
 
 
@@ -87529,7 +87531,7 @@ class JobManager {
                 if (!setupResult.suppressedLocally)
                     await this.notifyError(`${alertMsg}\n\nResult: ${setupResult.status}`);
                 if (setupResult.swapped) {
-                    this.log('info', `Promotion rotation completed 🔄 ${setupResult.existingMobile} → ${setupResult.newMobile}`);
+                    this.log('info', `Promotion rotation completed 🔄 ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_30__.maskMobile)(setupResult.existingMobile)} → ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_30__.maskMobile)(setupResult.newMobile)}`);
                 }
                 else {
                     this.log('warn', `Promotion rotation not performed: ${setupResult.status} — ${setupResult.message}`);
@@ -105428,6 +105430,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _tg_core_utils_telegram_error_parser__WEBPACK_IMPORTED_MODULE_18__ = __webpack_require__(/*! @tg/core/utils/telegram-error-parser */ "../../packages/tg-core/src/utils/telegram-error-parser.ts");
 /* harmony import */ var _telegram_spam_state__WEBPACK_IMPORTED_MODULE_19__ = __webpack_require__(/*! ../telegram/spam-state */ "./src/telegram/spam-state.ts");
 /* harmony import */ var _tg_channel_state__WEBPACK_IMPORTED_MODULE_20__ = __webpack_require__(/*! @tg/channel-state */ "../../packages/tg-channel-state/src/index.ts");
+/* harmony import */ var _tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_21__ = __webpack_require__(/*! @tg/core/utils/dc-ip-family */ "../../packages/tg-core/src/utils/dc-ip-family.ts");
+
 
 
 
@@ -105555,7 +105559,7 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_20__.Ba
         return this.shouldContinueHelperPromotion();
     }
     onCheckMissing(messageItem, status) {
-        logger.debug(`[${this.mobile}] Helper message check: channelId=${messageItem.channelId} messageId=${messageItem.messageId} status=${status}`);
+        logger.debug(`[${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_21__.maskMobile)(this.mobile)}] Helper message check: channelId=${messageItem.channelId} messageId=${messageItem.messageId} status=${status}`);
     }
     onCheckTerminalFailure(messageItem, parsed) {
         logger.warn([
@@ -105893,10 +105897,10 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_20__.Ba
     //  SEND-PATH LOG HOOKS (rich)
     // =================================================================
     onSendAttempt(request) {
-        logger.debug(`[${this.mobile}] Helper send attempt | ${request.channel.channelId} | ${this.formatUsername(request.channel.username)} | ${request.candidate.kind}:${request.candidate.randomIndex} | followUp ${request.isFollowUp}`);
+        logger.debug(`[${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_21__.maskMobile)(this.mobile)}] Helper send attempt | ${request.channel.channelId} | ${this.formatUsername(request.channel.username)} | ${request.candidate.kind}:${request.candidate.randomIndex} | followUp ${request.isFollowUp}`);
     }
     onSendCandidateEmpty(request, randomIndex) {
-        logger.debug(`[${this.mobile}] Helper candidate empty: channelId=${request.channel.channelId} candidate=${request.candidate.kind}:${randomIndex}`);
+        logger.debug(`[${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_21__.maskMobile)(this.mobile)}] Helper candidate empty: channelId=${request.channel.channelId} candidate=${request.candidate.kind}:${randomIndex}`);
     }
     onSendMaterialized(request, materialized) {
         logger.debug([
@@ -105910,7 +105914,7 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_20__.Ba
         ].join(' | '));
     }
     onSendEmptyResult(request, randomIndex, checkable) {
-        logger.debug(`[${this.mobile}] Helper send returned empty result: channelId=${request.channel.channelId} candidate=${randomIndex} checkable=${checkable}`);
+        logger.debug(`[${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_21__.maskMobile)(this.mobile)}] Helper send returned empty result: channelId=${request.channel.channelId} candidate=${randomIndex} checkable=${checkable}`);
     }
     onSendError(request, error) {
         if ((0,_tg_core_telegram_utils_isTelegramRuntimeFailure__WEBPACK_IMPORTED_MODULE_6__.isTelegramRuntimeFailure)(error))
@@ -105926,7 +105930,7 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_20__.Ba
     async sendViaPrivateFallback(channelInfo, message) {
         const fallbackUsername = this.normalizeTelegramUsername(channelInfo.username);
         if (!fallbackUsername) {
-            logger.warn(`[${this.mobile}] Private channel fallback skipped: invalid username for channel ${channelInfo.channelId}`);
+            logger.warn(`[${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_21__.maskMobile)(this.mobile)}] Private channel fallback skipped: invalid username for channel ${channelInfo.channelId}`);
             return undefined;
         }
         try {
@@ -106325,11 +106329,11 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_20__.Ba
         // Measured: 300 serial intelligence.get() = ~107s (300 WAN round-trips); one $in batch = one
         // round-trip. This is THE hydration-speed fix; concurrency alone couldn't beat the per-trip latency.
         const warm = await this.warmIntelligenceCache(candidates.map((c) => c.channelId));
-        logger.info(`[${this.mobile}] ⏱️ PROMO hydrate START | candidates ${candidates.length} | conc ${concurrency} | fetchDialogsMs ${fetchDialogsMs} | warmCache ${warm.found}/${warm.requested} in ${warm.ms}ms`);
+        logger.info(`[${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_21__.maskMobile)(this.mobile)}] ⏱️ PROMO hydrate START | candidates ${candidates.length} | conc ${concurrency} | fetchDialogsMs ${fetchDialogsMs} | warmCache ${warm.found}/${warm.requested} in ${warm.ms}ms`);
         const hydrateMapStart = Date.now();
         let hydratedDone = 0;
         const heartbeat = setInterval(() => {
-            logger.info(`[${this.mobile}] ⏱️ PROMO hydrate progress | ${hydratedDone}/${candidates.length} | elapsedMs ${Date.now() - hydrateMapStart} | conc ${concurrency}`);
+            logger.info(`[${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_21__.maskMobile)(this.mobile)}] ⏱️ PROMO hydrate progress | ${hydratedDone}/${candidates.length} | elapsedMs ${Date.now() - hydrateMapStart} | conc ${concurrency}`);
         }, 5000);
         heartbeat.unref?.();
         const hydrated = await this.mapWithConcurrency(candidates, concurrency, async (channel) => {
@@ -106339,7 +106343,7 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_20__.Ba
         });
         clearInterval(heartbeat);
         const hydrateMapMs = Date.now() - hydrateMapStart;
-        logger.info(`[${this.mobile}] ⏱️ PROMO hydrate DONE | ${candidates.length} channels | hydrateMapMs ${hydrateMapMs} | avgPerChannelMs ${candidates.length ? Math.round(hydrateMapMs / candidates.length) : 0} | conc ${concurrency}`);
+        logger.info(`[${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_21__.maskMobile)(this.mobile)}] ⏱️ PROMO hydrate DONE | ${candidates.length} channels | hydrateMapMs ${hydrateMapMs} | avgPerChannelMs ${candidates.length ? Math.round(hydrateMapMs / candidates.length) : 0} | conc ${concurrency}`);
         for (let i = 0; i < candidates.length; i++) {
             const channelInfo = hydrated[i];
             if (channelInfo) {
@@ -106364,7 +106368,7 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_20__.Ba
             dropSamples: rejectionSamples,
         };
         logger.info([
-            `[${this.mobile}] Helper adapter loaded promotion channels: fetched=${fetchedChannels.length}`,
+            `[${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_21__.maskMobile)(this.mobile)}] Helper adapter loaded promotion channels: fetched=${fetchedChannels.length}`,
             `hydrated=${channels.length}`,
             `dropped=${fetchedChannels.length - channels.length}`,
             `dropBreakdown=${this.formatCountMap(rejectionCounts)}`,
@@ -106407,7 +106411,7 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_20__.Ba
             await (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_20__.persistObservedChannels)(_data_db__WEBPACK_IMPORTED_MODULE_1__.channelsStore, observedChannels, (level, message) => this.logRunnerMessage(level, message));
             const sendableCount = observedChannels.filter((channel) => channel.canSendMsgs === true).length;
             channelData = observedChannels;
-            logger.info(`[${this.mobile}] Observed ${observedChannels.length} channels; ${sendableCount} currently sendable (DialogManager has ${this.dialogManager.getAllDialogs().length} total dialogs)`);
+            logger.info(`[${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_21__.maskMobile)(this.mobile)}] Observed ${observedChannels.length} channels; ${sendableCount} currently sendable (DialogManager has ${this.dialogManager.getAllDialogs().length} total dialogs)`);
             const topChannels = await this.selectHydrationCandidates(channelData, this.MAX_CHANNELS_CACHE);
             logger.log(`🎯 PROMO hydrate candidates | selected ${topChannels.length} | max ${this.MAX_CHANNELS_CACHE} | source ${channelData.length} | policy conversion+safety+20%explore`);
             return topChannels;
@@ -106420,7 +106424,7 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_20__.Ba
     async finalizeChannelInfo(channelInfo) {
         let normalized = await this.normalizePromotionChannelSnapshot(channelInfo);
         if (Array.isArray(normalized.availableMsgs) && normalized.availableMsgs.length === 0) {
-            logger.debug(`[${this.mobile}] Channel ${normalized.channelId} has exhausted default templates; allowing AI/custom/fallback candidates without banning during hydration`);
+            logger.debug(`[${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_21__.maskMobile)(this.mobile)}] Channel ${normalized.channelId} has exhausted default templates; allowing AI/custom/fallback candidates without banning during hydration`);
             normalized = { ...normalized };
             delete normalized.availableMsgs;
         }
@@ -122481,9 +122485,11 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ });
 /* harmony import */ var _tg_core_utils_generateTGConfig__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/core/utils/generateTGConfig */ "../../packages/tg-core/src/utils/generateTGConfig.ts");
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! @tg/core/utils/dc-ip-family */ "../../packages/tg-core/src/utils/dc-ip-family.ts");
 // Telegram fingerprint summary — used in permanent-failure alerts so operators can see the exact
 // api_id / device / proxy the dying account was running with. Kept separate from the handoff logic
 // so each file has one responsibility.
+
 
 
 const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_1__.Logger('tg-aut:permanent-failure:fingerprint');
@@ -122527,7 +122533,7 @@ async function loadTelegramFingerprintSummary(mobile) {
         };
     }
     catch (error) {
-        logger.warn(`[PermanentFailure] Failed to load Telegram fingerprint summary for ${mobile}`, {
+        logger.warn(`[PermanentFailure] Failed to load Telegram fingerprint summary for ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_2__.maskMobile)(mobile)}`, {
             error: error instanceof Error ? error.message : String(error),
         });
         return null;
@@ -122566,6 +122572,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _setup_client__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ../setup-client */ "./src/telegram/setup-client.ts");
 /* harmony import */ var _tg_core_utils_fetchWithTimeout__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! @tg/core/utils/fetchWithTimeout */ "../../packages/tg-core/src/utils/fetchWithTimeout.ts");
 /* harmony import */ var _tg_core_account_health_handoff__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! @tg/core/account-health/handoff */ "../../packages/tg-core/src/account-health/handoff.ts");
+/* harmony import */ var _tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! @tg/core/utils/dc-ip-family */ "../../packages/tg-core/src/utils/dc-ip-family.ts");
 // Permanent-failure handoff. When Telegram returns a permanent error (FROZEN_METHOD_INVALID,
 // SESSION_REVOKED, AUTH_KEY_*, USER_DEACTIVATED), the affected mobile is dead. We hand off to the
 // CMS setupClient endpoint (which swaps in a fresh buffer account) and then shut this process down
@@ -122576,6 +122583,7 @@ __webpack_require__.r(__webpack_exports__);
 // graceful restart instead of importing app.ts's shutdown() — so catch sites across the app can
 // import it with static imports without dragging in the heavy app graph (which previously caused a
 // core/utils <-> app.ts cycle).
+
 
 
 
@@ -122686,7 +122694,7 @@ async function startNewUserProcess(error, context = 'runtime') {
     if (isNewUserProcessRunning >= Date.now() - HANDOFF_RETRY_BASE_MS * 2 ** failedHandoffs) {
         logger.warn(`[PermanentFailure] ${context}: setup flow already triggered recently, skipping duplicate handoff`, {
             errorMessage,
-            mobile: process.env.mobile,
+            mobile: (0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_12__.maskMobile)(process.env.mobile),
         });
         return;
     }
@@ -122698,7 +122706,7 @@ async function startNewUserProcess(error, context = 'runtime') {
         const fingerprintSummary = (0,_fingerprint__WEBPACK_IMPORTED_MODULE_8__.formatTelegramFingerprintSummary)(fingerprint);
         logger.error(`[PermanentFailure] ${context}: starting setupClient handoff`, {
             errorMessage,
-            mobile: process.env.mobile,
+            mobile: (0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_12__.maskMobile)(process.env.mobile),
             clientId: process.env.clientId,
             permanentReplacement: true,
             fingerprint,
@@ -122767,7 +122775,7 @@ async function startNewUserProcess(error, context = 'runtime') {
         logger.info(`[PermanentFailure] ${context}: setupClient handoff completed, waiting before shutdown`, {
             delayMs: POST_SETUPCLIENT_SHUTDOWN_DELAY_MS,
             clientId: process.env.clientId,
-            newMobile: setupResult.newMobile,
+            newMobile: (0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_12__.maskMobile)(setupResult.newMobile),
             // Set when CMS had no normal buffer and took a degraded-swap account (tier 2-4).
             degradedTier: setupResult.degradedTier,
         });
@@ -123926,13 +123934,6 @@ class TelegramManager {
                 await TelegramManager.liveLeases.hold(this.mobile);
                 // NOTE: Session string should match the API ID it was created with. If not, GramJS will throw and we fall back to re-setup.
                 this.client = new telegram__WEBPACK_IMPORTED_MODULE_0__.TelegramClient(this.session, apiId, apiHash, clientParams);
-                // DC override: only when explicitly requested (e.g. for IPv6 workaround)
-                // if (process.env.FORCE_DC5 === 'true') {
-                //     await this.client.session.setDC(5, '91.108.56.194', 80);
-                //     console.log('[TelegramManager] DC5 override applied (FORCE_DC5=true)');
-                // } else if (process.env.FORCE_DC5 !== undefined) {
-                //     console.warn('[TelegramManager] FORCE_DC5 is set but not "true", DC5 override NOT applied');
-                // }
                 this.client.setLogLevel(telegram_extensions_Logger__WEBPACK_IMPORTED_MODULE_2__.LogLevel.ERROR);
                 await this.client.connect();
                 // Save session after successful connect (GramJS updates auth key & DC info)
