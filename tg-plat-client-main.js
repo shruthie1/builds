@@ -38531,6 +38531,22 @@ class PaymentProofsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_
             .limit(n)
             .toArray());
     }
+    /**
+     * This chat's CREDITED rows (every persona) created since `since`, newest first (the gate's re-send rule, 48 h). Uses
+     * chatId_1_createdAt_-1 (chatId + createdAt range); servedAt is filtered on the few rows of one chat in that range.
+     * null on a failure (the gate fails closed), unlike recentForChat.
+     */
+    async creditedForChat(chatId, since, limit = 100) {
+        const id = String(chatId || '').trim();
+        if (!id)
+            return [];
+        const n = Math.max(1, Math.min(100, Math.floor(limit)));
+        return this.guard(`creditedForChat(${id})`, null, () => this.collection
+            .find({ chatId: id, createdAt: { $gte: since }, servedAt: { $exists: true }, ...NOT_RECORD_ONLY })
+            .sort({ createdAt: -1 })
+            .limit(n)
+            .toArray());
+    }
     /** Set the ASK_PROOF state of one row (section 8). Returns true when a row matched. */
     async markProof(chatId, telegramMsgId, proof) {
         const id = String(chatId || '').trim();
@@ -58712,8 +58728,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "6bc7d500f49e16bd378fd5b29209c7a325a594c2" : 0;
-    const builtAt =  true ? "2026-11-08T17:41:22.833Z" : 0;
+    const sha =  true ? "1eebe24a8269cfb567df6bfd3366e2cb207869cd" : 0;
+    const builtAt =  true ? "2026-11-08T18:15:56.828Z" : 0;
     return { sha, builtAt };
 }
 
@@ -85829,6 +85845,10 @@ async function processImage(event) {
     // second credit of the same payment).
     let serviceSent = false;
     const serviceStarted = () => { releaseClaim = undefined; serviceSent = true; };
+    // The ledger credit and payment_event row are on record (creditAndAttributePayment): the claim (servedAt) stays even if
+    // the service then throws, so a re-send of this payment is a repeat (owed service answered), never a second credit.
+    let creditRecorded = false;
+    const keepCreditClaim = () => { releaseClaim = undefined; creditRecorded = true; };
     // This screenshot's review record (payments/proof-archive); written in the finally below, after every reply.
     let proof;
     const initiateCallKeepingClaim = async (...args) => {
@@ -86104,6 +86124,7 @@ async function processImage(event) {
                                         // the read range bounds it, not the per-receipt credit limit.
                                         if (tierAmount !== payAmount && tierAmount < _payments_ladder__WEBPACK_IMPORTED_MODULE_4__.PAID_MIN) {
                                             credit = await creditAndAttributePayment(event, chatId, db, amount, gateIdentified);
+                                            keepCreditClaim();
                                             await handleLowAmountPayment(event, chatId, db, imageDetails, userDetails, tierAmount, payAmount, isWithinPastTenMinutesImage, userChatState, initiateCallKeepingClaim);
                                         }
                                         else if (tierAmount >= _payments_ladder__WEBPACK_IMPORTED_MODULE_4__.DEMO_GRANT_MIN && tierAmount <= _tg_vision__WEBPACK_IMPORTED_MODULE_48__.MAX_PAYMENT_AMOUNT) {
@@ -86118,10 +86139,12 @@ async function processImage(event) {
                                                 userDetails = await db.update(chatId, bought);
                                             }
                                             credit = await creditAndAttributePayment(event, chatId, db, amount, gateIdentified);
+                                            keepCreditClaim();
                                             await handlePaidServiceAmount(event, chatId, db, imageDetails, userDetails, tierAmount, payAmount, text, isWithinPastTenMinutesImage, userChatState, initiateCallKeepingClaim, serviceStarted);
                                         }
                                         else {
                                             credit = await creditAndAttributePayment(event, chatId, db, amount, gateIdentified);
+                                            keepCreditClaim();
                                             await (0,_telegram_delete_messages__WEBPACK_IMPORTED_MODULE_6__.deleteMessage)(event);
                                             await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_31__.notifyChat)(chatId, {
                                                 title: 'Pic deleted',
@@ -86222,7 +86245,7 @@ async function processImage(event) {
         const failedChat = event.message?.chatId?.toString?.() ?? "";
         await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_31__.notifyChat)(failedChat, {
             title: 'Pic process fail',
-            summary: releaseClaim ? 'Payment was valid; credit claim released.' : undefined,
+            summary: releaseClaim ? 'Payment was valid; credit claim released.' : creditRecorded ? 'Payment was credited; the claim stays (a re-send is not credited again).' : undefined,
             severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_22__.NotificationSeverity.ERROR,
             fields: [fact('Error', String(error?.message ?? error).slice(0, 200))],
         });
@@ -101446,7 +101469,6 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   askAnswerable: () => (/* binding */ askAnswerable),
 /* harmony export */   classifyAgainstServed: () => (/* binding */ classifyAgainstServed),
 /* harmony export */   confirmsAsk: () => (/* binding */ confirmsAsk),
-/* harmony export */   creditedSameAmountWithin: () => (/* binding */ creditedSameAmountWithin),
 /* harmony export */   dedupeReference: () => (/* binding */ dedupeReference),
 /* harmony export */   differentFormatSamePayment: () => (/* binding */ differentFormatSamePayment),
 /* harmony export */   findConfirmedAsk: () => (/* binding */ findConfirmedAsk),
@@ -101463,6 +101485,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   normalizePayeeName: () => (/* binding */ normalizePayeeName),
 /* harmony export */   normalizePayeeUpi: () => (/* binding */ normalizePayeeUpi),
 /* harmony export */   normalizeUtr: () => (/* binding */ normalizeUtr),
+/* harmony export */   otherPayee: () => (/* binding */ otherPayee),
 /* harmony export */   pictureDistance: () => (/* binding */ pictureDistance),
 /* harmony export */   referenceCutOf: () => (/* binding */ referenceCutOf),
 /* harmony export */   referenceFormat: () => (/* binding */ referenceFormat),
@@ -101984,18 +102007,6 @@ function fraudAskAnswerable(row, nowMs) {
 function gateBlockAnswerable(row, nowMs) {
     return fraudAskAnswerable(row, nowMs) && !!row.ask?.blockedAt;
 }
-/** This user (any persona) has a row credited within `windowMs` before `nowMs` with the same amount. */
-function creditedSameAmountWithin(facts, rows, nowMs, windowMs) {
-    return rows.some((r) => {
-        if (r.chatId !== facts.chatId || (r.profile === facts.profile && r.telegramMsgId === facts.msgId) || !r.servedAt)
-            return false;
-        // The same file is a repeat (servedSha claim), not a "maybe new payment".
-        if (facts.sha256 && r.imageSha256 === facts.sha256)
-            return false;
-        const served = new Date(r.servedAt).getTime();
-        return Number.isFinite(served) && nowMs - served <= windowMs && sameAmount(r.amount, facts.amount);
-    });
-}
 /**
  * The payee part of servedMinuteKey, never broader than samePayee (rule 8): equal keys always mean samePayee is true.
  * The UPI id when one was read (normalizePayeeUpi, then the sameUpiId reading: a phone-number id by its 10 digits,
@@ -102061,6 +102072,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _proof_check_messages__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../proof-check/messages */ "./src/payments/proof-check/messages.ts");
 /* harmony import */ var _conversation_state_upsell_quiet__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../../conversation/state/upsell-quiet */ "./src/conversation/state/upsell-quiet.ts");
 /* harmony import */ var _fingerprint__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../fingerprint */ "./src/payments/fingerprint.ts");
+/* harmony import */ var _proof_archive_verdict__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ../proof-archive/verdict */ "./src/payments/proof-archive/verdict.ts");
+
 
 
 
@@ -102112,6 +102125,7 @@ function gateFacts(ref) {
         ...(ref.arrivalMs !== undefined ? { arrivalMs: ref.arrivalMs } : {}),
         payeeUpiId: ref.details.payeeUpiId ?? null,
         payeeName: ref.details.payeeName || null,
+        txnId: (0,_proof_archive_verdict__WEBPACK_IMPORTED_MODULE_5__.txnIdOf)(ref.details.text) ?? null,
     };
 }
 class PaymentFlow {
@@ -102368,14 +102382,16 @@ class PaymentFlow {
                 await notify({ title: 'Asked pay page', summary: `Reference ${f.utr} has ${f.utr?.length} digits (real ones have 12).` });
                 return { handled: true };
             }
-            if (session.sameAmountCreditedRecently()) {
-                // No UTR, no readable time, and this amount was already credited to this user in the last 24 h: a
-                // re-send cannot be told from a new payment, so the details page decides.
+            const resendStep = session.resendNeedsDetailsPage();
+            if (resendStep) {
+                // The same amount was credited to this user (any persona) in the last 48 h and nothing on this screenshot
+                // tells a re-send from a new payment (resend.ts steps 5-6): the details page decides. Only a real
+                // reference answers the request (NEEDS_REAL_REFERENCE_REASONS); its reference / time is judged again.
                 await session.openAsk('old_time', ['NO_UTR_NO_TIME_SAME_AMOUNT']);
-                this.note('old_time', ['NO_UTR_NO_TIME_SAME_AMOUNT']);
-                this.io.warn(`[payment-gate] ${f.chatId}: no reference, no time, same amount credited within 24 h: asked for the details page, not crediting yet`);
+                this.note('old_time', ['NO_UTR_NO_TIME_SAME_AMOUNT', `RESEND_${resendStep}`]);
+                this.io.warn(`[payment-gate] ${f.chatId}: same amount credited within 48 h, re-send or new payment undecided (${resendStep}): asked for the details page, not crediting yet`);
                 await this.io.reply(this.pick(_messages__WEBPACK_IMPORTED_MODULE_1__.DETAILS_PAGE_ASK_MESSAGES));
-                await notify({ title: 'Asked pay page', summary: 'No reference, no time, and the same amount was credited in the last 24 h.' });
+                await notify({ title: 'Asked pay page', summary: `Same amount credited in the last 48 h; nothing shows this is a new payment (${resendStep}).` });
                 return { handled: true };
             }
         }
@@ -102458,6 +102474,7 @@ class PaymentFlow {
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   CHAT_CREDITED_SCAN: () => (/* binding */ CHAT_CREDITED_SCAN),
 /* harmony export */   CHAT_SERVED_SCAN: () => (/* binding */ CHAT_SERVED_SCAN),
 /* harmony export */   GateSession: () => (/* binding */ GateSession),
 /* harmony export */   ProofGate: () => (/* binding */ ProofGate),
@@ -102467,6 +102484,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
 /* harmony import */ var _decide__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./decide */ "./src/payments/proof-gate/decide.ts");
 /* harmony import */ var _payment_time__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../payment-time */ "./src/payments/payment-time.ts");
+/* harmony import */ var _resend__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ./resend */ "./src/payments/proof-gate/resend.ts");
 /**
  * Payment-screenshot gate: the I/O around ./decide over the `paymentProofs` collection (one row per payment
  * screenshot, 90-day TTL, shared by every persona process). Every call is time-bounded. No store configured at all
@@ -102474,6 +102492,7 @@ __webpack_require__.r(__webpack_exports__);
  * FAILS CLOSED on the credit path (v2 design 2026-11-07): begin / check / claim come back `unavailable` and the caller
  * holds the screenshot for a bounded re-check (processImage holdForLaterAnalysis); it is never credited on a guess.
  */
+
 
 
 
@@ -102487,6 +102506,11 @@ const STORE_TIMEOUT_MS = 4000;
  * The repository caps a read at 100.
  */
 const CHAT_SERVED_SCAN = 50;
+/**
+ * The re-send rule (resend.ts) reads every credited row of this user in its 48 h window. 14 days of live rows: up to 71
+ * rows (any state) of one chat in 48 h, so the 50-row scan above can miss a credit; the repository caps a read at 100.
+ */
+const CHAT_CREDITED_SCAN = 100;
 function withTimeout(work, ms, fallback, what) {
     let timer;
     return Promise.race([
@@ -102501,8 +102525,8 @@ function withTimeout(work, ms, fallback, what) {
 /** One screenshot's pass through the gate. Created only when its row was stored. */
 class GateSession {
     constructor(deps, store, facts, creditAmount) {
-        /** This user's newest rows as check() read them (sameAmountCreditedRecently). */
-        this.recent = [];
+        /** The re-send rule's verdict as check() read it (resendNeedsDetailsPage). */
+        this.resend = { kind: 'none' };
         /** When the last claim() started (claimState tells this claim's landed write from an earlier one). */
         this.claimStartedAt = null;
         this.deps = deps;
@@ -102526,20 +102550,27 @@ class GateSession {
         const payment = minuteMs !== null && f.amount > 0
             ? { amount: f.amount, sinceMs: (0,_payment_time__WEBPACK_IMPORTED_MODULE_2__.istDayStartMs)(f.arrivalMs ?? this.deps.now()), fromMs: minuteMs, toMs: minuteMs + 60000 }
             : null;
-        const [served, recent] = await Promise.all([
+        const [served, recent, credited] = await Promise.all([
             this.bound(this.store.servedCandidates({
                 chatId: f.chatId, profile: f.profile, telegramMsgId: f.msgId,
                 ...(f.utr ? { utr: f.utr } : {}), imageSha256: f.sha256, ...(f.dHash ? { imageHash: f.dHash } : {}),
                 ...(payment ? { payment } : {}),
             }), null, 'servedCandidates'),
             this.recentRows(),
+            this.creditedRows(),
         ]);
-        if (served === null || recent === null)
+        if (served === null || recent === null || credited === null)
             return { kind: 'unavailable' };
-        this.recent = recent;
         const verdict = (0,_decide__WEBPACK_IMPORTED_MODULE_1__.classifyAgainstServed)(f, served, this.chatServed(recent), this.deps.now());
         if (verdict.kind !== 'clear')
             return verdict;
+        // Re-send or new payment (resend.ts, owner 2026-11-08): this user's credits of the same amount in the last 48 h,
+        // any persona. A repeat is answered like every repeat; an ask is raised after the credit rules (flow.ts).
+        this.resend = (0,_resend__WEBPACK_IMPORTED_MODULE_3__.decideResend)(f, credited ?? recent, this.deps.now());
+        if (this.resend.kind === 'repeat') {
+            const row = this.resend.matched;
+            return { kind: 'repeat', by: (0,_resend__WEBPACK_IMPORTED_MODULE_3__.repeatBy)(this.resend.step), sameChat: row.chatId === f.chatId && row.profile === f.profile, matched: row };
+        }
         const open = await this.readOpenAsks();
         if (open === null)
             return { kind: 'unavailable' };
@@ -102576,6 +102607,16 @@ class GateSession {
         return this.bound(this.store.recentForChat(this.facts.chatId, CHAT_SERVED_SCAN), null, 'recentForChat');
     }
     /**
+     * This user's credited rows (every persona) for the re-send rule's 48 h window. undefined without the read (the
+     * recent rows stand in), null on a failure / timeout (fail closed).
+     */
+    async creditedRows() {
+        if (!this.store.creditedForChat)
+            return undefined;
+        const since = new Date((this.facts.arrivalMs ?? this.deps.now()) - _resend__WEBPACK_IMPORTED_MODULE_3__.RESEND_LOOKBACK_MS);
+        return this.bound(this.store.creditedForChat(this.facts.chatId, since, CHAT_CREDITED_SCAN), null, 'creditedForChat');
+    }
+    /**
      * This user's own credited rows (every persona), for a different screenshot of a credited payment, with or without a
      * UTR (classifyAgainstServed, same-day rule 4). Only when that rule can apply: payment time readable.
      */
@@ -102600,14 +102641,12 @@ class GateSession {
         return (await this.openAsks()).some((r) => !(r.profile === this.facts.profile && r.telegramMsgId === this.facts.msgId) && (0,_decide__WEBPACK_IMPORTED_MODULE_1__.fraudGraceOpen)(r, now));
     }
     /**
-     * No UTR and no readable time, and this user (any persona) was credited the same amount in the last 24 h (as
-     * check() read the rows): the crop could be that payment again, every identity key is gone. Ask, never credit.
+     * The re-send rule (resend.ts, as check() read it) cannot tell this screenshot from a credit of the same amount in
+     * the last 48 h (this user, any persona): ask for the payment details page, never credit. The step that decided
+     * ('next-minute' / 'no-evidence'), else null.
      */
-    sameAmountCreditedRecently() {
-        const f = this.facts;
-        if ((0,_decide__WEBPACK_IMPORTED_MODULE_1__.isRealReference)(f.utr) || f.timeMs !== null)
-            return false;
-        return (0,_decide__WEBPACK_IMPORTED_MODULE_1__.creditedSameAmountWithin)(f, this.recent, this.deps.now(), _decide__WEBPACK_IMPORTED_MODULE_1__.ASK_ANSWER_WINDOW_MS);
+    resendNeedsDetailsPage() {
+        return this.resend.kind === 'ask' ? this.resend.step : null;
     }
     async openAsk(kind, reasons) {
         return this.bound(this.store.openAsk(this.facts.chatId, this.facts.profile, this.facts.msgId, kind, reasons), false, 'openAsk');
@@ -102848,6 +102887,190 @@ const STORE_HOLD_MESSAGES = [
     "Checking your payment baby.. give me a few mins 🙈",
     "Wait baby, checking your payment.. few mins 💕",
 ];
+
+
+/***/ },
+
+/***/ "./src/payments/proof-gate/resend.ts"
+/*!*******************************************!*\
+  !*** ./src/payments/proof-gate/resend.ts ***!
+  \*******************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   RESEND_LOOKBACK_MS: () => (/* binding */ RESEND_LOOKBACK_MS),
+/* harmony export */   decideResend: () => (/* binding */ decideResend),
+/* harmony export */   foldReference: () => (/* binding */ foldReference),
+/* harmony export */   repeatBy: () => (/* binding */ repeatBy),
+/* harmony export */   resendPair: () => (/* binding */ resendPair),
+/* harmony export */   resendReference: () => (/* binding */ resendReference),
+/* harmony export */   sideOfFacts: () => (/* binding */ sideOfFacts),
+/* harmony export */   sideOfRow: () => (/* binding */ sideOfRow)
+/* harmony export */ });
+/* harmony import */ var _decide__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./decide */ "./src/payments/proof-gate/decide.ts");
+/**
+ * Re-send or new payment (owner 2026-11-08, measured on 14 days of paymentProofs: 631 later screenshots with the same
+ * amount as an earlier credit in the same chat). A screenshot is compared with EVERY credited screenshot of the same
+ * user (chat id, any client / persona) with the same amount, created in the last RESEND_LOOKBACK_MS. Per earlier credit,
+ * the first step that applies decides:
+ *   1. same image bytes -> repeat;
+ *   2. references equal after normalising + OCR folding, one an 8+ character start / end of the other, or same length
+ *      and one character off -> repeat;
+ *   3. both show a real reference of the SAME format and they differ -> new (an RRN vs a PhonePe T-id proves nothing);
+ *   4. this printed time is readable, not ahead of its arrival by more than 5 min, and later than the earlier
+ *      screenshot's ARRIVAL + 2 min -> new (the earlier screenshot existed before this payment was made);
+ *   4b. both payees read and different (otherPayee) -> new. The brief has this only in step 6; it runs before step 5
+ *      so a same- or next-minute receipt to ANOTHER payee is not a re-send (journeys L6 u / x, owner 2026-10-23 P3/P4).
+ *      Measured on the 631 cases: 0 outcomes change (3 NEW cases change only their step label);
+ *   5. both printed times readable: same minute -> repeat; 1 minute apart -> ask; exactly 12 h / 24 h apart -> repeat
+ *      only when this printed time is more than 15 min off its own arrival (else new: daily payers at one clock time,
+ *      kavya1 1810212425 / arpitha1 8085659189); any other gap -> new;
+ *   6. otherwise (same amount, payees not both read and different) -> ask for the payment details page.
+ * Over all earlier credits: repeat beats ask beats new. Replaces the 24 h no-UTR-no-time same-amount ask; the servedSha /
+ * servedMin claim keys stay behind it. Stored payment times are already the time check's (AM/PM / midnight corrected:
+ * signals.ts futurePaymentTimeReasons / amPmFlipConfirmed, payment-time.ts), so the 12 h / 24 h step is the only
+ * tolerance here. Analysis: docs/PAYMENT-SCREENSHOT-FLOW.md "Re-send or new payment".
+ */
+
+const MINUTE_MS = 60000;
+/** Earlier credits this far back (by their arrival) are compared. Was 24 h; the one credited ambiguous case at 32 h asks now. */
+const RESEND_LOOKBACK_MS = 48 * 60 * MINUTE_MS;
+/** Step 4: a printed time this far after the arrival is not "readable and real" for the new-payment proof. */
+const FUTURE_SLACK_MS = 5 * MINUTE_MS;
+/** Step 4: printed after the earlier screenshot's arrival + this = a payment made after that screenshot existed. */
+const AFTER_EARLIER_MS = 2 * MINUTE_MS;
+/** Step 5: a 12 h / 24 h gap is a misread only when this printed time is stale by more than this. */
+const STALE_MS = 15 * MINUTE_MS;
+/** Spaces / punctuation removed, uppercase. Null for masked ("XXXX", "****"), under 8 characters or with no digit. */
+function resendReference(raw) {
+    if (typeof raw !== 'string' || /[X*•]{3,}/i.test(raw.replace(/[\s\-.:]/g, '')))
+        return null;
+    const u = raw.replace(/[^A-Za-z0-9]/g, '').toUpperCase();
+    if (u.length < 8 || !/\d/.test(u))
+        return null;
+    return u;
+}
+/** OCR folding: O->0, I/L->1, S->5, B->8, Z->2 (a leading PhonePe T stays). */
+function foldReference(u) {
+    return u.replace(/O/g, '0').replace(/[IL]/g, '1').replace(/S/g, '5').replace(/B/g, '8').replace(/Z/g, '2');
+}
+function refsOf(side) {
+    return [...new Set(side.refs.map(resendReference).filter((r) => !!r).map(foldReference))];
+}
+/** Step 2: equal, a cut (8+ characters at the start or end of the other), or same length one character off. */
+function referencesMatch(a, b) {
+    for (const x of a)
+        for (const y of b) {
+            if (x === y)
+                return true;
+            const [s, l] = x.length <= y.length ? [x, y] : [y, x];
+            if (s.length >= 8 && (l.startsWith(s) || l.endsWith(s)))
+                return true;
+            if (x.length === y.length) {
+                let diff = 0;
+                for (let i = 0; i < x.length && diff < 2; i++)
+                    if (x[i] !== y[i])
+                        diff++;
+                if (diff === 1)
+                    return true;
+            }
+        }
+    return false;
+}
+/** Step 3: some pair of real references of the same format (referenceFormat) that differ. */
+function sameFormatDifferent(a, b) {
+    for (const x of a)
+        for (const y of b) {
+            const fx = (0,_decide__WEBPACK_IMPORTED_MODULE_0__.referenceFormat)(x);
+            if (fx !== null && fx === (0,_decide__WEBPACK_IMPORTED_MODULE_0__.referenceFormat)(y) && x !== y)
+                return true;
+        }
+    return false;
+}
+/** One later screenshot against one earlier credit of the same amount: the first step that applies. */
+function resendPair(later, earlier) {
+    if (later.sha256 && later.sha256 === earlier.sha256)
+        return { kind: 'repeat', step: 'sha' };
+    const ra = refsOf(later);
+    const rb = refsOf(earlier);
+    if (referencesMatch(ra, rb))
+        return { kind: 'repeat', step: 'ref-match' };
+    if (sameFormatDifferent(ra, rb))
+        return { kind: 'new', step: 'ref-different' };
+    const tp = later.timeMs;
+    const te = earlier.timeMs;
+    if (tp !== null && tp <= later.arrivalMs + FUTURE_SLACK_MS && tp > earlier.arrivalMs + AFTER_EARLIER_MS)
+        return { kind: 'new', step: 'time-after-earlier' };
+    if ((0,_decide__WEBPACK_IMPORTED_MODULE_0__.otherPayee)(later, earlier))
+        return { kind: 'new', step: 'other-payee' };
+    if (tp !== null && te !== null) {
+        const d = Math.abs(Math.floor(tp / MINUTE_MS) - Math.floor(te / MINUTE_MS));
+        if (d === 0)
+            return { kind: 'repeat', step: 'same-minute' };
+        if (d === 1)
+            return { kind: 'ask', step: 'next-minute' };
+        if (d === 12 * 60 || d === 24 * 60) {
+            return Math.abs(later.arrivalMs - tp) > STALE_MS ? { kind: 'repeat', step: 'half-day-stale' } : { kind: 'new', step: 'half-day-fresh' };
+        }
+        return { kind: 'new', step: 'other-minute' };
+    }
+    return { kind: 'ask', step: 'no-evidence' };
+}
+const RANK = { repeat: 0, ask: 1, new: 2 };
+function rowMs(v) {
+    return v instanceof Date ? v.getTime() : typeof v === 'string' || typeof v === 'number' ? new Date(v).getTime() : NaN;
+}
+function sideOfRow(row) {
+    return {
+        sha256: row.imageSha256 ?? null,
+        refs: [row.utr, row.servedUtr, row.ocr?.txnId],
+        timeMs: row.time?.state === 'known' && typeof row.time.epochMs === 'number' ? row.time.epochMs : null,
+        arrivalMs: rowMs(row.createdAt),
+        payeeUpiId: row.payeeUpiId ?? null,
+        payeeName: row.payeeName ?? null,
+    };
+}
+function sideOfFacts(facts, arrivalMs) {
+    return {
+        sha256: facts.sha256,
+        refs: [facts.utr, facts.txnId],
+        timeMs: facts.timeMs,
+        arrivalMs,
+        payeeUpiId: facts.payeeUpiId ?? null,
+        payeeName: facts.payeeName ?? null,
+    };
+}
+/**
+ * This screenshot against every earlier credit of this user (any persona) with the same amount, arrived within
+ * RESEND_LOOKBACK_MS before it. Repeat beats ask beats new; the newest earlier credit wins a tie. `none` = no such credit.
+ */
+function decideResend(facts, rows, nowMs) {
+    const arrival = facts.arrivalMs ?? nowMs;
+    const later = sideOfFacts(facts, arrival);
+    let best = null;
+    for (const row of rows) {
+        if (row.chatId !== facts.chatId || !row.servedAt)
+            continue;
+        if (row.profile === facts.profile && row.telegramMsgId === facts.msgId)
+            continue;
+        if (!(0,_decide__WEBPACK_IMPORTED_MODULE_0__.sameAmount)(row.amount, facts.amount))
+            continue;
+        const at = rowMs(row.createdAt);
+        // No "arrived before this one" test: an album's first picture is credited (its row stored) after the second arrived.
+        if (!Number.isFinite(at) || arrival - at > RESEND_LOOKBACK_MS)
+            continue;
+        const v = resendPair(later, sideOfRow(row));
+        if (!best || RANK[v.kind] < RANK[best.kind] || (RANK[v.kind] === RANK[best.kind] && at > best.at))
+            best = { ...v, matched: row, at };
+    }
+    return best ? { kind: best.kind, step: best.step, matched: best.matched } : { kind: 'none' };
+}
+/** The existing repeat label (flow.ts REPEAT_BY) for a repeat step. */
+function repeatBy(step) {
+    return step === 'sha' ? 'file' : step === 'ref-match' ? 'utr' : 'time';
+}
 
 
 /***/ },
