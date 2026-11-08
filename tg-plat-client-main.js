@@ -59291,8 +59291,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "c19246d2efc16ad53778ef58e1d305b1a8a74fd4" : 0;
-    const builtAt =  true ? "2026-11-08T09:17:33.828Z" : 0;
+    const sha =  true ? "68672a082dc67ec2455fb0d4610c8dde08d84ea1" : 0;
+    const builtAt =  true ? "2026-11-08T09:24:35.159Z" : 0;
     return { sha, builtAt };
 }
 
@@ -103559,6 +103559,12 @@ function istParts(ms) {
  *    (the model misread the day: nidhi1 2026-10-20 "21st Oct 26" read as 26 Oct).
  *  - FUTURE_TIME: same day, later clock. Not when the AM/PM is not printed with that clock and the other half of the
  *    day is not in the future: the earlier reading is taken (a genuine payer is never called fake on an AM/PM misread).
+ *    Not either when the 12 h earlier reading is within RESEND_WINDOW_MS (10 min) of the arrival (correctAmPmAhead):
+ *    the time check credits that receipt as an AM read as PM, so the gate must not call it fake first. Live 2026-11-06 nidhi1 63833: "Today, 12:50 PM" sent 00:58 IST got the fake warning (the clock was printed as PM).
+ *    Nor when the PhonePe transaction id (server time, IST) is not ahead and the printed clock is its time + 12 h
+ *    (± 10 min): the same flip, confirmed by the machine time (divya2 2026-11-04 "01:30 pm", id T2611040130.., 13 min
+ *    old). A fresh id under any other lead is no excuse.
+ * Owner rule 6: future-dated receipts are fake; only the 12 h AM/PM flip (± the 10 min window) and the leads are excused.
  * The time is read as the time check reads it (parsePaymentTime: IST wall clock, current year, New Year roll-back).
  */
 function futurePaymentTimeReasons(details, arrivalMs) {
@@ -103575,6 +103581,17 @@ function futurePaymentTimeReasons(details, arrivalMs) {
     }
     const otherHalfMs = readMs + (read.h >= 12 ? -TWELVE_HOURS_MS : TWELVE_HOURS_MS);
     if ((0,_payment_time__WEBPACK_IMPORTED_MODULE_0__.paymentDay)(otherHalfMs, arrivalMs) !== 'future' && !clockPrintedAs(text, read.h, read.mi))
+        return [];
+    // 12 h ± RESEND_WINDOW_MS only: correctAmPmAhead also lets the earlier reading run up to FUTURE_LEAD_MS ahead, which
+    // here would excuse a printed clock up to 15 h ahead (owner rule 6: never widen the future excuse beyond the flip).
+    const amPmMs = (0,_payment_time__WEBPACK_IMPORTED_MODULE_0__.correctAmPmAhead)(readMs, arrivalMs);
+    if (amPmMs !== null && Math.abs(amPmMs - arrivalMs) <= _payment_time__WEBPACK_IMPORTED_MODULE_0__.RESEND_WINDOW_MS)
+        return [];
+    // The same flip confirmed by the PhonePe transaction id: the printed clock is the id's time + 12 h (± the window)
+    // and the id is not ahead. A fresh id under any other lead is no excuse (journey L3: printed 5 h ahead = fake).
+    const txnMs = (0,_payment_time__WEBPACK_IMPORTED_MODULE_0__.phonePeTxnTimeMs)(details.text);
+    if (txnMs !== null && (0,_payment_time__WEBPACK_IMPORTED_MODULE_0__.paymentDay)(txnMs, arrivalMs) !== 'future'
+        && Math.abs(readMs - TWELVE_HOURS_MS - txnMs) <= _payment_time__WEBPACK_IMPORTED_MODULE_0__.RESEND_WINDOW_MS)
         return [];
     return ['FUTURE_TIME'];
 }
