@@ -15080,8 +15080,9 @@ exports.RateLimiter = RateLimiter;
 
 
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.UNPARSEABLE_LIMIT_FALLBACK_DAYS = exports.SPAMBOT_TOTAL_TIMEOUT_MS = exports.SPAMBOT_POLL_INTERVAL_MS = exports.SPAMBOT_POLL_TIMEOUT_MS = exports.SPAMBOT_USERNAME = void 0;
+exports.SPAMBOT_FREE_PHRASES = exports.SPAMBOT_HARSH_PHRASES = exports.SPAMBOT_LIMITED_PHRASES = exports.UNPARSEABLE_LIMIT_FALLBACK_DAYS = exports.SPAMBOT_TOTAL_TIMEOUT_MS = exports.SPAMBOT_POLL_INTERVAL_MS = exports.SPAMBOT_POLL_TIMEOUT_MS = exports.SPAMBOT_USERNAME = void 0;
 exports.parseLimitedUntil = parseLimitedUntil;
+exports.normalizeSpamBotText = normalizeSpamBotText;
 exports.classifySpamBotReply = classifySpamBotReply;
 exports.probeSpamBot = probeSpamBot;
 const telegram_1 = __webpack_require__(/*! telegram */ "telegram");
@@ -15140,16 +15141,20 @@ function parseLimitedUntil(text, now = new Date()) {
     }
     return null;
 }
+exports.SPAMBOT_LIMITED_PHRASES = ['limited until', 'automatically released', 'released on'];
+exports.SPAMBOT_HARSH_PHRASES = ['trigger a harsh', 'harsh response', 'while the account is limited'];
+exports.SPAMBOT_FREE_PHRASES = ['good news'];
+function normalizeSpamBotText(text) {
+    return (text || '').toLowerCase().replace(/\s+/g, ' ');
+}
+const hasAnyPhrase = (normalized, phrases) => phrases.some((p) => normalized.includes(p));
 function classifySpamBotReply(text, now = new Date()) {
     const reply = (text || '').trim();
-    const lower = reply.toLowerCase();
+    const normalized = normalizeSpamBotText(reply);
     const snippet = reply.slice(0, 300);
     if (!reply)
         return { status: 'unknown', limitedUntil: null };
-    if (lower.includes('good news')) {
-        return { status: 'free', limitedUntil: null, replyText: snippet };
-    }
-    if (lower.includes('limited until') || lower.includes('automatically released')) {
+    if (hasAnyPhrase(normalized, exports.SPAMBOT_LIMITED_PHRASES)) {
         const until = parseLimitedUntil(reply, now);
         if (until)
             return { status: 'limited', limitedUntil: until, replyText: snippet };
@@ -15159,8 +15164,11 @@ function classifySpamBotReply(text, now = new Date()) {
             replyText: snippet,
         };
     }
-    if (lower.includes('harsh response') || lower.includes('while the account is limited')) {
+    if (hasAnyPhrase(normalized, exports.SPAMBOT_HARSH_PHRASES)) {
         return { status: 'harsh', limitedUntil: null, replyText: snippet };
+    }
+    if (hasAnyPhrase(normalized, exports.SPAMBOT_FREE_PHRASES)) {
+        return { status: 'free', limitedUntil: null, replyText: snippet };
     }
     return { status: 'unknown', limitedUntil: null, replyText: snippet };
 }
@@ -46274,6 +46282,7 @@ Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.PromoteStatSchema = exports.PromoteStat = void 0;
 const mongoose_1 = __webpack_require__(/*! @nestjs/mongoose */ "@nestjs/mongoose");
 const swagger_1 = __webpack_require__(/*! @nestjs/swagger */ "@nestjs/swagger");
+const mongoose_2 = __webpack_require__(/*! mongoose */ "mongoose");
 let PromoteStat = class PromoteStat {
 };
 exports.PromoteStat = PromoteStat;
@@ -46317,6 +46326,14 @@ __decorate([
     (0, mongoose_1.Prop)({ required: true, type: [String] }),
     __metadata("design:type", Array)
 ], PromoteStat.prototype, "channels", void 0);
+__decorate([
+    (0, mongoose_1.Prop)({ type: mongoose_2.Schema.Types.Mixed, required: false }),
+    __metadata("design:type", Number)
+], PromoteStat.prototype, "count", void 0);
+__decorate([
+    (0, mongoose_1.Prop)({ type: String, required: false }),
+    __metadata("design:type", String)
+], PromoteStat.prototype, "mobile", void 0);
 exports.PromoteStat = PromoteStat = __decorate([
     (0, mongoose_1.Schema)()
 ], PromoteStat);
@@ -54384,6 +54401,7 @@ Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.StatSchema = exports.Stat2 = void 0;
 const mongoose_1 = __webpack_require__(/*! @nestjs/mongoose */ "@nestjs/mongoose");
 const swagger_1 = __webpack_require__(/*! @nestjs/swagger */ "@nestjs/swagger");
+const mongoose_2 = __webpack_require__(/*! mongoose */ "mongoose");
 let Stat2 = class Stat2 {
 };
 exports.Stat2 = Stat2;
@@ -54447,6 +54465,14 @@ __decorate([
     (0, mongoose_1.Prop)({ type: Number, required: false }),
     __metadata("design:type", Number)
 ], Stat2.prototype, "paymentAttributionCreditedAt", void 0);
+__decorate([
+    (0, mongoose_1.Prop)({ type: String, required: false }),
+    __metadata("design:type", String)
+], Stat2.prototype, "dailyPaidCountedAt", void 0);
+__decorate([
+    (0, mongoose_1.Prop)({ type: mongoose_2.Schema.Types.Mixed, required: false }),
+    __metadata("design:type", Number)
+], Stat2.prototype, "dailyRevenueCounted", void 0);
 exports.Stat2 = Stat2 = __decorate([
     (0, mongoose_1.Schema)()
 ], Stat2);
