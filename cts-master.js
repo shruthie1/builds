@@ -1412,14 +1412,7 @@ let AppService = AppService_1 = class AppService {
         }
     }
     async runUserDataRetention() {
-        this.logger.log('Starting UMS user-data/timestamp retention');
-        try {
-            const res = await this.userDataService.removeRedundantData();
-            this.logger.log(`Completed UMS userData retention: deleted=${res.deletedCount}`);
-        }
-        catch (e) {
-            this.logger.error(`UMS userData retention failed: ${(0, utils_1.parseError)(e, 'userData retention', false).message}`);
-        }
+        this.logger.log('Starting UMS timestamp retention (userData delete disabled: never delete records)');
         try {
             await this.timestampService.clear();
             this.logger.log('Completed UMS timestamps clear');
@@ -1635,8 +1628,6 @@ let AppService = AppService_1 = class AppService {
             videos: [],
         };
         const threeDaysAgo = Date.now() - 3 * 24 * 60 * 60 * 1000;
-        const twentyDays = Date.now() - 20 * 24 * 60 * 60 * 1000;
-        const resets = [];
         try {
             const query1 = {
                 chatId,
@@ -1669,39 +1660,11 @@ let AppService = AppService_1 = class AppService {
                         }
                         resp.videos.push(...doc.videos);
                     }
-                    else {
-                        if (doc.lastMsgTimeStamp < twentyDays) {
-                            resets.push([
-                                doc.profile,
-                                doc.chatId,
-                                getReadableTimeDifference(doc.lastMsgTimeStamp, Date.now()),
-                            ]);
-                            await this.userDataService.update(doc.profile, doc.chatId, {
-                                payAmount: 0,
-                                demoGiven: false,
-                                secondShow: false,
-                                highestPayAmount: 0,
-                                lastMsgTimeStamp: Date.now(),
-                            });
-                        }
-                    }
                 }
             }
         }
         catch (error) {
             (0, utils_1.parseError)(error);
-        }
-        if (resets.length) {
-            try {
-                await (0, bot_notice_1.sendBotNotice)('pppl', {
-                    severity: 'warning',
-                    title: 'Reset userData',
-                    tables: [{ columns: [`Profile (${resets.length})`, 'Chat', 'Last message'], rows: resets }],
-                });
-            }
-            catch (error) {
-                (0, utils_1.parseError)(error, 'Resetting UserData notification failed', false);
-            }
         }
         console.log(resp);
         return resp;
@@ -2290,24 +2253,6 @@ exports.AppService = AppService = AppService_1 = __decorate([
         components_1.BufferClientService,
         account_maintenance_service_1.AccountMaintenanceService])
 ], AppService);
-function getReadableTimeDifference(ms1, ms2) {
-    const diff = Math.abs(ms1 - ms2);
-    const seconds = Math.floor(diff / 1000);
-    const days = Math.floor(seconds / (3600 * 24));
-    const hours = Math.floor((seconds % (3600 * 24)) / 3600);
-    const minutes = Math.floor((seconds % 3600) / 60);
-    const secs = seconds % 60;
-    let result = [];
-    if (days > 0)
-        result.push(`${days}d`);
-    if (hours > 0)
-        result.push(`${hours}h`);
-    if (minutes > 0)
-        result.push(`${minutes}m`);
-    if (secs > 0 || result.length === 0)
-        result.push(`${secs}s`);
-    return result.join(' ');
-}
 function isNonBlankString(value) {
     return typeof value === 'string' && value.trim().length > 0;
 }
@@ -15592,8 +15537,12 @@ const AUTH_ALLOWLIST = {
     countries: ['singapore'],
     deviceModelSubstrings: ['oneplus 11', 'cli', 'linux', 'windows'],
     deviceModelSuffixes: ['-ssk'],
-    appNamePrefixes: ['lik', 'ramy', 'sru', 'shru', 'han'],
+    appNamePrefixes: ['lik', 'ram', 'sru', 'shru', 'han'],
 };
+function ownedAppPrefix(appName) {
+    const compactAppName = appName.replace(/[^a-z0-9]+/g, "");
+    return AUTH_ALLOWLIST.appNamePrefixes.find((prefix) => compactAppName.startsWith(prefix));
+}
 function getAuthProtectionReason(auth) {
     if (auth.apiId && OUR_API_IDS.has(auth.apiId))
         return `apiId:${auth.apiId}`;
@@ -15609,7 +15558,7 @@ function getAuthProtectionReason(auth) {
     const deviceSuffixMatch = AUTH_ALLOWLIST.deviceModelSuffixes.find(s => device.endsWith(s));
     if (deviceSuffixMatch)
         return `device_suffix:${deviceSuffixMatch}`;
-    const appPrefixMatch = AUTH_ALLOWLIST.appNamePrefixes.find(s => app.startsWith(s));
+    const appPrefixMatch = ownedAppPrefix(app);
     if (appPrefixMatch)
         return `app_prefix:${appPrefixMatch}`;
     return null;
@@ -22830,6 +22779,7 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
         const healthViews = healthMode === 'off' ? null : await (0, account_facet_read_1.resolveAccountHealthViews)((0, account_facet_read_1.accountFacetReadCollectionOf)(this.bufferClientModel, account_facet_read_1.ACCOUNT_HEALTH_READ_COLLECTION), 'R2', assigned.map((doc) => ({ mobile: doc.mobile, doc: doc })), { mode: healthMode, logger: this.logger });
         const healthByDoc = healthViews ? new Map(assigned.map((doc, i) => [doc, healthViews[i]])) : null;
         const countedPerClient = new Map();
+        const heldPerClient = new Map();
         const capPerClient = new Map();
         const perClient = new Map();
         let fleetWarming = 0;
@@ -22844,6 +22794,7 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
             if (config.mode === 'legacy') {
                 if (this.isHealthyBufferClientForCap(doc, now)) {
                     countedPerClient.set(doc.clientId, (countedPerClient.get(doc.clientId) || 0) + 1);
+                    heldPerClient.set(doc.clientId, (heldPerClient.get(doc.clientId) || 0) + 1);
                 }
                 continue;
             }
@@ -22853,7 +22804,9 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
                 : doc, now, classifyOptions);
             if ('kind' in verdict) {
                 bucket.counted[verdict.kind] += 1;
-                countedPerClient.set(doc.clientId, (countedPerClient.get(doc.clientId) || 0) + 1);
+                heldPerClient.set(doc.clientId, (heldPerClient.get(doc.clientId) || 0) + 1);
+                if (verdict.kind === 'usable')
+                    countedPerClient.set(doc.clientId, (countedPerClient.get(doc.clientId) || 0) + 1);
                 if (verdict.kind === 'pipeline')
                     fleetWarming += 1;
             }
@@ -22881,6 +22834,7 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
         for (const client of clients) {
             const availability = await this.calculateAvailabilityBasedNeedsForCurrentState(client.clientId);
             const counted = countedPerClient.get(client.clientId) || 0;
+            const held = heldPerClient.get(client.clientId) || 0;
             const bucket = perClient.get(client.clientId) || { counted: { usable: 0, limited_soon: 0, pipeline: 0 }, excluded: {}, needsSpamCheck: [] };
             if (config.mode === 'legacy') {
                 const cap = buffer_supply_1.LEGACY_HEALTHY_CAP;
@@ -22888,7 +22842,7 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
                 const need = Math.min(availability.totalNeeded, remaining);
                 capPerClient.set(client.clientId, cap);
                 entries.push({
-                    clientId: client.clientId, counted, countedByKind: bucket.counted, excluded: bucket.excluded,
+                    clientId: client.clientId, counted, held, countedByKind: bucket.counted, excluded: bucket.excluded,
                     needsSpamCheck: [], consumed: 0, ratePerDay: 0, target: this.config.minTotalClients, cap,
                     windowNeed: availability.totalNeeded, need, allocated: 0, priority: availability.priority,
                     reason: need < availability.totalNeeded
@@ -22900,14 +22854,14 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
             }
             const consumed = consumedPerClient.get(client.clientId) || 0;
             const target = (0, buffer_supply_1.computeClientSupplyTarget)({ consumed, counted }, config);
-            const remaining = Math.max(0, target.cap - counted);
+            const remaining = Math.max(0, target.cap - held);
             const need = Math.min(remaining, Math.max(target.need, availability.totalNeeded));
             capPerClient.set(client.clientId, target.cap);
             entries.push({
-                clientId: client.clientId, counted, countedByKind: bucket.counted, excluded: bucket.excluded,
+                clientId: client.clientId, counted, held, countedByKind: bucket.counted, excluded: bucket.excluded,
                 needsSpamCheck: bucket.needsSpamCheck, consumed, ratePerDay: target.ratePerDay, target: target.target,
                 cap: target.cap, windowNeed: availability.totalNeeded, need, allocated: 0, priority: availability.priority,
-                reason: `supply ${counted}/${target.target} (cap ${target.cap}; ${consumed} swaps in ${config.consumptionWindowDays}d)`,
+                reason: `supply ${counted} usable/${target.target} (+${bucket.counted.limited_soon} limited, ${bucket.counted.pipeline} warming; held ${held}/cap ${target.cap}; ${consumed} swaps in ${config.consumptionWindowDays}d)`,
                 availability,
             });
         }
@@ -22941,7 +22895,7 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
             || b.need - a.need
             || a.priority - b.priority
             || a.clientId.localeCompare(b.clientId));
-        return { mode: config.mode, invalidConfig: invalid, config, fleet, entries: ordered, countedPerClient, capPerClient };
+        return { mode: config.mode, invalidConfig: invalid, config, fleet, entries: ordered, countedPerClient, heldPerClient, capPerClient };
     }
     logBufferSupplyPlan(plan) {
         if (plan.invalidConfig.length) {
@@ -22951,6 +22905,7 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
             this.logger.info(`[${entry.clientId}] Buffer supply plan`, {
                 mode: plan.mode,
                 counted: entry.counted,
+                held: entry.held,
                 countedByKind: entry.countedByKind,
                 excluded: entry.excluded,
                 needsSpamCheck: entry.needsSpamCheck,
@@ -23346,10 +23301,11 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
         let totalSlotsNeeded = 0;
         for (const entry of plan.entries) {
             const availabilityNeeds = entry.availability;
-            const remainingCapacity = Math.max(0, entry.cap - entry.counted);
+            const remainingCapacity = Math.max(0, entry.cap - entry.held);
             const decision = {
                 clientId: entry.clientId,
                 healthyCount: entry.counted,
+                heldCount: entry.held,
                 healthyCap: entry.cap,
                 remainingCapacity,
                 readyActive: availabilityNeeds.readyActive,
@@ -23380,7 +23336,7 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
                 totalSlotsNeeded += entry.allocated;
             }
             else if (wanted > 0 && remainingCapacity <= 0) {
-                decision.blockedReason = `healthy cap reached (${entry.counted}/${entry.cap})`;
+                decision.blockedReason = `healthy cap reached (${entry.held}/${entry.cap} held, ${entry.counted} usable)`;
             }
             else if (entry.need > 0) {
                 decision.blockedReason = `fleet enrolment budget exhausted (${plan.fleet.budget} this run)`;
@@ -23656,7 +23612,7 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
         };
         if (clientNeedingBufferClients.length > 0 && totalSlotsNeeded > 0) {
             try {
-                dynamicCreateResult = await this.addNewUserstoBufferClientsDynamic([], goodIds, clientNeedingBufferClients, supplyPlan.countedPerClient, supplyPlan.capPerClient);
+                dynamicCreateResult = await this.addNewUserstoBufferClientsDynamic([], goodIds, clientNeedingBufferClients, supplyPlan.heldPerClient, supplyPlan.capPerClient);
             }
             catch (error) {
                 const errMsg = (0, parseError_1.parseError)(error, 'addNewUserstoBufferClientsDynamic').message;
@@ -23722,7 +23678,7 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
         }));
         if (needs.length === 0)
             return;
-        await this.addNewUserstoBufferClientsDynamic(badIds, goodIds, needs, plan.countedPerClient, plan.capPerClient);
+        await this.addNewUserstoBufferClientsDynamic(badIds, goodIds, needs, plan.heldPerClient, plan.capPerClient);
     }
     async addNewUserstoBufferClientsDynamic(badIds, goodIds, clientsNeedingBufferClients, bufferClientsPerClient, capPerClient) {
         return (0, candidate_source_1.runEnrolmentBatch)({
@@ -23870,7 +23826,8 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
             return null;
         const rows = plan.entries.map((e) => [
             e.clientId,
-            `${e.counted} (${e.countedByKind.usable}f/${e.countedByKind.limited_soon}l/${e.countedByKind.pipeline}w)`,
+            String(e.counted),
+            `${e.countedByKind.limited_soon}l/${e.countedByKind.pipeline}w`,
             String(e.excluded.harsh || 0),
             String((e.excluded.never_checked || 0) + (e.excluded.stale_free || 0)),
             String(e.consumed),
@@ -23884,7 +23841,7 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
             : `budget ${fleet.budget}, 7d enrolled ${fleet.enrolledLast7d}/${fleet.weeklyCeiling}, warming ${fleet.fleetWarming}/${fleet.pipelineCapacity}`;
         return {
             title: `Supply plan (${budgetNote})`,
-            columns: ['Client', 'Counted f/l/w', 'Harsh', 'Unchecked', 'Swaps', 'Target/Cap', 'Need', 'Enrol'],
+            columns: ['Client', 'Usable', 'Limited/Warming', 'Harsh', 'Unchecked', 'Swaps', 'Target/Cap', 'Need', 'Enrol'],
             rows,
         };
     }
@@ -65080,7 +65037,7 @@ exports.NoticeDigestFlusher = NoticeDigestFlusher;
 
 
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.invisibleChars = exports.specialCharMap = exports.numberMap = exports.homoglyphMap = exports.SeededRandom = exports.ObfuscationConfig = void 0;
+exports.invisibleChars = exports.specialCharMap = exports.numberMap = exports.defaultSafeBlocks = exports.homoglyphMap = exports.SeededRandom = void 0;
 exports.obfuscateText = obfuscateText;
 exports.analyzeText = analyzeText;
 exports.attemptReverse = attemptReverse;
@@ -65089,6 +65046,7 @@ exports.testReverseCoverage = testReverseCoverage;
 exports.batchObfuscate = batchObfuscate;
 exports.generateVariants = generateVariants;
 exports.validateConfig = validateConfig;
+exports.getConfig = getConfig;
 const DEFAULT_CONFIG = {
     substitutionRate: 0.4,
     invisibleCharRate: 0,
@@ -65096,7 +65054,7 @@ const DEFAULT_CONFIG = {
     preserveNumbers: false,
     preserveSpecialChars: true,
     useInvisibleChars: false,
-    maintainFormatting: true,
+    maintainFormatting: false,
     randomSeed: null,
     maxInvisibleCharsPerWord: 2,
     customSafeBlocks: [],
@@ -65171,38 +65129,22 @@ const invisibleChars = [
     '\uFEFF',
 ];
 exports.invisibleChars = invisibleChars;
-class ObfuscationConfig {
-    constructor(options = {}) {
-        const config = { ...DEFAULT_CONFIG, ...options };
-        this.substitutionRate = config.substitutionRate;
-        this.invisibleCharRate = config.invisibleCharRate;
-        this.preserveCase = config.preserveCase;
-        this.preserveNumbers = config.preserveNumbers;
-        this.preserveSpecialChars = config.preserveSpecialChars;
-        this.useInvisibleChars = config.useInvisibleChars;
-        this.maintainFormatting = config.maintainFormatting;
-        this.randomSeed = config.randomSeed;
-        this.maxInvisibleCharsPerWord = config.maxInvisibleCharsPerWord;
-        this.customSafeBlocks = Object.freeze([...config.customSafeBlocks]);
-        this.intensityVariation = config.intensityVariation;
-    }
-    toJSON() {
-        return {
-            substitutionRate: this.substitutionRate,
-            invisibleCharRate: this.invisibleCharRate,
-            preserveCase: this.preserveCase,
-            preserveNumbers: this.preserveNumbers,
-            preserveSpecialChars: this.preserveSpecialChars,
-            useInvisibleChars: this.useInvisibleChars,
-            maintainFormatting: this.maintainFormatting,
-            randomSeed: this.randomSeed,
-            maxInvisibleCharsPerWord: this.maxInvisibleCharsPerWord,
-            customSafeBlocks: [...this.customSafeBlocks],
-            intensityVariation: this.intensityVariation
-        };
-    }
+const defaultSafeBlocks = [
+    '𝗩𝗲𝗱𝗶𝗼 𝗖𝗮𝗹𝗹 𝗗𝗲𝗺𝗼 𝗔𝘃𝗶𝗹𝗯𝗹𝗲',
+    '━━━━━━━━━━━━━━━━━━━━━━━━',
+    '🔥🔥  T O D A Y \' S   O F F E R  🔥🔥',
+    '🇻 🇮 🇩 🇪 🇴  🇨 🇦 𝗟 𝗟 ',
+    '𝗠𝗢𝗢𝗗', '𝗨𝗡𝗗𝗜', '𝗜𝗗𝗘', '𝗜𝗥𝗨𝗞𝗞𝗨',
+    '𝗛𝗔𝗜', '𝗛𝗔𝗜𝗥', '𝗛𝗔𝗜𝗥𝗘', '𝗗𝗠', '𝗖𝗛𝗘𝗬𝗬𝗜',
+    '𝗕𝗢𝗬𝗦', '𝗚𝗔𝗥𝗔𝗠', '𝗛𝗨𝗠𝗔𝗜𝗥𝗔𝗠', '𝗛𝗔𝗜𝗥𝗘𝗦𝗦', '𝗔𝗥𝗘𝗔𝗦',
+    '𝗖𝗔𝗟𝗟', '𝗢𝗡𝗟𝗬', '𝗗𝗔𝗥𝗟𝗜𝗡𝗚',
+    '𝗝𝗢𝗜𝗡', '𝗙𝗔𝗦𝗧', '𝗧𝗜𝗠𝗘', '𝗡𝗢', '𝗛𝗔𝗜',
+    '𝗟𝗘𝗧𝗦', '𝗛𝗔𝗩𝗘', '𝗛𝗢𝗧', '𝗩𝗜𝗗𝗘𝗢', '𝗖𝗔𝗟𝗟'
+];
+exports.defaultSafeBlocks = defaultSafeBlocks;
+function getConfig(options = {}) {
+    return { ...DEFAULT_CONFIG, ...options };
 }
-exports.ObfuscationConfig = ObfuscationConfig;
 class SeededRandom {
     constructor(seed = null) {
         this.seed = seed ?? Math.random() * 2147483647;
@@ -65252,34 +65194,23 @@ function getRandom(arr, weights) {
     }
     return arr[arr.length - 1];
 }
-const defaultSafeBlocks = [
-    '𝗩𝗲𝗱𝗶𝗼 𝗖𝗮𝗹𝗹 𝗗𝗲𝗺𝗼 𝗔𝘃𝗶𝗹𝗯𝗹𝗲',
-    '━━━━━━━━━━━━━━━━━━━━━━━━',
-    '🔥🔥  T O D A Y \' S   O F F E R  🔥🔥',
-    '🇻 🇮 🇩 🇪 🇴  🇨 🇦 𝗟 𝗟 ',
-    '𝗠𝗢𝗢𝗗', '𝗨𝗡𝗗𝗜', '𝗜𝗗𝗘', '𝗜𝗥𝗨𝗞𝗞𝗨',
-    '𝗛𝗔𝗜', '𝗛𝗔𝗜𝗥', '𝗛𝗔𝗜𝗥𝗘', '𝗗𝗠', '𝗖𝗛𝗘𝗬𝗬𝗜',
-    '𝗕𝗢𝗬𝗦', '𝗚𝗔𝗥𝗔𝗠', '𝗛𝗨𝗠𝗔𝗜𝗥𝗔𝗠', '𝗛𝗔𝗜𝗥𝗘𝗦𝗦', '𝗔𝗥𝗘𝗔𝗦',
-    '𝗖𝗔𝗟𝗟', '𝗡𝗢𝗪', '𝗗𝗔𝗥𝗟𝗜𝗡𝗚',
-    '𝗝𝗢𝗜𝗡', '𝗙𝗔𝗦𝗧', '𝗧𝗜𝗠𝗘', '𝗡𝗢', '𝗛𝗔𝗜',
-    '𝗟𝗘𝗧𝗦', '𝗛𝗔𝗩𝗘', '𝗛𝗢𝗧', '𝗩𝗜𝗗𝗘𝗢', '𝗖𝗔𝗟𝗟'
-];
 function obfuscateText(text, config = {}) {
-    const settings = config instanceof ObfuscationConfig ? config : new ObfuscationConfig(config);
+    const settings = getConfig(config);
     const random = new SeededRandom(settings.randomSeed);
     const safeBlocks = [...defaultSafeBlocks, ...settings.customSafeBlocks];
+    const maintainFormatting = settings.maintainFormatting;
     const specialCharCache = new Map();
     let obfuscated = '';
     const lines = text.split('\n');
     for (let j = 0; j < lines.length; j++) {
-        const line = lines[j].replace(/\*\*/g, '');
+        const line = maintainFormatting ? lines[j] : lines[j].replace(/\*\*/g, '');
         if (line.trim() === '') {
-            obfuscated += '\n';
+            obfuscated += '\n\n';
             continue;
         }
         const isSafe = safeBlocks.some((safe) => line.includes(safe));
         if (isSafe) {
-            obfuscated += line + '\n';
+            obfuscated += line + '\n\n';
             continue;
         }
         let newLine = '';
@@ -65341,7 +65272,7 @@ function obfuscateText(text, config = {}) {
                 newLine += random.choice(invisibleChars);
             }
         }
-        obfuscated += settings.maintainFormatting ? `**${newLine}**\n` : newLine + '\n';
+        obfuscated += maintainFormatting ? newLine + '\n\n' : `**${newLine}**\n\n`;
     }
     return obfuscated.trim();
 }
@@ -65417,8 +65348,7 @@ function attemptReverseFuzzy(obfuscatedText) {
         cleaned = cleaned.replace(new RegExp(escapeRegExp(char), 'g'), '');
     });
     let result = '';
-    for (let i = 0; i < cleaned.length; i++) {
-        const char = cleaned[i];
+    for (const char of cleaned) {
         let bestMatch = char;
         let found = false;
         for (const [original, substitutes] of Object.entries(homoglyphMap)) {
@@ -65492,8 +65422,8 @@ function escapeRegExp(str) {
 }
 function batchObfuscate(text, configArray) {
     return configArray.map(config => {
-        const configObj = config instanceof ObfuscationConfig ? config : new ObfuscationConfig(config);
-        const result = obfuscateText(text, configObj);
+        const configObj = getConfig(config);
+        const result = obfuscateText(text, config);
         const analysisStats = analyzeText(result);
         return {
             config: configObj,
@@ -65504,16 +65434,17 @@ function batchObfuscate(text, configArray) {
 }
 function generateVariants(text, baseConfig = {}, variants = 5) {
     const results = [];
-    const config = new ObfuscationConfig(baseConfig);
+    const baseSettings = getConfig(baseConfig);
     for (let i = 0; i < variants; i++) {
         const intensity = (i + 1) / variants;
-        const variantConfig = new ObfuscationConfig({
-            ...config.toJSON(),
+        const variantOptions = {
+            ...baseSettings,
             substitutionRate: intensity * 0.8,
             invisibleCharRate: intensity * 0.15,
             randomSeed: Math.floor(Math.random() * 1000000)
-        });
-        results.push(obfuscateText(text, variantConfig));
+        };
+        const variantSettings = getConfig(variantOptions);
+        results.push(obfuscateText(text, variantSettings));
     }
     return results;
 }
@@ -65558,7 +65489,8 @@ const DEFAULT_ERROR_CONFIG = {
         /INPUT_USER_DEACTIVATED/i,
         /too many req/i,
         /could not find/i,
-        /ECONNREFUSED/i
+        /ECONNREFUSED/i,
+        /PEER_FLOOD/i
     ],
     defaultStatus: 500,
     defaultMessage: 'An unknown error occurred',
@@ -65943,7 +65875,7 @@ const SECRET_KEYS = new Set([
     'token', 'bottoken', 'accesstoken', 'refreshtoken', 'secret', 'authkey',
 ]);
 const SESSION_LIKE = /\b1[A-Za-z0-9+/_-]{200,}={0,2}/g;
-const BOT_TOKEN_LIKE = /(?<!\d)\d{6,12}:[A-Za-z0-9_-]{30,}/g;
+const BOT_TOKEN_LIKE = /(?<!\d)(\d{6,12}):[A-Za-z0-9_-]{30,}/g;
 exports.REDACTED = '[redacted]';
 function isSecretKey(key) {
     return SECRET_KEYS.has(String(key).toLowerCase());
@@ -65951,7 +65883,7 @@ function isSecretKey(key) {
 function redactSecretText(text) {
     if (typeof text !== 'string')
         return text;
-    return text.replace(SESSION_LIKE, '[redacted-session]').replace(BOT_TOKEN_LIKE, '[redacted-token]');
+    return text.replace(SESSION_LIKE, '[redacted-session]').replace(BOT_TOKEN_LIKE, '$1:[redacted-token]');
 }
 
 
