@@ -58728,8 +58728,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "e27c51f2ab881e135cd26d2d23e528d62625692c" : 0;
-    const builtAt =  true ? "2026-11-09T11:46:41.842Z" : 0;
+    const sha =  true ? "614a9a165d606a71e9670207e73a8817fbd2347c" : 0;
+    const builtAt =  true ? "2026-11-09T12:20:15.248Z" : 0;
     return { sha, builtAt };
 }
 
@@ -103112,6 +103112,7 @@ function repeatBy(step) {
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   amPmFlipConfirmed: () => (/* binding */ amPmFlipConfirmed),
+/* harmony export */   amountWordsReasons: () => (/* binding */ amountWordsReasons),
 /* harmony export */   clockPrintedAs: () => (/* binding */ clockPrintedAs),
 /* harmony export */   fabricatedTextReasons: () => (/* binding */ fabricatedTextReasons),
 /* harmony export */   futurePaymentTimeReasons: () => (/* binding */ futurePaymentTimeReasons),
@@ -103145,6 +103146,7 @@ function fabricatedTextReasons(text, opts = {}) {
     if (COMPLETED_SUCCESSFULLY.test(t))
         reasons.push('GENERATOR_SUCCESS_TEXT');
     reasons.push(...txnIdDateReasons(t, opts));
+    reasons.push(...amountWordsReasons(t));
     return reasons;
 }
 const IST_OFFSET_MS = 330 * 60000;
@@ -103268,6 +103270,51 @@ const TXN_ID_FORMATS = [
         },
     },
 ];
+/**
+ * Owner 2026-11-09 "Proceed" (fake-screenshot checks for apps whose ids carry no date): the receipt's own fields must
+ * agree. Replay 2026-11-09 (OCR of every proof 2026-10-26 .. 11-09, VM1/VM2 sidecars + stored text; 1,163 receipts):
+ *  - AMOUNT_WORDS_MISMATCH (built): the amount figure and the amount in words printed right after it ("₹150 Rupees
+ *    Three Hundred Fifty Only", Paytm "₹150 One Hundred Fifty Rupees") disagree. 84 such pairs, 32 on genuine credited
+ *    receipts, all equal; 3 disagree, all edited Paytm "Sent Successfully" screens (shruthi1 7005432597 156847,
+ *    1779768427 157262 / 157272: a ₹350 template edited to ₹150). Judged only on a clean read: the figure, then
+ *    nothing but number words up to "rupees" / "only" (a misread word, "and", paise: not judged).
+ * Measured and not built: per-app id shapes (every id field is 12 digits, PhonePe / Kotak / BHIM ids are in
+ * TXN_ID_FORMATS; an 11 / 13-digit reference is already the polite IMPOSSIBLE_REFERENCE ask, decide.ts; GPay "CICAg.."
+ * ids appear on 1 genuine receipt and the text here is lower-cased, so no base64 read), weekday vs date (3 genuine, no
+ * fake), the same reference printed twice (1 receipt), look-alikes of our UPI ids (genuine receipts show one-letter
+ * misreads of them: paid-to-us.ts decides), "Payments Successful" (4 receipts the owner marked not fake).
+ */
+const AMOUNT_WORD_VALUES = {
+    one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12,
+    thirteen: 13, fourteen: 14, fifteen: 15, sixteen: 16, seventeen: 17, eighteen: 18, nineteen: 19, twenty: 20,
+    thirty: 30, forty: 40, fifty: 50, sixty: 60, seventy: 70, eighty: 80, ninety: 90,
+};
+const AMOUNT_WORD = `(?:${[...Object.keys(AMOUNT_WORD_VALUES), 'hundred', 'thousand'].sort((a, b) => b.length - a.length).join('|')})\\b`;
+/** "₹150 [rupees] three hundred fifty rupees|only": figure (₴ = OCR'd ₹), then only number words up to the terminator. */
+const AMOUNT_IN_WORDS = new RegExp(`[₹₴]\\s?(\\d{1,3}(?:,\\d{3})+|\\d+)(?:\\.\\d{2})?\\s+(?:rupees\\s+)?(${AMOUNT_WORD}(?:[\\s-]+${AMOUNT_WORD})*)\\s+(?:rupees|only)\\b`, 'gi');
+function amountInWordsValue(words) {
+    let total = 0, current = 0;
+    for (const w of words.toLowerCase().split(/[\s-]+/)) {
+        if (w === 'hundred')
+            current = (current || 1) * 100;
+        else if (w === 'thousand') {
+            total += (current || 1) * 1000;
+            current = 0;
+        }
+        else
+            current += AMOUNT_WORD_VALUES[w] ?? 0;
+    }
+    return total + current;
+}
+/** AMOUNT_WORDS_MISMATCH (see above): a printed amount whose words, printed right after it, say another amount. */
+function amountWordsReasons(text) {
+    const t = String(text ?? '').replace(/\s+/g, ' ');
+    for (const m of t.matchAll(AMOUNT_IN_WORDS)) {
+        if (Number(m[1].replace(/,/g, '')) !== amountInWordsValue(m[2]))
+            return ['AMOUNT_WORDS_MISMATCH'];
+    }
+    return [];
+}
 /** How close a printed clock (to the minute) must be to the id's time, also after a time-zone lead. */
 const TZ_MINUTE_MS = 2 * 60000;
 /** The 12 h clock of a labelled date-time: "hh:mm", optional seconds, optional AM/PM. */
