@@ -58728,8 +58728,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "1eebe24a8269cfb567df6bfd3366e2cb207869cd" : 0;
-    const builtAt =  true ? "2026-11-08T18:15:56.828Z" : 0;
+    const sha =  true ? "a1a4578c4ed7ffb66ee7c894dc4ff74440d227ec" : 0;
+    const builtAt =  true ? "2026-11-09T10:52:26.490Z" : 0;
     return { sha, builtAt };
 }
 
@@ -103088,7 +103088,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   clockPrintedAs: () => (/* binding */ clockPrintedAs),
 /* harmony export */   fabricatedTextReasons: () => (/* binding */ fabricatedTextReasons),
 /* harmony export */   futurePaymentTimeReasons: () => (/* binding */ futurePaymentTimeReasons),
-/* harmony export */   phonePeTxnTimeMs: () => (/* reexport safe */ _payment_time__WEBPACK_IMPORTED_MODULE_0__.phonePeTxnTimeMs)
+/* harmony export */   phonePeTxnTimeMs: () => (/* reexport safe */ _payment_time__WEBPACK_IMPORTED_MODULE_0__.phonePeTxnTimeMs),
+/* harmony export */   txnIdDateReasons: () => (/* binding */ txnIdDateReasons)
 /* harmony export */ });
 /* harmony import */ var _payment_time__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../payment-time */ "./src/payments/payment-time.ts");
 
@@ -103115,6 +103116,7 @@ function fabricatedTextReasons(text) {
         reasons.push('SAMPLE_PAYMENT');
     if (COMPLETED_SUCCESSFULLY.test(t))
         reasons.push('GENERATOR_SUCCESS_TEXT');
+    reasons.push(...txnIdDateReasons(t));
     return reasons;
 }
 const IST_OFFSET_MS = 330 * 60000;
@@ -103170,6 +103172,81 @@ function printedDates(text) {
             out.push({ d: Number(m[1]), mo });
     }
     return out;
+}
+/**
+ * A T-number of PhonePe's length ("T" + 20-22 digits: YYMMDDhhmmss + 8-10), the only form phonePeTxnTimeMs reads. A
+ * longer one (23+ digits, an OCR'd extra digit: arpitha1 105379, credited, genuine) or a shorter one is not judged here.
+ */
+const PHONEPE_LENGTH_T_NUMBER = /\bt\s?\d{20,22}\b/i;
+/**
+ * Owner 2026-11-09 "Has transaction ID as date": the PhonePe transaction id encodes the payment's IST date
+ * (phonePeTxnTimeMs), so a receipt whose printed date is another day, or whose id does not start with a valid date at
+ * all, is an edited / made-up screenshot. Live sowmya2 6881950151 2026-11-09: six "Girls Community" receipts printed
+ * "01:29 AM on 09 November 2026" .. "02:05 AM" with ids T1629.., T0690.., T5303.., T7619.., T3062.., T6106.. (none
+ * reads as YYMMDDhhmmss) and a fresh made-up UTR each, all credited. Replay of every paymentProofs row 2026-11-02 ..
+ * 11-09 (445 PhonePe ids): no genuine credited receipt has a PhonePe-length id that is not a date, or a date another day.
+ *  - Only when the text prints a date (printedDates); a dateless receipt keeps the previous behaviour.
+ *  - TXN_ID_NOT_A_DATE: a PhonePe-length T-number that phonePeTxnTimeMs does not read as a date and time.
+ *  - TXN_ID_DATE_MISMATCH: no printed date is the id's IST day. Not when a printed date is the day before / after and a
+ *    printed clock on it is the id's moment: within RESEND_WINDOW_MS (a payment at 23:59 stamped 00:00, and back), or
+ *    the id's moment on a phone set to another time zone (PhonePe prints the phone's local time; the id is IST): a
+ *    whole quarter-hour offset from IST-17:30 to IST+8:30, within TZ_MINUTE_MS (2 min). Live divya2 1748455130
+ *    15888/15919 (credited, genuine, reviewed fine): "10:51 pm on 08 Nov 2026" with id T261109042120.. = 04:21 IST on
+ *    9 Nov, a phone on UTC.
+ * A fraud reason (processImage fraudReasons, the fake warning), so a fresh reference on the receipt never excuses it.
+ */
+function txnIdDateReasons(text) {
+    const t = String(text ?? '').replace(/\s+/g, ' ');
+    if (!PHONEPE_LENGTH_T_NUMBER.test(t))
+        return [];
+    const dates = printedDates(t).filter((p) => p.d >= 1 && p.d <= 31 && p.mo >= 1 && p.mo <= 12);
+    if (dates.length === 0)
+        return [];
+    const txnMs = (0,_payment_time__WEBPACK_IMPORTED_MODULE_0__.phonePeTxnTimeMs)(t);
+    if (txnMs === null)
+        return ['TXN_ID_NOT_A_DATE'];
+    const id = istParts(txnMs);
+    if (dates.some((p) => p.d === id.d && p.mo === id.mo))
+        return [];
+    return printedAtIdMoment(t, dates, txnMs) ? [] : ['TXN_ID_DATE_MISMATCH'];
+}
+/** Time-zone offsets from IST a phone can print (UTC-12 .. UTC+14), and how close to a quarter hour the clock must be. */
+const TZ_BEHIND_MS = (17 * 60 + 30) * 60000;
+const TZ_AHEAD_MS = (8 * 60 + 30) * 60000;
+const QUARTER_HOUR_MS = 15 * 60000;
+const TZ_MINUTE_MS = 2 * 60000;
+/**
+ * A printed date the day before / after `txnMs` plus a printed clock on it that is the id's moment: within
+ * RESEND_WINDOW_MS, or a whole quarter-hour time-zone offset away (± TZ_MINUTE_MS). Wall clocks read as IST.
+ */
+function printedAtIdMoment(text, dates, txnMs) {
+    const year = new Date(txnMs + IST_OFFSET_MS).getUTCFullYear();
+    const clocks = [];
+    for (const m of text.replace(DOT_CLOCK, '$1:$2').matchAll(CLOCK)) {
+        const h = Number(m[1]), mi = Number(m[2]);
+        if (h > 23 || mi > 59)
+            continue;
+        if (!m[3])
+            clocks.push((h * 60 + mi) * 60000);
+        else if (h >= 1 && h <= 12)
+            clocks.push((((h % 12) + (m[3].toLowerCase() === 'p' ? 12 : 0)) * 60 + mi) * 60000);
+    }
+    for (const p of dates) {
+        for (const y of [year - 1, year, year + 1]) {
+            const dayMs = Date.UTC(y, p.mo - 1, p.d) - IST_OFFSET_MS;
+            if (Math.abs(dayMs - txnMs) > 2 * DAY_MS)
+                continue;
+            for (const clockMs of clocks) {
+                const offset = dayMs + clockMs - txnMs;
+                if (Math.abs(offset) <= _payment_time__WEBPACK_IMPORTED_MODULE_0__.RESEND_WINDOW_MS)
+                    return true;
+                const toQuarter = Math.abs(offset - Math.round(offset / QUARTER_HOUR_MS) * QUARTER_HOUR_MS);
+                if (offset >= -TZ_BEHIND_MS - TZ_MINUTE_MS && offset <= TZ_AHEAD_MS + TZ_MINUTE_MS && toQuarter <= TZ_MINUTE_MS)
+                    return true;
+            }
+        }
+    }
+    return false;
 }
 /**
  * The screenshot text prints this clock (`hour` 0-23) unambiguously: with an AM/PM that agrees, or in 24 h form
