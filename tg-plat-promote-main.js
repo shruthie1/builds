@@ -3922,6 +3922,8 @@ __webpack_require__.r(__webpack_exports__);
  *    (encoder target bps, RTCP fraction lost in 1/256 units, rtt ms; about once a second per video call).
  * Volume per call in that loopback: INFO ~16 lines/s while connecting, ~2/s after; DEBUG ~650-840 lines/s
  * (~300 KB/s through the binding into the JS thread). So 'info' is the default and 'debug' is opt-in.
+ * Re-checked 2026-11-09 on linux-x64 3.0.6 (loopback call on VM1): same two lines and format; only the source line
+ * number moved (video_stream_encoder.cc:2508 → 2491), which the patterns do not pin.
  *
  * The lines carry no call id: a sample is credited to a call only while that call is the ONLY live ntgcalls
  * instance in the process. A call that shared the process with another live instance at any point while it was
@@ -4119,6 +4121,7 @@ __webpack_require__.r(__webpack_exports__);
  * step happens while Node has a live child (audio feeder, ffprobe, a system command), libuv's watcher stays active
  * with nothing behind it and every later child becomes a zombie until restart. Reproduced in a Linux container
  * with ntgcalls 3.0.5 on Node 20 (2026-11-04): stop() with a Node child alive → SIGCHLD SIG_DFL, no exit events.
+ * Re-checked with 3.0.6 on Ubuntu 24.04 / Node 20.20 (VM1, 2026-11-09): same loss without the hold, none with it.
  *
  * The hold opens one SHELL source on its own never-connected ntgcalls instance at a moment Node has no child, and
  * keeps it for the life of the process. asio then makes its one sigaction while no Node child can be lost, and never
@@ -47870,8 +47873,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "1eebe24a8269cfb567df6bfd3366e2cb207869cd" : 0;
-    const builtAt =  true ? "2026-11-08T18:15:50.480Z" : 0;
+    const sha =  true ? "cecdadf56244e8167ac2e0ace3b35b75486a4f1a" : 0;
+    const builtAt =  true ? "2026-11-09T17:53:46.793Z" : 0;
     return { sha, builtAt };
 }
 
