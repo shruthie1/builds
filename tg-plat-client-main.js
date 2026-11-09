@@ -58728,8 +58728,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "a1a4578c4ed7ffb66ee7c894dc4ff74440d227ec" : 0;
-    const builtAt =  true ? "2026-11-09T10:52:26.490Z" : 0;
+    const sha =  true ? "e27c51f2ab881e135cd26d2d23e528d62625692c" : 0;
+    const builtAt =  true ? "2026-11-09T11:46:41.842Z" : 0;
     return { sha, builtAt };
 }
 
@@ -86015,7 +86015,7 @@ async function processImage(event) {
                         };
                         const fraudReasons = [
                             ...((0,_payments_screenshot_detect_fake__WEBPACK_IMPORTED_MODULE_37__.detectFakeScreenshot)(imageDetails.text) ? ["FAKE_TEXT"] : []),
-                            ...(0,_payments_proof_gate_signals__WEBPACK_IMPORTED_MODULE_45__.fabricatedTextReasons)(imageDetails.text),
+                            ...(0,_payments_proof_gate_signals__WEBPACK_IMPORTED_MODULE_45__.fabricatedTextReasons)(imageDetails.text, { time: imageDetails.time, arrivalMs: pictureArrivalMs(event) }),
                             // Who it was paid to (paid-to-us.ts payeeVerdict): only a TAMPERED payee is a fraud reason. Someone else's
                             // payment (NOT_OURS) falls through to the "not my payment" branch below. Foreign ids are judged only
                             // against the fetched /upi-ids list: without it our shared ids are unknown.
@@ -99411,6 +99411,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   FUTURE_LEAD_MS: () => (/* binding */ FUTURE_LEAD_MS),
 /* harmony export */   REFERENCE_MAX_AGE_MS: () => (/* binding */ REFERENCE_MAX_AGE_MS),
 /* harmony export */   RESEND_WINDOW_MS: () => (/* binding */ RESEND_WINDOW_MS),
+/* harmony export */   TIMEZONE_LEADS_FROM_IST_MIN: () => (/* binding */ TIMEZONE_LEADS_FROM_IST_MIN),
 /* harmony export */   YESTERDAY_GRACE_MS: () => (/* binding */ YESTERDAY_GRACE_MS),
 /* harmony export */   callTimeAsOf: () => (/* binding */ callTimeAsOf),
 /* harmony export */   correctAmPmAhead: () => (/* binding */ correctAmPmAhead),
@@ -99420,6 +99421,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   parseRawPaymentTime: () => (/* binding */ parseRawPaymentTime),
 /* harmony export */   paymentDay: () => (/* binding */ paymentDay),
 /* harmony export */   phonePeTxnTimeMs: () => (/* binding */ phonePeTxnTimeMs),
+/* harmony export */   timezoneLeadMin: () => (/* binding */ timezoneLeadMin),
 /* harmony export */   withoutProofStore: () => (/* binding */ withoutProofStore),
 /* harmony export */   yearShownIn: () => (/* binding */ yearShownIn)
 /* harmony export */ });
@@ -99458,6 +99460,31 @@ const IST_DATE = { day: "2-digit", month: "2-digit", year: "numeric", timeZone: 
  */
 const YESTERDAY_GRACE_MS = 3 * HOUR_MS;
 const FUTURE_LEAD_MS = 3 * HOUR_MS;
+/** The UTC offsets in use (minutes, UTC-12 .. UTC+14, the quarter / half hours included: Nepal +5:45, Chatham +12:45). */
+const UTC_OFFSETS_MIN = [
+    -720, -660, -600, -570, -540, -480, -420, -360, -300, -240, -210, -180, -120, -60, 0,
+    60, 120, 180, 210, 240, 270, 300, 330, 345, 360, 390, 420, 480, 525, 540, 570, 600, 630, 660, 720, 765, 780, 840,
+];
+/**
+ * The one definition of a phone clock in another time zone, as its lead over IST in minutes (printed wall clock minus
+ * the IST wall clock of the same moment): every real zone behind IST, and ahead of it only up to FUTURE_LEAD_MS, the
+ * lead the same-day rule and the future-time fake signal (proof-gate/signals.ts futurePaymentTimeReasons) excuse. The
+ * leads are exactly owner rule 6's "+15/30/60/90/150 min" (Nepal, Bangladesh, Myanmar, Thailand, Singapore).
+ */
+const TIMEZONE_LEADS_FROM_IST_MIN = UTC_OFFSETS_MIN
+    .map((m) => m - 330)
+    .filter((lead) => lead !== 0 && lead * MINUTE_MS <= FUTURE_LEAD_MS);
+/**
+ * The time-zone lead (TIMEZONE_LEADS_FROM_IST_MIN) of a phone that printed `printedMs` (its wall clock read as IST) for
+ * a payment made at `trueMs`, within `toleranceMs`; null when the gap is no real time zone.
+ */
+function timezoneLeadMin(printedMs, trueMs, toleranceMs) {
+    const gapMin = (printedMs - trueMs) / MINUTE_MS;
+    for (const lead of TIMEZONE_LEADS_FROM_IST_MIN)
+        if (Math.abs(gapMin - lead) * MINUTE_MS <= toleranceMs)
+            return lead;
+    return null;
+}
 /**
  * Owner 2026-10-22 (A): a receipt that shows a UTR or a PhonePe transaction id is recent up to this old (receipt time
  * vs arrival), yesterday included. Safe only because the proof gate's global served check (UTR / file, every chat and
@@ -103107,7 +103134,8 @@ const SAMPLE_PAYMENT = /\bsample\s+payment\b/i;
  * completed successfully". (Not "has been successfully completed": a genuine PhonePe line uses that order.)
  */
 const COMPLETED_SUCCESSFULLY = /\bhas\s+been\s+completed\s+successfully\b/i;
-function fabricatedTextReasons(text) {
+/** `opts`: the vision payment time and the picture's arrival, for the transaction-id check (txnIdDateReasons). */
+function fabricatedTextReasons(text, opts = {}) {
     const t = String(text ?? '').replace(/\s+/g, ' ');
     const reasons = [];
     if (MASKED_ID.test(t))
@@ -103116,7 +103144,7 @@ function fabricatedTextReasons(text) {
         reasons.push('SAMPLE_PAYMENT');
     if (COMPLETED_SUCCESSFULLY.test(t))
         reasons.push('GENERATOR_SUCCESS_TEXT');
-    reasons.push(...txnIdDateReasons(t));
+    reasons.push(...txnIdDateReasons(t, opts));
     return reasons;
 }
 const IST_OFFSET_MS = 330 * 60000;
@@ -103179,74 +103207,213 @@ function printedDates(text) {
  */
 const PHONEPE_LENGTH_T_NUMBER = /\bt\s?\d{20,22}\b/i;
 /**
- * Owner 2026-11-09 "Has transaction ID as date": the PhonePe transaction id encodes the payment's IST date
- * (phonePeTxnTimeMs), so a receipt whose printed date is another day, or whose id does not start with a valid date at
- * all, is an edited / made-up screenshot. Live sowmya2 6881950151 2026-11-09: six "Girls Community" receipts printed
- * "01:29 AM on 09 November 2026" .. "02:05 AM" with ids T1629.., T0690.., T5303.., T7619.., T3062.., T6106.. (none
- * reads as YYMMDDhhmmss) and a fresh made-up UTR each, all credited. Replay of every paymentProofs row 2026-11-02 ..
- * 11-09 (445 PhonePe ids): no genuine credited receipt has a PhonePe-length id that is not a date, or a date another day.
- *  - Only when the text prints a date (printedDates); a dateless receipt keeps the previous behaviour.
- *  - TXN_ID_NOT_A_DATE: a PhonePe-length T-number that phonePeTxnTimeMs does not read as a date and time.
- *  - TXN_ID_DATE_MISMATCH: no printed date is the id's IST day. Not when a printed date is the day before / after and a
- *    printed clock on it is the id's moment: within RESEND_WINDOW_MS (a payment at 23:59 stamped 00:00, and back), or
- *    the id's moment on a phone set to another time zone (PhonePe prints the phone's local time; the id is IST): a
- *    whole quarter-hour offset from IST-17:30 to IST+8:30, within TZ_MINUTE_MS (2 min). Live divya2 1748455130
- *    15888/15919 (credited, genuine, reviewed fine): "10:51 pm on 08 Nov 2026" with id T261109042120.. = 04:21 IST on
- *    9 Nov, a phone on UTC.
- * A fraud reason (processImage fraudReasons, the fake warning), so a fresh reference on the receipt never excuses it.
+ * A Kotak / Kotak811 "Kotak txn ID": "K811T" + the payment's Unix time in seconds (10 digits) + 20 hex digits
+ * ("K811T1793889466057ae3e84d5344bcb800" = 05 Nov 2026 20:07:46 IST, printed "08:07 pm"). OCR may read the 1s as I.
+ * At least 16 hex digits after the time, so a cut-off or merged id is not judged.
  */
-function txnIdDateReasons(text) {
-    const t = String(text ?? '').replace(/\s+/g, ' ');
-    if (!PHONEPE_LENGTH_T_NUMBER.test(t))
-        return [];
-    const dates = printedDates(t).filter((p) => p.d >= 1 && p.d <= 31 && p.mo >= 1 && p.mo <= 12);
-    if (dates.length === 0)
-        return [];
-    const txnMs = (0,_payment_time__WEBPACK_IMPORTED_MODULE_0__.phonePeTxnTimeMs)(t);
-    if (txnMs === null)
-        return ['TXN_ID_NOT_A_DATE'];
-    const id = istParts(txnMs);
-    if (dates.some((p) => p.d === id.d && p.mo === id.mo))
-        return [];
-    return printedAtIdMoment(t, dates, txnMs) ? [] : ['TXN_ID_DATE_MISMATCH'];
-}
-/** Time-zone offsets from IST a phone can print (UTC-12 .. UTC+14), and how close to a quarter hour the clock must be. */
-const TZ_BEHIND_MS = (17 * 60 + 30) * 60000;
-const TZ_AHEAD_MS = (8 * 60 + 30) * 60000;
-const QUARTER_HOUR_MS = 15 * 60000;
-const TZ_MINUTE_MS = 2 * 60000;
+const KOTAK_TXN_ID = /\bK8[1I][1I]T\s?(\d{10})[0-9a-f]{16,}/i;
+/** Kotak ids from before 2023-11 or after 2033-05 are no payment time (Unix seconds 1.7e9 .. 2.0e9). */
+const KOTAK_MIN_S = 1700000000;
+const KOTAK_MAX_S = 2000000000;
 /**
- * A printed date the day before / after `txnMs` plus a printed clock on it that is the id's moment: within
- * RESEND_WINDOW_MS, or a whole quarter-hour time-zone offset away (± TZ_MINUTE_MS). Wall clocks read as IST.
+ * The BHIM app's receipt (header "BHIM - Bharat's Own Payments App"; a bank's "Money sent" screen with a BHIM logo
+ * prints a 12-digit UTR as its "Transaction ID" instead: ramya1 183033 "421355465887"). Its Transaction ID is 12 digits
+ * that start with the payment's hhmmss ("050545559745" printed "8th Nov 26, 05:05 am"). OCR glues the date's day to it
+ * ("0505455597458th Nov 26"): 12 digits, then at most the day digits before "st/nd/rd/th".
  */
-function printedAtIdMoment(text, dates, txnMs) {
-    const year = new Date(txnMs + IST_OFFSET_MS).getUTCFullYear();
-    const clocks = [];
-    for (const m of text.replace(DOT_CLOCK, '$1:$2').matchAll(CLOCK)) {
-        const h = Number(m[1]), mi = Number(m[2]);
-        if (h > 23 || mi > 59)
-            continue;
-        if (!m[3])
-            clocks.push((h * 60 + mi) * 60000);
-        else if (h >= 1 && h <= 12)
-            clocks.push((((h % 12) + (m[3].toLowerCase() === 'p' ? 12 : 0)) * 60 + mi) * 60000);
-    }
-    for (const p of dates) {
-        for (const y of [year - 1, year, year + 1]) {
-            const dayMs = Date.UTC(y, p.mo - 1, p.d) - IST_OFFSET_MS;
-            if (Math.abs(dayMs - txnMs) > 2 * DAY_MS)
+const BHIM_HEADER = /\bbhim\s*-\s*bharat['’]?s\s+own\s+payments\s+app\b/i;
+const BHIM_TXN_ID = /transaction\s*id[^0-9]{0,40}?(\d{12})(?:\d{1,2}(?:st|nd|rd|th)\b)?(?!\d)/i;
+/**
+ * Owner 2026-11-09 "Has transaction ID as date" / "Can we handle most of the apps?": the receipt formats whose
+ * transaction id encodes the payment time, judged in one place (txnIdDateReasons). Each is recognised by the id's own
+ * shape (prefix, length, characters; BHIM's plain 12 digits also by the BHIM receipt header it sits under), never by
+ * the model's app label (ramya2 237032: a PhonePe T-id labelled "Paytm"). Replay 2026-11-09 (stored OCR of every proof
+ * 2026-11-02 .. 11-09 on VM1/VM2 plus the stored text of VM3 from 11-08; images read): PhonePe 445 ids; Kotak 10 receipts
+ * (9 credited), each id the printed date and minute; BHIM 22 receipts (16 credited), each id the printed hh:mm.
+ * Measured and not built (too few, or no time in the id): Navi's 32-digit "Navi transaction ID" (yyyymmddhhmmss.., 2),
+ * GPay "CICAg.." (base64 protobuf with no time), Paytm / super.money / Fam / slice / CRED / Amazon Pay ids (12-digit UTRs
+ * or random hex), Paytm's 12-digit UTR as year + day (Paytm 70/162 genuine).
+ */
+const TXN_ID_FORMATS = [
+    {
+        app: 'PhonePe',
+        read: (t) => {
+            if (!PHONEPE_LENGTH_T_NUMBER.test(t))
+                return null;
+            const ms = (0,_payment_time__WEBPACK_IMPORTED_MODULE_0__.phonePeTxnTimeMs)(t);
+            return ms === null ? 'not-a-date' : { ms };
+        },
+    },
+    {
+        app: 'Kotak',
+        read: (t) => {
+            const m = KOTAK_TXN_ID.exec(t);
+            if (!m)
+                return null;
+            const s = Number(m[1]);
+            return s < KOTAK_MIN_S || s >= KOTAK_MAX_S ? 'not-a-date' : { ms: s * 1000 };
+        },
+    },
+    {
+        app: 'BHIM',
+        timeOnly: true,
+        read: (t) => {
+            if (!BHIM_HEADER.test(t))
+                return null;
+            const m = BHIM_TXN_ID.exec(t);
+            if (!m)
+                return null;
+            const [h, mi, s] = [m[1].slice(0, 2), m[1].slice(2, 4), m[1].slice(4, 6)].map(Number);
+            return h > 23 || mi > 59 || s > 59 ? 'not-a-date' : { timeOfDayMs: ((h * 60 + mi) * 60 + s) * 1000 };
+        },
+    },
+];
+/** How close a printed clock (to the minute) must be to the id's time, also after a time-zone lead. */
+const TZ_MINUTE_MS = 2 * 60000;
+/** The 12 h clock of a labelled date-time: "hh:mm", optional seconds, optional AM/PM. */
+const LABEL_CLOCK = '(\\d{1,2}):(\\d{2})(?::\\d{2})?(?:\\s*([ap])\\.?\\s?m\\b\\.?)?';
+const LABEL_DAY_MONTH = `(\\d{1,2})(?:st|nd|rd|th)?\\s*(?:of\\s+)?${MONTH}(?:\\s*,?\\s*'?(\\d{4}|\\d{2})(?![\\d:]))?`;
+const LABEL_SEP = '\\s*(?:,|\\bat\\b|•|-)?\\s*';
+/** DD/MM/YY(YY) or DD-MM-YY(YY): day, month, year. */
+const LABEL_NUMERIC = '(\\d{1,2})[/-](\\d{1,2})[/-](\\d{4}|\\d{2})(?![\\d:])';
+/**
+ * The receipt's labelled payment date-time: a date with its clock ("08 Nov 2026, 10:51 pm", "08 November 2026 at 01:09
+ * PM", "8th Nov 26, 05:05 am", "November 8 at 1:49 PM") or a clock with its date ("10:51 pm on 08 Nov 2026", PhonePe).
+ * A clock with no date beside it (the status bar) is never one.
+ */
+const LABELLED_DATE_TIME = [
+    { re: new RegExp(`${LABEL_DAY_MONTH}${LABEL_SEP}${LABEL_CLOCK}`, 'gi'), day: 1, month: 2, year: 3, clock: 4, dayFirst: true },
+    { re: new RegExp(`${MONTH}\\s+(\\d{1,2})(?:\\s*,?\\s*(\\d{4}))?${LABEL_SEP}${LABEL_CLOCK}`, 'gi'), day: 2, month: 1, year: 3, clock: 4, dayFirst: false },
+    { re: new RegExp(`${LABEL_CLOCK}\\s*,?\\s*(?:on\\s+)?${LABEL_DAY_MONTH}`, 'gi'), day: 4, month: 5, year: 6, clock: 1, dayFirst: false },
+    { re: new RegExp(`${LABEL_NUMERIC}${LABEL_SEP}${LABEL_CLOCK}`, 'gi'), day: 1, month: 2, year: 3, clock: 4, dayFirst: true },
+    { re: new RegExp(`${LABEL_CLOCK}\\s*,?\\s*(?:on\\s+)?${LABEL_NUMERIC}`, 'gi'), day: 4, month: 5, year: 6, clock: 1, dayFirst: false },
+];
+/** Minutes since midnight of a matched clock (h, mm, a/p), or null when it is no clock. */
+function clockMs(h, mi, ap) {
+    if (mi > 59)
+        return null;
+    if (!ap)
+        return h <= 23 ? (h * 60 + mi) * 60000 : null;
+    if (h < 1 || h > 12)
+        return null;
+    return (((h % 12) + (ap.toLowerCase() === 'p' ? 12 : 0)) * 60 + mi) * 60000;
+}
+/**
+ * Every labelled payment date-time in the text (LABELLED_DATE_TIME) plus the vision `time` field (the model's read of
+ * the printed payment time, parsePaymentTime), as IST wall clocks: `timeOfDayMs` always, `ms` when the date is a real
+ * day (the year printed, else the one closest to `nearMs`). A day glued to digits before it (an OCR'd id) keeps only
+ * its clock.
+ */
+function labelledDateTimes(text, visionTime, nearMs) {
+    const out = [];
+    const t = text.replace(DOT_CLOCK, '$1:$2');
+    const nearYear = new Date(nearMs + IST_OFFSET_MS).getUTCFullYear();
+    for (const p of LABELLED_DATE_TIME) {
+        for (const m of t.matchAll(p.re)) {
+            const tod = clockMs(Number(m[p.clock]), Number(m[p.clock + 1]), m[p.clock + 2]);
+            if (tod === null)
                 continue;
-            for (const clockMs of clocks) {
-                const offset = dayMs + clockMs - txnMs;
-                if (Math.abs(offset) <= _payment_time__WEBPACK_IMPORTED_MODULE_0__.RESEND_WINDOW_MS)
-                    return true;
-                const toQuarter = Math.abs(offset - Math.round(offset / QUARTER_HOUR_MS) * QUARTER_HOUR_MS);
-                if (offset >= -TZ_BEHIND_MS - TZ_MINUTE_MS && offset <= TZ_AHEAD_MS + TZ_MINUTE_MS && toQuarter <= TZ_MINUTE_MS)
-                    return true;
+            const d = Number(m[p.day]), mo = /^\d+$/.test(m[p.month]) ? Number(m[p.month]) : MONTHS.indexOf(m[p.month].slice(0, 3).toLowerCase()) + 1;
+            // Only a match that starts with its day can have digits glued before it.
+            const glued = p.dayFirst && /\d/.test(t[m.index - 1] ?? '');
+            let ms = null;
+            if (!glued && d >= 1 && d <= 31 && mo >= 1 && mo <= 12) {
+                const y = m[p.year] ? Number(m[p.year]) + (m[p.year].length === 2 ? 2000 : 0) : null;
+                const candidates = (y ? [y] : [nearYear - 1, nearYear, nearYear + 1])
+                    .map((yy) => Date.UTC(yy, mo - 1, d) - IST_OFFSET_MS + tod)
+                    .filter((c) => new Date(c + IST_OFFSET_MS).getUTCDate() === d);
+                if (candidates.length)
+                    ms = candidates.reduce((a, b) => (Math.abs(a - nearMs) <= Math.abs(b - nearMs) ? a : b));
             }
+            out.push({ ms, timeOfDayMs: tod });
+        }
+    }
+    if (typeof visionTime === 'string' && visionTime.trim()) {
+        const ms = (0,_payment_time__WEBPACK_IMPORTED_MODULE_0__.parsePaymentTime)(visionTime, new Date(nearMs), text)?.getTime();
+        if (ms !== undefined && Number.isFinite(ms))
+            out.push({ ms, timeOfDayMs: (ms + IST_OFFSET_MS) % DAY_MS });
+    }
+    return out;
+}
+/** The gap between two IST times of day, across midnight (0 .. 12 h). */
+function timeOfDayGap(a, b) {
+    const g = Math.abs(a - b) % DAY_MS;
+    return Math.min(g, DAY_MS - g);
+}
+/**
+ * The phone printed its own time zone: a labelled date-time is the id's moment shifted by a real time-zone lead
+ * (payment-time.ts timezoneLeadMin, the one definition shared with owner rule 6 and futurePaymentTimeReasons), within
+ * TZ_MINUTE_MS, and the id's moment is no later than the picture's arrival + TZ_MINUTE_MS. Never without an arrival.
+ */
+function timezoneExcused(labelled, id, arrivalMs) {
+    if (arrivalMs === undefined || !Number.isFinite(arrivalMs) || id === 'not-a-date')
+        return false;
+    for (const l of labelled) {
+        if (l.ms === null)
+            continue;
+        if ('ms' in id) {
+            if (id.ms <= arrivalMs + TZ_MINUTE_MS && (0,_payment_time__WEBPACK_IMPORTED_MODULE_0__.timezoneLeadMin)(l.ms, id.ms, TZ_MINUTE_MS) !== null)
+                return true;
+            continue;
+        }
+        // A time-only id: the moment that has the id's time of day nearest the labelled one minus each lead.
+        for (const lead of _payment_time__WEBPACK_IMPORTED_MODULE_0__.TIMEZONE_LEADS_FROM_IST_MIN) {
+            const shifted = l.ms - lead * 60000;
+            if (timeOfDayGap((shifted + IST_OFFSET_MS) % DAY_MS, id.timeOfDayMs) > TZ_MINUTE_MS)
+                continue;
+            if (shifted <= arrivalMs + TZ_MINUTE_MS)
+                return true;
         }
     }
     return false;
+}
+/**
+ * Owner 2026-11-09 "Has transaction ID as date": a transaction id that encodes the payment time (TXN_ID_FORMATS:
+ * PhonePe date + time in IST, Kotak date + time, BHIM time only) and is not the receipt's printed date / time, or is no
+ * time at all, marks an edited / made-up screenshot. Live sowmya2 6881950151 2026-11-09: six "Girls Community"
+ * receipts printed "01:29 AM on 09 November 2026" .. "02:05 AM" with ids T1629.., T0690.., T5303.., T7619.., T3062..,
+ * T6106.. (none reads as YYMMDDhhmmss) and a fresh made-up UTR each, all credited.
+ *  - Only when the text prints a date (date + time ids) or a labelled payment time (time-only ids); else not judged.
+ *  - TXN_ID_NOT_A_DATE: an id of a format's shape that is no date / time (PhonePe: not YYMMDDhhmmss; Kotak: Unix time
+ *    outside 2023-11 .. 2033-05; BHIM: hhmmss out of range).
+ *  - TXN_ID_DATE_MISMATCH: date + time ids: no printed date is the id's IST day, unless a labelled date-time
+ *    (labelledDateTimes: the "Date & Time" / "<time> on <date>" line or the vision `time`, never the status bar) is
+ *    within RESEND_WINDOW_MS of the id's moment (a payment at 23:59 stamped 00:00, and back). Time-only ids: no
+ *    labelled clock is within TZ_MINUTE_MS of the id's time of day.
+ *  - Either way excused when the phone printed another time zone (timezoneExcused): live divya2 1748455130 15888/15919
+ *    (credited, genuine, reviewed fine) "10:51 pm on 08 Nov 2026" with id T261109042120.. = 04:21 IST on 9 Nov, a phone
+ *    on UTC (lead -330 min), arriving 04:21:59 IST. A date edited by a day keeps its clock: 24 h is no time zone.
+ * `opts.time`: the vision payment time; `opts.arrivalMs`: when the picture arrived (no time-zone excuse without it).
+ * A fraud reason (processImage fraudReasons, the fake warning), so a fresh reference on the receipt never excuses it.
+ */
+function txnIdDateReasons(text, opts = {}) {
+    const t = String(text ?? '').replace(/\s+/g, ' ');
+    for (const format of TXN_ID_FORMATS) {
+        const id = format.read(t);
+        if (id === null)
+            continue;
+        const nearMs = id !== 'not-a-date' && 'ms' in id ? id.ms : opts.arrivalMs ?? Date.now();
+        const labelled = labelledDateTimes(t, opts.time, nearMs);
+        const dates = printedDates(t).filter((p) => p.d >= 1 && p.d <= 31 && p.mo >= 1 && p.mo <= 12);
+        if (id === 'not-a-date')
+            return (format.timeOnly ? labelled.length : dates.length) > 0 ? ['TXN_ID_NOT_A_DATE'] : [];
+        if ('timeOfDayMs' in id) {
+            if (labelled.length === 0)
+                return [];
+            if (labelled.some((l) => timeOfDayGap(l.timeOfDayMs, id.timeOfDayMs) <= TZ_MINUTE_MS))
+                return [];
+            return timezoneExcused(labelled, id, opts.arrivalMs) ? [] : ['TXN_ID_DATE_MISMATCH'];
+        }
+        if (dates.length === 0)
+            return [];
+        const day = istParts(id.ms);
+        if (dates.some((p) => p.d === day.d && p.mo === day.mo))
+            return [];
+        if (labelled.some((l) => l.ms !== null && Math.abs(l.ms - id.ms) <= _payment_time__WEBPACK_IMPORTED_MODULE_0__.RESEND_WINDOW_MS))
+            return [];
+        return timezoneExcused(labelled, id, opts.arrivalMs) ? [] : ['TXN_ID_DATE_MISMATCH'];
+    }
+    return [];
 }
 /**
  * The screenshot text prints this clock (`hour` 0-23) unambiguously: with an AM/PM that agrees, or in 24 h form
@@ -103308,6 +103475,9 @@ function amPmFlipConfirmed(readMs, arrivalMs, text) {
  *    dateless "11:58 pm" sent 00:02 IST, which the time check credits as yesterday.
  * Owner rule 6: future-dated receipts are fake; only the 12 h AM/PM flip, the dateless clock across midnight (each ± the
  * 10 min window) and the leads are excused.
+ * The leads are payment-time.ts TIMEZONE_LEADS_FROM_IST_MIN (+15/30/60/90/150 min, the one definition, bounded by
+ * FUTURE_LEAD_MS), the same the transaction-id check (txnIdDateReasons) excuses; a clock ahead up to FUTURE_LEAD_MS is
+ * judged as now here, so a lead or a fast phone clock is never FUTURE_*.
  * The time is read as the time check reads it (parsePaymentTime: IST wall clock, current year, New Year roll-back).
  */
 function futurePaymentTimeReasons(details, arrivalMs) {
