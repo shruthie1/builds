@@ -29666,7 +29666,7 @@ class AccountLeasesRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_
     }
     /**
      * The live holder of `mobile` when its lease is unexpired by the SERVER clock, else null. Throws on a
-     * store error (the inactive scraper fails closed: skip the mobile).
+     * store error (callers fail closed: no connect).
      */
     async liveHolder(mobile) {
         return this.guardStrict(`liveHolder(${mobile})`, async () => {
@@ -40339,9 +40339,8 @@ class ParkedResponder {
         const ep = await stores.episodes.claimDue(adapter.app, adapter.clientId, this.deps.owner, _constants__WEBPACK_IMPORTED_MODULE_0__.RUNNER_CLAIM_MS);
         if (!ep)
             return 'idle';
-        // Re-review 2 (S4): busy only around the pass. Flag first, then re-check ready() synchronously: a fallback
-        // scraper run that started during discovery / claim makes this not ready, and one starting from now on
-        // sees passRunning (both sides set their own flag before reading the other's).
+        // Re-review 2 (S4): busy only around the pass. Flag first, then re-check ready() synchronously (the app may
+        // have become not ready during discovery / claim).
         this.passInFlight = true;
         let result;
         try {
@@ -45429,606 +45428,6 @@ HealthMonitor.MAX_SKIP_REPLACEMENT_WARN_ENTRIES = 500;
 
 /***/ },
 
-/***/ "./src/accounts/inactive-mobile-scraper.ts"
-/*!*************************************************!*\
-  !*** ./src/accounts/inactive-mobile-scraper.ts ***!
-  \*************************************************/
-(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
-
-__webpack_require__.r(__webpack_exports__);
-/* harmony export */ __webpack_require__.d(__webpack_exports__, {
-/* harmony export */   InactiveMobileScraper: () => (/* binding */ InactiveMobileScraper),
-/* harmony export */   NO_MAIN_HANDLE: () => (/* binding */ NO_MAIN_HANDLE),
-/* harmony export */   parkedPathReason: () => (/* binding */ parkedPathReason)
-/* harmony export */ });
-/* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! telegram */ "telegram");
-/* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(telegram__WEBPACK_IMPORTED_MODULE_0__);
-/* harmony import */ var telegram_sessions__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! telegram/sessions */ "telegram/sessions");
-/* harmony import */ var telegram_sessions__WEBPACK_IMPORTED_MODULE_1___default = /*#__PURE__*/__webpack_require__.n(telegram_sessions__WEBPACK_IMPORTED_MODULE_1__);
-/* harmony import */ var _data_db__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../data/db */ "./src/data/db.ts");
-/* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
-/* harmony import */ var _tg_core_utils_telegram_error_parser__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! @tg/core/utils/telegram-error-parser */ "../../packages/tg-core/src/utils/telegram-error-parser.ts");
-/* harmony import */ var _mobile_manager__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ./mobile-manager */ "./src/accounts/mobile-manager.ts");
-/* harmony import */ var telegram_Helpers__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! telegram/Helpers */ "telegram/Helpers");
-/* harmony import */ var telegram_Helpers__WEBPACK_IMPORTED_MODULE_6___default = /*#__PURE__*/__webpack_require__.n(telegram_Helpers__WEBPACK_IMPORTED_MODULE_6__);
-/* harmony import */ var _tg_dialogs__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! @tg/dialogs */ "../../packages/tg-dialogs/src/index.ts");
-/* harmony import */ var _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! @tg/core/utils/TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
-/* harmony import */ var _tg_core_utils_generateTGConfig__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! @tg/core/utils/generateTGConfig */ "../../packages/tg-core/src/utils/generateTGConfig.ts");
-/* harmony import */ var _tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! @tg/core/utils/dc-ip-family */ "../../packages/tg-core/src/utils/dc-ip-family.ts");
-/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
-/* harmony import */ var _tg_parked__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! @tg/parked */ "../../packages/tg-parked/src/index.ts");
-/* harmony import */ var _parked_adapter__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! ./parked-adapter */ "./src/accounts/parked-adapter.ts");
-/* harmony import */ var _parked_exclusion__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! ./parked-exclusion */ "./src/accounts/parked-exclusion.ts");
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_11__.Logger("inactive-mobile-scraper");
-const SCRAPE_COOLDOWN_HOURS = 5;
-const RECENT_USAGE_HOURS = 24;
-const SCRAPE_CLIENT_CONNECT_TIMEOUT_MS = 60000;
-/** Reply result error when clients.username is missing: nothing is sent (design P-7, review S7). */
-const NO_MAIN_HANDLE = 'NO_MAIN_HANDLE';
-/** GramJS and config come from this file's imports so the scraper's test seams stay as they were. */
-const scraperSessionDeps = {
-    TelegramClient: telegram__WEBPACK_IMPORTED_MODULE_0__.TelegramClient,
-    StringSession: telegram_sessions__WEBPACK_IMPORTED_MODULE_1__.StringSession,
-    generateTGConfig: _tg_core_utils_generateTGConfig__WEBPACK_IMPORTED_MODULE_9__.generateTGConfig,
-    applyDcIpFamily: _tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_10__.applyDcIpFamily,
-    closeExportedSenders: _tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_10__.closeExportedSenders,
-    sleep: telegram_Helpers__WEBPACK_IMPORTED_MODULE_6__.sleep,
-    reportError: _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError,
-    logger,
-};
-async function notifyInactiveScraper(notification, context) {
-    try {
-        const sent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_8__.BotConfig.getInstance().sendMessage(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_8__.ChannelCategory.PROM_LOGS2, notification);
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.logUnsentNotification)(sent, "Inactive mobile scraper notification returned false", context);
-    }
-    catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, context, false);
-    }
-}
-/**
- * Why the scraper must not touch the next mobile, or null to go on (P3 review 9). It is the fallback while the
- * parked responder is OFF for this client: parkedControl enabled for (promote, clientId) means the responder
- * owns the client, and a responder pass in flight means it is replying right now. Read before each mobile.
- * A failed control read counts as OFF (the responder fails closed on the same read, so only one path runs).
- * Re-review 2 nit: a read that does not answer within `timeoutMs` counts as failed, so a hung Mongo socket cannot
- * stall the scraper run.
- */
-async function parkedPathReason(clientId, timeoutMs = 10000) {
-    if (_parked_exclusion__WEBPACK_IMPORTED_MODULE_14__.parkedExclusion.responderBusy())
-        return 'a parked responder pass is running';
-    const control = (0,_data_db__WEBPACK_IMPORTED_MODULE_2__.getRepositories)()?.parkedControl;
-    if (!control)
-        return null;
-    let timer = null;
-    const enabled = await Promise.race([
-        control.isEnabled('promote', clientId).catch(() => false),
-        new Promise((resolve) => {
-            timer = setTimeout(() => resolve(false), timeoutMs);
-            timer.unref?.();
-        }),
-    ]).finally(() => { if (timer)
-        clearTimeout(timer); });
-    return enabled ? `parked responder enabled for ${clientId}` : null;
-}
-/**
- * Inactive Mobile Scraper Service (P3: fallback for one more build, only while the parked responder is off
- * for this client; see parkedPathReason).
- * Scrapes inactive mobiles, creates Telegram clients, handles private chats, and replies to unread messages
- */
-class InactiveMobileScraper {
-    constructor() {
-        this.isRunning = false;
-        this.lastRunAt = null;
-        this.hourlyInterval = null;
-        this.REPLY_MESSAGES = _tg_parked__WEBPACK_IMPORTED_MODULE_12__.PARKED_REPLY_TEMPLATES;
-        this.mobileManager = _mobile_manager__WEBPACK_IMPORTED_MODULE_5__.MobileManager.getInstance();
-    }
-    static getInstance() {
-        if (!InactiveMobileScraper.instance) {
-            InactiveMobileScraper.instance = new InactiveMobileScraper();
-        }
-        return InactiveMobileScraper.instance;
-    }
-    /**
-     * Start the hourly scraping process
-     */
-    startHourlyScraping() {
-        if (this.hourlyInterval) {
-            logger.info("🔄 Hourly scraping is already running");
-            return;
-        }
-        logger.info("🚀 Starting hourly inactive mobile scraping...");
-        // // Run immediately first time
-        // setTimeout(() => this.processInactiveMobiles(), 300000);
-        // Then run every hour
-        this.hourlyInterval = setInterval(() => {
-            this.processInactiveMobiles();
-        }, 60 * 60 * 1000); // 1 hour
-        logger.info("✅ Hourly scraping scheduled");
-    }
-    /**
-     * Stop the hourly scraping process
-     */
-    stopHourlyScraping() {
-        if (this.hourlyInterval) {
-            clearInterval(this.hourlyInterval);
-            this.hourlyInterval = null;
-            logger.info("🛑 Hourly scraping stopped");
-        }
-    }
-    /**
-     * Main method to process inactive mobiles
-     */
-    async processInactiveMobiles() {
-        if (this.isRunning) {
-            logger.info("⏳ Processing already in progress, skipping...");
-            return;
-        }
-        try {
-            this.isRunning = true;
-            _parked_exclusion__WEBPACK_IMPORTED_MODULE_14__.parkedExclusion.setScraperRunning(true);
-            logger.info("🔍 Starting inactive mobile processing...");
-            const clientId = (process.env.clientId || '').trim();
-            const offReason = await parkedPathReason(clientId);
-            if (offReason) {
-                logger.info(`⏭️ Inactive scraper idle: ${offReason}`);
-                return;
-            }
-            this.lastRunAt = new Date();
-            const inactiveMobiles = await this.getInactiveMobiles();
-            logger.info(`📱 Found ${inactiveMobiles.length} inactive mobiles to process`);
-            if (inactiveMobiles.length === 0) {
-                logger.info("✅ No inactive mobiles found");
-                return;
-            }
-            const results = [];
-            for (let i = 0; i < inactiveMobiles.length; i++) {
-                const inactiveMobile = inactiveMobiles[i];
-                if (inactiveMobile?.mobile) {
-                    // P3 review 9: the parked responder took over (or is mid-pass): stop this run here.
-                    const parkedReason = await parkedPathReason(clientId);
-                    if (parkedReason) {
-                        logger.info(`🛑 Inactive scraper run stopped before ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_10__.maskMobile)(inactiveMobile.mobile)}: ${parkedReason}`);
-                        break;
-                    }
-                    // Live-lease skip (design §4.4, P2): a TelegramManager holds this account right now.
-                    const liveReason = await (0,_parked_adapter__WEBPACK_IMPORTED_MODULE_13__.promoteLiveLeaseSkipReason)(inactiveMobile.mobile);
-                    if (liveReason) {
-                        logger.info(`🔒 Skipping ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_10__.maskMobile)(inactiveMobile.mobile)}: ${liveReason}`);
-                        continue;
-                    }
-                    try {
-                        logger.info(`🔧 Processing mobile: ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_10__.maskMobile)(inactiveMobile.mobile)}`);
-                        const mobileResults = await this.processSingleMobile(inactiveMobile);
-                        results.push(mobileResults);
-                        await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_6__.sleep)(10000);
-                    }
-                    catch (error) {
-                        logger.warn(`⚠️ Error processing mobile ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_10__.maskMobile)(inactiveMobile.mobile)}:`, (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, `Single Mobile processing failed :${inactiveMobile.mobile}`));
-                        // Check if it's a flood wait termination error
-                        if (error.message && error.message.includes('FLOOD_WAIT_TERMINATION')) {
-                            logger.error(`🚨 FLOOD WAIT TERMINATION: Stopping all processing immediately!`);
-                            logger.error(`📊 Partial results before termination:`);
-                            this.logResults(results);
-                            // Exit the process
-                            throw new Error(`Process terminated due to flood wait on mobile: ${inactiveMobile.mobile}`);
-                        }
-                    }
-                }
-                else {
-                    logger.warn(`⚠️ Inactive mobile ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_10__.maskMobile)(inactiveMobile?.mobile)} is not valid`);
-                }
-            }
-            logger.info(`📊 Inactive mobile processing completed, total processed: ${results.length}`);
-            const okReplies = results.flat().filter((result) => result.success).length;
-            const failedReplies = results.flat().filter((result) => !result.success).length;
-            // One completion notice per run (no "started"), batched across clients by the UMS digest.
-            await notifyInactiveScraper({
-                title: "Mobile scrape",
-                severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_8__.NotificationSeverity.SUCCESS,
-                fields: [
-                    { label: "Mobiles", value: results.length },
-                    { label: "Successful Replies", value: okReplies },
-                    { label: "Failed Replies", value: failedReplies },
-                ],
-                digest: {
-                    key: "promote-inactive-scrape",
-                    merge: "sum",
-                    // Hourly per process but offset by boot time: collect an hour's runs into one table.
-                    quietMs: 60 * 60 * 1000,
-                    sortBy: "Mobiles",
-                    row: { Mobiles: results.length, "OK replies": okReplies, "Failed replies": failedReplies },
-                },
-                tags: ["promote", "inactive-scraper", "completed"],
-            }, "InactiveMobileScraper.notification.completed");
-            this.logResults(results);
-        }
-        catch (error) {
-            logger.error(error);
-            logger.error("❌ Error in inactive mobile processing:", (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "Processing failed"));
-        }
-        finally {
-            this.isRunning = false;
-            _parked_exclusion__WEBPACK_IMPORTED_MODULE_14__.parkedExclusion.setScraperRunning(false);
-            logger.info("🏁 Inactive mobile processing completed");
-        }
-    }
-    /**
-     * Get all inactive mobiles (excluding active ones)
-     */
-    async getInactiveMobiles() {
-        try {
-            // Get currently active mobiles
-            const activeMobiles = this.mobileManager.getActiveMobiles();
-            logger.info(`📋 Active mobiles: ${activeMobiles.map((m) => (0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_10__.maskMobile)(m)).join(', ')}`);
-            const scrapeCutoff = new Date(Date.now() - SCRAPE_COOLDOWN_HOURS * 60 * 60 * 1000);
-            const recentUsageCutoff = new Date(Date.now() - RECENT_USAGE_HOURS * 60 * 60 * 1000);
-            // "Inactive" here means not loaded into the current process, not DB-inactive.
-            // We only scrape active promote accounts that were used recently and are outside
-            // the scrape cooldown.
-            const allAvailableMobiles = await (0,_data_db__WEBPACK_IMPORTED_MODULE_2__.getRepositories)()?.promote.searchPromoteClients({
-                $and: [
-                    { clientId: process.env.clientId },
-                    { status: 'active' },
-                    { lastUsed: { $exists: true, $gt: recentUsageCutoff } },
-                    {
-                        $or: [
-                            { lastScraped: { $exists: false } }, // Never scraped
-                            { lastScraped: { $lt: scrapeCutoff } } // Scrape cooldown elapsed
-                        ]
-                    }
-                ]
-            });
-            if (!allAvailableMobiles?.length) {
-                logger.info("📊 No eligible inactive promote mobiles found after DB query");
-                return [];
-            }
-            // Filter out active mobiles to get inactive ones
-            const inactiveMobiles = allAvailableMobiles.filter(mobile => !activeMobiles.includes(mobile.mobile));
-            logger.info(`📊 Total available: ${allAvailableMobiles.length}, Active: ${activeMobiles.length}, Inactive: ${inactiveMobiles.length}`);
-            logger.info(`⏰ Filtering: lastScraped older than ${SCRAPE_COOLDOWN_HOURS}h, lastUsed within ${RECENT_USAGE_HOURS}h`);
-            const rankedMobiles = inactiveMobiles
-                .map(mobile => {
-                const lastUsedAtMs = mobile.lastUsed ? new Date(mobile.lastUsed).getTime() : 0;
-                const parsedLastScraped = mobile.lastScraped ? new Date(mobile.lastScraped).getTime() : NaN;
-                const neverScraped = !Number.isFinite(parsedLastScraped);
-                return {
-                    mobile: mobile.mobile,
-                    channels: mobile.channels || 0,
-                    availableDate: mobile.availableDate || '',
-                    status: mobile.status || 'unknown',
-                    lastUsedAtMs: Number.isFinite(lastUsedAtMs) ? lastUsedAtMs : 0,
-                    lastScrapedAtMs: neverScraped ? null : parsedLastScraped,
-                    neverScraped,
-                };
-            })
-                .sort((a, b) => {
-                if (a.neverScraped !== b.neverScraped)
-                    return a.neverScraped ? -1 : 1;
-                if ((a.lastScrapedAtMs ?? 0) !== (b.lastScrapedAtMs ?? 0))
-                    return (a.lastScrapedAtMs ?? 0) - (b.lastScrapedAtMs ?? 0);
-                if (a.lastUsedAtMs !== b.lastUsedAtMs)
-                    return b.lastUsedAtMs - a.lastUsedAtMs;
-                if (a.channels !== b.channels)
-                    return b.channels - a.channels;
-                return a.mobile.localeCompare(b.mobile);
-            });
-            logger.info(`📋 Ranked inactive promote mobiles for scraping`, {
-                ranked: rankedMobiles.map(mobile => ({
-                    mobile: mobile.mobile,
-                    channels: mobile.channels,
-                    neverScraped: mobile.neverScraped,
-                    lastUsedAt: mobile.lastUsedAtMs ? new Date(mobile.lastUsedAtMs).toISOString() : null,
-                    lastScrapedAt: mobile.lastScrapedAtMs ? new Date(mobile.lastScrapedAtMs).toISOString() : null,
-                })),
-            });
-            return rankedMobiles;
-        }
-        catch (error) {
-            logger.error("❌ Error getting inactive mobiles:", (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "Database query failed"));
-            return [];
-        }
-    }
-    /**
-     * Process a single inactive mobile
-     */
-    async processSingleMobile(inactiveMobile) {
-        let client = null;
-        let dialogManager = null;
-        const results = [];
-        try {
-            client = await this.createTelegramClient(inactiveMobile.mobile);
-            // Use getOrCreate to prevent duplicate instances
-            dialogManager = _tg_dialogs__WEBPACK_IMPORTED_MODULE_7__.DialogManager.getOrCreate(client, { instanceId: inactiveMobile.mobile, instanceName: inactiveMobile.mobile });
-            await dialogManager.initialize();
-            // Get unread private chats
-            const privateChats = await dialogManager.getUnreadDialogsByType(_tg_dialogs__WEBPACK_IMPORTED_MODULE_7__.DialogType.PERSONAL);
-            logger.info(`💬 Found ${privateChats.length} unread private chats for ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_10__.maskMobile)(inactiveMobile.mobile)}`);
-            // Reply to each unread private chat
-            for (let i = 0; i < privateChats.length; i++) {
-                const chat = privateChats[i];
-                const privateChat = {
-                    entity: await dialogManager.getEntity(chat.id),
-                    lastMessageId: chat.lastMessageId,
-                    title: chat.title,
-                    id: chat.id,
-                    unreadCount: chat.unreadCount,
-                    lastMessageTimestamp: chat.lastMessageTimestamp
-                };
-                if (await this.isTelegramJoinedNotification(dialogManager, chat)) {
-                    continue;
-                }
-                if (!(0,_tg_parked__WEBPACK_IMPORTED_MODULE_12__.isWithinWindow)(chat.lastMessageTimestamp, Date.now(), _tg_parked__WEBPACK_IMPORTED_MODULE_12__.PROMOTE_WINDOW_MS)) {
-                    logger.info(`🚫 Skipping reply to ${chat.title} (${chat.id}) for ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_10__.maskMobile)(inactiveMobile.mobile)} - Last message too old`);
-                    continue;
-                }
-                const msgs = await client.getMessages(chat.id, { limit: 3 });
-                const inbound = (0,_tg_parked__WEBPACK_IMPORTED_MODULE_12__.inboundCheck)(msgs);
-                if (inbound === 'empty') {
-                    logger.info('🚫 Skipping reply, getMessages returned null', `Failed to fetch messages for ${chat.id} : ${chat.title}`);
-                    continue;
-                }
-                if (inbound === 'no_inbound') {
-                    logger.info(`🚫 Skipping reply, No messages from other person found in recent history`);
-                    continue;
-                }
-                try {
-                    const result = await this.replyToPrivateChat(client, inactiveMobile.mobile, privateChat);
-                    if (result.error === NO_MAIN_HANDLE) {
-                        // No handle to link: nothing was sent, leave the chat unread and stop this mobile.
-                        results.push(result);
-                        break;
-                    }
-                    await dialogManager.markAsRead(chat.id);
-                    results.push(result);
-                    // Add delay between replies
-                    await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_6__.sleep)(2000);
-                }
-                catch (error) {
-                    // Check if it's a flood wait termination error
-                    if (error.message && error.message.includes('FLOOD_WAIT_TERMINATION')) {
-                        logger.error(`🚨 Flood wait detected! Terminating entire process...`);
-                        throw error; // Re-throw to terminate the entire processing
-                    }
-                    results.push({
-                        mobile: inactiveMobile.mobile,
-                        chatId: chat.id,
-                        success: false,
-                        error: (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, `Reply failed to ${chat.title} || id: ${chat.id} for ${inactiveMobile.mobile}`).message
-                    });
-                }
-                await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_6__.sleep)(15000);
-            }
-        }
-        catch (error) {
-            if (error.message && error.message.includes('FLOOD_WAIT_TERMINATION')) {
-                throw error;
-            }
-            if ((0,_parked_adapter__WEBPACK_IMPORTED_MODULE_13__.isSharedKeyError)(error)) {
-                // shared_key stop (design §4.2, P2): never connected, nothing to report or retire.
-                logger.info(`🔑 ${error.message}`);
-                results.push({ mobile: inactiveMobile.mobile, chatId: 'unknown', success: false, error: _parked_adapter__WEBPACK_IMPORTED_MODULE_13__.SHARED_KEY });
-                return results;
-            }
-            const errorDetails = (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, `Client creation failed for ${inactiveMobile.mobile} at InactiveMobileScraper`);
-            await (0,_parked_adapter__WEBPACK_IMPORTED_MODULE_13__.onPromotePermanentError)(inactiveMobile.mobile, errorDetails);
-            results.push({
-                mobile: inactiveMobile.mobile,
-                chatId: 'unknown',
-                success: false,
-                error: errorDetails.message
-            });
-        }
-        finally {
-            // Always cleanup DialogManager first
-            if (dialogManager) {
-                try {
-                    dialogManager.cleanup();
-                    logger.info(`✅ DialogManager cleaned up for ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_10__.maskMobile)(inactiveMobile.mobile)}`);
-                }
-                catch (error) {
-                    logger.warn(`⚠️ Error cleaning up DialogManager for ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_10__.maskMobile)(inactiveMobile.mobile)}:`, (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "DialogManager cleanup failed"));
-                }
-            }
-            // Wait a bit before disposing client
-            await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_6__.sleep)(2000);
-            // Always dispose the client
-            await this.updateLastScraped(inactiveMobile.mobile);
-            if (client) {
-                await this.disposeTelegramClient(client, inactiveMobile.mobile);
-            }
-        }
-        return results;
-    }
-    /**
-     * Create a Telegram client for the given mobile
-     */
-    async createTelegramClient(mobile) {
-        // shared_key stop (design §4.2, P2) on the session that would connect (pool session or the
-        // oldest-session fallback), before any connect. A read failure still surfaces inside
-        // openParkedSession, on the same error path and log context as before.
-        const read = await this.resolvePromoteSessionString(mobile).then((session) => ({ session, error: null }), (error) => ({ session: null, error }));
-        // readPromoteSession already checked (and refused to persist) a shared oldest-session fallback.
-        if ((0,_parked_adapter__WEBPACK_IMPORTED_MODULE_13__.isSharedKeyError)(read.error))
-            throw read.error;
-        if (read.session !== null) {
-            const sharedReason = await (0,_parked_adapter__WEBPACK_IMPORTED_MODULE_13__.promoteSharedKeyReason)(mobile, read.session);
-            if (sharedReason)
-                throw new _parked_adapter__WEBPACK_IMPORTED_MODULE_13__.SharedKeyError(mobile, sharedReason);
-        }
-        return (0,_tg_parked__WEBPACK_IMPORTED_MODULE_12__.openParkedSession)(mobile, read.session !== null ? read.session : () => Promise.reject(read.error), scraperSessionDeps, { connectTimeoutMs: SCRAPE_CLIENT_CONNECT_TIMEOUT_MS });
-    }
-    async resolvePromoteSessionString(mobile) {
-        return (0,_parked_adapter__WEBPACK_IMPORTED_MODULE_13__.readPromoteSession)(mobile);
-    }
-    async fetchOldestSessionFallback(mobile) {
-        return (0,_parked_adapter__WEBPACK_IMPORTED_MODULE_13__.fetchOldestPromoteSession)(mobile);
-    }
-    async isTelegramJoinedNotification(dialogManager, chat) {
-        try {
-            const kind = (0,_tg_parked__WEBPACK_IMPORTED_MODULE_12__.joinedNoticeKind)(chat.message, telegram__WEBPACK_IMPORTED_MODULE_0__.Api);
-            if (!kind) {
-                return false;
-            }
-            const entity = await dialogManager.getEntity(chat.id);
-            const label = kind === 'service_action' ? 'notification from user' : 'text pattern in message from';
-            logger.info(`🚫 Detected "joined Telegram" ${label}: ${entity?.firstName || 'Unknown'}`);
-            return true;
-        }
-        catch (error) {
-            logger.warn(`⚠️ Could not check for joined notification:`, (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "Message check failed"));
-            return false;
-        }
-    }
-    async replyToPrivateChat(client, mobile, chat) {
-        try {
-            const diffMs = Date.now() - chat.lastMessageTimestamp;
-            const hours = Math.floor(diffMs / (1000 * 60 * 60));
-            const minutes = Math.floor((diffMs % (1000 * 60 * 60)) / (1000 * 60));
-            const seconds = Math.floor((diffMs % (1000 * 60)) / 1000);
-            let timeString = '';
-            if (hours > 0)
-                timeString += `${hours}h `;
-            if (minutes > 0 || hours > 0)
-                timeString += `${minutes}m `;
-            timeString += `${seconds}s`;
-            const dateInfo = chat.lastMessageTimestamp ? ` (last msg: ${timeString.trim()} ago)` : '';
-            logger.info(`💬 Replying to ${chat.title} (${chat.id}) for ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_10__.maskMobile)(mobile)}${dateInfo}`);
-            // The main's handle, re-read per reply. Missing = no send (the old phone-digits fallback linked
-            // the parked account's own number; design P-7).
-            const username = await (0,_parked_adapter__WEBPACK_IMPORTED_MODULE_13__.promoteMainHandle)(mobile);
-            if (!username) {
-                return { mobile, chatId: chat.id, success: false, error: NO_MAIN_HANDLE };
-            }
-            // Get a random spintax reply message and process it
-            const rawMessage = this.getRandomReplyMessage();
-            const replyMessage = this.processSpintaxMessage(rawMessage, username);
-            // Send the reply
-            const result = await client.sendMessage(chat.entity, {
-                message: replyMessage,
-                linkPreview: true
-            });
-            await client.markAsRead(chat.entity);
-            logger.info(`✅ Successfully replied to ${chat.title} for ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_10__.maskMobile)(mobile)}`);
-            logger.info(`📝 Message sent: ${replyMessage.substring(0, 100)}${replyMessage.length > 100 ? '...' : ''}`);
-            await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_6__.sleep)(5000);
-            return {
-                mobile: mobile,
-                chatId: chat.id,
-                success: true,
-                repliedTo: result.id
-            };
-        }
-        catch (error) {
-            const errorInfo = (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, `Reply failed to ${chat.title} || id: ${chat.id} for ${mobile}`, error.errorMessage == "CHANNEL_PRIVATE" ? false : true);
-            logger.error(`⚠️ ${error.errorMessage}`);
-            // Check if it's a flood wait error. NOTE: a real GramJS FloodWaitError
-            // has errorMessage "FLOOD" (not "FLOOD_WAIT"), so the canonical parser
-            // is used instead of a brittle string compare on errorInfo.message.
-            if ((0,_tg_parked__WEBPACK_IMPORTED_MODULE_12__.isFloodAbort)(error)) {
-                const parsedTgError = (0,_tg_core_utils_telegram_error_parser__WEBPACK_IMPORTED_MODULE_4__.parseTelegramError)(error);
-                logger.error(`🚨 FLOOD WAIT ERROR detected for ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_10__.maskMobile)(mobile)}! Terminating process to avoid further rate limiting.`);
-                logger.error(`📍 Error details: ${parsedTgError.type}`);
-                // Throw a special error to terminate the entire process
-                throw new Error(`FLOOD_WAIT_TERMINATION: ${parsedTgError.type}`);
-            }
-            logger.error(`⚠️ Failed to reply to ${chat.title} for ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_10__.maskMobile)(mobile)}:`, errorInfo);
-            return {
-                mobile: mobile,
-                chatId: chat.id,
-                success: false,
-                error: errorInfo.message
-            };
-        }
-    }
-    /**
-     * Get a random reply message
-     */
-    getRandomReplyMessage() {
-        return (0,_tg_parked__WEBPACK_IMPORTED_MODULE_12__.pickTemplate)(Math.random());
-    }
-    /**
-     * Process spintax message with username and emojis
-     */
-    processSpintaxMessage(message, username) {
-        return (0,_tg_parked__WEBPACK_IMPORTED_MODULE_12__.renderSpintax)(message, username, Math.random);
-    }
-    async disposeTelegramClient(client, mobile) {
-        await (0,_tg_parked__WEBPACK_IMPORTED_MODULE_12__.disposeParkedSession)(client, mobile, scraperSessionDeps);
-    }
-    /**
-     * Update lastScraped timestamp for a mobile
-     */
-    async updateLastScraped(mobile) {
-        try {
-            const timestamp = new Date();
-            await (0,_data_db__WEBPACK_IMPORTED_MODULE_2__.getRepositories)()?.promote.updatePromoteClient({ mobile: mobile, clientId: process.env.clientId, status: 'active' }, { lastScraped: timestamp, updatedAt: timestamp });
-            logger.info(`⏰ Updated lastScraped for ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_10__.maskMobile)(mobile)}: ${timestamp.toISOString()}`);
-        }
-        catch (error) {
-            logger.warn(`⚠️ Failed to update lastScraped for ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_10__.maskMobile)(mobile)}:`, (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "Database update failed"));
-        }
-    }
-    /**
-     * Log processing results
-     */
-    logResults(results) {
-        const successCount = results.flat().filter(r => r.success).length;
-        const failureCount = results.flat().filter(r => !r.success).length;
-        const processedMobiles = [...new Set(results.flat().map(r => r.mobile))].length;
-        logger.info(`📊 Processing Results:`);
-        logger.info(`  📱 Mobiles processed: ${processedMobiles}`);
-        logger.info(`  ✅ Successful replies: ${successCount}`);
-        logger.info(`  ❌ Failed replies: ${failureCount}`);
-        logger.info(`  📈 Total processed: ${results.length}`);
-        logger.info(`  📅 Only messages from last 24 hours were processed`);
-        logger.info(`  🚫 Telegram official accounts and "joined" notifications were filtered out`);
-        logger.info(`  ⏰ lastScraped timestamps updated for all processed mobiles`);
-        if (failureCount > 0) {
-            logger.info(`⚠️ Failed replies details:`);
-            results.flat().filter(r => !r.success).forEach(result => {
-                logger.info(`  - ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_10__.maskMobile)(result.mobile)} -> ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_10__.maskMobile)(result.chatId)}: ${result.error}`);
-            });
-        }
-    }
-    /**
-     * Get current processing status
-     */
-    getStatus() {
-        return {
-            isRunning: this.isRunning,
-            isScheduled: this.hourlyInterval !== null,
-            lastRunAt: this.lastRunAt ? this.lastRunAt.toISOString() : null,
-        };
-    }
-    /**
-     * Manual trigger for processing (for testing/debugging)
-     */
-    async triggerManualProcessing() {
-        logger.info("🔧 Manual processing triggered");
-        await this.processInactiveMobiles();
-    }
-}
-
-
-/***/ },
-
 /***/ "./src/accounts/mobile-manager.ts"
 /*!****************************************!*\
   !*** ./src/accounts/mobile-manager.ts ***!
@@ -46621,30 +46020,19 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   PARKED_SENDS_NAMESPACE: () => (/* binding */ PARKED_SENDS_NAMESPACE),
 /* harmony export */   ROUTE_SENDS_NAMESPACE: () => (/* binding */ ROUTE_SENDS_NAMESPACE),
-/* harmony export */   SHARED_KEY: () => (/* binding */ SHARED_KEY),
-/* harmony export */   SharedKeyError: () => (/* binding */ SharedKeyError),
 /* harmony export */   createPromoteParkedAdapter: () => (/* binding */ createPromoteParkedAdapter),
-/* harmony export */   fetchOldestPromoteSession: () => (/* binding */ fetchOldestPromoteSession),
-/* harmony export */   isSharedKeyError: () => (/* binding */ isSharedKeyError),
 /* harmony export */   onPromotePermanentError: () => (/* binding */ onPromotePermanentError),
 /* harmony export */   parseScoredSends: () => (/* binding */ parseScoredSends),
-/* harmony export */   promoteLiveLeaseSkipReason: () => (/* binding */ promoteLiveLeaseSkipReason),
-/* harmony export */   promoteMainHandle: () => (/* binding */ promoteMainHandle),
-/* harmony export */   promoteSharedKeyReason: () => (/* binding */ promoteSharedKeyReason),
-/* harmony export */   readPromoteSession: () => (/* binding */ readPromoteSession)
+/* harmony export */   promoteMainHandle: () => (/* binding */ promoteMainHandle)
 /* harmony export */ });
 /* harmony import */ var _data_user_data_crud__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../data/user-data-crud */ "./src/data/user-data-crud.ts");
 /* harmony import */ var _data_db__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../data/db */ "./src/data/db.ts");
 /* harmony import */ var _tg_core_telegram_utils_isPermanentError__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! @tg/core/telegram-utils/isPermanentError */ "../../packages/tg-core/src/telegram-utils/isPermanentError.ts");
-/* harmony import */ var _tg_core_utils_fetchWithTimeout__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! @tg/core/utils/fetchWithTimeout */ "../../packages/tg-core/src/utils/fetchWithTimeout.ts");
-/* harmony import */ var _tg_core_utils_apiKey__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! @tg/core/utils/apiKey */ "../../packages/tg-core/src/utils/apiKey.ts");
-/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
-/* harmony import */ var _tg_parked_registry_episode_key__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! @tg/parked/registry/episode-key */ "../../packages/tg-parked/src/registry/episode-key.ts");
-/* harmony import */ var _tg_core_account_lease_mobile__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! @tg/core/account-lease/mobile */ "../../packages/tg-core/src/account-lease/mobile.ts");
-/* harmony import */ var _tg_db_collections_account_facet_read__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! @tg/db/collections/account-facet-read */ "../../packages/tg-db/src/collections/account-facet-read.ts");
-/* harmony import */ var _tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! @tg/core/utils/dc-ip-family */ "../../packages/tg-core/src/utils/dc-ip-family.ts");
-
-
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _tg_parked_registry_episode_key__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! @tg/parked/registry/episode-key */ "../../packages/tg-parked/src/registry/episode-key.ts");
+/* harmony import */ var _tg_core_account_lease_mobile__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! @tg/core/account-lease/mobile */ "../../packages/tg-core/src/account-lease/mobile.ts");
+/* harmony import */ var _tg_db_collections_account_facet_read__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! @tg/db/collections/account-facet-read */ "../../packages/tg-db/src/collections/account-facet-read.ts");
+/* harmony import */ var _tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! @tg/core/utils/dc-ip-family */ "../../packages/tg-core/src/utils/dc-ip-family.ts");
 
 
 
@@ -46658,121 +46046,10 @@ __webpack_require__.r(__webpack_exports__);
  * ParkedAdapter (createPromoteParkedAdapter, which never uses the oldest-session fallback): boot diff,
  * account facts, the routesends read, the parked::sends write and lastScraped. Every IO dependency of the
  * adapter is injected (accounts/parked-responder.ts wires the real ones), so tests need no Mongo or Redis.
- * P3 review 9: the scraper is back as a fallback for one more build (only while the responder is off for the
- * client), so its P1/P2 helpers (session read with the shared_key-checked fallback, live-lease skip) are kept here.
+ * The fallback scraper and its helpers (oldest-session fallback, its own shared_key / live-lease checks) are
+ * removed; the responder's shared_key and live-lease checks live in @tg/parked and in the adapter below.
  */
-const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_5__.Logger('parked-adapter');
-/**
- * promoteClients.session, else the CMS oldest-session fallback persisted onto the doc (P1 parity; scraper only, the responder never falls back).
- * The fallback gets the shared_key check BEFORE it is persisted: a users.session (same auth key) must never
- * be written onto promoteClients.session, where later passes would pick it up as the pool session.
- * Throws SharedKeyError (nothing persisted) when the fallback is shared or the check fails (fail closed).
- */
-async function readPromoteSession(mobile) {
-    const clientId = process.env.clientId;
-    const promoteClient = await (0,_data_db__WEBPACK_IMPORTED_MODULE_1__.getRepositories)()?.promote.findPromoteClient({ mobile, clientId, status: 'active' });
-    const existingSession = typeof promoteClient?.session === 'string'
-        ? promoteClient.session.trim()
-        : '';
-    if (existingSession) {
-        logger.info(`📦 Using promoteClients.session for inactive scrape ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_9__.maskMobile)(mobile)}`);
-        return existingSession;
-    }
-    logger.warn(`⚠️ Missing promoteClients.session for inactive scrape ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_9__.maskMobile)(mobile)}, falling back to oldest session API`);
-    const fallbackSession = await fetchOldestPromoteSession(mobile);
-    if (!fallbackSession) {
-        throw new Error(`No usable session found for inactive scrape mobile ${mobile}`);
-    }
-    const sharedReason = await promoteSharedKeyReason(mobile, fallbackSession);
-    if (sharedReason)
-        throw new SharedKeyError(mobile, `oldest-session fallback: ${sharedReason}; not persisted`);
-    await (0,_data_db__WEBPACK_IMPORTED_MODULE_1__.getRepositories)()?.promote.updatePromoteClient({ mobile, clientId, status: 'active' }, { session: fallbackSession, updatedAt: new Date() });
-    logger.info(`💾 Persisted oldest-session fallback onto promoteClients doc for ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_9__.maskMobile)(mobile)}`);
-    return fallbackSession;
-}
-async function fetchOldestPromoteSession(mobile) {
-    const runtimeBase = (process.env.RUNTIME_CONFIG_BASE || process.env.tgcms || process.env.tgmanager || '').trim().replace(/\/$/, '');
-    if (!runtimeBase) {
-        logger.warn(`Cannot fetch oldest session for ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_9__.maskMobile)(mobile)}: no runtime config base configured`);
-        return null;
-    }
-    const response = await (0,_tg_core_utils_fetchWithTimeout__WEBPACK_IMPORTED_MODULE_3__.fetchWithTimeout)(`${runtimeBase}/telegram/session/oldest`, {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            'x-api-key': (0,_tg_core_utils_apiKey__WEBPACK_IMPORTED_MODULE_4__.getApiKey)(),
-        },
-        data: {
-            mobile,
-            allowFallback: true,
-            maxAgeDays: 365,
-        },
-        timeout: 15000,
-    });
-    const session = typeof response?.data?.session === 'string'
-        ? response.data.session.trim()
-        : '';
-    if (!session) {
-        logger.warn(`Oldest-session fallback returned no usable session for inactive scrape ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_9__.maskMobile)(mobile)}`, {
-            responseDataKeys: response?.data ? Object.keys(response.data) : [],
-        });
-        return null;
-    }
-    logger.info(`📥 Fetched oldest-session fallback for inactive scrape ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_9__.maskMobile)(mobile)}`, {
-        sessionAge: response?.data?.sessionAge ?? null,
-        isNew: response?.data?.isNew ?? null,
-        usageCount: response?.data?.usageCount ?? null,
-    });
-    return session;
-}
-/** Reply-result error when the pool session is also a users.session (shared_key stop, design §4.2, P2). */
-const SHARED_KEY = 'SHARED_KEY';
-/** Thrown before any connect when the session must not be used by a parked pass. */
-class SharedKeyError extends Error {
-    constructor(mobile, why) {
-        super(`${SHARED_KEY}: not connecting ${mobile} (${why})`);
-        this.code = SHARED_KEY;
-        this.name = 'SharedKeyError';
-    }
-}
-function isSharedKeyError(error) {
-    return error instanceof SharedKeyError || error?.code === SHARED_KEY;
-}
-/**
- * The `shared_key` stop (design §4.2, review B1): a session that is also any users.session may be connected
- * by CMS jobs at any time, so a parked pass never connects it. Fails closed: no repository or a read error
- * also means "do not connect". Returns the reason, or null when the session may be used.
- */
-async function promoteSharedKeyReason(mobile, session) {
-    const leases = (0,_data_db__WEBPACK_IMPORTED_MODULE_1__.getRepositories)()?.accountLeases;
-    if (!leases)
-        return 'no Mongo connection for the shared-key check';
-    try {
-        return (await leases.isUsersSession(session, mobile)) ? 'session shares its auth key with a users.session' : null;
-    }
-    catch (error) {
-        logger.warn(`shared-key check failed for ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_9__.maskMobile)(mobile)}; not connecting`, error instanceof Error ? error.message : String(error));
-        return 'shared-key check failed';
-    }
-}
-/**
- * Live-lease skip for the scraper (design §4.4, P2): a mobile whose accountLeases doc has an unexpired LIVE
- * holder (server clock) is in use by a TelegramManager right now, so the scraper must not connect it.
- * Fails closed: no repository or a read error also skips. Returns the reason to skip, or null.
- */
-async function promoteLiveLeaseSkipReason(mobile) {
-    const leases = (0,_data_db__WEBPACK_IMPORTED_MODULE_1__.getRepositories)()?.accountLeases;
-    if (!leases)
-        return 'no Mongo connection for the live-lease check';
-    try {
-        const holder = await leases.liveHolder(mobile);
-        return holder ? `live lease held by ${holder.app} ${holder.owner}` : null;
-    }
-    catch (error) {
-        logger.warn(`live-lease check failed for ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_9__.maskMobile)(mobile)}; skipping`, error instanceof Error ? error.message : String(error));
-        return 'live-lease check failed';
-    }
-}
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_3__.Logger('parked-adapter');
 /**
  * The live main's public handle (clients.username of this process's clientId), re-read per reply.
  * null when it is missing, blank or the read fails: the caller must not send (review S7, P-7).
@@ -46783,13 +46060,13 @@ async function promoteMainHandle(mobile = '') {
         // Leading '@' stripped, as normalizeHandle does (telegram-manager.ts), so the template never shows '@@x'.
         const username = typeof clientData?.username === 'string' ? clientData.username.trim().replace(/^@+/, '').trim() : '';
         if (!username) {
-            logger.warn(`⚠️ No clients.username for ${process.env.clientId}; not replying${mobile ? ` from ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_9__.maskMobile)(mobile)}` : ''}`);
+            logger.warn(`⚠️ No clients.username for ${process.env.clientId}; not replying${mobile ? ` from ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_7__.maskMobile)(mobile)}` : ''}`);
             return null;
         }
         return username;
     }
     catch (error) {
-        logger.warn(`⚠️ Could not get username from DB${mobile ? ` for ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_9__.maskMobile)(mobile)}` : ''}; not replying`, error instanceof Error ? error.message : String(error));
+        logger.warn(`⚠️ Could not get username from DB${mobile ? ` for ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_7__.maskMobile)(mobile)}` : ''}; not replying`, error instanceof Error ? error.message : String(error));
         return null;
     }
 }
@@ -46847,20 +46124,20 @@ function createPromoteParkedAdapter(deps) {
         storedMobile.set(canonical, raw);
     };
     const stored = async (mobile) => {
-        const canonical = (0,_tg_core_account_lease_mobile__WEBPACK_IMPORTED_MODULE_7__.canonicalMobile)(mobile);
+        const canonical = (0,_tg_core_account_lease_mobile__WEBPACK_IMPORTED_MODULE_5__.canonicalMobile)(mobile);
         const known = storedMobile.get(canonical);
         if (known !== undefined || !canonical)
             return known ?? mobile;
         const docs = await Promise.resolve(deps.repos()?.promote.searchPromoteClients({ clientId, mobile: { $in: [canonical, `+${canonical}`] } }) ?? null)
             .catch(() => null);
-        const forms = (docs ?? []).map((d) => (typeof d.mobile === 'string' ? d.mobile.trim() : '')).filter((m) => (0,_tg_core_account_lease_mobile__WEBPACK_IMPORTED_MODULE_7__.canonicalMobile)(m) === canonical);
+        const forms = (docs ?? []).map((d) => (typeof d.mobile === 'string' ? d.mobile.trim() : '')).filter((m) => (0,_tg_core_account_lease_mobile__WEBPACK_IMPORTED_MODULE_5__.canonicalMobile)(m) === canonical);
         const found = forms.includes(canonical) ? canonical : forms[0];
         if (!found)
             return mobile;
         remember(canonical, found);
         return found;
     };
-    const loadedCanonical = () => new Set(deps.activeMobiles().map((m) => (0,_tg_core_account_lease_mobile__WEBPACK_IMPORTED_MODULE_7__.canonicalMobile)(m)).filter(Boolean));
+    const loadedCanonical = () => new Set(deps.activeMobiles().map((m) => (0,_tg_core_account_lease_mobile__WEBPACK_IMPORTED_MODULE_5__.canonicalMobile)(m)).filter(Boolean));
     return {
         app: 'promote',
         clientId,
@@ -46882,7 +46159,7 @@ function createPromoteParkedAdapter(deps) {
             const seeds = [];
             for (const doc of docs) {
                 const raw = typeof doc.mobile === 'string' ? doc.mobile.trim() : '';
-                const mobile = (0,_tg_core_account_lease_mobile__WEBPACK_IMPORTED_MODULE_7__.canonicalMobile)(raw);
+                const mobile = (0,_tg_core_account_lease_mobile__WEBPACK_IMPORTED_MODULE_5__.canonicalMobile)(raw);
                 const lastUsed = toMs(doc.lastUsed);
                 if (!mobile || lastUsed === null || loaded.has(mobile))
                     continue;
@@ -46892,7 +46169,7 @@ function createPromoteParkedAdapter(deps) {
                 // mobile at most maxAge after it was last live; a future lastUsed (clock skew) counts as now.
                 const parkedAtMs = Math.min(nowMs, lastUsed);
                 seeds.push({
-                    _id: (0,_tg_parked_registry_episode_key__WEBPACK_IMPORTED_MODULE_6__.episodeKey)('promote', mobile, lastUsed),
+                    _id: (0,_tg_parked_registry_episode_key__WEBPACK_IMPORTED_MODULE_4__.episodeKey)('promote', mobile, lastUsed),
                     app: 'promote',
                     mobile,
                     clientId,
@@ -46927,7 +46204,7 @@ function createPromoteParkedAdapter(deps) {
                 throw new Error('tg::acct unavailable (Redis); not connecting');
             // Reader R15 of the account split (S2): off = tg::acct only, no call; shadow = background compare, tg::acct
             // decides; on = a newer, still-live accountHealth verdict replaces tg::acct (null answer = keep tg::acct).
-            const healthMode = (0,_tg_db_collections_account_facet_read__WEBPACK_IMPORTED_MODULE_8__.accountFacetReadMode)('health', 'R15');
+            const healthMode = (0,_tg_db_collections_account_facet_read__WEBPACK_IMPORTED_MODULE_6__.accountFacetReadMode)('health', 'R15');
             let facetAcct = null;
             if (healthMode === 'shadow') {
                 void repos.parkedAccounts.resolveAcctHealth?.('R15', mobile, acct, healthMode, now)?.catch(() => null);
@@ -46949,7 +46226,7 @@ function createPromoteParkedAdapter(deps) {
                 lastUsedMs: pool?.lastUsedMs ?? null,
                 sessionPresent: !!pool?.session,
                 sharedKey: false, // checked on the exact session string by the runner (isUsersSession)
-                loadedHere: loadedCanonical().has((0,_tg_core_account_lease_mobile__WEBPACK_IMPORTED_MODULE_7__.canonicalMobile)(mobile)),
+                loadedHere: loadedCanonical().has((0,_tg_core_account_lease_mobile__WEBPACK_IMPORTED_MODULE_5__.canonicalMobile)(mobile)),
                 liveLeaseHeld: live !== null,
                 floodUntilMs: lease?.floodUntil ? lease.floodUntil.getTime() : null,
                 floodCount: lease?.floodCount ?? 0,
@@ -47019,50 +46296,6 @@ function createPromoteParkedAdapter(deps) {
 
 /***/ },
 
-/***/ "./src/accounts/parked-exclusion.ts"
-/*!******************************************!*\
-  !*** ./src/accounts/parked-exclusion.ts ***!
-  \******************************************/
-(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
-
-__webpack_require__.r(__webpack_exports__);
-/* harmony export */ __webpack_require__.d(__webpack_exports__, {
-/* harmony export */   parkedExclusion: () => (/* binding */ parkedExclusion)
-/* harmony export */ });
-/**
- * In-process exclusion between the restored inactive scraper and the parked responder (P3 review 9).
- * One promote process per clientId, so both paths of a client live in this process:
- *   - the scraper runs only while parkedControl says the parked path is OFF for this client (re-checked before
- *     each mobile), and stops its run when a responder pass is in flight;
- *   - the responder treats "scraper run in progress" as not ready (no claim, no pass).
- * The responder also re-reads the kill switch before every send, so a flip to OFF ends its pass at the next send.
- * No imports: both sides import this file, never each other.
- */
-let scraperRun = false;
-let responderBusy = () => false;
-const parkedExclusion = {
-    setScraperRunning(running) {
-        scraperRun = running;
-    },
-    scraperRunning() {
-        return scraperRun;
-    },
-    registerResponderBusy(fn) {
-        responderBusy = fn;
-    },
-    responderBusy() {
-        try {
-            return responderBusy();
-        }
-        catch {
-            return true;
-        }
-    },
-};
-
-
-/***/ },
-
 /***/ "./src/accounts/parked-responder.ts"
 /*!******************************************!*\
   !*** ./src/accounts/parked-responder.ts ***!
@@ -47097,8 +46330,6 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _mobile_manager__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! ./mobile-manager */ "./src/accounts/mobile-manager.ts");
 /* harmony import */ var _telegram_telegram_manager__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! ../telegram/telegram-manager */ "./src/telegram/telegram-manager.ts");
 /* harmony import */ var _parked_adapter__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! ./parked-adapter */ "./src/accounts/parked-adapter.ts");
-/* harmony import */ var _parked_exclusion__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! ./parked-exclusion */ "./src/accounts/parked-exclusion.ts");
-
 
 
 
@@ -47116,11 +46347,10 @@ __webpack_require__.r(__webpack_exports__);
 
 
 /**
- * Promote wiring of the parked responder (design §7.1, P3). Takes over from the hourly InactiveMobileScraper per
- * client: nothing runs unless parkedControl `global` AND `promote` say enabled: true (absent = disabled) and the
- * promote doc's optional `clientIds` includes this client. While it is off, the scraper is the fallback
- * (parked-exclusion.ts keeps the two from running together). Connect cap: PARKED_CONNECTS_PER_DAY, default 4
- * per account per IST day.
+ * Promote wiring of the parked responder (design §7.1, P3). It replaced the hourly inactive scraper (the fallback
+ * is removed): nothing runs unless parkedControl `global` AND `promote` say enabled: true (absent = disabled) and
+ * the promote doc's optional `clientIds` includes this client. While it is off, nothing replies to parked
+ * accounts (ticks return 'disabled'). Connect cap: PARKED_CONNECTS_PER_DAY, default 4 per account per IST day.
  */
 const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_10__.Logger("parked-responder");
 /** Positive integer from the remote config, else the canary default (4). Read per pass. */
@@ -47193,8 +46423,7 @@ function promoteAdapterDeps(clientId) {
         clientId: () => clientId,
         persona: () => personaFromEnv(),
         repos: () => (0,_data_db__WEBPACK_IMPORTED_MODULE_12__.getRepositories)(),
-        // A scraper run in progress (fallback path) = not ready: the two never reply for a client together.
-        ready: () => _mobile_manager__WEBPACK_IMPORTED_MODULE_13__.MobileManager.getInstance().isActive() && !_parked_exclusion__WEBPACK_IMPORTED_MODULE_16__.parkedExclusion.scraperRunning(),
+        ready: () => _mobile_manager__WEBPACK_IMPORTED_MODULE_13__.MobileManager.getInstance().isActive(),
         activeMobiles: () => _mobile_manager__WEBPACK_IMPORTED_MODULE_13__.MobileManager.getInstance().getActiveMobiles(),
         loadAccountState: (mobile, now) => (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_8__.loadAccountRestartState)(mobile, now),
         readScored: (label, key, min) => (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_8__.readState)(label, (r) => r.zrangebyscore(key, min, '+inf', 'WITHSCORES')),
@@ -47251,8 +46480,6 @@ function buildResponder() {
 class PromoteParkedResponder {
     constructor() {
         this.responder = buildResponder();
-        // Re-review 2 (S4): only a pass in flight, not a whole tick (disabled ticks, reconcile, digest).
-        _parked_exclusion__WEBPACK_IMPORTED_MODULE_16__.parkedExclusion.registerResponderBusy(() => this.responder.status().passRunning);
     }
     static getInstance() {
         if (!PromoteParkedResponder.instance)
@@ -47873,8 +47100,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "cecdadf56244e8167ac2e0ace3b35b75486a4f1a" : 0;
-    const builtAt =  true ? "2026-11-09T17:53:46.793Z" : 0;
+    const sha =  true ? "77d7754cf102b29cc5a1f31a1b014c1f2223b873" : 0;
+    const builtAt =  true ? "2026-11-10T03:20:33.750Z" : 0;
     return { sha, builtAt };
 }
 
@@ -50656,17 +49883,16 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! @tg/core/utils/TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
 /* harmony import */ var _bootstrap_app_service__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ../bootstrap/app-service */ "./src/bootstrap/app-service.ts");
 /* harmony import */ var _accounts_parked_responder__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ../accounts/parked-responder */ "./src/accounts/parked-responder.ts");
-/* harmony import */ var _accounts_inactive_mobile_scraper__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! ../accounts/inactive-mobile-scraper */ "./src/accounts/inactive-mobile-scraper.ts");
-/* harmony import */ var _health_service_health__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! ../health/service-health */ "./src/health/service-health.ts");
-/* harmony import */ var _stats_notifications__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! ./stats-notifications */ "./src/jobs/stats-notifications.ts");
-/* harmony import */ var node_schedule_tz__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! node-schedule-tz */ "node-schedule-tz");
-/* harmony import */ var node_schedule_tz__WEBPACK_IMPORTED_MODULE_15___default = /*#__PURE__*/__webpack_require__.n(node_schedule_tz__WEBPACK_IMPORTED_MODULE_15__);
-/* harmony import */ var _tg_dialogs__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! @tg/dialogs */ "../../packages/tg-dialogs/src/index.ts");
-/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_17__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
-/* harmony import */ var _tg_analytics__WEBPACK_IMPORTED_MODULE_18__ = __webpack_require__(/*! @tg/analytics */ "../../packages/tg-analytics/src/index.ts");
-/* harmony import */ var _tg_core_state_durable_queue__WEBPACK_IMPORTED_MODULE_19__ = __webpack_require__(/*! @tg/core/state/durable-queue */ "../../packages/tg-core/src/state/durable-queue.ts");
-/* harmony import */ var _tg_core_utils_shutdown_budget__WEBPACK_IMPORTED_MODULE_20__ = __webpack_require__(/*! @tg/core/utils/shutdown-budget */ "../../packages/tg-core/src/utils/shutdown-budget.ts");
-/* harmony import */ var _monitoring_heartbeat__WEBPACK_IMPORTED_MODULE_21__ = __webpack_require__(/*! ../monitoring/heartbeat */ "./src/monitoring/heartbeat.ts");
+/* harmony import */ var _health_service_health__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! ../health/service-health */ "./src/health/service-health.ts");
+/* harmony import */ var _stats_notifications__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! ./stats-notifications */ "./src/jobs/stats-notifications.ts");
+/* harmony import */ var node_schedule_tz__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! node-schedule-tz */ "node-schedule-tz");
+/* harmony import */ var node_schedule_tz__WEBPACK_IMPORTED_MODULE_14___default = /*#__PURE__*/__webpack_require__.n(node_schedule_tz__WEBPACK_IMPORTED_MODULE_14__);
+/* harmony import */ var _tg_dialogs__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! @tg/dialogs */ "../../packages/tg-dialogs/src/index.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _tg_analytics__WEBPACK_IMPORTED_MODULE_17__ = __webpack_require__(/*! @tg/analytics */ "../../packages/tg-analytics/src/index.ts");
+/* harmony import */ var _tg_core_state_durable_queue__WEBPACK_IMPORTED_MODULE_18__ = __webpack_require__(/*! @tg/core/state/durable-queue */ "../../packages/tg-core/src/state/durable-queue.ts");
+/* harmony import */ var _tg_core_utils_shutdown_budget__WEBPACK_IMPORTED_MODULE_19__ = __webpack_require__(/*! @tg/core/utils/shutdown-budget */ "../../packages/tg-core/src/utils/shutdown-budget.ts");
+/* harmony import */ var _monitoring_heartbeat__WEBPACK_IMPORTED_MODULE_20__ = __webpack_require__(/*! ../monitoring/heartbeat */ "./src/monitoring/heartbeat.ts");
 
 
 
@@ -50688,8 +49914,7 @@ __webpack_require__.r(__webpack_exports__);
 
 
 
-
-const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_17__.Logger("scheduler");
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_16__.Logger("scheduler");
 async function sendPromoteOperatorNotification(notification, failureContext) {
     try {
         const sent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_9__.BotConfig.getInstance().sendMessage(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_9__.ChannelCategory.ACCOUNT_NOTIFICATIONS, notification);
@@ -50714,18 +49939,16 @@ function setupScheduledJobs() {
         onError: (error) => logger.error('Maintenance restart signal failed', error),
     });
     // Parked-account responder (design 2026-11-05 P3). Ticks every 60 s ± 15 s but connects nothing unless
-    // parkedControl global + promote are enabled for this client (absent = disabled).
+    // parkedControl global + promote are enabled for this client (absent = disabled). The inactive scraper
+    // fallback is removed (design P3 review fixes item 9, "Fallback removed"): with the switch off nothing replies to parked accounts.
     _accounts_parked_responder__WEBPACK_IMPORTED_MODULE_11__.PromoteParkedResponder.getInstance().start();
-    // Fallback for one more build (review 9): the hourly scraper runs only while the responder is off for this
-    // client (re-checked before each mobile; parked-exclusion.ts keeps the two apart).
-    _accounts_inactive_mobile_scraper__WEBPACK_IMPORTED_MODULE_12__.InactiveMobileScraper.getInstance().startHourlyScraping();
-    logger.info("🚀 Parked responder + fallback inactive scraper started (switch: parkedControl)");
+    logger.info("🚀 Parked responder started (switch: parkedControl)");
     // Daily statistics job at 00:25 IST
-    node_schedule_tz__WEBPACK_IMPORTED_MODULE_15__.scheduleJob('daily-stats', '25 0 * * *', 'Asia/Kolkata', async () => {
+    node_schedule_tz__WEBPACK_IMPORTED_MODULE_14__.scheduleJob('daily-stats', '25 0 * * *', 'Asia/Kolkata', async () => {
         try {
             const appService = _bootstrap_app_service__WEBPACK_IMPORTED_MODULE_10__.AppService.getInstance();
             const stats = await appService.getDailyStats();
-            await (0,_stats_notifications__WEBPACK_IMPORTED_MODULE_14__.sendPromoteStatsNotification)((0,_stats_notifications__WEBPACK_IMPORTED_MODULE_14__.buildDailyStatsNotification)(stats, 'scheduler'), 'Scheduled daily stats notification failed');
+            await (0,_stats_notifications__WEBPACK_IMPORTED_MODULE_13__.sendPromoteStatsNotification)((0,_stats_notifications__WEBPACK_IMPORTED_MODULE_13__.buildDailyStatsNotification)(stats, 'scheduler'), 'Scheduled daily stats notification failed');
             // Reset stats after 30 seconds
             (0,_tg_core_utils_timers__WEBPACK_IMPORTED_MODULE_1__.scheduleUnrefTimeout)(async () => {
                 try {
@@ -50765,7 +49988,7 @@ function setupScheduledJobs() {
     return healthCheckInterval;
 }
 async function runScheduledHealthRecovery() {
-    const health = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_13__.buildPromoteHealthSnapshot)();
+    const health = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_12__.buildPromoteHealthSnapshot)();
     const recoveryPlan = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_8__.createHealthRecoveryPlan)(health);
     if (!recoveryPlan.hasActions) {
         logger.debug("Scheduled health recovery skipped; no actionable issues", {
@@ -50805,7 +50028,7 @@ function setupExitHandlers() {
             return;
         }
         isShuttingDown = true;
-        const forceExitMs = (0,_tg_core_utils_shutdown_budget__WEBPACK_IMPORTED_MODULE_20__.resolveShutdownForceExitMs)();
+        const forceExitMs = (0,_tg_core_utils_shutdown_budget__WEBPACK_IMPORTED_MODULE_19__.resolveShutdownForceExitMs)();
         const deadlineAt = Date.now() + forceExitMs;
         logger.info(`🛑 Received shutdown signal (force exit in ${forceExitMs}ms):`, options);
         // Hard deadline, before the loader's own force-exit.
@@ -50821,19 +50044,19 @@ function setupExitHandlers() {
                 logger.error("Error stopping connection loop during shutdown:", error);
             }
             // Keep up to 3 s (at most half of what is left) for the teardown and analytics stop.
-            const flushReserveMs = (0,_tg_core_utils_shutdown_budget__WEBPACK_IMPORTED_MODULE_20__.halfOfRemaining)(deadlineAt, 3000);
+            const flushReserveMs = (0,_tg_core_utils_shutdown_budget__WEBPACK_IMPORTED_MODULE_19__.halfOfRemaining)(deadlineAt, 3000);
             const queueFlushMs = Math.max(0, Math.min(3000, deadlineAt - flushReserveMs - Date.now()));
             await Promise.all([
-                (0,_tg_core_utils_shutdown_budget__WEBPACK_IMPORTED_MODULE_20__.runShutdownStep)(logger, "durable queue flush", () => (0,_tg_core_state_durable_queue__WEBPACK_IMPORTED_MODULE_19__.shutdownDurableQueues)(queueFlushMs), deadlineAt, 3000, flushReserveMs),
-                (0,_tg_core_utils_shutdown_budget__WEBPACK_IMPORTED_MODULE_20__.runShutdownStep)(logger, "analytics pre-flush", () => (0,_tg_analytics__WEBPACK_IMPORTED_MODULE_18__.flushAnalytics)(), deadlineAt, 3000, flushReserveMs),
+                (0,_tg_core_utils_shutdown_budget__WEBPACK_IMPORTED_MODULE_19__.runShutdownStep)(logger, "durable queue flush", () => (0,_tg_core_state_durable_queue__WEBPACK_IMPORTED_MODULE_18__.shutdownDurableQueues)(queueFlushMs), deadlineAt, 3000, flushReserveMs),
+                (0,_tg_core_utils_shutdown_budget__WEBPACK_IMPORTED_MODULE_19__.runShutdownStep)(logger, "analytics pre-flush", () => (0,_tg_analytics__WEBPACK_IMPORTED_MODULE_17__.flushAnalytics)(), deadlineAt, 3000, flushReserveMs),
                 // Final 'stopping' heartbeat while Redis is still connected (bounded 1 s, never throws).
-                (0,_tg_core_utils_shutdown_budget__WEBPACK_IMPORTED_MODULE_20__.runShutdownStep)(logger, "heartbeat stop", () => (0,_monitoring_heartbeat__WEBPACK_IMPORTED_MODULE_21__.stopPromoteHeartbeat)(), deadlineAt, 1000, flushReserveMs),
+                (0,_tg_core_utils_shutdown_budget__WEBPACK_IMPORTED_MODULE_19__.runShutdownStep)(logger, "heartbeat stop", () => (0,_monitoring_heartbeat__WEBPACK_IMPORTED_MODULE_20__.stopPromoteHeartbeat)(), deadlineAt, 1000, flushReserveMs),
             ]);
             logger.info("State flushed (durable queues, analytics); tearing down Telegram");
-            await (0,_tg_core_utils_shutdown_budget__WEBPACK_IMPORTED_MODULE_20__.runShutdownStep)(logger, "Telegram teardown", () => teardown(options), deadlineAt, 3000, (0,_tg_core_utils_shutdown_budget__WEBPACK_IMPORTED_MODULE_20__.halfOfRemaining)(deadlineAt, 2000));
+            await (0,_tg_core_utils_shutdown_budget__WEBPACK_IMPORTED_MODULE_19__.runShutdownStep)(logger, "Telegram teardown", () => teardown(options), deadlineAt, 3000, (0,_tg_core_utils_shutdown_budget__WEBPACK_IMPORTED_MODULE_19__.halfOfRemaining)(deadlineAt, 2000));
             // Drain rows recorded since the pre-flush. If the force-exit cuts this short, the sink's
             // 'exit' hook spills whatever is still in memory to disk synchronously.
-            await (0,_tg_core_utils_shutdown_budget__WEBPACK_IMPORTED_MODULE_20__.runShutdownStep)(logger, "analytics stop", () => (0,_tg_analytics__WEBPACK_IMPORTED_MODULE_18__.shutdownAnalytics)(), deadlineAt, 3000, 300);
+            await (0,_tg_core_utils_shutdown_budget__WEBPACK_IMPORTED_MODULE_19__.runShutdownStep)(logger, "analytics stop", () => (0,_tg_analytics__WEBPACK_IMPORTED_MODULE_17__.shutdownAnalytics)(), deadlineAt, 3000, 300);
             clearTimeout(shutdownTimer);
             logger.info("✅ Graceful shutdown completed");
         }
@@ -50847,11 +50070,10 @@ function setupExitHandlers() {
     }
     async function teardown(options) {
         try {
-            // Stop the parked paths FIRST (review 7): no new pass or scrape may start while the app shuts down.
+            // Stop the parked responder FIRST (review 7): no new pass may start while the app shuts down.
             // A running pass ends at its next step; the lease expires by TTL if we exit first.
             _accounts_parked_responder__WEBPACK_IMPORTED_MODULE_11__.PromoteParkedResponder.getInstance().stop();
-            _accounts_inactive_mobile_scraper__WEBPACK_IMPORTED_MODULE_12__.InactiveMobileScraper.getInstance().stopHourlyScraping();
-            logger.info("🛑 Parked responder + inactive scraper stopped before graceful shutdown");
+            logger.info("🛑 Parked responder stopped before graceful shutdown");
             const appService = _bootstrap_app_service__WEBPACK_IMPORTED_MODULE_10__.AppService.getInstance();
             await appService.gracefulShutdown(`Exit handler: ${JSON.stringify(options)}`);
         }
@@ -50870,7 +50092,7 @@ function setupExitHandlers() {
                 logger.error("Error disconnecting Telegram clients:", err);
             }
             try {
-                await _tg_dialogs__WEBPACK_IMPORTED_MODULE_16__.DialogManager.cleanupAllInstances();
+                await _tg_dialogs__WEBPACK_IMPORTED_MODULE_15__.DialogManager.cleanupAllInstances();
             }
             catch (err) {
                 logger.error("Error closing DialogManager connection:", err);
@@ -52667,34 +51889,36 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   legacyScraperStatus: () => (/* binding */ legacyScraperStatus)
 /* harmony export */ });
 /* harmony import */ var _accounts_parked_responder__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../../accounts/parked-responder */ "./src/accounts/parked-responder.ts");
-/* harmony import */ var _accounts_inactive_mobile_scraper__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../../accounts/inactive-mobile-scraper */ "./src/accounts/inactive-mobile-scraper.ts");
-/* harmony import */ var _data_db__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../../data/db */ "./src/data/db.ts");
-/* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
-/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
-/* harmony import */ var _route_responses__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ./route-responses */ "./src/server/route-handlers/route-responses.ts");
+/* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _route_responses__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ./route-responses */ "./src/server/route-handlers/route-responses.ts");
 
 
 
 
-
-
-const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_4__.Logger("routes");
-async function activePath() {
-    const control = (0,_data_db__WEBPACK_IMPORTED_MODULE_2__.getRepositories)()?.parkedControl;
-    const clientId = (process.env.clientId || '').trim();
-    return control && (await control.isEnabled('promote', clientId)) ? 'parked' : 'scraper';
-}
-/** The legacy status shape (ops-gateway reads status.isRunning and status.lastRunAt) for the active path. */
-function legacyScraperStatus(path, responder, scraper) {
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_2__.Logger("routes");
+/*
+ * The inactive scraper fallback is removed (design 2026-11-05 P3 review fixes item 9, "Fallback removed"). The /inactive-scraper/*
+ * routes stay because ops-gateway (summaries.ts reads status.isRunning + status.lastRunAt) and dashboard-local
+ * call /inactive-scraper/status; every route now serves the parked responder: status = responder status,
+ * start/stop = responder scheduler, trigger = one responder tick (kill switch and every gate still apply, so with
+ * parkedControl off the tick returns 'disabled' and nothing connects).
+ */
+/** The legacy status shape (ops-gateway reads status.isRunning and status.lastRunAt), from the responder. */
+function legacyScraperStatus(responder) {
     const lastPassAt = responder.recent.length > 0 ? responder.recent[responder.recent.length - 1].at : responder.lastTickAt;
-    const active = path === 'parked'
-        ? { isRunning: responder.running, isScheduled: responder.started, lastRunAt: lastPassAt ? new Date(lastPassAt).toISOString() : null }
-        : { isRunning: scraper.isRunning, isScheduled: scraper.isScheduled, lastRunAt: scraper.lastRunAt };
-    return { path, ...active, parked: responder, scraper };
+    return {
+        path: 'parked',
+        enabled: responder.enabled,
+        isRunning: responder.running,
+        isScheduled: responder.started,
+        lastRunAt: lastPassAt ? new Date(lastPassAt).toISOString() : null,
+        parked: responder,
+    };
 }
 const handleInactiveScraperStatus = async (req, res) => {
     try {
-        const status = legacyScraperStatus(await activePath(), _accounts_parked_responder__WEBPACK_IMPORTED_MODULE_0__.PromoteParkedResponder.getInstance().getStatus(), _accounts_inactive_mobile_scraper__WEBPACK_IMPORTED_MODULE_1__.InactiveMobileScraper.getInstance().getStatus());
+        const status = legacyScraperStatus(_accounts_parked_responder__WEBPACK_IMPORTED_MODULE_0__.PromoteParkedResponder.getInstance().getStatus());
         logger.info('📊 /inactive-scraper/status - Status requested:', status);
         res.json({
             success: true,
@@ -52704,8 +51928,8 @@ const handleInactiveScraperStatus = async (req, res) => {
     }
     catch (error) {
         logger.error('❌ /inactive-scraper/status - Error:', error);
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "Error getting inactive scraper status");
-        (0,_route_responses__WEBPACK_IMPORTED_MODULE_5__.sendHealthRouteFailure)(req, res, error, {
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_1__.parseError)(error, "Error getting inactive scraper status");
+        (0,_route_responses__WEBPACK_IMPORTED_MODULE_3__.sendHealthRouteFailure)(req, res, error, {
             operation: "inactive-scraper-status",
             component: "service.health",
             owner: "system",
@@ -52718,7 +51942,6 @@ const handleInactiveScraperStatus = async (req, res) => {
 const handleInactiveScraperStart = async (req, res) => {
     try {
         _accounts_parked_responder__WEBPACK_IMPORTED_MODULE_0__.PromoteParkedResponder.getInstance().start();
-        _accounts_inactive_mobile_scraper__WEBPACK_IMPORTED_MODULE_1__.InactiveMobileScraper.getInstance().startHourlyScraping();
         logger.info('🚀 /inactive-scraper/start - Hourly scraping started');
         res.json({
             success: true,
@@ -52728,8 +51951,8 @@ const handleInactiveScraperStart = async (req, res) => {
     }
     catch (error) {
         logger.error('❌ /inactive-scraper/start - Error:', error);
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "Error starting inactive scraper");
-        (0,_route_responses__WEBPACK_IMPORTED_MODULE_5__.sendHealthRouteFailure)(req, res, error, {
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_1__.parseError)(error, "Error starting inactive scraper");
+        (0,_route_responses__WEBPACK_IMPORTED_MODULE_3__.sendHealthRouteFailure)(req, res, error, {
             operation: "inactive-scraper-start",
             component: "service.health",
             owner: "system",
@@ -52743,7 +51966,6 @@ const handleInactiveScraperStart = async (req, res) => {
 const handleInactiveScraperStop = async (req, res) => {
     try {
         _accounts_parked_responder__WEBPACK_IMPORTED_MODULE_0__.PromoteParkedResponder.getInstance().stop();
-        _accounts_inactive_mobile_scraper__WEBPACK_IMPORTED_MODULE_1__.InactiveMobileScraper.getInstance().stopHourlyScraping();
         logger.info('🛑 /inactive-scraper/stop - Hourly scraping stopped');
         res.json({
             success: true,
@@ -52753,8 +51975,8 @@ const handleInactiveScraperStop = async (req, res) => {
     }
     catch (error) {
         logger.error('❌ /inactive-scraper/stop - Error:', error);
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "Error stopping inactive scraper");
-        (0,_route_responses__WEBPACK_IMPORTED_MODULE_5__.sendHealthRouteFailure)(req, res, error, {
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_1__.parseError)(error, "Error stopping inactive scraper");
+        (0,_route_responses__WEBPACK_IMPORTED_MODULE_3__.sendHealthRouteFailure)(req, res, error, {
             operation: "inactive-scraper-stop",
             component: "service.health",
             owner: "system",
@@ -52767,12 +51989,8 @@ const handleInactiveScraperStop = async (req, res) => {
 };
 const handleInactiveScraperTrigger = async (req, res) => {
     try {
-        const path = await activePath();
-        if (path === 'parked')
-            await _accounts_parked_responder__WEBPACK_IMPORTED_MODULE_0__.PromoteParkedResponder.getInstance().triggerOnce();
-        else
-            await _accounts_inactive_mobile_scraper__WEBPACK_IMPORTED_MODULE_1__.InactiveMobileScraper.getInstance().triggerManualProcessing();
-        logger.info(`🔧 /inactive-scraper/trigger - Manual processing completed (${path})`);
+        const outcome = await _accounts_parked_responder__WEBPACK_IMPORTED_MODULE_0__.PromoteParkedResponder.getInstance().triggerOnce();
+        logger.info(`🔧 /inactive-scraper/trigger - Manual processing completed (parked: ${outcome})`);
         res.json({
             success: true,
             message: "Manual processing completed",
@@ -52781,8 +51999,8 @@ const handleInactiveScraperTrigger = async (req, res) => {
     }
     catch (error) {
         logger.error('❌ /inactive-scraper/trigger - Error:', error);
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "Error triggering manual processing");
-        (0,_route_responses__WEBPACK_IMPORTED_MODULE_5__.sendHealthRouteFailure)(req, res, error, {
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_1__.parseError)(error, "Error triggering manual processing");
+        (0,_route_responses__WEBPACK_IMPORTED_MODULE_3__.sendHealthRouteFailure)(req, res, error, {
             operation: "inactive-scraper-trigger",
             component: "service.health",
             owner: "system",
@@ -52799,8 +52017,8 @@ const handleParkedStatus = async (req, res) => {
         res.json({ success: true, status, timestamp: new Date().toISOString() });
     }
     catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "Error getting parked responder status");
-        (0,_route_responses__WEBPACK_IMPORTED_MODULE_5__.sendHealthRouteFailure)(req, res, error, {
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_1__.parseError)(error, "Error getting parked responder status");
+        (0,_route_responses__WEBPACK_IMPORTED_MODULE_3__.sendHealthRouteFailure)(req, res, error, {
             operation: "parked-status",
             component: "service.health",
             owner: "system",
@@ -53604,10 +52822,10 @@ __webpack_require__.r(__webpack_exports__);
  *
  * Inactive Mobile Scraper APIs:
  * - GET  /parked/status            - Parked responder: kill switch, open episodes, last 20 passes (masked)
- * - GET  /inactive-scraper/status   - Status of the active path (parked responder or fallback scraper)
- * - POST /inactive-scraper/start    - Start both schedulers (each still obeys parkedControl)
- * - POST /inactive-scraper/stop     - Stop both schedulers
- * - POST /inactive-scraper/trigger  - Run the active path once (kill switch applies)
+ * - GET  /inactive-scraper/status   - Parked responder status in the legacy shape (scraper fallback removed)
+ * - POST /inactive-scraper/start    - Start the parked responder scheduler (still obeys parkedControl)
+ * - POST /inactive-scraper/stop     - Stop the parked responder scheduler
+ * - POST /inactive-scraper/trigger  - One parked responder tick (kill switch applies)
  *
  * Original APIs:
  * - GET  /getstats           - Daily statistics (legacy)
@@ -53653,7 +52871,7 @@ function configureRoutes(app) {
     app.post('/memory/cleanup', _route_handlers_maintenance_handlers__WEBPACK_IMPORTED_MODULE_4__.handleMemoryCleanup);
     app.post('/resources/optimize', _route_handlers_maintenance_handlers__WEBPACK_IMPORTED_MODULE_4__.handleResourcesOptimize);
     app.get('/debug/timers', _route_handlers_maintenance_handlers__WEBPACK_IMPORTED_MODULE_4__.handleDebugTimers);
-    // Parked responder (P3). /inactive-scraper/* serve whichever path is active (scraper = fallback, review 9).
+    // Parked responder (P3). /inactive-scraper/* are kept as aliases onto the responder (scraper fallback removed).
     app.get('/parked/status', _route_handlers_inactive_scraper_handlers__WEBPACK_IMPORTED_MODULE_5__.handleParkedStatus);
     app.get('/inactive-scraper/status', _route_handlers_inactive_scraper_handlers__WEBPACK_IMPORTED_MODULE_5__.handleInactiveScraperStatus);
     app.post('/inactive-scraper/start', _route_handlers_inactive_scraper_handlers__WEBPACK_IMPORTED_MODULE_5__.handleInactiveScraperStart);
