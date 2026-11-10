@@ -52799,6 +52799,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   coerceConfidence: () => (/* binding */ coerceConfidence),
 /* harmony export */   normalizeAuthenticity: () => (/* binding */ normalizeAuthenticity),
 /* harmony export */   normalizeWire: () => (/* binding */ normalizeWire),
+/* harmony export */   repairDroppedDigitUtr: () => (/* binding */ repairDroppedDigitUtr),
 /* harmony export */   validateWire: () => (/* binding */ validateWire)
 /* harmony export */ });
 /* harmony import */ var _rules_amount__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../rules/amount */ "../../packages/tg-vision/src/rules/amount.ts");
@@ -52903,6 +52904,30 @@ function normalizeAuthenticity(w) {
     const fakeScore = score ?? VERDICT_DEFAULT_SCORE[verdict];
     return { fakeScore, verdict: verdict ?? verdictFromScore(fakeScore), signals, evidence };
 }
+/** A 12-digit number printed after a UTR / UPI ref / "UPI transaction ID" label in OCR text. */
+const LABELLED_UTR12 = /\b(?:utr|upi\s*ref(?:erence)?\.?(?:\s*(?:no|number|id))?|upi\s*transaction\s*id)\b\.?\s*(?:no\.?|number)?\s*[:#-]?\s*(\d{12})(?!\d)/gi;
+/**
+ * Fix B (owner 2026-11-10): the model dropped one digit of a printed 12-digit UTR (meghana2 6809433050 read
+ * 01813797394 off "UTR: 018137973934"; arpitha2 5335506100 read 66806156006 off "UTR 668061516006"), so the gate held a
+ * genuine receipt as IMPOSSIBLE_REFERENCE. When the model's reference is 11 digits and the OCR text prints exactly ONE
+ * distinct labelled 12-digit UTR from which deleting one digit gives it, the OCR number is the reference. Anything else
+ * (no labelled number, two of them, not a one-digit deletion, 10 or 13+ digits) keeps the model's read unchanged.
+ */
+function repairDroppedDigitUtr(utr, ocrText) {
+    if (utr === null || typeof ocrText !== 'string' || !ocrText)
+        return utr;
+    const digits = utr.replace(/[\s\-.:]/g, '');
+    if (!/^\d{11}$/.test(digits))
+        return utr;
+    const found = [...new Set([...ocrText.matchAll(LABELLED_UTR12)].map((m) => m[1]))];
+    if (found.length !== 1)
+        return utr;
+    const full = found[0];
+    for (let i = 0; i < full.length; i++)
+        if (full.slice(0, i) + full.slice(i + 1) === digits)
+            return full;
+    return utr;
+}
 /** Build the typed extraction. Call validateWire first; this function is total and never throws on a bad shape. */
 function normalizeWire(raw, ctx) {
     const v2 = ctx.v2 ?? _rules_v2__WEBPACK_IMPORTED_MODULE_4__.NO_RULES;
@@ -52940,6 +52965,10 @@ function normalizeWire(raw, ctx) {
         const s = str(value);
         return s && s.toLowerCase() !== appKey ? s : null;
     };
+    const readUtr = str(w.utr);
+    const utr = repairDroppedDigitUtr(readUtr, ctx.ocrText);
+    if (utr !== readUtr)
+        rulesApplied.push('UTR_OCR_DIGIT');
     const confidence = coerceConfidence(w.confidence);
     const extraction = {
         isPayment: bool(w.isPayment),
@@ -52950,7 +52979,7 @@ function normalizeWire(raw, ctx) {
         payeeName: name(w.payeeName),
         payeeUpiId: str(w.payeeUpiId),
         payerName: name(w.payerName),
-        utr: str(w.utr),
+        utr,
         app,
         note: str(w.note),
         fullText,
@@ -55545,7 +55574,8 @@ __webpack_require__.r(__webpack_exports__);
 //  - Always on (not V2-gated): R57 a printed "12 October 2026 at 11:55 PM" next to transaction words is not vetoed by a status bar
 //    ("5G", "45%") within 50 chars: on short receipts the phone's status bar always sits that close, so
 //    the model's misread time stood (meghana1 2026-10-12: text 11:55 PM, model 13:55 -> "Old payment").
-//  - R58: a history screen's "2 minutes ago" / "just now" is a context time (most recent entry wins).
+//  - R58: a history screen's "2 minutes ago" / "just now" is a context time (most recent entry wins). Such a time, and
+//    a bare "yesterday" / "N days ago", carries `relative: true` (no printed clock: the re-send rule does not match on it).
 
 
 const IST_OFFSET_MS = 330 * 60 * 1000;
@@ -55706,7 +55736,7 @@ function relativeFromText(text, nowMs) {
     }
     if (agoMs !== null) {
         const p = istParts(nowMs - agoMs);
-        return { date: { y: p.y, mo: p.mo, d: p.d }, clock: { h: p.h, mi: p.mi, s: 0 } };
+        return { date: { y: p.y, mo: p.mo, d: p.d }, clock: { h: p.h, mi: p.mi, s: 0 }, relative: true };
     }
     if (/\btoday\b/.test(t))
         return null;
@@ -55749,7 +55779,7 @@ function relativeFromText(text, nowMs) {
         if (isValidHms(h, mi, 0))
             return { date, clock: { h, mi, s: 0 }, relativeDays: true };
     }
-    return { date, clock: null, relativeDays: true, ...(yesterday ? { modelClockOk: true } : {}) };
+    return { date, clock: null, relativeDays: true, relative: true, ...(yesterday ? { modelClockOk: true } : {}) };
 }
 /** Manual (host-TZ independent) parse of a model-supplied time string. Zone-carrying ISO strings are converted to IST. */
 function parseTimeString(raw, nowMs) {
@@ -55888,6 +55918,8 @@ function resolveVisionTime(input, contextText, nowMs, v2 = _v2__WEBPACK_IMPORTED
     let date;
     let clock;
     let source;
+    // Fix A 2026-11-10: a moment made of "x min ago", "just now" or a bare day word, resolved against an arrival.
+    let relative = false;
     if (ctx) {
         const rel = ctx;
         date = ctx.date;
@@ -55895,6 +55927,7 @@ function resolveVisionTime(input, contextText, nowMs, v2 = _v2__WEBPACK_IMPORTED
         clock = ctx.clock ?? (rel.relativeDays ? (rel.modelClockOk && modelClock) || { h: 0, mi: 0, s: 0 } : modelClock);
         source = 'ocr_text';
         yearInferred = false;
+        relative = ctx.relative === true;
     }
     else {
         date = modelDate;
@@ -55927,11 +55960,11 @@ function resolveVisionTime(input, contextText, nowMs, v2 = _v2__WEBPACK_IMPORTED
         return {
             state: 'known', date: fmtDate(date), clock: fmtClock(clock),
             epochMs: istEpochMs(date.y, date.mo, date.d, clock.h, clock.mi, clock.s),
-            raw, source, yearInferred,
+            raw, source, yearInferred, ...(relative ? { relative: true } : {}),
         };
     }
     if (date) {
-        return { state: 'date_only', date: fmtDate(date), clock: null, epochMs: null, raw, source, yearInferred };
+        return { state: 'date_only', date: fmtDate(date), clock: null, epochMs: null, raw, source, yearInferred, ...(relative ? { relative: true } : {}) };
     }
     if (clock) {
         return { state: 'clock_only', date: null, clock: fmtClock(clock), epochMs: null, raw, source: source ?? 'model', yearInferred: false };
@@ -58730,8 +58763,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "77d7754cf102b29cc5a1f31a1b014c1f2223b873" : 0;
-    const builtAt =  true ? "2026-11-10T03:20:31.391Z" : 0;
+    const sha =  true ? "c53803a1edcc248fa624d1bcf196c6d451e250cd" : 0;
+    const builtAt =  true ? "2026-11-10T04:00:37.675Z" : 0;
     return { sha, builtAt };
 }
 
@@ -85358,6 +85391,7 @@ async function runFraudBlock(client, chatId, args) {
     }
 }
 function screenshotRef(event, chatId, photoBuffer, imageDetails, paymentMs) {
+    const vision = (0,_payments_vision_shadow__WEBPACK_IMPORTED_MODULE_15__.proofVisionOf)(imageDetails);
     return {
         chatId,
         msgId: Number(event.message.id) || 0,
@@ -85366,6 +85400,9 @@ function screenshotRef(event, chatId, photoBuffer, imageDetails, paymentMs) {
         photo: photoBuffer,
         details: imageDetails,
         paymentMs,
+        // The re-send rule (resend.ts relativeTime): a time made from "1 min ago" is not a printed time.
+        ...(vision?.timeRelative ? { timeRelative: true } : {}),
+        ...(vision?.ocrText ? { ocrText: vision.ocrText } : {}),
     };
 }
 /** Payment moment as printed (no AM/PM correction): used where the time check did not run. */
@@ -99874,7 +99911,9 @@ class ProofRecord {
             ...(i.details.payeeUpiId ? { payeeUpiId: i.details.payeeUpiId } : {}),
             ...(i.details.payeeName ? { payeeName: i.details.payeeName } : {}),
             amount: Number.isFinite(amount) ? amount : 0,
-            time: paymentMs !== null && Number.isFinite(paymentMs) ? { state: 'known', epochMs: paymentMs } : { state: 'unknown' },
+            time: paymentMs !== null && Number.isFinite(paymentMs)
+                ? { state: 'known', epochMs: paymentMs, ...(i.vision?.timeRelative ? { relative: true } : {}) }
+                : { state: 'unknown' },
             ...(ocr.app ? { app: ocr.app } : {}),
             decision: 'ACCEPT', reasons: [], mode: 'record', provider: 'tg-aut', source: 'local',
             imageSha256: image.sha256,
@@ -102155,6 +102194,8 @@ function gateFacts(ref) {
         payeeUpiId: ref.details.payeeUpiId ?? null,
         payeeName: ref.details.payeeName || null,
         txnId: (0,_proof_archive_verdict__WEBPACK_IMPORTED_MODULE_5__.txnIdOf)(ref.details.text) ?? null,
+        ...(ref.timeRelative ? { timeRelative: true } : {}),
+        timeText: [ref.ocrText, ref.details.text].filter(Boolean).join('\n'),
     };
 }
 class PaymentFlow {
@@ -102771,7 +102812,7 @@ class ProofGate {
             ...(extra.payeeUpiId ? { payeeUpiId: extra.payeeUpiId } : {}),
             ...(extra.payeeName ? { payeeName: extra.payeeName } : {}),
             amount: facts.amount,
-            time: facts.timeMs !== null ? { state: 'known', epochMs: facts.timeMs } : { state: 'unknown' },
+            time: facts.timeMs !== null ? { state: 'known', epochMs: facts.timeMs, ...(facts.timeRelative ? { relative: true } : {}) } : { state: 'unknown' },
             // Outcome lives in `ask` / `servedAt`; `decision` is the schema's required field (ACCEPT = not rejected here).
             decision: 'ACCEPT', reasons: [], mode: 'enforce', provider: 'tg-aut', source: 'local',
             imageSha256: facts.sha256, ...(facts.dHash ? { imageHash: facts.dHash } : {}),
@@ -102932,6 +102973,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   RESEND_LOOKBACK_MS: () => (/* binding */ RESEND_LOOKBACK_MS),
 /* harmony export */   decideResend: () => (/* binding */ decideResend),
 /* harmony export */   foldReference: () => (/* binding */ foldReference),
+/* harmony export */   relativeTime: () => (/* binding */ relativeTime),
 /* harmony export */   repeatBy: () => (/* binding */ repeatBy),
 /* harmony export */   resendPair: () => (/* binding */ resendPair),
 /* harmony export */   resendReference: () => (/* binding */ resendReference),
@@ -102961,6 +103003,11 @@ __webpack_require__.r(__webpack_exports__);
  * servedMin claim keys stay behind it. Stored payment times are already the time check's (AM/PM / midnight corrected:
  * signals.ts futurePaymentTimeReasons / amPmFlipConfirmed, payment-time.ts), so the 12 h / 24 h step is the only
  * tolerance here. Analysis: docs/PAYMENT-SCREENSHOT-FLOW.md "Re-send or new payment".
+ *
+ * Fix A (owner 2026-11-10, meghana2 6809433050 ₹100): a time made from relative text ("1 min ago", "just now", a bare
+ * "yesterday" / "2 days ago") is not a printed time here, on either side (relativeTime): steps 4 and 5 skip it and the
+ * case falls to step 6 (ask). Live: a PhonePe "My Statements" list ("Paid to … ₹100, 1 min ago") was credited with
+ * 11:33 made from "1 min ago"; the original 11:31:44 receipt then compared 11:31 with 11:33 -> "other gap" -> new.
  */
 
 const MINUTE_MS = 60000;
@@ -103018,6 +103065,29 @@ function sameFormatDifferent(a, b) {
         }
     return false;
 }
+/** Relative time words a history / statement list prints instead of a clock. */
+const RELATIVE_WORDS = /\bjust now\b|\b\d{1,3}\s*(?:min|mins|minute|minutes|hr|hrs|hour|hours)\s+ago\b|\b(?:\d{1,2}|a|one)\s*days?\s+ago\b|\byesterday\b|\btoday\b/i;
+/** The IST clock of `ms` printed in `text`, as 12 h ("11:33 AM", "11.33") or 24 h ("23:33"). */
+function clockPrinted(text, ms) {
+    const d = new Date(ms + 330 * MINUTE_MS);
+    const h = d.getUTCHours();
+    const mm = String(d.getUTCMinutes()).padStart(2, '0');
+    const h12 = h % 12 === 0 ? 12 : h % 12;
+    const hours = [...new Set([String(h), String(h).padStart(2, '0'), String(h12), String(h12).padStart(2, '0')])].join('|');
+    return new RegExp(`(?:^|[^0-9])(?:${hours})[:.]${mm}(?![0-9])`).test(text);
+}
+/**
+ * Fix A: the time was made from relative text, not read off a printed clock. `flag` = VisionTime.relative (stored as
+ * time.relative since 2026-11-10). Without it (rows stored before, a reused vision result) the text decides: relative
+ * words ("1 min ago", "just now", "N days ago", "yesterday", "today") and the time's own clock printed nowhere.
+ */
+function relativeTime(flag, text, timeMs) {
+    if (flag === true)
+        return true;
+    if (timeMs === null || typeof text !== 'string' || !RELATIVE_WORDS.test(text))
+        return false;
+    return !clockPrinted(text, timeMs);
+}
 /** One later screenshot against one earlier credit of the same amount: the first step that applies. */
 function resendPair(later, earlier) {
     if (later.sha256 && later.sha256 === earlier.sha256)
@@ -103052,10 +103122,12 @@ function rowMs(v) {
     return v instanceof Date ? v.getTime() : typeof v === 'string' || typeof v === 'number' ? new Date(v).getTime() : NaN;
 }
 function sideOfRow(row) {
+    const timeMs = row.time?.state === 'known' && typeof row.time.epochMs === 'number' ? row.time.epochMs : null;
+    const text = [row.ocr?.precheckText, row.ocr?.text].filter(Boolean).join('\n');
     return {
         sha256: row.imageSha256 ?? null,
         refs: [row.utr, row.servedUtr, row.ocr?.txnId],
-        timeMs: row.time?.state === 'known' && typeof row.time.epochMs === 'number' ? row.time.epochMs : null,
+        timeMs: relativeTime(row.time?.relative, text, timeMs) ? null : timeMs,
         arrivalMs: rowMs(row.createdAt),
         payeeUpiId: row.payeeUpiId ?? null,
         payeeName: row.payeeName ?? null,
@@ -103065,7 +103137,7 @@ function sideOfFacts(facts, arrivalMs) {
     return {
         sha256: facts.sha256,
         refs: [facts.utr, facts.txnId],
-        timeMs: facts.timeMs,
+        timeMs: relativeTime(facts.timeRelative, facts.timeText, facts.timeMs) ? null : facts.timeMs,
         arrivalMs,
         payeeUpiId: facts.payeeUpiId ?? null,
         payeeName: facts.payeeName ?? null,
@@ -105178,6 +105250,7 @@ function rememberProofVision(details, vision) {
             model: e?.model ?? null,
             confidence: typeof e?.confidence === 'number' ? e.confidence : null,
             timeRaw: e?.time?.raw ?? null,
+            ...(e?.time?.relative === true ? { timeRelative: true } : {}),
             fakeScore: typeof auth?.fakeScore === 'number' ? auth.fakeScore : null,
             fakeSignals: Array.isArray(auth?.signals) ? [...auth.signals] : [],
         });
