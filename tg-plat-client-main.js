@@ -36259,7 +36259,7 @@ class AccountLeasesRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_
     }
     /**
      * The live holder of `mobile` when its lease is unexpired by the SERVER clock, else null. Throws on a
-     * store error (the inactive scraper fails closed: skip the mobile).
+     * store error (callers fail closed: no connect).
      */
     async liveHolder(mobile) {
         return this.guardStrict(`liveHolder(${mobile})`, async () => {
@@ -47569,9 +47569,8 @@ class ParkedResponder {
         const ep = await stores.episodes.claimDue(adapter.app, adapter.clientId, this.deps.owner, _constants__WEBPACK_IMPORTED_MODULE_0__.RUNNER_CLAIM_MS);
         if (!ep)
             return 'idle';
-        // Re-review 2 (S4): busy only around the pass. Flag first, then re-check ready() synchronously: a fallback
-        // scraper run that started during discovery / claim makes this not ready, and one starting from now on
-        // sees passRunning (both sides set their own flag before reading the other's).
+        // Re-review 2 (S4): busy only around the pass. Flag first, then re-check ready() synchronously (the app may
+        // have become not ready during discovery / claim).
         this.passInFlight = true;
         let result;
         try {
@@ -58731,8 +58730,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "cecdadf56244e8167ac2e0ace3b35b75486a4f1a" : 0;
-    const builtAt =  true ? "2026-11-09T17:53:57.222Z" : 0;
+    const sha =  true ? "77d7754cf102b29cc5a1f31a1b014c1f2223b873" : 0;
+    const builtAt =  true ? "2026-11-10T03:20:31.391Z" : 0;
     return { sha, builtAt };
 }
 
