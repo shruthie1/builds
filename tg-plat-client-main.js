@@ -22508,7 +22508,6 @@ function extractRealOrigin(request) {
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   ACTIVE_CHANNEL_BOOLEAN_FIELDS: () => (/* reexport safe */ _types_activeChannel__WEBPACK_IMPORTED_MODULE_25__.ACTIVE_CHANNEL_BOOLEAN_FIELDS),
-/* harmony export */   ACTIVE_CHANNEL_LEGACY_PERMISSION_FIELDS: () => (/* reexport safe */ _types_activeChannel__WEBPACK_IMPORTED_MODULE_25__.ACTIVE_CHANNEL_LEGACY_PERMISSION_FIELDS),
 /* harmony export */   ACTIVE_CHANNEL_WRITABLE_KEYS: () => (/* reexport safe */ _types_activeChannel__WEBPACK_IMPORTED_MODULE_25__.ACTIVE_CHANNEL_WRITABLE_KEYS),
 /* harmony export */   BotConfig: () => (/* reexport safe */ _utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_6__.BotConfig),
 /* harmony export */   ChannelCategory: () => (/* reexport safe */ _utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_6__.ChannelCategory),
@@ -26084,7 +26083,6 @@ async function runManualSpamBotProbe(mobile, client) {
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   ACTIVE_CHANNEL_BOOLEAN_FIELDS: () => (/* binding */ ACTIVE_CHANNEL_BOOLEAN_FIELDS),
-/* harmony export */   ACTIVE_CHANNEL_LEGACY_PERMISSION_FIELDS: () => (/* binding */ ACTIVE_CHANNEL_LEGACY_PERMISSION_FIELDS),
 /* harmony export */   ACTIVE_CHANNEL_WRITABLE_KEYS: () => (/* binding */ ACTIVE_CHANNEL_WRITABLE_KEYS),
 /* harmony export */   activeChannelCanSendUpdateExpression: () => (/* binding */ activeChannelCanSendUpdateExpression),
 /* harmony export */   activeChannelHydrationReasonUpdateExpression: () => (/* binding */ activeChannelHydrationReasonUpdateExpression),
@@ -26109,17 +26107,6 @@ const ACTIVE_CHANNEL_WRITABLE_KEYS = [
     'accessHash', 'bannedAt', 'reactRestrictedAt',
     'createdAt', 'updatedAt', 'lastHydratedAt', 'lastLiveCheckedAt',
     'lastHydrationStatus', 'lastHydrationReason', 'participantsCountCheckedAt',
-];
-/**
- * Legacy Telegram permission snapshots that used to be persisted independently.
- * They are observation-only inputs and must never be written by runtime code.
- * Remove existing copies with the explicit, one-time schema migration; normal
- * reads and writes intentionally leave old documents untouched.
- */
-const ACTIVE_CHANNEL_LEGACY_PERMISSION_FIELDS = [
-    'restricted',
-    'sendMessages',
-    'sendPlain',
 ];
 const WRITABLE_KEY_SET = new Set(ACTIVE_CHANNEL_WRITABLE_KEYS);
 /**
@@ -39621,7 +39608,6 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   REPLY_FAILURES_CLIENT_INDEX: () => (/* binding */ REPLY_FAILURES_CLIENT_INDEX),
 /* harmony export */   REPLY_FAILURES_TTL_INDEX: () => (/* binding */ REPLY_FAILURES_TTL_INDEX),
 /* harmony export */   REPLY_FAILURES_TTL_SECONDS: () => (/* binding */ REPLY_FAILURES_TTL_SECONDS),
-/* harmony export */   REPLY_FAILURE_TEXT_MAX: () => (/* binding */ REPLY_FAILURE_TEXT_MAX),
 /* harmony export */   ReplyFailuresRepository: () => (/* binding */ ReplyFailuresRepository)
 /* harmony export */ });
 /* harmony import */ var _base_repository__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../base-repository */ "../../packages/tg-db/src/base-repository.ts");
@@ -39637,8 +39623,6 @@ __webpack_require__.r(__webpack_exports__);
 const REPLY_FAILURES_TTL_SECONDS = 14 * 24 * 60 * 60;
 const REPLY_FAILURES_TTL_INDEX = 'ts_ttl';
 const REPLY_FAILURES_CLIENT_INDEX = 'clientId_ts';
-/** Longest stored text (characters). */
-const REPLY_FAILURE_TEXT_MAX = 300;
 class ReplyFailuresRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_0__.BaseRepository {
     constructor() {
         super(...arguments);
@@ -40659,7 +40643,6 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   REPLY_FAILURES_CLIENT_INDEX: () => (/* reexport safe */ _collections_reply_failures_repository__WEBPACK_IMPORTED_MODULE_10__.REPLY_FAILURES_CLIENT_INDEX),
 /* harmony export */   REPLY_FAILURES_TTL_INDEX: () => (/* reexport safe */ _collections_reply_failures_repository__WEBPACK_IMPORTED_MODULE_10__.REPLY_FAILURES_TTL_INDEX),
 /* harmony export */   REPLY_FAILURES_TTL_SECONDS: () => (/* reexport safe */ _collections_reply_failures_repository__WEBPACK_IMPORTED_MODULE_10__.REPLY_FAILURES_TTL_SECONDS),
-/* harmony export */   REPLY_FAILURE_TEXT_MAX: () => (/* reexport safe */ _collections_reply_failures_repository__WEBPACK_IMPORTED_MODULE_10__.REPLY_FAILURE_TEXT_MAX),
 /* harmony export */   ReplyFailuresRepository: () => (/* reexport safe */ _collections_reply_failures_repository__WEBPACK_IMPORTED_MODULE_10__.ReplyFailuresRepository),
 /* harmony export */   RepositoryContainer: () => (/* reexport safe */ _repositories__WEBPACK_IMPORTED_MODULE_18__.RepositoryContainer),
 /* harmony export */   StatsRepository: () => (/* reexport safe */ _collections_stats_repository__WEBPACK_IMPORTED_MODULE_9__.StatsRepository),
@@ -44337,14 +44320,8 @@ class EventScheduler {
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
-/* harmony export */   EventStore: () => (/* binding */ EventStore),
-/* harmony export */   eventCollectionFrom: () => (/* binding */ eventCollectionFrom)
+/* harmony export */   EventStore: () => (/* binding */ EventStore)
 /* harmony export */ });
-/* harmony import */ var _event_schema__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./event.schema */ "../../packages/tg-events/src/event.schema.ts");
-
-function eventCollectionFrom(client) {
-    return client.db(_event_schema__WEBPACK_IMPORTED_MODULE_0__.EVENTS_DB).collection(_event_schema__WEBPACK_IMPORTED_MODULE_0__.EVENTS_COLLECTION);
-}
 /**
  * The sole owner of the `events` collection. It deliberately does NOT live in @tg/db.
  *
@@ -44566,7 +44543,6 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildPostInHouseFailureLadder: () => (/* reexport safe */ _event_ladders__WEBPACK_IMPORTED_MODULE_3__.buildPostInHouseFailureLadder),
 /* harmony export */   classifyError: () => (/* reexport safe */ _executor_types__WEBPACK_IMPORTED_MODULE_1__.classifyError),
 /* harmony export */   decideEventAction: () => (/* reexport safe */ _executor_types__WEBPACK_IMPORTED_MODULE_1__.decideEventAction),
-/* harmony export */   eventCollectionFrom: () => (/* reexport safe */ _event_store__WEBPACK_IMPORTED_MODULE_2__.eventCollectionFrom),
 /* harmony export */   isBadTargetError: () => (/* reexport safe */ _executor_types__WEBPACK_IMPORTED_MODULE_1__.isBadTargetError),
 /* harmony export */   isFloodError: () => (/* reexport safe */ _executor_types__WEBPACK_IMPORTED_MODULE_1__.isFloodError),
 /* harmony export */   isRpcError: () => (/* reexport safe */ _executor_types__WEBPACK_IMPORTED_MODULE_1__.isRpcError),
@@ -58763,8 +58739,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "c53803a1edcc248fa624d1bcf196c6d451e250cd" : 0;
-    const builtAt =  true ? "2026-11-10T04:00:37.675Z" : 0;
+    const sha =  true ? "f203946cf67985eb2cc72dbb2b143d5bd0931a35" : 0;
+    const builtAt =  true ? "2026-11-11T06:47:52.925Z" : 0;
     return { sha, builtAt };
 }
 
@@ -71237,7 +71213,6 @@ function getMsgstats() {
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   callDeclinedMessages: () => (/* binding */ callDeclinedMessages),
-/* harmony export */   callDroppedMessages: () => (/* binding */ callDroppedMessages),
 /* harmony export */   callMediaFailedMessages: () => (/* binding */ callMediaFailedMessages),
 /* harmony export */   callNotEligibleMessages: () => (/* binding */ callNotEligibleMessages),
 /* harmony export */   callPayAgainMessage: () => (/* binding */ callPayAgainMessage),
@@ -71245,7 +71220,6 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   callPrivacyBlockedMessages: () => (/* binding */ callPrivacyBlockedMessages),
 /* harmony export */   callPrivacyMessage: () => (/* binding */ callPrivacyMessage),
 /* harmony export */   callStatusMessage: () => (/* binding */ callStatusMessage),
-/* harmony export */   callUserEndedMessages: () => (/* binding */ callUserEndedMessages),
 /* harmony export */   callWaitMessages: () => (/* binding */ callWaitMessages),
 /* harmony export */   inHouseRecallMessages: () => (/* binding */ inHouseRecallMessages),
 /* harmony export */   pickVariation: () => (/* binding */ pickVariation),
@@ -71349,19 +71323,6 @@ const callNotEligibleMessages = [
     `Almost there baby 😘\n\nJust **complete the payment**\n\nAnd I'll call you\nright away`,
     `I'm ready for you 🔥\n\nBut **pay for the show** first na..\n\nThen I'll call`,
     `Baby your last show is done 🙈\n\n**Pay again**\n\nAnd I'll give you more`,
-];
-/** The user hung up the show early: we call back in a few minutes and resume. */
-const callUserEndedMessages = [
-    `Why did you cut the call baby? 🥺\n\nI'll **call you again**\nin a minute..\n\nPick up na\nWe'll continue 😘`,
-    `Arey you cut it in the middle 🙈\n\nI'll call you back soon..\n\n**Show is still pending**\nfor you`,
-    `Baby come back 🥺\n\nI'll **call you again** in a bit\n\nI'll start from\nwhere it stopped`,
-    `You left so soon? 😏\n\nI'll call you back baby..\n\n**Pick up** this time 💋`,
-];
-/** The show was cut by the network: we call back shortly and resume. */
-const callDroppedMessages = [
-    `Call got cut baby 😩\n\n**Calling you back** now..\n\nI'll continue\nfrom where we stopped 😘`,
-    `Network cut the call yaar 🥺\n\nI'm **calling you again**\n\nSame place\nDon't worry`,
-    `Uff call dropped 🙈\n\n**Pick up** baby\nI'm calling you back..\n\nYour show is still pending`,
 ];
 /** The user answered but the video never started (old or desktop Telegram, media failure). */
 const callMediaFailedMessages = [
@@ -72870,7 +72831,6 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   extractDurationMinutes: () => (/* binding */ extractDurationMinutes),
 /* harmony export */   firstAmountFromText: () => (/* binding */ firstAmountFromText),
 /* harmony export */   firstNumberFromText: () => (/* binding */ firstNumberFromText),
-/* harmony export */   hasDurationMention: () => (/* binding */ hasDurationMention),
 /* harmony export */   hasMinuteUnit: () => (/* binding */ hasMinuteUnit),
 /* harmony export */   isPayAmountMessage: () => (/* binding */ isPayAmountMessage),
 /* harmony export */   numberMentions: () => (/* binding */ numberMentions),
@@ -72960,10 +72920,6 @@ function isPayAmountMessage(text) {
 function extractDurationMinutes(text) {
     const first = numberMentions(text).find((mention) => mention.kind === 'duration');
     return first?.minutes ?? -1;
-}
-/** The text names a duration ("4 minutes", "6 min baki"). */
-function hasDurationMention(text) {
-    return numberMentions(text).some((mention) => mention.kind === 'duration');
 }
 /**
  * The amount a "<amount> with face/pic ok?" offer names: never a duration or a pic/video count; a ₹/rs-marked number
@@ -108293,8 +108249,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   mergePieces: () => (/* binding */ mergePieces),
 /* harmony export */   newestAnsweredSource: () => (/* binding */ newestAnsweredSource),
 /* harmony export */   noteQueuedSource: () => (/* binding */ noteQueuedSource),
-/* harmony export */   piecesOf: () => (/* binding */ piecesOf),
-/* harmony export */   resetAnsweredSources: () => (/* binding */ resetAnsweredSources)
+/* harmony export */   piecesOf: () => (/* binding */ piecesOf)
 /* harmony export */ });
 /* harmony import */ var _outbound_chat_voice__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../outbound/chat-voice */ "./src/outbound/chat-voice.ts");
 /* harmony import */ var _outbound_outbound_log__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../outbound/outbound-log */ "./src/outbound/outbound-log.ts");
@@ -108406,9 +108361,6 @@ function noteQueuedSource(chatId, src) {
 /** The newest user message id a reply was queued for (this process). */
 function newestAnsweredSource(chatId) {
     return answeredSources.get(String(chatId));
-}
-function resetAnsweredSources() {
-    answeredSources.clear();
 }
 /** How long a filler for an older message waits for the newer message's own reply: inbound batching (5 s existing / 8 s new chat) + handler. Live 10-27/28 ([INBOUND] ms, text, n=43,084): p50 8.5 s, p90 13.8 s, p99 15.2 s, 1.3% over 15 s, 0.15% over 20 s (was 12 s: 20% over). */
 const WAIT_FOR_NEWER_REPLY_MS = 20000;
