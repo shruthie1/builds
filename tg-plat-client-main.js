@@ -58739,8 +58739,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "f203946cf67985eb2cc72dbb2b143d5bd0931a35" : 0;
-    const builtAt =  true ? "2026-11-11T06:47:52.925Z" : 0;
+    const sha =  true ? "656f6494e37fb99afe8d2b23136fa440077af7b3" : 0;
+    const builtAt =  true ? "2026-11-11T08:06:22.484Z" : 0;
     return { sha, builtAt };
 }
 
@@ -95568,11 +95568,8 @@ const commonPatterns = [
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
-/* harmony export */   comeWords: () => (/* binding */ comeWords),
-/* harmony export */   doWords: () => (/* binding */ doWords),
 /* harmony export */   giveWords: () => (/* binding */ giveWords),
 /* harmony export */   karWords: () => (/* binding */ karWords),
-/* harmony export */   letWords: () => (/* binding */ letWords),
 /* harmony export */   openRemoveWords: () => (/* binding */ openRemoveWords),
 /* harmony export */   startWords: () => (/* binding */ startWords),
 /* harmony export */   touchWords: () => (/* binding */ touchWords)
@@ -95584,13 +95581,6 @@ __webpack_require__.r(__webpack_exports__);
  * Do, kar, give, start, let, come, open/remove, touch patterns
  */
 
-// ===== DO/ACTION VARIATIONS =====
-const doArray = [
-    'kar', 'karo', 'kro', 'do', 'start', 'strt', 'begin',
-    'proceed', 'procede', 'continue', 'continu',
-    'aage', 'age', 'badho', 'bdho'
-];
-const doWords = (0,_utils__WEBPACK_IMPORTED_MODULE_0__.createRegexFromArray)(doArray);
 // ===== KAR/ACTION WORDS (Hindi) =====
 const karArray = ['kar', 'karo', 'kro', 'kr', 'lagao', 'laga', 'lago'];
 const karWords = (0,_utils__WEBPACK_IMPORTED_MODULE_0__.createRegexFromArray)(karArray);
@@ -95602,13 +95592,6 @@ const startArray = [
     'start', 'strt', 'begin', 'proceed', 'procede', 'continue', 'continu'
 ];
 const startWords = (0,_utils__WEBPACK_IMPORTED_MODULE_0__.createRegexFromArray)(startArray);
-// ===== LET'S WORDS =====
-const letArray = ['lets', 'let\'s', 'chalo', 'chlo', 'chal', 'lemme', 'lem'];
-const letSimpleWords = (0,_utils__WEBPACK_IMPORTED_MODULE_0__.createRegexFromArray)(letArray);
-const letWords = `(${letSimpleWords}|let.{0,5}me)`;
-// ===== COME VARIATIONS =====
-const comeArray = ['come', 'cum', 'kam', 'chalo', 'chlo', 'chal'];
-const comeWords = (0,_utils__WEBPACK_IMPORTED_MODULE_0__.createRegexFromArray)(comeArray);
 // ===== OPEN/REMOVE WORDS =====
 const openRemoveArray = [
     'open', 'opn', 'remove', 'remov', 'rmove',
@@ -95795,20 +95778,15 @@ const videoCallRegex = { test: (text) => getCallRequestType(text) === "video_cal
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   abhiWord: () => (/* reexport safe */ _languagePatterns__WEBPACK_IMPORTED_MODULE_10__.abhiWord),
-/* harmony export */   alreadyWords: () => (/* reexport safe */ _temporalPatterns__WEBPACK_IMPORTED_MODULE_6__.alreadyWords),
 /* harmony export */   bodyParts: () => (/* reexport safe */ _explicitPatterns__WEBPACK_IMPORTED_MODULE_7__.bodyParts),
 /* harmony export */   bodyPartsArray: () => (/* reexport safe */ _explicitPatterns__WEBPACK_IMPORTED_MODULE_7__.bodyPartsArray),
 /* harmony export */   botArray: () => (/* reexport safe */ _contextPatterns__WEBPACK_IMPORTED_MODULE_9__.botArray),
 /* harmony export */   botWords: () => (/* reexport safe */ _contextPatterns__WEBPACK_IMPORTED_MODULE_9__.botWords),
 /* harmony export */   braBoobArray: () => (/* reexport safe */ _utilityPatterns__WEBPACK_IMPORTED_MODULE_11__.braBoobArray),
-/* harmony export */   braBoobWords: () => (/* reexport safe */ _utilityPatterns__WEBPACK_IMPORTED_MODULE_11__.braBoobWords),
-/* harmony export */   callArray: () => (/* reexport safe */ _servicePatterns__WEBPACK_IMPORTED_MODULE_3__.callArray),
 /* harmony export */   callWords: () => (/* reexport safe */ _servicePatterns__WEBPACK_IMPORTED_MODULE_3__.callWords),
 /* harmony export */   chestArray: () => (/* reexport safe */ _utilityPatterns__WEBPACK_IMPORTED_MODULE_11__.chestArray),
-/* harmony export */   chestWords: () => (/* reexport safe */ _utilityPatterns__WEBPACK_IMPORTED_MODULE_11__.chestWords),
 /* harmony export */   clothingArray: () => (/* reexport safe */ _utilityPatterns__WEBPACK_IMPORTED_MODULE_11__.clothingArray),
 /* harmony export */   clothingWords: () => (/* reexport safe */ _utilityPatterns__WEBPACK_IMPORTED_MODULE_11__.clothingWords),
-/* harmony export */   comeWords: () => (/* reexport safe */ _actionPatterns__WEBPACK_IMPORTED_MODULE_4__.comeWords),
 /* harmony export */   completionWords: () => (/* reexport safe */ _paymentPatterns__WEBPACK_IMPORTED_MODULE_1__.completionWords),
 /* harmony export */   complimentArray: () => (/* reexport safe */ _socialPatterns__WEBPACK_IMPORTED_MODULE_8__.complimentArray),
 /* harmony export */   complimentWords: () => (/* reexport safe */ _socialPatterns__WEBPACK_IMPORTED_MODULE_8__.complimentWords),
@@ -95816,10 +95794,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   createRegexFromArray: () => (/* reexport safe */ _utils__WEBPACK_IMPORTED_MODULE_0__.createRegexFromArray),
 /* harmony export */   demoArray: () => (/* reexport safe */ _servicePatterns__WEBPACK_IMPORTED_MODULE_3__.demoArray),
 /* harmony export */   demoWords: () => (/* reexport safe */ _servicePatterns__WEBPACK_IMPORTED_MODULE_3__.demoWords),
-/* harmony export */   dickWords: () => (/* reexport safe */ _explicitPatterns__WEBPACK_IMPORTED_MODULE_7__.dickWords),
 /* harmony export */   dirtyWords: () => (/* reexport safe */ _explicitPatterns__WEBPACK_IMPORTED_MODULE_7__.dirtyWords),
-/* harmony export */   doWords: () => (/* reexport safe */ _actionPatterns__WEBPACK_IMPORTED_MODULE_4__.doWords),
-/* harmony export */   doingArray: () => (/* reexport safe */ _utilityPatterns__WEBPACK_IMPORTED_MODULE_11__.doingArray),
 /* harmony export */   englishServiceWords: () => (/* reexport safe */ _languagePatterns__WEBPACK_IMPORTED_MODULE_10__.englishServiceWords),
 /* harmony export */   errorWords: () => (/* reexport safe */ _paymentPatterns__WEBPACK_IMPORTED_MODULE_1__.errorWords),
 /* harmony export */   explicitWords: () => (/* reexport safe */ _explicitPatterns__WEBPACK_IMPORTED_MODULE_7__.explicitWords),
@@ -95836,16 +95811,13 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   hindiServiceWords: () => (/* reexport safe */ _languagePatterns__WEBPACK_IMPORTED_MODULE_10__.hindiServiceWords),
 /* harmony export */   hornyWords: () => (/* reexport safe */ _explicitPatterns__WEBPACK_IMPORTED_MODULE_7__.hornyWords),
 /* harmony export */   howArray: () => (/* reexport safe */ _utilityPatterns__WEBPACK_IMPORTED_MODULE_11__.howArray),
-/* harmony export */   howManyQuestionArray: () => (/* reexport safe */ _utilityPatterns__WEBPACK_IMPORTED_MODULE_11__.howManyQuestionArray),
 /* harmony export */   howMuchQuestionArray: () => (/* reexport safe */ _utilityPatterns__WEBPACK_IMPORTED_MODULE_11__.howMuchQuestionArray),
-/* harmony export */   howMuchQuestionWords: () => (/* reexport safe */ _utilityPatterns__WEBPACK_IMPORTED_MODULE_11__.howMuchQuestionWords),
 /* harmony export */   howWords: () => (/* reexport safe */ _utilityPatterns__WEBPACK_IMPORTED_MODULE_11__.howWords),
 /* harmony export */   immediateWords: () => (/* reexport safe */ _temporalPatterns__WEBPACK_IMPORTED_MODULE_6__.immediateWords),
 /* harmony export */   insufficientWords: () => (/* reexport safe */ _paymentPatterns__WEBPACK_IMPORTED_MODULE_1__.insufficientWords),
 /* harmony export */   karWords: () => (/* reexport safe */ _actionPatterns__WEBPACK_IMPORTED_MODULE_4__.karWords),
 /* harmony export */   kitnaArray: () => (/* reexport safe */ _servicePatterns__WEBPACK_IMPORTED_MODULE_3__.kitnaArray),
 /* harmony export */   laterWords: () => (/* reexport safe */ _temporalPatterns__WEBPACK_IMPORTED_MODULE_6__.laterWords),
-/* harmony export */   letWords: () => (/* reexport safe */ _actionPatterns__WEBPACK_IMPORTED_MODULE_4__.letWords),
 /* harmony export */   listenArray: () => (/* reexport safe */ _mediaPatterns__WEBPACK_IMPORTED_MODULE_2__.listenArray),
 /* harmony export */   listenWords: () => (/* reexport safe */ _mediaPatterns__WEBPACK_IMPORTED_MODULE_2__.listenWords),
 /* harmony export */   meWords: () => (/* reexport safe */ _personPatterns__WEBPACK_IMPORTED_MODULE_5__.meWords),
@@ -95860,7 +95832,6 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   negativeWords: () => (/* reexport safe */ _utilityPatterns__WEBPACK_IMPORTED_MODULE_11__.negativeWords),
 /* harmony export */   networkWords: () => (/* reexport safe */ _paymentPatterns__WEBPACK_IMPORTED_MODULE_1__.networkWords),
 /* harmony export */   nowWords: () => (/* reexport safe */ _temporalPatterns__WEBPACK_IMPORTED_MODULE_6__.nowWords),
-/* harmony export */   onlyWords: () => (/* reexport safe */ _utilityPatterns__WEBPACK_IMPORTED_MODULE_11__.onlyWords),
 /* harmony export */   openRemoveWords: () => (/* reexport safe */ _actionPatterns__WEBPACK_IMPORTED_MODULE_4__.openRemoveWords),
 /* harmony export */   otherQuestionArray: () => (/* reexport safe */ _utilityPatterns__WEBPACK_IMPORTED_MODULE_11__.otherQuestionArray),
 /* harmony export */   otherQuestionWords: () => (/* reexport safe */ _utilityPatterns__WEBPACK_IMPORTED_MODULE_11__.otherQuestionWords),
@@ -95876,40 +95847,29 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   priceWords: () => (/* reexport safe */ _paymentPatterns__WEBPACK_IMPORTED_MODULE_1__.priceWords),
 /* harmony export */   profileSimpleArray: () => (/* reexport safe */ _utilityPatterns__WEBPACK_IMPORTED_MODULE_11__.profileSimpleArray),
 /* harmony export */   profileWords: () => (/* reexport safe */ _utilityPatterns__WEBPACK_IMPORTED_MODULE_11__.profileWords),
-/* harmony export */   questionIndicators: () => (/* reexport safe */ _utilityPatterns__WEBPACK_IMPORTED_MODULE_11__.questionIndicators),
 /* harmony export */   questionIndicatorsArray: () => (/* reexport safe */ _utilityPatterns__WEBPACK_IMPORTED_MODULE_11__.questionIndicatorsArray),
-/* harmony export */   questionPatterns: () => (/* reexport safe */ _utilityPatterns__WEBPACK_IMPORTED_MODULE_11__.questionPatterns),
 /* harmony export */   questionWords: () => (/* reexport safe */ _utilityPatterns__WEBPACK_IMPORTED_MODULE_11__.questionWords),
-/* harmony export */   readyWords: () => (/* reexport safe */ _temporalPatterns__WEBPACK_IMPORTED_MODULE_6__.readyWords),
 /* harmony export */   recordingArray: () => (/* reexport safe */ _mediaPatterns__WEBPACK_IMPORTED_MODULE_2__.recordingArray),
-/* harmony export */   recordingWords: () => (/* reexport safe */ _mediaPatterns__WEBPACK_IMPORTED_MODULE_2__.recordingWords),
-/* harmony export */   rightWords: () => (/* reexport safe */ _utilityPatterns__WEBPACK_IMPORTED_MODULE_11__.rightWords),
 /* harmony export */   serviceArray: () => (/* reexport safe */ _servicePatterns__WEBPACK_IMPORTED_MODULE_3__.serviceArray),
 /* harmony export */   serviceWords: () => (/* reexport safe */ _servicePatterns__WEBPACK_IMPORTED_MODULE_3__.serviceWords),
 /* harmony export */   showSendArray: () => (/* reexport safe */ _mediaPatterns__WEBPACK_IMPORTED_MODULE_2__.showSendArray),
 /* harmony export */   showSendWords: () => (/* reexport safe */ _mediaPatterns__WEBPACK_IMPORTED_MODULE_2__.showSendWords),
 /* harmony export */   sizeArray: () => (/* reexport safe */ _utilityPatterns__WEBPACK_IMPORTED_MODULE_11__.sizeArray),
 /* harmony export */   sizeDescriptorArray: () => (/* reexport safe */ _utilityPatterns__WEBPACK_IMPORTED_MODULE_11__.sizeDescriptorArray),
-/* harmony export */   sizeDescriptorWords: () => (/* reexport safe */ _utilityPatterns__WEBPACK_IMPORTED_MODULE_11__.sizeDescriptorWords),
 /* harmony export */   sizeQuestionArray: () => (/* reexport safe */ _utilityPatterns__WEBPACK_IMPORTED_MODULE_11__.sizeQuestionArray),
-/* harmony export */   sizeQuestionWords: () => (/* reexport safe */ _utilityPatterns__WEBPACK_IMPORTED_MODULE_11__.sizeQuestionWords),
 /* harmony export */   sizeWords: () => (/* reexport safe */ _utilityPatterns__WEBPACK_IMPORTED_MODULE_11__.sizeWords),
 /* harmony export */   startWords: () => (/* reexport safe */ _actionPatterns__WEBPACK_IMPORTED_MODULE_4__.startWords),
 /* harmony export */   talkWords: () => (/* reexport safe */ _socialPatterns__WEBPACK_IMPORTED_MODULE_8__.talkWords),
 /* harmony export */   technicalWords: () => (/* reexport safe */ _paymentPatterns__WEBPACK_IMPORTED_MODULE_1__.technicalWords),
 /* harmony export */   teluguServiceWords: () => (/* reexport safe */ _languagePatterns__WEBPACK_IMPORTED_MODULE_10__.teluguServiceWords),
 /* harmony export */   timeArray: () => (/* reexport safe */ _servicePatterns__WEBPACK_IMPORTED_MODULE_3__.timeArray),
-/* harmony export */   timeWords: () => (/* reexport safe */ _servicePatterns__WEBPACK_IMPORTED_MODULE_3__.timeWords),
 /* harmony export */   touchWords: () => (/* reexport safe */ _actionPatterns__WEBPACK_IMPORTED_MODULE_4__.touchWords),
 /* harmony export */   trustWords: () => (/* reexport safe */ _socialPatterns__WEBPACK_IMPORTED_MODULE_8__.trustWords),
-/* harmony export */   urgencyHindiWords: () => (/* reexport safe */ _temporalPatterns__WEBPACK_IMPORTED_MODULE_6__.urgencyHindiWords),
 /* harmony export */   videoArray: () => (/* reexport safe */ _mediaPatterns__WEBPACK_IMPORTED_MODULE_2__.videoArray),
 /* harmony export */   videoWords: () => (/* reexport safe */ _mediaPatterns__WEBPACK_IMPORTED_MODULE_2__.videoWords),
 /* harmony export */   voiceArray: () => (/* reexport safe */ _mediaPatterns__WEBPACK_IMPORTED_MODULE_2__.voiceArray),
-/* harmony export */   voiceTechnicalWords: () => (/* reexport safe */ _mediaPatterns__WEBPACK_IMPORTED_MODULE_2__.voiceTechnicalWords),
 /* harmony export */   voiceWords: () => (/* reexport safe */ _mediaPatterns__WEBPACK_IMPORTED_MODULE_2__.voiceWords),
 /* harmony export */   wantSeeArray: () => (/* reexport safe */ _utilityPatterns__WEBPACK_IMPORTED_MODULE_11__.wantSeeArray),
-/* harmony export */   wantSeeWords: () => (/* reexport safe */ _utilityPatterns__WEBPACK_IMPORTED_MODULE_11__.wantSeeWords),
 /* harmony export */   whatArray: () => (/* reexport safe */ _utilityPatterns__WEBPACK_IMPORTED_MODULE_11__.whatArray),
 /* harmony export */   whatWords: () => (/* reexport safe */ _utilityPatterns__WEBPACK_IMPORTED_MODULE_11__.whatWords),
 /* harmony export */   whenArray: () => (/* reexport safe */ _utilityPatterns__WEBPACK_IMPORTED_MODULE_11__.whenArray),
@@ -96197,7 +96157,6 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   bodyParts: () => (/* binding */ bodyParts),
 /* harmony export */   bodyPartsArray: () => (/* binding */ bodyPartsArray),
-/* harmony export */   dickWords: () => (/* binding */ dickWords),
 /* harmony export */   dirtyWords: () => (/* binding */ dirtyWords),
 /* harmony export */   explicitWords: () => (/* binding */ explicitWords),
 /* harmony export */   hornyWords: () => (/* binding */ hornyWords),
@@ -96247,12 +96206,6 @@ const bodyPartsArray = [
 // Build regex from array using helper function
 // Words < 4 chars get boundaries, longer words don't
 const bodyParts = (0,_utils__WEBPACK_IMPORTED_MODULE_0__.createRegexFromArray)(bodyPartsArray);
-// ===== DICK/PENIS WORDS =====
-const dickArray = [
-    'dick', 'dic', 'cock', 'cok', 'penis',
-    'lund', 'lung', 'lulli', 'modda', 'sullu', 'pilla', 'puku', 'pooku'
-];
-const dickWords = (0,_utils__WEBPACK_IMPORTED_MODULE_0__.createRegexFromArray)(dickArray);
 // ===== DIRTY TALK WORDS =====
 const dirtyArray = [
     'slut', 'slt', 'whore', 'whor', 'bitch', 'btch',
@@ -96346,23 +96299,17 @@ const complimentsExclusionRegex = new RegExp(`(goodbye|good.{0,15}bye|good.{0,15
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   abhiWord: () => (/* reexport safe */ _languagePatterns__WEBPACK_IMPORTED_MODULE_10__.abhiWord),
-/* harmony export */   activityQuestionRegex: () => (/* reexport safe */ _serviceDescriptionRegex__WEBPACK_IMPORTED_MODULE_18__.activityQuestionRegex),
-/* harmony export */   alreadyWords: () => (/* reexport safe */ _temporalPatterns__WEBPACK_IMPORTED_MODULE_6__.alreadyWords),
 /* harmony export */   asksToHoldCalls: () => (/* reexport safe */ _callRequestRegex__WEBPACK_IMPORTED_MODULE_13__.asksToHoldCalls),
 /* harmony export */   bodyParts: () => (/* reexport safe */ _explicitPatterns__WEBPACK_IMPORTED_MODULE_7__.bodyParts),
 /* harmony export */   bodyPartsArray: () => (/* reexport safe */ _explicitPatterns__WEBPACK_IMPORTED_MODULE_7__.bodyPartsArray),
 /* harmony export */   botArray: () => (/* reexport safe */ _contextPatterns__WEBPACK_IMPORTED_MODULE_9__.botArray),
 /* harmony export */   botWords: () => (/* reexport safe */ _contextPatterns__WEBPACK_IMPORTED_MODULE_9__.botWords),
 /* harmony export */   braBoobArray: () => (/* reexport safe */ _utilityPatterns__WEBPACK_IMPORTED_MODULE_11__.braBoobArray),
-/* harmony export */   braBoobWords: () => (/* reexport safe */ _utilityPatterns__WEBPACK_IMPORTED_MODULE_11__.braBoobWords),
-/* harmony export */   callArray: () => (/* reexport safe */ _servicePatterns__WEBPACK_IMPORTED_MODULE_3__.callArray),
 /* harmony export */   callRequestExclusionRegex: () => (/* reexport safe */ _callRequestRegex__WEBPACK_IMPORTED_MODULE_13__.callRequestExclusionRegex),
 /* harmony export */   callWords: () => (/* reexport safe */ _servicePatterns__WEBPACK_IMPORTED_MODULE_3__.callWords),
 /* harmony export */   chestArray: () => (/* reexport safe */ _utilityPatterns__WEBPACK_IMPORTED_MODULE_11__.chestArray),
-/* harmony export */   chestWords: () => (/* reexport safe */ _utilityPatterns__WEBPACK_IMPORTED_MODULE_11__.chestWords),
 /* harmony export */   clothingArray: () => (/* reexport safe */ _utilityPatterns__WEBPACK_IMPORTED_MODULE_11__.clothingArray),
 /* harmony export */   clothingWords: () => (/* reexport safe */ _utilityPatterns__WEBPACK_IMPORTED_MODULE_11__.clothingWords),
-/* harmony export */   comeWords: () => (/* reexport safe */ _actionPatterns__WEBPACK_IMPORTED_MODULE_4__.comeWords),
 /* harmony export */   complainsOrAsksForCall: () => (/* reexport safe */ _callRequestRegex__WEBPACK_IMPORTED_MODULE_13__.complainsOrAsksForCall),
 /* harmony export */   completionWords: () => (/* reexport safe */ _paymentPatterns__WEBPACK_IMPORTED_MODULE_1__.completionWords),
 /* harmony export */   complimentArray: () => (/* reexport safe */ _socialPatterns__WEBPACK_IMPORTED_MODULE_8__.complimentArray),
@@ -96374,15 +96321,9 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   createRegexFromArray: () => (/* reexport safe */ _utils__WEBPACK_IMPORTED_MODULE_0__.createRegexFromArray),
 /* harmony export */   demoArray: () => (/* reexport safe */ _servicePatterns__WEBPACK_IMPORTED_MODULE_3__.demoArray),
 /* harmony export */   demoWords: () => (/* reexport safe */ _servicePatterns__WEBPACK_IMPORTED_MODULE_3__.demoWords),
-/* harmony export */   dickWords: () => (/* reexport safe */ _explicitPatterns__WEBPACK_IMPORTED_MODULE_7__.dickWords),
 /* harmony export */   directContentRegex: () => (/* reexport safe */ _contentRequestRegex__WEBPACK_IMPORTED_MODULE_14__.directContentRegex),
 /* harmony export */   dirtyWords: () => (/* reexport safe */ _explicitPatterns__WEBPACK_IMPORTED_MODULE_7__.dirtyWords),
-/* harmony export */   doWords: () => (/* reexport safe */ _actionPatterns__WEBPACK_IMPORTED_MODULE_4__.doWords),
-/* harmony export */   doingArray: () => (/* reexport safe */ _utilityPatterns__WEBPACK_IMPORTED_MODULE_11__.doingArray),
 /* harmony export */   durationExclusionRegex: () => (/* reexport safe */ _durationRegex__WEBPACK_IMPORTED_MODULE_15__.durationExclusionRegex),
-/* harmony export */   englishHappenQuestionRegex: () => (/* reexport safe */ _serviceDescriptionRegex__WEBPACK_IMPORTED_MODULE_18__.englishHappenQuestionRegex),
-/* harmony export */   englishInclusionQuestionRegex: () => (/* reexport safe */ _serviceDescriptionRegex__WEBPACK_IMPORTED_MODULE_18__.englishInclusionQuestionRegex),
-/* harmony export */   englishServiceQuestionRegex: () => (/* reexport safe */ _serviceDescriptionRegex__WEBPACK_IMPORTED_MODULE_18__.englishServiceQuestionRegex),
 /* harmony export */   englishServiceWords: () => (/* reexport safe */ _languagePatterns__WEBPACK_IMPORTED_MODULE_10__.englishServiceWords),
 /* harmony export */   errorWords: () => (/* reexport safe */ _paymentPatterns__WEBPACK_IMPORTED_MODULE_1__.errorWords),
 /* harmony export */   explicitContentMediaRegex: () => (/* reexport safe */ _contentRequestRegex__WEBPACK_IMPORTED_MODULE_14__.explicitContentMediaRegex),
@@ -96392,7 +96333,6 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   foodWords: () => (/* reexport safe */ _contextPatterns__WEBPACK_IMPORTED_MODULE_9__.foodWords),
 /* harmony export */   fullWords: () => (/* reexport safe */ _servicePatterns__WEBPACK_IMPORTED_MODULE_3__.fullWords),
 /* harmony export */   futureWords: () => (/* reexport safe */ _temporalPatterns__WEBPACK_IMPORTED_MODULE_6__.futureWords),
-/* harmony export */   generalServiceQuestionRegex: () => (/* reexport safe */ _serviceDescriptionRegex__WEBPACK_IMPORTED_MODULE_18__.generalServiceQuestionRegex),
 /* harmony export */   getBodyAppreciationType: () => (/* reexport safe */ _sexualActsRegex__WEBPACK_IMPORTED_MODULE_19__.getBodyAppreciationType),
 /* harmony export */   getCallRequestType: () => (/* reexport safe */ _callRequestRegex__WEBPACK_IMPORTED_MODULE_13__.getCallRequestType),
 /* harmony export */   getContentRequestType: () => (/* reexport safe */ _contentRequestRegex__WEBPACK_IMPORTED_MODULE_14__.getContentRequestType),
@@ -96405,18 +96345,14 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   goodbyeExclusionWords: () => (/* reexport safe */ _socialPatterns__WEBPACK_IMPORTED_MODULE_8__.goodbyeExclusionWords),
 /* harmony export */   goodbyeRegex: () => (/* reexport safe */ _generalPatternsRegex__WEBPACK_IMPORTED_MODULE_16__.goodbyeRegex),
 /* harmony export */   goodbyeWords: () => (/* reexport safe */ _socialPatterns__WEBPACK_IMPORTED_MODULE_8__.goodbyeWords),
-/* harmony export */   happenQuestionRegex: () => (/* reexport safe */ _serviceDescriptionRegex__WEBPACK_IMPORTED_MODULE_18__.happenQuestionRegex),
 /* harmony export */   helpWords: () => (/* reexport safe */ _contextPatterns__WEBPACK_IMPORTED_MODULE_9__.helpWords),
 /* harmony export */   hiWords: () => (/* reexport safe */ _utilityPatterns__WEBPACK_IMPORTED_MODULE_11__.hiWords),
 /* harmony export */   hindiServiceWords: () => (/* reexport safe */ _languagePatterns__WEBPACK_IMPORTED_MODULE_10__.hindiServiceWords),
 /* harmony export */   hornyWords: () => (/* reexport safe */ _explicitPatterns__WEBPACK_IMPORTED_MODULE_7__.hornyWords),
 /* harmony export */   howArray: () => (/* reexport safe */ _utilityPatterns__WEBPACK_IMPORTED_MODULE_11__.howArray),
-/* harmony export */   howManyQuestionArray: () => (/* reexport safe */ _utilityPatterns__WEBPACK_IMPORTED_MODULE_11__.howManyQuestionArray),
 /* harmony export */   howMuchQuestionArray: () => (/* reexport safe */ _utilityPatterns__WEBPACK_IMPORTED_MODULE_11__.howMuchQuestionArray),
-/* harmony export */   howMuchQuestionWords: () => (/* reexport safe */ _utilityPatterns__WEBPACK_IMPORTED_MODULE_11__.howMuchQuestionWords),
 /* harmony export */   howWords: () => (/* reexport safe */ _utilityPatterns__WEBPACK_IMPORTED_MODULE_11__.howWords),
 /* harmony export */   immediateWords: () => (/* reexport safe */ _temporalPatterns__WEBPACK_IMPORTED_MODULE_6__.immediateWords),
-/* harmony export */   inclusionQuestionRegex: () => (/* reexport safe */ _serviceDescriptionRegex__WEBPACK_IMPORTED_MODULE_18__.inclusionQuestionRegex),
 /* harmony export */   insufficientWords: () => (/* reexport safe */ _paymentPatterns__WEBPACK_IMPORTED_MODULE_1__.insufficientWords),
 /* harmony export */   isBodyPartsAppreciation: () => (/* reexport safe */ _sexualActsRegex__WEBPACK_IMPORTED_MODULE_19__.isBodyPartsAppreciation),
 /* harmony export */   isCallRequest: () => (/* reexport safe */ _callRequestRegex__WEBPACK_IMPORTED_MODULE_13__.isCallRequest),
@@ -96431,7 +96367,6 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   karWords: () => (/* reexport safe */ _actionPatterns__WEBPACK_IMPORTED_MODULE_4__.karWords),
 /* harmony export */   kitnaArray: () => (/* reexport safe */ _servicePatterns__WEBPACK_IMPORTED_MODULE_3__.kitnaArray),
 /* harmony export */   laterWords: () => (/* reexport safe */ _temporalPatterns__WEBPACK_IMPORTED_MODULE_6__.laterWords),
-/* harmony export */   letWords: () => (/* reexport safe */ _actionPatterns__WEBPACK_IMPORTED_MODULE_4__.letWords),
 /* harmony export */   listenArray: () => (/* reexport safe */ _mediaPatterns__WEBPACK_IMPORTED_MODULE_2__.listenArray),
 /* harmony export */   listenWords: () => (/* reexport safe */ _mediaPatterns__WEBPACK_IMPORTED_MODULE_2__.listenWords),
 /* harmony export */   meWords: () => (/* reexport safe */ _personPatterns__WEBPACK_IMPORTED_MODULE_5__.meWords),
@@ -96447,7 +96382,6 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   networkWords: () => (/* reexport safe */ _paymentPatterns__WEBPACK_IMPORTED_MODULE_1__.networkWords),
 /* harmony export */   nowWords: () => (/* reexport safe */ _temporalPatterns__WEBPACK_IMPORTED_MODULE_6__.nowWords),
 /* harmony export */   numberedContentRegex: () => (/* reexport safe */ _contentRequestRegex__WEBPACK_IMPORTED_MODULE_14__.numberedContentRegex),
-/* harmony export */   onlyWords: () => (/* reexport safe */ _utilityPatterns__WEBPACK_IMPORTED_MODULE_11__.onlyWords),
 /* harmony export */   openRemoveWords: () => (/* reexport safe */ _actionPatterns__WEBPACK_IMPORTED_MODULE_4__.openRemoveWords),
 /* harmony export */   otherQuestionArray: () => (/* reexport safe */ _utilityPatterns__WEBPACK_IMPORTED_MODULE_11__.otherQuestionArray),
 /* harmony export */   otherQuestionWords: () => (/* reexport safe */ _utilityPatterns__WEBPACK_IMPORTED_MODULE_11__.otherQuestionWords),
@@ -96468,7 +96402,6 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   paymentSuccessExclusionRegex: () => (/* reexport safe */ _paymentRegex__WEBPACK_IMPORTED_MODULE_17__.paymentSuccessExclusionRegex),
 /* harmony export */   paymentTechnicalIssueRegex: () => (/* reexport safe */ _paymentRegex__WEBPACK_IMPORTED_MODULE_17__.paymentTechnicalIssueRegex),
 /* harmony export */   paymentWords: () => (/* reexport safe */ _paymentPatterns__WEBPACK_IMPORTED_MODULE_1__.paymentWords),
-/* harmony export */   performQuestionRegex: () => (/* reexport safe */ _serviceDescriptionRegex__WEBPACK_IMPORTED_MODULE_18__.performQuestionRegex),
 /* harmony export */   permissionWords: () => (/* reexport safe */ _socialPatterns__WEBPACK_IMPORTED_MODULE_8__.permissionWords),
 /* harmony export */   picWords: () => (/* reexport safe */ _mediaPatterns__WEBPACK_IMPORTED_MODULE_2__.picWords),
 /* harmony export */   possessiveWords: () => (/* reexport safe */ _personPatterns__WEBPACK_IMPORTED_MODULE_5__.possessiveWords),
@@ -96476,54 +96409,37 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   priceWords: () => (/* reexport safe */ _paymentPatterns__WEBPACK_IMPORTED_MODULE_1__.priceWords),
 /* harmony export */   profileSimpleArray: () => (/* reexport safe */ _utilityPatterns__WEBPACK_IMPORTED_MODULE_11__.profileSimpleArray),
 /* harmony export */   profileWords: () => (/* reexport safe */ _utilityPatterns__WEBPACK_IMPORTED_MODULE_11__.profileWords),
-/* harmony export */   questionIndicators: () => (/* reexport safe */ _utilityPatterns__WEBPACK_IMPORTED_MODULE_11__.questionIndicators),
 /* harmony export */   questionIndicatorsArray: () => (/* reexport safe */ _utilityPatterns__WEBPACK_IMPORTED_MODULE_11__.questionIndicatorsArray),
-/* harmony export */   questionPatterns: () => (/* reexport safe */ _utilityPatterns__WEBPACK_IMPORTED_MODULE_11__.questionPatterns),
 /* harmony export */   questionWords: () => (/* reexport safe */ _utilityPatterns__WEBPACK_IMPORTED_MODULE_11__.questionWords),
-/* harmony export */   readyWords: () => (/* reexport safe */ _temporalPatterns__WEBPACK_IMPORTED_MODULE_6__.readyWords),
 /* harmony export */   recordingArray: () => (/* reexport safe */ _mediaPatterns__WEBPACK_IMPORTED_MODULE_2__.recordingArray),
-/* harmony export */   recordingWords: () => (/* reexport safe */ _mediaPatterns__WEBPACK_IMPORTED_MODULE_2__.recordingWords),
-/* harmony export */   rightWords: () => (/* reexport safe */ _utilityPatterns__WEBPACK_IMPORTED_MODULE_11__.rightWords),
 /* harmony export */   serviceArray: () => (/* reexport safe */ _servicePatterns__WEBPACK_IMPORTED_MODULE_3__.serviceArray),
-/* harmony export */   serviceContentQuestionRegex: () => (/* reexport safe */ _serviceDescriptionRegex__WEBPACK_IMPORTED_MODULE_18__.serviceContentQuestionRegex),
 /* harmony export */   serviceContextRegex: () => (/* reexport safe */ _durationRegex__WEBPACK_IMPORTED_MODULE_15__.serviceContextRegex),
 /* harmony export */   serviceDescriptionExclusionRegex: () => (/* reexport safe */ _serviceDescriptionRegex__WEBPACK_IMPORTED_MODULE_18__.serviceDescriptionExclusionRegex),
-/* harmony export */   serviceDescriptionQuestionRegex: () => (/* reexport safe */ _serviceDescriptionRegex__WEBPACK_IMPORTED_MODULE_18__.serviceDescriptionQuestionRegex),
-/* harmony export */   serviceInclusionRegex: () => (/* reexport safe */ _serviceDescriptionRegex__WEBPACK_IMPORTED_MODULE_18__.serviceInclusionRegex),
 /* harmony export */   serviceWords: () => (/* reexport safe */ _servicePatterns__WEBPACK_IMPORTED_MODULE_3__.serviceWords),
 /* harmony export */   showSendArray: () => (/* reexport safe */ _mediaPatterns__WEBPACK_IMPORTED_MODULE_2__.showSendArray),
 /* harmony export */   showSendRegex: () => (/* reexport safe */ _contentRequestRegex__WEBPACK_IMPORTED_MODULE_14__.showSendRegex),
 /* harmony export */   showSendWords: () => (/* reexport safe */ _mediaPatterns__WEBPACK_IMPORTED_MODULE_2__.showSendWords),
 /* harmony export */   sizeArray: () => (/* reexport safe */ _utilityPatterns__WEBPACK_IMPORTED_MODULE_11__.sizeArray),
 /* harmony export */   sizeDescriptorArray: () => (/* reexport safe */ _utilityPatterns__WEBPACK_IMPORTED_MODULE_11__.sizeDescriptorArray),
-/* harmony export */   sizeDescriptorWords: () => (/* reexport safe */ _utilityPatterns__WEBPACK_IMPORTED_MODULE_11__.sizeDescriptorWords),
 /* harmony export */   sizeQuestionArray: () => (/* reexport safe */ _utilityPatterns__WEBPACK_IMPORTED_MODULE_11__.sizeQuestionArray),
-/* harmony export */   sizeQuestionWords: () => (/* reexport safe */ _utilityPatterns__WEBPACK_IMPORTED_MODULE_11__.sizeQuestionWords),
 /* harmony export */   sizeWords: () => (/* reexport safe */ _utilityPatterns__WEBPACK_IMPORTED_MODULE_11__.sizeWords),
 /* harmony export */   startWords: () => (/* reexport safe */ _actionPatterns__WEBPACK_IMPORTED_MODULE_4__.startWords),
 /* harmony export */   talkWords: () => (/* reexport safe */ _socialPatterns__WEBPACK_IMPORTED_MODULE_8__.talkWords),
 /* harmony export */   technicalWords: () => (/* reexport safe */ _paymentPatterns__WEBPACK_IMPORTED_MODULE_1__.technicalWords),
-/* harmony export */   teluguActivityRegex: () => (/* reexport safe */ _serviceDescriptionRegex__WEBPACK_IMPORTED_MODULE_18__.teluguActivityRegex),
-/* harmony export */   teluguInclusionRegex: () => (/* reexport safe */ _serviceDescriptionRegex__WEBPACK_IMPORTED_MODULE_18__.teluguInclusionRegex),
-/* harmony export */   teluguServiceQuestionRegex: () => (/* reexport safe */ _serviceDescriptionRegex__WEBPACK_IMPORTED_MODULE_18__.teluguServiceQuestionRegex),
 /* harmony export */   teluguServiceWords: () => (/* reexport safe */ _languagePatterns__WEBPACK_IMPORTED_MODULE_10__.teluguServiceWords),
 /* harmony export */   testRegexFromArray: () => (/* reexport safe */ _utils__WEBPACK_IMPORTED_MODULE_0__.testRegexFromArray),
 /* harmony export */   timeArray: () => (/* reexport safe */ _servicePatterns__WEBPACK_IMPORTED_MODULE_3__.timeArray),
-/* harmony export */   timeWords: () => (/* reexport safe */ _servicePatterns__WEBPACK_IMPORTED_MODULE_3__.timeWords),
 /* harmony export */   touchWords: () => (/* reexport safe */ _actionPatterns__WEBPACK_IMPORTED_MODULE_4__.touchWords),
 /* harmony export */   trustWords: () => (/* reexport safe */ _socialPatterns__WEBPACK_IMPORTED_MODULE_8__.trustWords),
 /* harmony export */   urgencyExclusionRegex: () => (/* reexport safe */ _urgencyRegex__WEBPACK_IMPORTED_MODULE_20__.urgencyExclusionRegex),
-/* harmony export */   urgencyHindiWords: () => (/* reexport safe */ _temporalPatterns__WEBPACK_IMPORTED_MODULE_6__.urgencyHindiWords),
 /* harmony export */   urgencyRequestRegex: () => (/* reexport safe */ _urgencyRegex__WEBPACK_IMPORTED_MODULE_20__.urgencyRequestRegex),
 /* harmony export */   videoArray: () => (/* reexport safe */ _mediaPatterns__WEBPACK_IMPORTED_MODULE_2__.videoArray),
 /* harmony export */   videoCallRegex: () => (/* reexport safe */ _callRequestRegex__WEBPACK_IMPORTED_MODULE_13__.videoCallRegex),
 /* harmony export */   videoWords: () => (/* reexport safe */ _mediaPatterns__WEBPACK_IMPORTED_MODULE_2__.videoWords),
 /* harmony export */   voiceArray: () => (/* reexport safe */ _mediaPatterns__WEBPACK_IMPORTED_MODULE_2__.voiceArray),
 /* harmony export */   voicePraiseExclusionRegex: () => (/* reexport safe */ _voiceRegex__WEBPACK_IMPORTED_MODULE_21__.voicePraiseExclusionRegex),
-/* harmony export */   voiceTechnicalWords: () => (/* reexport safe */ _mediaPatterns__WEBPACK_IMPORTED_MODULE_2__.voiceTechnicalWords),
 /* harmony export */   voiceWords: () => (/* reexport safe */ _mediaPatterns__WEBPACK_IMPORTED_MODULE_2__.voiceWords),
 /* harmony export */   wantSeeArray: () => (/* reexport safe */ _utilityPatterns__WEBPACK_IMPORTED_MODULE_11__.wantSeeArray),
-/* harmony export */   wantSeeWords: () => (/* reexport safe */ _utilityPatterns__WEBPACK_IMPORTED_MODULE_11__.wantSeeWords),
 /* harmony export */   whatArray: () => (/* reexport safe */ _utilityPatterns__WEBPACK_IMPORTED_MODULE_11__.whatArray),
 /* harmony export */   whatWords: () => (/* reexport safe */ _utilityPatterns__WEBPACK_IMPORTED_MODULE_11__.whatWords),
 /* harmony export */   whenArray: () => (/* reexport safe */ _utilityPatterns__WEBPACK_IMPORTED_MODULE_11__.whenArray),
@@ -96654,13 +96570,11 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   musicWords: () => (/* binding */ musicWords),
 /* harmony export */   picWords: () => (/* binding */ picWords),
 /* harmony export */   recordingArray: () => (/* binding */ recordingArray),
-/* harmony export */   recordingWords: () => (/* binding */ recordingWords),
 /* harmony export */   showSendArray: () => (/* binding */ showSendArray),
 /* harmony export */   showSendWords: () => (/* binding */ showSendWords),
 /* harmony export */   videoArray: () => (/* binding */ videoArray),
 /* harmony export */   videoWords: () => (/* binding */ videoWords),
 /* harmony export */   voiceArray: () => (/* binding */ voiceArray),
-/* harmony export */   voiceTechnicalWords: () => (/* binding */ voiceTechnicalWords),
 /* harmony export */   voiceWords: () => (/* binding */ voiceWords)
 /* harmony export */ });
 /* harmony import */ var _utils__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./utils */ "./src/pattern-handlers/regex/utils.ts");
@@ -96704,7 +96618,6 @@ const recordingArray = [
     'message', 'msg', 'mesage', 'messge',
     'recording', 'record', 'rec'
 ];
-const recordingWords = (0,_utils__WEBPACK_IMPORTED_MODULE_0__.createRegexFromArray)(recordingArray);
 // ===== MUSIC/CONTENT WORDS =====
 const musicArray = [
     'music', 'song', 'radio', 'news', 'story', 'book',
@@ -96718,9 +96631,6 @@ const listenArray = [
 const listenWords = (0,_utils__WEBPACK_IMPORTED_MODULE_0__.createRegexFromArray)(listenArray);
 // ===== CONSUMPTION WORDS (listen + content) =====
 const consumptionPattern = `${listenWords}.{0,15}${musicWords}|${musicWords}.{0,15}${listenWords}`;
-// ===== VOICE MAIL/TECHNICAL WORDS =====
-// Complex pattern - keep as is
-const voiceTechnicalWords = `(voice.{0,15}(mail|over.{0,10}ip|call|chat)|phone.{0,15}(number|book|case|charger|call)|audio.{0,15}(file|book|device|driver|format))`;
 
 
 /***/ },
@@ -97148,25 +97058,10 @@ const possessiveWords = (0,_utils__WEBPACK_IMPORTED_MODULE_0__.createRegexFromAr
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
-/* harmony export */   activityQuestionRegex: () => (/* binding */ activityQuestionRegex),
-/* harmony export */   englishHappenQuestionRegex: () => (/* binding */ englishHappenQuestionRegex),
-/* harmony export */   englishInclusionQuestionRegex: () => (/* binding */ englishInclusionQuestionRegex),
-/* harmony export */   englishServiceQuestionRegex: () => (/* binding */ englishServiceQuestionRegex),
-/* harmony export */   generalServiceQuestionRegex: () => (/* binding */ generalServiceQuestionRegex),
-/* harmony export */   happenQuestionRegex: () => (/* binding */ happenQuestionRegex),
-/* harmony export */   inclusionQuestionRegex: () => (/* binding */ inclusionQuestionRegex),
 /* harmony export */   isServiceDescriptionQuestion: () => (/* binding */ isServiceDescriptionQuestion),
-/* harmony export */   performQuestionRegex: () => (/* binding */ performQuestionRegex),
-/* harmony export */   serviceContentQuestionRegex: () => (/* binding */ serviceContentQuestionRegex),
-/* harmony export */   serviceDescriptionExclusionRegex: () => (/* binding */ serviceDescriptionExclusionRegex),
-/* harmony export */   serviceDescriptionQuestionRegex: () => (/* binding */ serviceDescriptionQuestionRegex),
-/* harmony export */   serviceInclusionRegex: () => (/* binding */ serviceInclusionRegex),
-/* harmony export */   teluguActivityRegex: () => (/* binding */ teluguActivityRegex),
-/* harmony export */   teluguInclusionRegex: () => (/* binding */ teluguInclusionRegex),
-/* harmony export */   teluguServiceQuestionRegex: () => (/* binding */ teluguServiceQuestionRegex)
+/* harmony export */   serviceDescriptionExclusionRegex: () => (/* binding */ serviceDescriptionExclusionRegex)
 /* harmony export */ });
 /* harmony import */ var _tg_core__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/core */ "../../packages/tg-core/src/index.ts");
-/* harmony import */ var _commonPatterns__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./commonPatterns */ "./src/pattern-handlers/regex/commonPatterns.ts");
 /**
  * Service Description Regex Patterns
  *
@@ -97175,21 +97070,6 @@ __webpack_require__.r(__webpack_exports__);
  * Supports English, Hindi, and Telugu.
  */
 
-
-const serviceDescriptionQuestionRegex = new RegExp(`(what.{0,15}all.{0,15}(will.{0,15}|does.{0,15})?(\\byou\\b|y).{0,15}(${_commonPatterns__WEBPACK_IMPORTED_MODULE_1__.showSendWords}|perform|things|thngs)|kya.{0,15}sab.{0,15}(kar|dikh|hog|cheezein)(oge|te|a|ein)?|em.{0,15}sab.{0,15}(dikh|hog)(oge|te|a)?)`, 'i');
-const serviceInclusionRegex = new RegExp(`(what.{0,15}(is|are|does).{0,15}(it|the.{0,15}service)?.{0,15}include|what.{0,15}(is|are).{0,15}include|wht.{0,15}(is|are).{0,15}include|kya.{0,15}(hai).{0,15}include).{0,15}(${_commonPatterns__WEBPACK_IMPORTED_MODULE_1__.serviceWords}|${_commonPatterns__WEBPACK_IMPORTED_MODULE_1__.callWords}|${_commonPatterns__WEBPACK_IMPORTED_MODULE_1__.videoWords}|sex|activity|activities)`, 'i');
-const activityQuestionRegex = new RegExp(`(what.{0,15}(activities|activites|things|thngs|work|wrk|kaam|kam).{0,15}(will|wil).{0,15}(\\byou\\b).{0,15}(perform|perfom)|kya.{0,15}(kaam|kam|activities).{0,15}(kar|hoga|hog)(oge|te|a)?)`, 'i');
-const serviceContentQuestionRegex = new RegExp(`(${_commonPatterns__WEBPACK_IMPORTED_MODULE_1__.serviceWords}|${_commonPatterns__WEBPACK_IMPORTED_MODULE_1__.callWords}|${_commonPatterns__WEBPACK_IMPORTED_MODULE_1__.videoWords}|sex).{0,15}(mein|men).{0,15}(kya|what|wht).{0,15}(sab|all|kuch).{0,15}(hai|included|include|hoga|hog)|(kya|what|wht).{0,15}(sab|all|kuch).{0,15}(hoga|hog|will|wil).{0,15}(${_commonPatterns__WEBPACK_IMPORTED_MODULE_1__.serviceWords}|${_commonPatterns__WEBPACK_IMPORTED_MODULE_1__.callWords}|${_commonPatterns__WEBPACK_IMPORTED_MODULE_1__.videoWords}|sex).{0,15}(mein|men)`, 'i');
-const generalServiceQuestionRegex = new RegExp(`(what.{0,15}all.{0,15}(does).{0,15}(\\byou\\b).{0,15}(perform|perfom|${_commonPatterns__WEBPACK_IMPORTED_MODULE_1__.showSendWords}|happens|hapens)|kya.{0,15}sab.{0,15}(kar|dikh|hoga|hog|karna)(oge|te|a)?(.{0,15}hoga)?)`, 'i');
-const happenQuestionRegex = new RegExp(`(what.{0,15}(will|wil|happen|hapens|happens).{0,15}in.{0,15}(the.{0,15})?(${_commonPatterns__WEBPACK_IMPORTED_MODULE_1__.serviceWords}|${_commonPatterns__WEBPACK_IMPORTED_MODULE_1__.callWords}|${_commonPatterns__WEBPACK_IMPORTED_MODULE_1__.videoWords})|kya.{0,15}(hoga|hog).{0,15}(${_commonPatterns__WEBPACK_IMPORTED_MODULE_1__.serviceWords}|${_commonPatterns__WEBPACK_IMPORTED_MODULE_1__.callWords}|${_commonPatterns__WEBPACK_IMPORTED_MODULE_1__.videoWords}).{0,15}(mein|men))`, 'i');
-const inclusionQuestionRegex = new RegExp(`(what.{0,15}is.{0,15}included.{0,15}in.{0,15}(${_commonPatterns__WEBPACK_IMPORTED_MODULE_1__.serviceWords}|${_commonPatterns__WEBPACK_IMPORTED_MODULE_1__.callWords}|${_commonPatterns__WEBPACK_IMPORTED_MODULE_1__.videoWords})|wht.{0,15}is.{0,15}included|kya.{0,15}sab.{0,15}(dikha|dikh|hoga|hog)(oge|te|a)?.{0,15}in.{0,15}(${_commonPatterns__WEBPACK_IMPORTED_MODULE_1__.serviceWords}|${_commonPatterns__WEBPACK_IMPORTED_MODULE_1__.callWords}))`, 'i');
-const performQuestionRegex = new RegExp(`(what.{0,15}all.{0,15}(does).{0,15}(\\byou\\b).{0,15}(perform|perfom|${_commonPatterns__WEBPACK_IMPORTED_MODULE_1__.showSendWords})|kya.{0,15}sab.{0,15}kaam.{0,15}(kar|hoga|hog)(oge|te|a)?)`, 'i');
-const englishServiceQuestionRegex = new RegExp(`(what.{0,15}all.{0,15}(will|wil|does).{0,15}(\\byou\\b).{0,15}(${_commonPatterns__WEBPACK_IMPORTED_MODULE_1__.showSendWords}|${_commonPatterns__WEBPACK_IMPORTED_MODULE_1__.giveWords}|perform|perfom|things|thngs))`, 'i');
-const englishInclusionQuestionRegex = new RegExp(`(what.{0,15}(does).{0,15}(the.{0,15})?(${_commonPatterns__WEBPACK_IMPORTED_MODULE_1__.serviceWords}|${_commonPatterns__WEBPACK_IMPORTED_MODULE_1__.callWords}|${_commonPatterns__WEBPACK_IMPORTED_MODULE_1__.videoWords}).{0,15}include)`, 'i');
-const englishHappenQuestionRegex = new RegExp(`(what.{0,15}(will|wil).{0,15}(all.{0,15})?happen.{0,15}in.{0,15}(the.{0,15})?(${_commonPatterns__WEBPACK_IMPORTED_MODULE_1__.serviceWords}|${_commonPatterns__WEBPACK_IMPORTED_MODULE_1__.callWords}|${_commonPatterns__WEBPACK_IMPORTED_MODULE_1__.videoWords}))`, 'i');
-const teluguServiceQuestionRegex = new RegExp(`(em.{0,15}sab.{0,15}chesthav|enti.{0,15}sab.{0,15}chestav|em.{0,15}sab.{0,15}chupistav|call.{0,15}lo.{0,15}enti.{0,15}sab.{0,15}jarugutundi|service.{0,15}lo.{0,15}em.{0,15}sab.{0,15}(untundi|undi)|video.{0,15}lo.{0,15}enti.{0,15}sab.{0,15}chestav)`, 'i');
-const teluguActivityRegex = new RegExp(`(enti.{0,15}(kaam|kam|activities|panulu).{0,15}(chestav|jarugutundi)|em.{0,15}(kaam|kam|activities|panulu).{0,15}(chesthav|jarugutundi))`, 'i');
-const teluguInclusionRegex = new RegExp(`(${_commonPatterns__WEBPACK_IMPORTED_MODULE_1__.serviceWords}|${_commonPatterns__WEBPACK_IMPORTED_MODULE_1__.callWords}|video).{0,15}lo.{0,15}enti.{0,15}sab.{0,15}(undi|untundi|jarugutundi)`, 'i');
 const serviceDescriptionExclusionRegex = new RegExp(`(what.{0,15}(time|is.{0,15}your.{0,15}name|are.{0,15}you.{0,15}doing|app|game|movie|song|book|food|place)|kya.{0,15}(haal|kar.{0,15}rhe|chal.{0,15}rha)|how.{0,15}(much|many|long|old)|when.{0,15}(will|can)|where.{0,15}(are|is)|who.{0,15}(are|is)|why.{0,15}(is|are))`, 'i');
 function isServiceDescriptionQuestion(text) {
     // Keywords indicating user is asking about services / what you offer
@@ -97287,7 +97167,6 @@ function isServiceDescriptionQuestion(text) {
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
-/* harmony export */   callArray: () => (/* binding */ callArray),
 /* harmony export */   callWords: () => (/* binding */ callWords),
 /* harmony export */   demoArray: () => (/* binding */ demoArray),
 /* harmony export */   demoWords: () => (/* binding */ demoWords),
@@ -97295,8 +97174,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   kitnaArray: () => (/* binding */ kitnaArray),
 /* harmony export */   serviceArray: () => (/* binding */ serviceArray),
 /* harmony export */   serviceWords: () => (/* binding */ serviceWords),
-/* harmony export */   timeArray: () => (/* binding */ timeArray),
-/* harmony export */   timeWords: () => (/* binding */ timeWords)
+/* harmony export */   timeArray: () => (/* binding */ timeArray)
 /* harmony export */ });
 /* harmony import */ var _utils__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./utils */ "./src/pattern-handlers/regex/utils.ts");
 /**
@@ -97317,7 +97195,6 @@ const demoArray = [
 ];
 const demoWords = (0,_utils__WEBPACK_IMPORTED_MODULE_0__.createRegexFromArray)(demoArray);
 // ===== CALL VARIATIONS =====
-const callArray = ['call', 'cal', 'kol', 'col', 'vc', 'ring'];
 // Boundaried so 'call'/'col' don't match inside collect/local/recall/medical/logical.
 // (Was `(ca+l+|co+l+|...)` which substring-matched those words.)
 const callWords = `(?<![a-zA-Z])(caa?l+|coll|kol|cal|col)(?![a-zA-Z])`;
@@ -97328,7 +97205,6 @@ const timeArray = [
     'lamba', 'lamb', 'when', 'wen', 'kab'
 ];
 const kitnaArray = ['kitna', 'kitne', 'kitn', 'dher', 'der', 'entha'];
-const timeWords = (0,_utils__WEBPACK_IMPORTED_MODULE_0__.createRegexFromArray)([...timeArray, ...kitnaArray]);
 // ===== FULL/COMPLETE WORDS =====
 const fullArray = [
     'full', 'hour', 'complete', 'night', 'entire', 'whole'
@@ -97596,14 +97472,11 @@ const permissionWords = (0,_utils__WEBPACK_IMPORTED_MODULE_0__.createRegexFromAr
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
-/* harmony export */   alreadyWords: () => (/* binding */ alreadyWords),
 /* harmony export */   futureWords: () => (/* binding */ futureWords),
 /* harmony export */   immediateWords: () => (/* binding */ immediateWords),
 /* harmony export */   laterWords: () => (/* binding */ laterWords),
 /* harmony export */   nowWords: () => (/* binding */ nowWords),
-/* harmony export */   pastWords: () => (/* binding */ pastWords),
-/* harmony export */   readyWords: () => (/* binding */ readyWords),
-/* harmony export */   urgencyHindiWords: () => (/* binding */ urgencyHindiWords)
+/* harmony export */   pastWords: () => (/* binding */ pastWords)
 /* harmony export */ });
 /* harmony import */ var _utils__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./utils */ "./src/pattern-handlers/regex/utils.ts");
 /**
@@ -97633,11 +97506,6 @@ const futureSimpleArray = ['will', 'wil', 'shall', 'gonna', 'gona'];
 const futureSimpleWords = (0,_utils__WEBPACK_IMPORTED_MODULE_0__.createRegexFromArray)(futureSimpleArray);
 // Special handling for "going to", "want to", "wanna to" patterns
 const futureWords = `(${futureSimpleWords}|going.{0,15}to|want.{0,15}to|wanna.{0,15}to)`;
-// ===== ALREADY WORDS =====
-const alreadyArray = [
-    'already', 'alredy', 'alrdy'
-];
-const alreadyWords = (0,_utils__WEBPACK_IMPORTED_MODULE_0__.createRegexFromArray)(alreadyArray);
 // ===== LATER/WAIT WORDS =====
 const laterArray = [
     'later', 'latr', 'ltr', 'wait', 'wat', 'busy', 'bsy',
@@ -97645,16 +97513,6 @@ const laterArray = [
 ];
 // Special handling for "not now", "baad me", "bad me" patterns
 const laterWords = `(${laterArray.join('|')}|not.{0,10}now|nt.{0,10}now|baad.{0,10}me|bad.{0,10}me)`;
-// ===== READY VARIATIONS =====
-const readySimpleArray = ['ready', 'redy', 'rdy'];
-const readySimpleWords = (0,_utils__WEBPACK_IMPORTED_MODULE_0__.createRegexFromArray)(readySimpleArray);
-// Special handling for "red+" pattern
-const readyWords = `(${readySimpleWords}|red+)`;
-// ===== TURANT/JALDI (Urgency in Hindi) =====
-const urgencyHindiArray = [
-    'turant', 'turnt', 'trant', 'jaldi', 'jldi', 'jldy', 'jaldy'
-];
-const urgencyHindiWords = (0,_utils__WEBPACK_IMPORTED_MODULE_0__.createRegexFromArray)(urgencyHindiArray);
 // ===== IMMEDIATE/FAST WORDS =====
 const immediateArray = ['immediate', 'immed', 'fast', 'fst', 'fastt'];
 const immediateWords = (0,_utils__WEBPACK_IMPORTED_MODULE_0__.createRegexFromArray)(immediateArray);
@@ -97725,38 +97583,26 @@ const urgencyRequestRegex = { test: isUrgencyRequest };
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   braBoobArray: () => (/* binding */ braBoobArray),
-/* harmony export */   braBoobWords: () => (/* binding */ braBoobWords),
 /* harmony export */   chestArray: () => (/* binding */ chestArray),
-/* harmony export */   chestWords: () => (/* binding */ chestWords),
 /* harmony export */   clothingArray: () => (/* binding */ clothingArray),
 /* harmony export */   clothingWords: () => (/* binding */ clothingWords),
-/* harmony export */   doingArray: () => (/* binding */ doingArray),
 /* harmony export */   hiWords: () => (/* binding */ hiWords),
 /* harmony export */   howArray: () => (/* binding */ howArray),
-/* harmony export */   howManyQuestionArray: () => (/* binding */ howManyQuestionArray),
 /* harmony export */   howMuchQuestionArray: () => (/* binding */ howMuchQuestionArray),
-/* harmony export */   howMuchQuestionWords: () => (/* binding */ howMuchQuestionWords),
 /* harmony export */   howWords: () => (/* binding */ howWords),
 /* harmony export */   negativeArray: () => (/* binding */ negativeArray),
 /* harmony export */   negativeWords: () => (/* binding */ negativeWords),
-/* harmony export */   onlyWords: () => (/* binding */ onlyWords),
 /* harmony export */   otherQuestionArray: () => (/* binding */ otherQuestionArray),
 /* harmony export */   otherQuestionWords: () => (/* binding */ otherQuestionWords),
 /* harmony export */   profileSimpleArray: () => (/* binding */ profileSimpleArray),
 /* harmony export */   profileWords: () => (/* binding */ profileWords),
-/* harmony export */   questionIndicators: () => (/* binding */ questionIndicators),
 /* harmony export */   questionIndicatorsArray: () => (/* binding */ questionIndicatorsArray),
-/* harmony export */   questionPatterns: () => (/* binding */ questionPatterns),
 /* harmony export */   questionWords: () => (/* binding */ questionWords),
-/* harmony export */   rightWords: () => (/* binding */ rightWords),
 /* harmony export */   sizeArray: () => (/* binding */ sizeArray),
 /* harmony export */   sizeDescriptorArray: () => (/* binding */ sizeDescriptorArray),
-/* harmony export */   sizeDescriptorWords: () => (/* binding */ sizeDescriptorWords),
 /* harmony export */   sizeQuestionArray: () => (/* binding */ sizeQuestionArray),
-/* harmony export */   sizeQuestionWords: () => (/* binding */ sizeQuestionWords),
 /* harmony export */   sizeWords: () => (/* binding */ sizeWords),
 /* harmony export */   wantSeeArray: () => (/* binding */ wantSeeArray),
-/* harmony export */   wantSeeWords: () => (/* binding */ wantSeeWords),
 /* harmony export */   whatArray: () => (/* binding */ whatArray),
 /* harmony export */   whatWords: () => (/* binding */ whatWords),
 /* harmony export */   whenArray: () => (/* binding */ whenArray),
@@ -97770,7 +97616,6 @@ __webpack_require__.r(__webpack_exports__);
  * Question, negative, size, clothing, want/see, profile patterns
  */
 
-const doingArray = ['doing', 'kar rah', 'kr rh', 'chestu', 'chesthu'];
 // ===== WHAT VARIATIONS =====
 const whatArray = [
     'what', 'wht', 'which', 'kya', 'kaun', 'kaha',
@@ -97787,8 +97632,6 @@ const howArray = [
     'elaaga', 'elaga', 'ela unda', 'elaunda', 'elaa unda', 'elaaunda'
 ];
 const howMuchQuestionArray = ['how much', 'hw much'];
-const howManyQuestionArray = ['how many', 'hw many'];
-const howMuchQuestionWords = (0,_utils__WEBPACK_IMPORTED_MODULE_0__.createRegexFromArray)(howMuchQuestionArray);
 const howWords = (0,_utils__WEBPACK_IMPORTED_MODULE_0__.createRegexFromArray)(howArray);
 // ===== WHEN VARIATIONS =====
 const whenArray = [
@@ -97826,27 +97669,23 @@ const sizeArray = [
 const sizeWords = (0,_utils__WEBPACK_IMPORTED_MODULE_0__.createRegexFromArray)(sizeArray);
 // ===== SIZE QUESTION WORDS =====
 const sizeQuestionArray = ['what', 'wht', 'how', 'kitna', 'ktna', 'entha'];
-const sizeQuestionWords = (0,_utils__WEBPACK_IMPORTED_MODULE_0__.createRegexFromArray)(sizeQuestionArray);
 // ===== SIZE DESCRIPTORS =====
 const sizeDescriptorArray = [
     'size', 'siz', 'big', 'bigg', 'small', 'smal',
     'tight', 'tite', 'tght'
 ];
-const sizeDescriptorWords = (0,_utils__WEBPACK_IMPORTED_MODULE_0__.createRegexFromArray)(sizeDescriptorArray);
 // ===== CHEST/SIZE WORDS =====
 const chestArray = [
     'chest', 'chst', 'chhati', 'chati', 'size', 'siz',
     'bra', 'panty', 'pnty', 'panties', 'pnties',
     'underwear', 'undwear', 'milk', 'mlk', 'doodh', 'dudh', 'palu', 'plu'
 ];
-const chestWords = (0,_utils__WEBPACK_IMPORTED_MODULE_0__.createRegexFromArray)(chestArray);
 // ===== BRA/BOOB WORDS =====
 const braBoobArray = [
     'bra', 'bob', 'boob', 'breast', 'brst',
     'chest', 'chst', 'milk', 'mlk', 'palu', 'plu',
     'doodh', 'dudh'
 ];
-const braBoobWords = (0,_utils__WEBPACK_IMPORTED_MODULE_0__.createRegexFromArray)(braBoobArray);
 // ===== CLOTHING WORDS =====
 const clothingArray = [
     'dress', 'dres', 'drs', 'clothes', 'cloth', 'clth',
@@ -97873,7 +97712,6 @@ const wantSeeArray = [
     // Malayalam: kaanikku/kaanik=show, kaanu/nokku=see, venam=want
     'kaanikku', 'kaanik', 'kaanu', 'nokku', 'venam'
 ];
-const wantSeeWords = (0,_utils__WEBPACK_IMPORTED_MODULE_0__.createRegexFromArray)(wantSeeArray);
 // ===== PROFILE/DP WORDS =====
 const profileSimpleArray = [
     'dp', 'profile', 'prof', 'who', 'you', 'your', 'ur', 'yor', 'yur',
@@ -97889,10 +97727,6 @@ const questionIndicatorsArray = [
     'hai', 'hae', 'ela', 'elaa',
     'eppudu', 'entha', 'undi', 'undhi'
 ];
-const questionIndicators = (0,_utils__WEBPACK_IMPORTED_MODULE_0__.createRegexFromArray)(questionIndicatorsArray);
-// ===== QUESTION PATTERNS =====
-// Complex pattern - keep as is
-const questionPatterns = `(are.{0,15}you|are.{0,15}u|is.{0,15}this|you.{0,15}are|this.{0,15}is|you.{0,10}re|you'?re|yo+u'?re|is.{0,15}it|it.{0,15}is|you.{0,15}do)`;
 // ===== YES/ACCEPTANCE VARIATIONS =====
 const yesSimpleArray = [
     'yes', 'yess', 'haan', 'han',
@@ -97903,12 +97737,6 @@ const yesSimpleArray = [
 const yesSimpleWords = (0,_utils__WEBPACK_IMPORTED_MODULE_0__.createRegexFromArray)(yesSimpleArray);
 // Special handling for "haa+n?" pattern
 const yesWords = `(${yesSimpleWords}|haa+n?)`;
-// ===== RIGHT WORDS =====
-const rightArray = ['right', 'rght', 'rite', 'ryt'];
-const rightWords = (0,_utils__WEBPACK_IMPORTED_MODULE_0__.createRegexFromArray)(rightArray);
-// ===== ONLY WORDS =====
-const onlyArray = ['only', 'onli', 'onl'];
-const onlyWords = (0,_utils__WEBPACK_IMPORTED_MODULE_0__.createRegexFromArray)(onlyArray);
 // ===== HI/HE WORDS =====
 const hiSimpleArray = ['hi', 'hii', 'hiii'];
 const hiSimpleWords = (0,_utils__WEBPACK_IMPORTED_MODULE_0__.createRegexFromArray)(hiSimpleArray);
