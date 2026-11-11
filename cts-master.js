@@ -1150,6 +1150,7 @@ const monitor_module_1 = __webpack_require__(/*! ./components/monitor/monitor.mo
 const fake_payment_module_1 = __webpack_require__(/*! ./components/fake-payment/fake-payment.module */ "./src/components/fake-payment/fake-payment.module.ts");
 const payment_proofs_module_1 = __webpack_require__(/*! ./components/payment-proofs/payment-proofs.module */ "./src/components/payment-proofs/payment-proofs.module.ts");
 const payment_uncredit_module_1 = __webpack_require__(/*! ./components/payment-uncredit/payment-uncredit.module */ "./src/components/payment-uncredit/payment-uncredit.module.ts");
+const payment_health_module_1 = __webpack_require__(/*! ./components/payment-health/payment-health.module */ "./src/components/payment-health/payment-health.module.ts");
 const file_module_1 = __webpack_require__(/*! ./components/files/file.module */ "./src/components/files/file.module.ts");
 const app_service_1 = __webpack_require__(/*! ./app.service */ "./src/app.service.ts");
 const runtime_config_service_1 = __webpack_require__(/*! ./control-plane/config/runtime-config.service */ "./src/control-plane/config/runtime-config.service.ts");
@@ -1188,6 +1189,7 @@ exports.AppModule = AppModule = __decorate([
             fake_payment_module_1.FakePaymentModule,
             payment_proofs_module_1.PaymentProofsModule,
             payment_uncredit_module_1.PaymentUncreditModule,
+            payment_health_module_1.PaymentHealthModule,
             stat_module_1.StatModule,
             stat2_module_1.Stat2Module,
             tg_signup_module_1.TgSignupModule,
@@ -43021,6 +43023,501 @@ exports.PoolSnapshotWriter = PoolSnapshotWriter = PoolSnapshotWriter_1 = __decor
 
 /***/ },
 
+/***/ "./src/components/payment-health/payment-health.controller.ts"
+/*!********************************************************************!*\
+  !*** ./src/components/payment-health/payment-health.controller.ts ***!
+  \********************************************************************/
+(__unused_webpack_module, exports, __webpack_require__) {
+
+
+var __decorate = (this && this.__decorate) || function (decorators, target, key, desc) {
+    var c = arguments.length, r = c < 3 ? target : desc === null ? desc = Object.getOwnPropertyDescriptor(target, key) : desc, d;
+    if (typeof Reflect === "object" && typeof Reflect.decorate === "function") r = Reflect.decorate(decorators, target, key, desc);
+    else for (var i = decorators.length - 1; i >= 0; i--) if (d = decorators[i]) r = (c < 3 ? d(r) : c > 3 ? d(target, key, r) : d(target, key)) || r;
+    return c > 3 && r && Object.defineProperty(target, key, r), r;
+};
+var __metadata = (this && this.__metadata) || function (k, v) {
+    if (typeof Reflect === "object" && typeof Reflect.metadata === "function") return Reflect.metadata(k, v);
+};
+var __param = (this && this.__param) || function (paramIndex, decorator) {
+    return function (target, key) { decorator(target, key, paramIndex); }
+};
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.PaymentHealthController = void 0;
+const common_1 = __webpack_require__(/*! @nestjs/common */ "@nestjs/common");
+const swagger_1 = __webpack_require__(/*! @nestjs/swagger */ "@nestjs/swagger");
+const payment_health_service_1 = __webpack_require__(/*! ./payment-health.service */ "./src/components/payment-health/payment-health.service.ts");
+let PaymentHealthController = class PaymentHealthController {
+    constructor(service) {
+        this.service = service;
+    }
+    report(day) {
+        return this.service.compute(day);
+    }
+};
+exports.PaymentHealthController = PaymentHealthController;
+__decorate([
+    (0, common_1.Get)('report'),
+    (0, swagger_1.ApiOperation)({
+        summary: 'Payment health of one IST day (default yesterday): credited proofs vs payment_event rows (missing / extra / voided), ' +
+            'possible double credits, holds and fake flags by reason, tg-aut processes not on the newest build. Read-only; never sends.',
+    }),
+    (0, swagger_1.ApiQuery)({ name: 'day', required: false, description: 'IST day YYYY-MM-DD (paymentProofs keeps 7 days)' }),
+    __param(0, (0, common_1.Query)('day')),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [String]),
+    __metadata("design:returntype", void 0)
+], PaymentHealthController.prototype, "report", null);
+exports.PaymentHealthController = PaymentHealthController = __decorate([
+    (0, swagger_1.ApiTags)('payment-proofs'),
+    (0, common_1.Controller)('payment-health'),
+    __metadata("design:paramtypes", [payment_health_service_1.PaymentHealthService])
+], PaymentHealthController);
+
+
+/***/ },
+
+/***/ "./src/components/payment-health/payment-health.module.ts"
+/*!****************************************************************!*\
+  !*** ./src/components/payment-health/payment-health.module.ts ***!
+  \****************************************************************/
+(__unused_webpack_module, exports, __webpack_require__) {
+
+
+var __decorate = (this && this.__decorate) || function (decorators, target, key, desc) {
+    var c = arguments.length, r = c < 3 ? target : desc === null ? desc = Object.getOwnPropertyDescriptor(target, key) : desc, d;
+    if (typeof Reflect === "object" && typeof Reflect.decorate === "function") r = Reflect.decorate(decorators, target, key, desc);
+    else for (var i = decorators.length - 1; i >= 0; i--) if (d = decorators[i]) r = (c < 3 ? d(r) : c > 3 ? d(target, key, r) : d(target, key)) || r;
+    return c > 3 && r && Object.defineProperty(target, key, r), r;
+};
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.PaymentHealthModule = void 0;
+const common_1 = __webpack_require__(/*! @nestjs/common */ "@nestjs/common");
+const mongoose_1 = __webpack_require__(/*! @nestjs/mongoose */ "@nestjs/mongoose");
+const redisClient_1 = __webpack_require__(/*! ../../utils/redisClient */ "./src/utils/redisClient.ts");
+const daily_analytics_module_1 = __webpack_require__(/*! ../daily-analytics/daily-analytics.module */ "./src/components/daily-analytics/daily-analytics.module.ts");
+const payment_proof_schema_1 = __webpack_require__(/*! ../payment-proofs/schemas/payment-proof.schema */ "./src/components/payment-proofs/schemas/payment-proof.schema.ts");
+const payment_health_controller_1 = __webpack_require__(/*! ./payment-health.controller */ "./src/components/payment-health/payment-health.controller.ts");
+const payment_health_service_1 = __webpack_require__(/*! ./payment-health.service */ "./src/components/payment-health/payment-health.service.ts");
+let PaymentHealthModule = class PaymentHealthModule {
+};
+exports.PaymentHealthModule = PaymentHealthModule;
+exports.PaymentHealthModule = PaymentHealthModule = __decorate([
+    (0, common_1.Module)({
+        imports: [
+            daily_analytics_module_1.DailyAnalyticsModule,
+            mongoose_1.MongooseModule.forFeature([{ name: payment_proof_schema_1.PAYMENT_PROOF_MODEL, schema: payment_proof_schema_1.PaymentProofSchema, collection: payment_proof_schema_1.PAYMENT_PROOF_COLLECTION }]),
+        ],
+        controllers: [payment_health_controller_1.PaymentHealthController],
+        providers: [
+            payment_health_service_1.PaymentHealthService,
+            {
+                provide: payment_health_service_1.PAYMENT_HEALTH_REDIS,
+                useFactory: () => ({
+                    smembers: (key) => redisClient_1.RedisClient.getClient().smembers(key),
+                    mget: (keys) => redisClient_1.RedisClient.getClient().mget(keys),
+                }),
+            },
+        ],
+        exports: [payment_health_service_1.PaymentHealthService],
+    })
+], PaymentHealthModule);
+
+
+/***/ },
+
+/***/ "./src/components/payment-health/payment-health.report.ts"
+/*!****************************************************************!*\
+  !*** ./src/components/payment-health/payment-health.report.ts ***!
+  \****************************************************************/
+(__unused_webpack_module, exports, __webpack_require__) {
+
+
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.inr = exports.MAX_REASONS = exports.MAX_LISTED = exports.IST_OFFSET_MS = exports.DAY_MS = exports.MATCH_WINDOW_MS = void 0;
+exports.istDay = istDay;
+exports.istDayRange = istDayRange;
+exports.reconcile = reconcile;
+exports.holdsAndFakes = holdsAndFakes;
+exports.doublesInDay = doublesInDay;
+exports.buildCheck = buildCheck;
+exports.buildReport = buildReport;
+exports.needsLook = needsLook;
+exports.formatReport = formatReport;
+const payment_proofs_double_credit_1 = __webpack_require__(/*! ../payment-proofs/payment-proofs.double-credit */ "./src/components/payment-proofs/payment-proofs.double-credit.ts");
+exports.MATCH_WINDOW_MS = 15 * 60 * 1000;
+exports.DAY_MS = 24 * 60 * 60 * 1000;
+exports.IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+exports.MAX_LISTED = 8;
+exports.MAX_REASONS = 6;
+function istDay(now, offsetDays = 0) {
+    return new Date(now + exports.IST_OFFSET_MS + offsetDays * exports.DAY_MS).toISOString().slice(0, 10);
+}
+function istDayRange(day) {
+    const from = Date.parse(`${day}T00:00:00.000Z`) - exports.IST_OFFSET_MS;
+    return { from, to: from + exports.DAY_MS };
+}
+function served(r) {
+    return r.servedAt ? new Date(r.servedAt).getTime() : NaN;
+}
+function wasCredited(r) {
+    if (!Number.isFinite(served(r)))
+        return false;
+    const o = r.verdict?.outcome;
+    return o ? o === 'credited' : true;
+}
+const sum = (xs) => xs.reduce((a, b) => a + b, 0);
+function reconcile(proofs, rows, from, to, matchMs = exports.MATCH_WINDOW_MS) {
+    const screenshot = rows.filter((x) => x.source === 'screenshot' && x.amount > 0);
+    const served_ = proofs.filter(wasCredited).sort((a, b) => served(a) - served(b));
+    const used = new Set();
+    const match = new Map();
+    for (const p of served_) {
+        const row = screenshot.find((x) => !used.has(x.id) && x.voidProofId && x.voidProofId === (0, payment_proofs_double_credit_1.proofKey)(p));
+        if (row) {
+            used.add(row.id);
+            match.set((0, payment_proofs_double_credit_1.proofKey)(p), row);
+        }
+    }
+    for (const p of served_) {
+        const id = (0, payment_proofs_double_credit_1.proofKey)(p);
+        if (match.has(id))
+            continue;
+        const t = served(p);
+        const amount = (0, payment_proofs_double_credit_1.creditAmountOf)(p);
+        let best;
+        for (const x of screenshot) {
+            if (used.has(x.id) || x.chatId !== String(p.chatId) || x.clientId !== p.clientId || x.amount !== amount)
+                continue;
+            if (Math.abs(x.ts - t) > matchMs)
+                continue;
+            if (!best || Math.abs(x.ts - t) < Math.abs(best.ts - t))
+                best = x;
+        }
+        if (best) {
+            used.add(best.id);
+            match.set(id, best);
+        }
+    }
+    const inDay = (t) => t >= from && t < to;
+    const dayProofs = served_.filter((p) => inDay(served(p)));
+    const live = dayProofs.filter((p) => (0, payment_proofs_double_credit_1.isLiveCredit)(p));
+    const unc = dayProofs.filter((p) => !(0, payment_proofs_double_credit_1.isLiveCredit)(p));
+    const dayRows = screenshot.filter((x) => inDay(x.ts));
+    const otherSources = {};
+    for (const x of rows)
+        if (inDay(x.ts) && x.source !== 'screenshot')
+            otherSources[x.source] = (otherSources[x.source] ?? 0) + 1;
+    const voidedRows = dayRows.filter((x) => x.voided);
+    return {
+        credited: { count: live.length, amount: sum(live.map(payment_proofs_double_credit_1.creditAmountOf)) },
+        uncredited: { count: unc.length, amount: sum(unc.map(payment_proofs_double_credit_1.creditAmountOf)) },
+        rows: { count: dayRows.length, amount: sum(dayRows.map((x) => x.amount)) },
+        missing: live.filter((p) => !match.has((0, payment_proofs_double_credit_1.proofKey)(p))).map((p) => ({
+            proofId: (0, payment_proofs_double_credit_1.proofKey)(p), chatId: String(p.chatId), clientId: String(p.clientId ?? ''), amount: (0, payment_proofs_double_credit_1.creditAmountOf)(p), servedAt: served(p),
+        })),
+        extra: dayRows.filter((x) => !used.has(x.id)).map((x) => {
+            const near = proofs.find((p) => !wasCredited(p) && Number.isFinite(served(p)) && String(p.chatId) === x.chatId
+                && p.clientId === x.clientId && (0, payment_proofs_double_credit_1.creditAmountOf)(p) === x.amount && Math.abs(served(p) - x.ts) <= matchMs);
+            return near ? { ...x, note: `served, verdict ${near.verdict?.outcome ?? '?'}: ${(0, payment_proofs_double_credit_1.proofKey)(near)}` } : x;
+        }),
+        voided: { count: voidedRows.length, amount: sum(voidedRows.map((x) => x.amount)) },
+        voidedButCredited: live.filter((p) => match.get((0, payment_proofs_double_credit_1.proofKey)(p))?.voided).map((p) => ({ proofId: (0, payment_proofs_double_credit_1.proofKey)(p), rowId: match.get((0, payment_proofs_double_credit_1.proofKey)(p)).id, amount: (0, payment_proofs_double_credit_1.creditAmountOf)(p) })),
+        uncreditedButCounted: unc.filter((p) => { const m = match.get((0, payment_proofs_double_credit_1.proofKey)(p)); return !!m && !m.voided; })
+            .map((p) => ({ proofId: (0, payment_proofs_double_credit_1.proofKey)(p), rowId: match.get((0, payment_proofs_double_credit_1.proofKey)(p)).id, amount: (0, payment_proofs_double_credit_1.creditAmountOf)(p) })),
+        otherSources,
+    };
+}
+function tally(lists) {
+    const m = new Map();
+    for (const l of lists)
+        for (const k of new Set(l.length ? l : ['(no reason)']))
+            m.set(k, (m.get(k) ?? 0) + 1);
+    return [...m.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+}
+function holdsAndFakes(proofs, from, to) {
+    const day = proofs.filter((p) => { const t = p.createdAt ? new Date(p.createdAt).getTime() : NaN; return t >= from && t < to; });
+    const held = day.filter((p) => p.ask?.kind === 'held' || p.ask?.kind === 'old_time');
+    const fake = day.filter((p) => p.verdict?.outcome === 'fraud_ask' || p.verdict?.outcome === 'fake_blocked');
+    return {
+        holds: {
+            total: held.length,
+            open: held.filter((p) => p.ask?.state === 'open').length,
+            byReason: tally(held.map((p) => (p.ask?.reasons?.length ? p.ask.reasons : p.verdict?.reasons ?? []))),
+        },
+        fakes: { total: fake.length, byReason: tally(fake.map((p) => p.verdict?.reasons ?? [])) },
+    };
+}
+function doublesInDay(proofs, from, to) {
+    return (0, payment_proofs_double_credit_1.findDoubleCredits)(proofs).filter((p) => p.secondServedAt >= from && p.secondServedAt < to);
+}
+function buildCheck(processes, skipped) {
+    if (!processes)
+        return { skipped: skipped ?? 'heartbeats unavailable' };
+    if (!processes.length)
+        return { skipped: 'no live tg-aut heartbeat' };
+    const stamped = processes.filter((p) => p.builtAt && Number.isFinite(Date.parse(p.builtAt)));
+    if (!stamped.length)
+        return { skipped: 'heartbeats carry no build stamp' };
+    const newest = stamped.reduce((a, b) => (Date.parse(b.builtAt) > Date.parse(a.builtAt) ? b : a));
+    const behind = processes.filter((p) => !p.builtAt || Date.parse(p.builtAt) < Date.parse(newest.builtAt))
+        .sort((a, b) => a.clientId.localeCompare(b.clientId));
+    return { newest: { sha: newest.sha, builtAt: newest.builtAt }, total: processes.length, behind };
+}
+function buildReport(input) {
+    const { from, to } = istDayRange(input.day);
+    return {
+        day: input.day,
+        reconcile: input.pgRows ? reconcile(input.proofs, input.pgRows, from, to) : null,
+        ...(input.pgRows ? {} : { pgError: input.pgError ?? 'Postgres unavailable' }),
+        doubles: doublesInDay(input.proofs, from, to),
+        ...holdsAndFakes(input.proofs, from, to),
+        builds: buildCheck(input.processes, input.processesSkipped),
+    };
+}
+const inr = (n) => '₹' + Math.round(n).toLocaleString('en-IN');
+exports.inr = inr;
+const ist = (t) => new Date(t + exports.IST_OFFSET_MS).toISOString().slice(5, 16).replace('T', ' ');
+const shortSha = (s) => (s ? s.slice(0, 7) : '?');
+function needsLook(r) {
+    const c = r.reconcile;
+    return !c || c.missing.length > 0 || c.extra.length > 0 || c.voidedButCredited.length > 0
+        || c.uncreditedButCounted.length > 0 || r.doubles.length > 0;
+}
+function formatReport(r) {
+    const c = r.reconcile;
+    const fields = [];
+    if (c) {
+        fields.push({ label: 'Credited', value: `${c.credited.count} · ${(0, exports.inr)(c.credited.amount)}`, code: false });
+        fields.push({ label: 'Revenue rows', value: `${c.rows.count} · ${(0, exports.inr)(c.rows.amount)}`, code: false });
+        fields.push({ label: 'Missing rows', value: c.missing.length ? `${c.missing.length} · ${(0, exports.inr)(sum(c.missing.map((m) => m.amount)))}` : '0', code: false });
+        fields.push({ label: 'Extra rows', value: String(c.extra.length), code: false });
+        fields.push({ label: 'Voided', value: `${c.voided.count} · ${(0, exports.inr)(c.voided.amount)} (uncredited ${c.uncredited.count})`, code: false });
+    }
+    else {
+        fields.push({ label: 'Revenue check', value: `skipped: ${r.pgError}`, code: false });
+    }
+    fields.push({ label: 'Possible double credits', value: r.doubles.length ? `${r.doubles.length} · ${(0, exports.inr)(sum(r.doubles.map((d) => d.amount)))}` : '0', code: false });
+    fields.push({ label: 'Holds', value: `${r.holds.total} (${r.holds.open} still open)`, code: false });
+    fields.push({ label: 'Fake flags', value: String(r.fakes.total), code: false });
+    const b = r.builds;
+    fields.push({
+        label: 'Old build',
+        value: b.skipped ? `skipped: ${b.skipped}` : `${b.behind.length} of ${b.total} (newest ${shortSha(b.newest.sha)})`,
+        code: false,
+    });
+    const tables = [];
+    const more = (n) => (n > exports.MAX_LISTED ? ` (first ${exports.MAX_LISTED} of ${n})` : '');
+    if (c?.missing.length) {
+        tables.push({
+            title: `Credited, no revenue row${more(c.missing.length)}`, columns: ['Proof', '₹', 'Served'], numeric: [1],
+            rows: c.missing.slice(0, exports.MAX_LISTED).map((m) => [m.proofId, m.amount, ist(m.servedAt)]),
+        });
+    }
+    if (c?.extra.length) {
+        tables.push({
+            title: `Revenue row, no proof${more(c.extra.length)}`, columns: ['Row', 'Client', 'Chat', '₹', 'At'], numeric: [3],
+            rows: c.extra.slice(0, exports.MAX_LISTED).map((x) => [`${x.id}${x.voided ? ' (voided)' : ''}${x.note ? ` (${x.note})` : ''}`, x.clientId, x.chatId, x.amount, ist(x.ts)]),
+        });
+    }
+    if (c?.voidedButCredited.length || c?.uncreditedButCounted.length) {
+        const rows = [
+            ...(c.voidedButCredited ?? []).map((x) => [x.proofId, x.rowId, 'row voided, proof still credited']),
+            ...(c.uncreditedButCounted ?? []).map((x) => [x.proofId, x.rowId, 'uncredited, row still counted']),
+        ];
+        tables.push({ title: `Void mismatch${more(rows.length)}`, columns: ['Proof', 'Row', 'What'], rows: rows.slice(0, exports.MAX_LISTED) });
+    }
+    if (r.doubles.length) {
+        tables.push({
+            title: `Possible double credit, check${more(r.doubles.length)}`, columns: ['Chat', '₹', 'Proofs', 'Why'], numeric: [1],
+            rows: r.doubles.slice(0, exports.MAX_LISTED).map((d) => [d.chatId, d.amount, `${d.first} + ${d.second.split('-').pop()}`, d.why]),
+        });
+    }
+    if (r.holds.byReason.length) {
+        tables.push({ title: 'Holds by reason', columns: ['Reason', 'n'], numeric: [1], rows: r.holds.byReason.slice(0, exports.MAX_REASONS) });
+    }
+    if (r.fakes.byReason.length) {
+        tables.push({ title: 'Fake flags by reason', columns: ['Reason', 'n'], numeric: [1], rows: r.fakes.byReason.slice(0, exports.MAX_REASONS) });
+    }
+    if (b.behind?.length) {
+        tables.push({
+            title: `Not on the newest build${more(b.behind.length)}`, columns: ['Client', 'Build'],
+            rows: b.behind.slice(0, exports.MAX_LISTED).map((p) => [p.clientId, p.builtAt ? `${shortSha(p.sha)} ${p.builtAt.slice(5, 16).replace('T', ' ')}Z` : 'unknown']),
+        });
+    }
+    return {
+        title: `Payment health ${r.day}`,
+        severity: needsLook(r) ? 'warning' : 'info',
+        summary: 'Yesterday (IST). Report only: nothing was changed.',
+        fields,
+        fieldLayout: 'table',
+        tables,
+    };
+}
+
+
+/***/ },
+
+/***/ "./src/components/payment-health/payment-health.service.ts"
+/*!*****************************************************************!*\
+  !*** ./src/components/payment-health/payment-health.service.ts ***!
+  \*****************************************************************/
+(__unused_webpack_module, exports, __webpack_require__) {
+
+
+var __decorate = (this && this.__decorate) || function (decorators, target, key, desc) {
+    var c = arguments.length, r = c < 3 ? target : desc === null ? desc = Object.getOwnPropertyDescriptor(target, key) : desc, d;
+    if (typeof Reflect === "object" && typeof Reflect.decorate === "function") r = Reflect.decorate(decorators, target, key, desc);
+    else for (var i = decorators.length - 1; i >= 0; i--) if (d = decorators[i]) r = (c < 3 ? d(r) : c > 3 ? d(target, key, r) : d(target, key)) || r;
+    return c > 3 && r && Object.defineProperty(target, key, r), r;
+};
+var __metadata = (this && this.__metadata) || function (k, v) {
+    if (typeof Reflect === "object" && typeof Reflect.metadata === "function") return Reflect.metadata(k, v);
+};
+var __param = (this && this.__param) || function (paramIndex, decorator) {
+    return function (target, key) { decorator(target, key, paramIndex); }
+};
+var PaymentHealthService_1;
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.PaymentHealthService = exports.PAYMENT_HEALTH_REDIS = exports.PAYMENT_HEALTH_FLAG = exports.PAYMENT_HEALTH_CATEGORY = void 0;
+exports.paymentHealthEnabled = paymentHealthEnabled;
+exports.summaryOf = summaryOf;
+const common_1 = __webpack_require__(/*! @nestjs/common */ "@nestjs/common");
+const mongoose_1 = __webpack_require__(/*! @nestjs/mongoose */ "@nestjs/mongoose");
+const channel_category_enum_1 = 0;
+const bot_service_instance_1 = __webpack_require__(/*! ../../utils/bot.service.instance */ "./src/utils/bot.service.instance.ts");
+const analytics_pg_reader_1 = __webpack_require__(/*! ../daily-analytics/analytics-pg.reader */ "./src/components/daily-analytics/analytics-pg.reader.ts");
+const monitor_util_1 = __webpack_require__(/*! ../monitor/monitor-util */ "./src/components/monitor/monitor-util.ts");
+const payment_proofs_double_credit_1 = __webpack_require__(/*! ../payment-proofs/payment-proofs.double-credit */ "./src/components/payment-proofs/payment-proofs.double-credit.ts");
+const payment_proof_schema_1 = __webpack_require__(/*! ../payment-proofs/schemas/payment-proof.schema */ "./src/components/payment-proofs/schemas/payment-proof.schema.ts");
+const payment_health_report_1 = __webpack_require__(/*! ./payment-health.report */ "./src/components/payment-health/payment-health.report.ts");
+exports.PAYMENT_HEALTH_CATEGORY = __webpack_require__(/*! ../bots/channel-category.enum */ "./src/components/bots/channel-category.enum.ts").ChannelCategory.CLIENT_UPDATES;
+exports.PAYMENT_HEALTH_FLAG = 'PAYMENT_HEALTH_REPORT_ENABLED';
+exports.PAYMENT_HEALTH_REDIS = 'PAYMENT_HEALTH_REDIS';
+const HEARTBEAT_INDEX_KEY = 'heartbeat::index';
+const HEARTBEAT_FRESH_MS = 10 * 60 * 1000;
+const REDIS_DEADLINE_MS = 3_000;
+const MONGO_TIMEOUT_MS = 30_000;
+function paymentHealthEnabled(env = process.env) {
+    const v = env[exports.PAYMENT_HEALTH_FLAG];
+    if (v === undefined || v.trim() === '')
+        return true;
+    return !['0', 'false', 'no', 'off'].includes(v.trim().toLowerCase());
+}
+const PROOF_PROJECTION = {
+    ...payment_proofs_double_credit_1.DOUBLE_CREDIT_PROJECTION,
+    createdAt: 1, 'verdict.reasons': 1, 'ask.kind': 1, 'ask.state': 1, 'ask.reasons': 1,
+};
+let PaymentHealthService = PaymentHealthService_1 = class PaymentHealthService {
+    constructor(proofModel, pg, redis) {
+        this.proofModel = proofModel;
+        this.pg = pg;
+        this.redis = redis;
+        this.logger = new common_1.Logger(PaymentHealthService_1.name);
+        this.notify = async (input) => {
+            const bots = (0, bot_service_instance_1.tryGetBotsServiceInstance)();
+            if (!bots) {
+                this.logger.error('Payment health report not sent (BotsService not ready)');
+                return false;
+            }
+            return bots.sendMessageByCategory(exports.PAYMENT_HEALTH_CATEGORY, input);
+        };
+    }
+    async loadProofs(from, to) {
+        const rows = await (0, monitor_util_1.withTimeout)(this.proofModel.collection
+            .find({ createdAt: { $gte: new Date(from - payment_proofs_double_credit_1.DOUBLE_CREDIT_WINDOW_MS - payment_health_report_1.MATCH_WINDOW_MS), $lt: new Date(to + payment_health_report_1.MATCH_WINDOW_MS) } }, { projection: PROOF_PROJECTION })
+            .toArray(), MONGO_TIMEOUT_MS, 'paymentProofs read');
+        return rows;
+    }
+    async loadPgRows(from, to) {
+        let failure;
+        const rows = await this.pg.query(`SELECT id::text AS id, (extract(epoch FROM ts) * 1000)::bigint::text AS t, chat_id, client_id, amount, source,
+                    voided_at IS NOT NULL AS voided, void_proof_id
+               FROM payment_event
+              WHERE ts >= to_timestamp($1 / 1000.0) AND ts < to_timestamp($2 / 1000.0)
+              ORDER BY ts`, [from - payment_health_report_1.MATCH_WINDOW_MS, to + payment_health_report_1.MATCH_WINDOW_MS], (e) => { failure = e; });
+        if (!rows)
+            return { rows: null, error: failure ? `${failure.kind}: ${failure.message}` : 'unknown error' };
+        return {
+            rows: rows.map((x) => ({
+                id: String(x.id), ts: Number(x.t), chatId: String(x.chat_id), clientId: String(x.client_id), amount: Number(x.amount),
+                source: String(x.source), voided: !!x.voided, voidProofId: x.void_proof_id ?? null,
+            })),
+        };
+    }
+    async loadBuilds(now) {
+        try {
+            const read = async () => {
+                const members = (await this.redis.smembers(HEARTBEAT_INDEX_KEY)) ?? [];
+                const keys = members.filter((m) => m.startsWith('tg-aut::')).map((m) => `heartbeat::${m}`);
+                return keys.length ? { keys, values: await this.redis.mget(keys) } : { keys, values: [] };
+            };
+            const { keys, values } = await (0, monitor_util_1.withTimeout)(read(), REDIS_DEADLINE_MS, 'heartbeat read');
+            const out = [];
+            keys.forEach((k, i) => {
+                const raw = values[i];
+                if (!raw)
+                    return;
+                try {
+                    const p = JSON.parse(raw);
+                    if (!p || typeof p !== 'object' || now - Number(p.ts) > HEARTBEAT_FRESH_MS || p.status === 'stopping')
+                        return;
+                    out.push({ clientId: String(p.clientId || k.slice('heartbeat::tg-aut::'.length)), sha: p.build?.sha ?? null, builtAt: p.build?.builtAt ?? null });
+                }
+                catch {
+                }
+            });
+            return { processes: out };
+        }
+        catch (e) {
+            return { processes: null, skipped: `heartbeats unreadable (${e?.message ?? e})` };
+        }
+    }
+    async compute(day, now = Date.now()) {
+        const d = day && /^\d{4}-\d{2}-\d{2}$/.test(day) ? day : (0, payment_health_report_1.istDay)(now, -1);
+        const { from, to } = (0, payment_health_report_1.istDayRange)(d);
+        const [proofs, pg, builds] = await Promise.all([this.loadProofs(from, to), this.loadPgRows(from, to), this.loadBuilds(now)]);
+        return (0, payment_health_report_1.buildReport)({ day: d, proofs, pgRows: pg.rows, pgError: pg.error, processes: builds.processes, processesSkipped: builds.skipped });
+    }
+    async runDaily(now = Date.now()) {
+        const report = await this.compute(undefined, now);
+        const summary = summaryOf(report);
+        if (!paymentHealthEnabled()) {
+            this.logger.log(`Payment health ${report.day}: not sent (${exports.PAYMENT_HEALTH_FLAG} off) ${JSON.stringify(summary)}`);
+            return { day: report.day, sent: false, disabled: true, summary };
+        }
+        const sent = await this.notify((0, payment_health_report_1.formatReport)(report));
+        this.logger.log(`Payment health ${report.day}: sent=${sent} ${JSON.stringify(summary)}`);
+        return { day: report.day, sent, summary };
+    }
+};
+exports.PaymentHealthService = PaymentHealthService;
+exports.PaymentHealthService = PaymentHealthService = PaymentHealthService_1 = __decorate([
+    (0, common_1.Injectable)(),
+    __param(0, (0, mongoose_1.InjectModel)(payment_proof_schema_1.PAYMENT_PROOF_MODEL)),
+    __param(2, (0, common_1.Inject)(exports.PAYMENT_HEALTH_REDIS)),
+    __metadata("design:paramtypes", [Function, analytics_pg_reader_1.AnalyticsPgReader, Object])
+], PaymentHealthService);
+function summaryOf(r) {
+    const c = r.reconcile;
+    return {
+        credited: c?.credited ?? null,
+        rows: c?.rows ?? null,
+        missing: c?.missing.length ?? null,
+        extra: c?.extra.length ?? null,
+        voided: c?.voided ?? null,
+        doubles: r.doubles.length,
+        holds: r.holds.total,
+        fakes: r.fakes.total,
+        behind: r.builds.behind?.length ?? null,
+        ...(r.pgError ? { pgError: r.pgError } : {}),
+        ...(r.builds.skipped ? { buildsSkipped: r.builds.skipped } : {}),
+    };
+}
+
+
+/***/ },
+
 /***/ "./src/components/payment-proofs/payment-proofs.classify.ts"
 /*!******************************************************************!*\
   !*** ./src/components/payment-proofs/payment-proofs.classify.ts ***!
@@ -43461,7 +43958,10 @@ __decorate([
             '(no reader): reviewModel, riskReasons, imageSha256, ocr, time. ' +
             'flagged = outcome fraud_ask|fake_blocked|cross_client; marked = chat has userData.fakePaymentAt; reviewed = a stamp that still holds (item.stamp). ' +
             'Rows without verdict (before tg-aut wrote one) get an outcome derived from servedAt / ask / decision (legacy: true). ' +
-            'counts cover since/client/chat/minAmount (not cursor).',
+            'counts cover since/client/chat/minAmount (not cursor). ' +
+            'With chat (2026-11-11): items.doubleCredit = { withProofIds, why } when a credited proof may double another credit of ' +
+            'the chat (same amount within 48 h; not two different real UTRs, not two printed clocks > 1 min apart), else null. ' +
+            'A signal for a human check only: nothing is uncredited.',
     }),
     (0, swagger_1.ApiQuery)({ name: 'since', required: false, description: 'ISO date; default now - 7 days (the TTL)' }),
     (0, swagger_1.ApiQuery)({ name: 'client', required: false, description: 'clientId' }),
@@ -43504,6 +44004,173 @@ exports.PaymentProofsController = PaymentProofsController = __decorate([
     (0, common_1.Controller)('payment-proofs'),
     __metadata("design:paramtypes", [payment_proofs_service_1.PaymentProofsService])
 ], PaymentProofsController);
+
+
+/***/ },
+
+/***/ "./src/components/payment-proofs/payment-proofs.double-credit.ts"
+/*!***********************************************************************!*\
+  !*** ./src/components/payment-proofs/payment-proofs.double-credit.ts ***!
+  \***********************************************************************/
+(__unused_webpack_module, exports) {
+
+
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.DOUBLE_CREDIT_PROJECTION = exports.CLOCK_TOLERANCE_MS = exports.DOUBLE_CREDIT_WINDOW_MS = void 0;
+exports.proofKey = proofKey;
+exports.creditAmountOf = creditAmountOf;
+exports.isLiveCredit = isLiveCredit;
+exports.utrFormat = utrFormat;
+exports.differentRealUtrs = differentRealUtrs;
+exports.printedClock = printedClock;
+exports.notProvenWhy = notProvenWhy;
+exports.findDoubleCredits = findDoubleCredits;
+exports.doubleCreditIndex = doubleCreditIndex;
+exports.DOUBLE_CREDIT_WINDOW_MS = 48 * 60 * 60 * 1000;
+exports.CLOCK_TOLERANCE_MS = 60 * 1000;
+const RELATIVE_TIME_RE = /\bjust\s+now\b|\b\d+\s*(?:s|sec|secs|second|seconds|m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days)\s+ago\b/i;
+const REPEATED_DIGIT_RE = /^(\d)\1+$/;
+function proofKey(r) {
+    return r.proofId || `${r.clientId}-${r.chatId}-${r.telegramMsgId}`;
+}
+function creditAmountOf(r) {
+    const n = Number(r.creditAmount ?? r.amount);
+    return Number.isFinite(n) && n > 0 ? n : 0;
+}
+function ms(v) {
+    if (v === null || v === undefined)
+        return NaN;
+    return new Date(v).getTime();
+}
+function isLiveCredit(r) {
+    if (!Number.isFinite(ms(r.servedAt)))
+        return false;
+    if (r.uncredited?.state === 'done')
+        return false;
+    const outcome = r.verdict?.outcome;
+    return outcome ? outcome === 'credited' : true;
+}
+function utrFormat(utr) {
+    if (typeof utr !== 'string')
+        return null;
+    const u = utr.trim();
+    if (/^\d{12}$/.test(u))
+        return REPEATED_DIGIT_RE.test(u) ? null : 'upi12';
+    if (/^T\d{20,22}$/.test(u))
+        return REPEATED_DIGIT_RE.test(u.slice(1)) ? null : `phonepe${u.length}`;
+    return null;
+}
+function positionsDiffering(a, b) {
+    let n = 0;
+    for (let i = 0; i < a.length; i++)
+        if (a[i] !== b[i])
+            n++;
+    return n;
+}
+function differentRealUtrs(a, b) {
+    const fa = utrFormat(a.utr);
+    const fb = utrFormat(b.utr);
+    if (!fa || fa !== fb)
+        return false;
+    const ua = String(a.utr).trim();
+    const ub = String(b.utr).trim();
+    return ua !== ub && positionsDiffering(ua, ub) > 1;
+}
+function ocrText(r) {
+    const parts = [r.ocr?.precheckText, r.ocr?.text].filter((x) => typeof x === 'string' && x.length > 0);
+    return parts.join('\n');
+}
+function printedClock(r) {
+    const t = r.time;
+    if (!t || t.state !== 'known' || t.relative === true)
+        return null;
+    const epoch = Number(t.epochMs);
+    if (!Number.isFinite(epoch) || epoch <= 0)
+        return null;
+    if (RELATIVE_TIME_RE.test(ocrText(r)))
+        return null;
+    return epoch;
+}
+function sameUtr(a, b) {
+    return typeof a.utr === 'string' && typeof b.utr === 'string' && a.utr.trim() !== '' && a.utr.trim() === b.utr.trim();
+}
+function notProvenWhy(a, b) {
+    if (a.imageSha256 && a.imageSha256 === b.imageSha256)
+        return 'same file';
+    if (sameUtr(a, b))
+        return 'same UTR';
+    if (differentRealUtrs(a, b))
+        return null;
+    const ca = printedClock(a);
+    const cb = printedClock(b);
+    if (ca !== null && cb !== null) {
+        if (Math.abs(ca - cb) > exports.CLOCK_TOLERANCE_MS)
+            return null;
+        return 'same printed minute';
+    }
+    const relA = !!a.time && (a.time.relative === true || RELATIVE_TIME_RE.test(ocrText(a)));
+    const relB = !!b.time && (b.time.relative === true || RELATIVE_TIME_RE.test(ocrText(b)));
+    if (relA || relB)
+        return 'relative time ("just now" / "N min ago")';
+    if (ca === null && cb === null)
+        return 'no UTR, no printed clock';
+    return 'one side has no printed clock';
+}
+function findDoubleCredits(rows, windowMs = exports.DOUBLE_CREDIT_WINDOW_MS) {
+    const byChat = new Map();
+    for (const r of rows) {
+        if (!isLiveCredit(r) || !creditAmountOf(r))
+            continue;
+        const k = String(r.chatId);
+        const list = byChat.get(k);
+        if (list)
+            list.push(r);
+        else
+            byChat.set(k, [r]);
+    }
+    const out = [];
+    for (const [chatId, list] of byChat) {
+        list.sort((x, y) => ms(x.servedAt) - ms(y.servedAt));
+        for (let i = 0; i < list.length; i++) {
+            const a = list[i];
+            const ta = ms(a.servedAt);
+            for (let j = i + 1; j < list.length; j++) {
+                const b = list[j];
+                const tb = ms(b.servedAt);
+                if (tb - ta > windowMs)
+                    break;
+                if (creditAmountOf(a) !== creditAmountOf(b) || proofKey(a) === proofKey(b))
+                    continue;
+                const why = notProvenWhy(a, b);
+                if (why === null)
+                    continue;
+                out.push({ chatId, amount: creditAmountOf(a), first: proofKey(a), second: proofKey(b), firstServedAt: ta, secondServedAt: tb, why });
+            }
+        }
+    }
+    return out.sort((x, y) => x.secondServedAt - y.secondServedAt);
+}
+function doubleCreditIndex(pairs) {
+    const m = new Map();
+    const add = (id, other, why) => {
+        const e = m.get(id);
+        if (e) {
+            if (!e.withProofIds.includes(other))
+                e.withProofIds.push(other);
+        }
+        else
+            m.set(id, { withProofIds: [other], why });
+    };
+    for (const p of pairs) {
+        add(p.first, p.second, p.why);
+        add(p.second, p.first, p.why);
+    }
+    return m;
+}
+exports.DOUBLE_CREDIT_PROJECTION = {
+    _id: 0, proofId: 1, chatId: 1, clientId: 1, telegramMsgId: 1, amount: 1, creditAmount: 1, servedAt: 1,
+    'verdict.outcome': 1, 'uncredited.state': 1, utr: 1, imageSha256: 1, time: 1, 'ocr.text': 1, 'ocr.precheckText': 1,
+};
 
 
 /***/ },
@@ -43578,6 +44245,7 @@ const mongoose_2 = __webpack_require__(/*! mongoose */ "mongoose");
 const user_data_schema_1 = __webpack_require__(/*! ../user-data/schemas/user-data.schema */ "./src/components/user-data/schemas/user-data.schema.ts");
 const payment_proof_schema_1 = __webpack_require__(/*! ./schemas/payment-proof.schema */ "./src/components/payment-proofs/schemas/payment-proof.schema.ts");
 const payment_proofs_classify_1 = __webpack_require__(/*! ./payment-proofs.classify */ "./src/components/payment-proofs/payment-proofs.classify.ts");
+const payment_proofs_double_credit_1 = __webpack_require__(/*! ./payment-proofs.double-credit */ "./src/components/payment-proofs/payment-proofs.double-credit.ts");
 const payment_proofs_views_1 = __webpack_require__(/*! ./payment-proofs.views */ "./src/components/payment-proofs/payment-proofs.views.ts");
 exports.DEFAULT_LIMIT = 50;
 exports.MAX_LIMIT = 100;
@@ -43726,9 +44394,25 @@ let PaymentProofsService = PaymentProofsService_1 = class PaymentProofsService {
                 clientHost: hosts.get(String(row.clientId)) ?? null,
             };
         });
+        if (p.chat && items.length)
+            await this.markDoubleCredits(p.chat, p.since, items);
         const last = page[page.length - 1];
         const nextCursor = more && last ? (0, payment_proofs_classify_1.encodeCursor)({ t: last.t, id: String(last.row._id) }) : null;
         return { items, nextCursor, counts, truncated };
+    }
+    async markDoubleCredits(chatId, since, items) {
+        try {
+            const rows = await this.proofModel
+                .find({ chatId, createdAt: { $gte: new Date(since - payment_proofs_double_credit_1.DOUBLE_CREDIT_WINDOW_MS) }, servedAt: { $ne: null } }, payment_proofs_double_credit_1.DOUBLE_CREDIT_PROJECTION)
+                .lean()
+                .exec();
+            const index = (0, payment_proofs_double_credit_1.doubleCreditIndex)((0, payment_proofs_double_credit_1.findDoubleCredits)(Array.isArray(rows) ? rows : []));
+            for (const item of items)
+                item.doubleCredit = index.get(item.proofId) ?? null;
+        }
+        catch (e) {
+            this.logger.warn(`double-credit check failed for chat ${chatId}: ${e?.message ?? e}`);
+        }
     }
     async window(since, now) {
         const wide = since < now - exports.DEFAULT_WINDOW_MS;
@@ -61776,10 +62460,11 @@ const runtime_config_service_1 = __webpack_require__(/*! ../config/runtime-confi
 const account_maintenance_service_1 = __webpack_require__(/*! ../maintenance/account-maintenance.service */ "./src/control-plane/maintenance/account-maintenance.service.ts");
 const analytics_health_check_1 = __webpack_require__(/*! ../../components/daily-analytics/analytics-health.check */ "./src/components/daily-analytics/analytics-health.check.ts");
 const pool_snapshot_writer_1 = __webpack_require__(/*! ../../components/monitor/pool-snapshot.writer */ "./src/components/monitor/pool-snapshot.writer.ts");
+const payment_health_service_1 = __webpack_require__(/*! ../../components/payment-health/payment-health.service */ "./src/components/payment-health/payment-health.service.ts");
 const IST = 'Asia/Kolkata';
 exports.SWAP_MAINTENANCE_CLAIM_TTL_MS = 60 * 60 * 1000;
 let ScheduledJobsService = ScheduledJobsService_1 = class ScheduledJobsService {
-    constructor(config, appService, maintenance, clientService, activeChannelsService, stat1Service, connection, analyticsHealth, poolSnapshot) {
+    constructor(config, appService, maintenance, clientService, activeChannelsService, stat1Service, connection, analyticsHealth, poolSnapshot, paymentHealth) {
         this.config = config;
         this.appService = appService;
         this.maintenance = maintenance;
@@ -61789,6 +62474,7 @@ let ScheduledJobsService = ScheduledJobsService_1 = class ScheduledJobsService {
         this.connection = connection;
         this.analyticsHealth = analyticsHealth;
         this.poolSnapshot = poolSnapshot;
+        this.paymentHealth = paymentHealth;
         this.logger = new common_1.Logger(ScheduledJobsService_1.name);
         this.jobs = [];
         this.startupTimers = [];
@@ -61836,6 +62522,7 @@ let ScheduledJobsService = ScheduledJobsService_1 = class ScheduledJobsService {
         this.register('cms-buffer-join', '0 */3 * * *', () => this.appService.joinBufferClients());
         this.register('cms-analytics-health', '30 2 * * *', () => this.runAnalyticsHealth());
         this.register('cms-pool-snapshot', '3 * * * *', () => this.runPoolSnapshot());
+        this.register('cms-payment-health', '0 9 * * *', () => this.runPaymentHealth());
         this.register('cms-swap-maintenance', '7,37 * * * *', () => {
             const now = new Date();
             return this.runClaimed(`swap-maintenance:${this.halfHourSlotKey(now)}`, 'swap maintenance', async () => {
@@ -61981,6 +62668,14 @@ let ScheduledJobsService = ScheduledJobsService_1 = class ScheduledJobsService {
     }
     utcHourKey(now = new Date()) {
         return now.toISOString().slice(0, 13);
+    }
+    runPaymentHealth() {
+        const service = this.paymentHealth;
+        if (!service) {
+            this.logger.warn('payment health report skipped: PaymentHealthService not provided');
+            return Promise.resolve();
+        }
+        return this.runClaimed(`payment-health:${this.istDateKey()}`, 'payment health report', () => service.runDaily());
     }
     runPoolSnapshot(now = new Date()) {
         return this.runClaimed(`pool-snapshot:${this.utcHourKey(now)}`, 'pool snapshot', async () => {
@@ -62196,13 +62891,15 @@ exports.ScheduledJobsService = ScheduledJobsService;
 exports.ScheduledJobsService = ScheduledJobsService = ScheduledJobsService_1 = __decorate([
     (0, common_1.Injectable)(),
     __param(6, (0, mongoose_1.InjectConnection)()),
+    __param(9, (0, common_1.Optional)()),
     __metadata("design:paramtypes", [runtime_config_service_1.RuntimeConfigService,
         app_service_1.AppService,
         account_maintenance_service_1.AccountMaintenanceService,
         components_1.ClientService,
         components_1.ActiveChannelsService,
         components_1.Stat1Service, Function, analytics_health_check_1.AnalyticsHealthCheck,
-        pool_snapshot_writer_1.PoolSnapshotWriter])
+        pool_snapshot_writer_1.PoolSnapshotWriter,
+        payment_health_service_1.PaymentHealthService])
 ], ScheduledJobsService);
 
 
