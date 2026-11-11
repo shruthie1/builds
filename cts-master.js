@@ -6548,50 +6548,6 @@ __decorate([
 
 /***/ },
 
-/***/ "./src/components/Telegram/dto/channel-operation.dto.ts"
-/*!**************************************************************!*\
-  !*** ./src/components/Telegram/dto/channel-operation.dto.ts ***!
-  \**************************************************************/
-(__unused_webpack_module, exports, __webpack_require__) {
-
-
-var __decorate = (this && this.__decorate) || function (decorators, target, key, desc) {
-    var c = arguments.length, r = c < 3 ? target : desc === null ? desc = Object.getOwnPropertyDescriptor(target, key) : desc, d;
-    if (typeof Reflect === "object" && typeof Reflect.decorate === "function") r = Reflect.decorate(decorators, target, key, desc);
-    else for (var i = decorators.length - 1; i >= 0; i--) if (d = decorators[i]) r = (c < 3 ? d(r) : c > 3 ? d(target, key, r) : d(target, key)) || r;
-    return c > 3 && r && Object.defineProperty(target, key, r), r;
-};
-var __metadata = (this && this.__metadata) || function (k, v) {
-    if (typeof Reflect === "object" && typeof Reflect.metadata === "function") return Reflect.metadata(k, v);
-};
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.ChannelOperationDto = void 0;
-const class_validator_1 = __webpack_require__(/*! class-validator */ "class-validator");
-const swagger_1 = __webpack_require__(/*! @nestjs/swagger */ "@nestjs/swagger");
-class ChannelOperationDto {
-}
-exports.ChannelOperationDto = ChannelOperationDto;
-__decorate([
-    (0, swagger_1.ApiProperty)({ description: 'Channel username or ID' }),
-    (0, class_validator_1.IsString)(),
-    __metadata("design:type", String)
-], ChannelOperationDto.prototype, "channel", void 0);
-__decorate([
-    (0, swagger_1.ApiProperty)({ description: 'Whether to forward messages after joining', required: false }),
-    (0, class_validator_1.IsOptional)(),
-    (0, class_validator_1.IsBoolean)(),
-    __metadata("design:type", Boolean)
-], ChannelOperationDto.prototype, "forward", void 0);
-__decorate([
-    (0, swagger_1.ApiProperty)({ description: 'Source chat ID to forward messages from', required: false }),
-    (0, class_validator_1.IsOptional)(),
-    (0, class_validator_1.IsString)(),
-    __metadata("design:type", String)
-], ChannelOperationDto.prototype, "fromChatId", void 0);
-
-
-/***/ },
-
 /***/ "./src/components/Telegram/dto/connection-management.dto.ts"
 /*!******************************************************************!*\
   !*** ./src/components/Telegram/dto/connection-management.dto.ts ***!
@@ -6666,29 +6622,9 @@ var __metadata = (this && this.__metadata) || function (k, v) {
     if (typeof Reflect === "object" && typeof Reflect.metadata === "function") return Reflect.metadata(k, v);
 };
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.AddContactsDto = exports.ContactImportDto = exports.ContactExportImportDto = exports.ContactBlockListDto = exports.ContactGroupDto = void 0;
+exports.AddContactsDto = exports.ContactExportImportDto = exports.ContactBlockListDto = void 0;
 const class_validator_1 = __webpack_require__(/*! class-validator */ "class-validator");
 const swagger_1 = __webpack_require__(/*! @nestjs/swagger */ "@nestjs/swagger");
-class ContactGroupDto {
-}
-exports.ContactGroupDto = ContactGroupDto;
-__decorate([
-    (0, swagger_1.ApiProperty)({ description: 'Name of the contact group' }),
-    (0, class_validator_1.IsString)(),
-    __metadata("design:type", String)
-], ContactGroupDto.prototype, "name", void 0);
-__decorate([
-    (0, swagger_1.ApiProperty)({ description: 'User IDs to include in the group', type: [String] }),
-    (0, class_validator_1.IsArray)(),
-    (0, class_validator_1.IsString)({ each: true }),
-    __metadata("design:type", Array)
-], ContactGroupDto.prototype, "userIds", void 0);
-__decorate([
-    (0, swagger_1.ApiProperty)({ description: 'Optional description for the group' }),
-    (0, class_validator_1.IsOptional)(),
-    (0, class_validator_1.IsString)(),
-    __metadata("design:type", String)
-], ContactGroupDto.prototype, "description", void 0);
 class ContactBlockListDto {
 }
 exports.ContactBlockListDto = ContactBlockListDto;
@@ -6720,14 +6656,6 @@ __decorate([
     (0, class_validator_1.IsBoolean)(),
     __metadata("design:type", Object)
 ], ContactExportImportDto.prototype, "includeBlocked", void 0);
-class ContactImportDto {
-}
-exports.ContactImportDto = ContactImportDto;
-__decorate([
-    (0, swagger_1.ApiProperty)({ description: 'Contacts to import', type: [Object] }),
-    (0, class_validator_1.IsArray)(),
-    __metadata("design:type", Array)
-], ContactImportDto.prototype, "contacts", void 0);
 class AddContactsDto {
 }
 exports.AddContactsDto = AddContactsDto;
@@ -7010,23 +6938,10 @@ var __metadata = (this && this.__metadata) || function (k, v) {
     if (typeof Reflect === "object" && typeof Reflect.metadata === "function") return Reflect.metadata(k, v);
 };
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.createGroupDto = exports.ChatCleanupDto = exports.GroupSettingsDto = exports.AdminOperationDto = exports.GroupMemberOperationDto = exports.BaseGroupOperationDto = exports.AdminPermissionsDto = exports.AdminPermission = void 0;
+exports.createGroupDto = exports.ChatCleanupDto = exports.GroupSettingsDto = exports.AdminOperationDto = exports.GroupMemberOperationDto = exports.BaseGroupOperationDto = exports.AdminPermissionsDto = void 0;
 const class_validator_1 = __webpack_require__(/*! class-validator */ "class-validator");
 const swagger_1 = __webpack_require__(/*! @nestjs/swagger */ "@nestjs/swagger");
 const class_transformer_1 = __webpack_require__(/*! class-transformer */ "class-transformer");
-var AdminPermission;
-(function (AdminPermission) {
-    AdminPermission["CHANGE_INFO"] = "changeInfo";
-    AdminPermission["POST_MESSAGES"] = "postMessages";
-    AdminPermission["EDIT_MESSAGES"] = "editMessages";
-    AdminPermission["DELETE_MESSAGES"] = "deleteMessages";
-    AdminPermission["BAN_USERS"] = "banUsers";
-    AdminPermission["INVITE_USERS"] = "inviteUsers";
-    AdminPermission["PIN_MESSAGES"] = "pinMessages";
-    AdminPermission["ADD_ADMINS"] = "addAdmins";
-    AdminPermission["ANONYMOUS"] = "anonymous";
-    AdminPermission["MANAGE_CALL"] = "manageCall";
-})(AdminPermission || (exports.AdminPermission = AdminPermission = {}));
 class AdminPermissionsDto {
     constructor() {
         this.changeInfo = true;
@@ -7315,7 +7230,6 @@ var __exportStar = (this && this.__exportStar) || function(m, exports) {
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 __exportStar(__webpack_require__(/*! ../manager/types */ "./src/components/Telegram/manager/types.ts"), exports);
 __exportStar(__webpack_require__(/*! ./batch-operations.dto */ "./src/components/Telegram/dto/batch-operations.dto.ts"), exports);
-__exportStar(__webpack_require__(/*! ./channel-operation.dto */ "./src/components/Telegram/dto/channel-operation.dto.ts"), exports);
 __exportStar(__webpack_require__(/*! ./connection-management.dto */ "./src/components/Telegram/dto/connection-management.dto.ts"), exports);
 __exportStar(__webpack_require__(/*! ./contact-management.dto */ "./src/components/Telegram/dto/contact-management.dto.ts"), exports);
 __exportStar(__webpack_require__(/*! ./create-bot.dto */ "./src/components/Telegram/dto/create-bot.dto.ts"), exports);
@@ -7328,7 +7242,6 @@ __exportStar(__webpack_require__(/*! ./message-search.dto */ "./src/components/T
 __exportStar(__webpack_require__(/*! ./metadata-operations.dto */ "./src/components/Telegram/dto/metadata-operations.dto.ts"), exports);
 __exportStar(__webpack_require__(/*! ./notification-settings.dto */ "./src/components/Telegram/dto/notification-settings.dto.ts"), exports);
 __exportStar(__webpack_require__(/*! ./profile-settings.dto */ "./src/components/Telegram/dto/profile-settings.dto.ts"), exports);
-__exportStar(__webpack_require__(/*! ./response-validation.dto */ "./src/components/Telegram/dto/response-validation.dto.ts"), exports);
 __exportStar(__webpack_require__(/*! ./schedule-operations.dto */ "./src/components/Telegram/dto/schedule-operations.dto.ts"), exports);
 __exportStar(__webpack_require__(/*! ./send-message.dto */ "./src/components/Telegram/dto/send-message.dto.ts"), exports);
 __exportStar(__webpack_require__(/*! ./update-profile.dto */ "./src/components/Telegram/dto/update-profile.dto.ts"), exports);
@@ -7355,7 +7268,7 @@ var __metadata = (this && this.__metadata) || function (k, v) {
     if (typeof Reflect === "object" && typeof Reflect.metadata === "function") return Reflect.metadata(k, v);
 };
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.VoiceMessageDto = exports.SendMediaAlbumDto = exports.MediaAlbumItemDto = exports.SendMediaDto = exports.MediaFilterDto = exports.MediaSearchDto = exports.BaseMediaOperationDto = exports.MediaType = void 0;
+exports.SendMediaAlbumDto = exports.MediaAlbumItemDto = exports.SendMediaDto = exports.MediaFilterDto = exports.MediaSearchDto = exports.BaseMediaOperationDto = exports.MediaType = void 0;
 const class_validator_1 = __webpack_require__(/*! class-validator */ "class-validator");
 const swagger_1 = __webpack_require__(/*! @nestjs/swagger */ "@nestjs/swagger");
 const class_transformer_1 = __webpack_require__(/*! class-transformer */ "class-transformer");
@@ -7478,27 +7391,6 @@ __decorate([
     (0, class_transformer_1.Type)(() => MediaAlbumItemDto),
     __metadata("design:type", Array)
 ], SendMediaAlbumDto.prototype, "media", void 0);
-class VoiceMessageDto extends BaseMediaOperationDto {
-}
-exports.VoiceMessageDto = VoiceMessageDto;
-__decorate([
-    (0, swagger_1.ApiProperty)({ description: 'URL of the voice message file' }),
-    (0, class_validator_1.IsString)(),
-    (0, class_validator_1.IsUrl)(),
-    __metadata("design:type", String)
-], VoiceMessageDto.prototype, "url", void 0);
-__decorate([
-    (0, swagger_1.ApiProperty)({ description: 'Duration of voice message in seconds', required: false }),
-    (0, class_validator_1.IsOptional)(),
-    (0, class_validator_1.IsNumber)(),
-    __metadata("design:type", Number)
-], VoiceMessageDto.prototype, "duration", void 0);
-__decorate([
-    (0, swagger_1.ApiProperty)({ description: 'Caption for the voice message', required: false }),
-    (0, class_validator_1.IsOptional)(),
-    (0, class_validator_1.IsString)(),
-    __metadata("design:type", String)
-], VoiceMessageDto.prototype, "caption", void 0);
 
 
 /***/ },
@@ -7520,10 +7412,8 @@ var __metadata = (this && this.__metadata) || function (k, v) {
     if (typeof Reflect === "object" && typeof Reflect.metadata === "function") return Reflect.metadata(k, v);
 };
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.MediaMetadataQueryDto = exports.PaginatedMediaResponseDto = exports.MediaGroupDto = exports.MediaFiltersDto = exports.PaginationDto = exports.MediaItemDto = void 0;
+exports.MediaGroupDto = exports.MediaFiltersDto = exports.PaginationDto = exports.MediaItemDto = void 0;
 const swagger_1 = __webpack_require__(/*! @nestjs/swagger */ "@nestjs/swagger");
-const class_validator_1 = __webpack_require__(/*! class-validator */ "class-validator");
-const class_transformer_1 = __webpack_require__(/*! class-transformer */ "class-transformer");
 const media_operations_dto_1 = __webpack_require__(/*! ./media-operations.dto */ "./src/components/Telegram/dto/media-operations.dto.ts");
 class MediaItemDto {
 }
@@ -7657,81 +7547,6 @@ __decorate([
     (0, swagger_1.ApiProperty)({ description: 'Pagination information for this type', type: PaginationDto }),
     __metadata("design:type", PaginationDto)
 ], MediaGroupDto.prototype, "pagination", void 0);
-class PaginatedMediaResponseDto {
-}
-exports.PaginatedMediaResponseDto = PaginatedMediaResponseDto;
-__decorate([
-    (0, swagger_1.ApiProperty)({ description: 'Array of media items (when single type or multiple types without grouping)', type: [MediaItemDto] }),
-    __metadata("design:type", Array)
-], PaginatedMediaResponseDto.prototype, "data", void 0);
-__decorate([
-    (0, swagger_1.ApiProperty)({ description: 'Media grouped by type (when "all" is in types)', type: [MediaGroupDto] }),
-    __metadata("design:type", Array)
-], PaginatedMediaResponseDto.prototype, "groups", void 0);
-__decorate([
-    (0, swagger_1.ApiProperty)({ description: 'Pagination information (for single type or overall)', type: PaginationDto }),
-    __metadata("design:type", PaginationDto)
-], PaginatedMediaResponseDto.prototype, "pagination", void 0);
-__decorate([
-    (0, swagger_1.ApiProperty)({ description: 'Applied filters', type: MediaFiltersDto }),
-    __metadata("design:type", MediaFiltersDto)
-], PaginatedMediaResponseDto.prototype, "filters", void 0);
-class MediaMetadataQueryDto {
-}
-exports.MediaMetadataQueryDto = MediaMetadataQueryDto;
-__decorate([
-    (0, swagger_1.ApiProperty)({ description: 'Chat ID or username' }),
-    (0, class_validator_1.IsString)(),
-    __metadata("design:type", String)
-], MediaMetadataQueryDto.prototype, "chatId", void 0);
-__decorate([
-    (0, swagger_1.ApiPropertyOptional)({ description: 'Media types to filter. Use "all" to get all types grouped by type', enum: media_operations_dto_1.MediaType, isArray: true }),
-    (0, class_validator_1.IsOptional)(),
-    (0, class_validator_1.IsArray)(),
-    (0, class_validator_1.IsEnum)(media_operations_dto_1.MediaType, { each: true }),
-    (0, class_transformer_1.Transform)(({ value }) => {
-        if (typeof value === 'string') {
-            return value.split(',').map(v => v.trim());
-        }
-        return Array.isArray(value) ? value : [value];
-    }),
-    __metadata("design:type", Array)
-], MediaMetadataQueryDto.prototype, "types", void 0);
-__decorate([
-    (0, swagger_1.ApiPropertyOptional)({ description: 'Start date (ISO 8601)' }),
-    (0, class_validator_1.IsOptional)(),
-    (0, class_validator_1.IsString)(),
-    __metadata("design:type", String)
-], MediaMetadataQueryDto.prototype, "startDate", void 0);
-__decorate([
-    (0, swagger_1.ApiPropertyOptional)({ description: 'End date (ISO 8601)' }),
-    (0, class_validator_1.IsOptional)(),
-    (0, class_validator_1.IsString)(),
-    __metadata("design:type", String)
-], MediaMetadataQueryDto.prototype, "endDate", void 0);
-__decorate([
-    (0, swagger_1.ApiPropertyOptional)({ description: 'Maximum number of items (1-1000)', minimum: 1, maximum: 1000 }),
-    (0, class_validator_1.IsOptional)(),
-    (0, class_transformer_1.Type)(() => Number),
-    (0, class_validator_1.IsNumber)(),
-    (0, class_validator_1.Min)(1),
-    (0, class_validator_1.Max)(1000),
-    __metadata("design:type", Number)
-], MediaMetadataQueryDto.prototype, "limit", void 0);
-__decorate([
-    (0, swagger_1.ApiPropertyOptional)({ description: 'Maximum message ID to include (use for pagination - get messages with ID less than this)' }),
-    (0, class_validator_1.IsOptional)(),
-    (0, class_transformer_1.Type)(() => Number),
-    (0, class_validator_1.IsNumber)(),
-    __metadata("design:type", Number)
-], MediaMetadataQueryDto.prototype, "maxId", void 0);
-__decorate([
-    (0, swagger_1.ApiPropertyOptional)({ description: 'Minimum message ID to include' }),
-    (0, class_validator_1.IsOptional)(),
-    (0, class_transformer_1.Type)(() => Number),
-    (0, class_validator_1.IsNumber)(),
-    __metadata("design:type", Number)
-], MediaMetadataQueryDto.prototype, "minId", void 0);
 
 
 /***/ },
@@ -7753,7 +7568,7 @@ var __metadata = (this && this.__metadata) || function (k, v) {
     if (typeof Reflect === "object" && typeof Reflect.metadata === "function") return Reflect.metadata(k, v);
 };
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.SearchMessagesResponseDto = exports.MessageTypeResult = exports.SearchMessagesDto = exports.SearchScope = exports.MessageMediaType = void 0;
+exports.SearchMessagesResponseDto = exports.MessageTypeResult = exports.SearchMessagesDto = exports.MessageMediaType = void 0;
 const swagger_1 = __webpack_require__(/*! @nestjs/swagger */ "@nestjs/swagger");
 const class_transformer_1 = __webpack_require__(/*! class-transformer */ "class-transformer");
 const class_validator_1 = __webpack_require__(/*! class-validator */ "class-validator");
@@ -7773,11 +7588,6 @@ var MessageMediaType;
     MessageMediaType["MUSIC"] = "music";
     MessageMediaType["CHAT_PHOTO"] = "chatPhoto";
 })(MessageMediaType || (exports.MessageMediaType = MessageMediaType = {}));
-var SearchScope;
-(function (SearchScope) {
-    SearchScope["CHAT"] = "chat";
-    SearchScope["GLOBAL"] = "global";
-})(SearchScope || (exports.SearchScope = SearchScope = {}));
 class SearchMessagesDto {
 }
 exports.SearchMessagesDto = SearchMessagesDto;
@@ -8030,16 +7840,9 @@ var __metadata = (this && this.__metadata) || function (k, v) {
     if (typeof Reflect === "object" && typeof Reflect.metadata === "function") return Reflect.metadata(k, v);
 };
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.BulkMessageOperationDto = exports.DialogsPeerType = exports.MediaMetadataDto = exports.MetadataType = void 0;
+exports.MediaMetadataDto = void 0;
 const class_validator_1 = __webpack_require__(/*! class-validator */ "class-validator");
 const swagger_1 = __webpack_require__(/*! @nestjs/swagger */ "@nestjs/swagger");
-const class_transformer_1 = __webpack_require__(/*! class-transformer */ "class-transformer");
-var MetadataType;
-(function (MetadataType) {
-    MetadataType["PHOTO"] = "photo";
-    MetadataType["VIDEO"] = "video";
-    MetadataType["DOCUMENT"] = "document";
-})(MetadataType || (exports.MetadataType = MetadataType = {}));
 class MediaMetadataDto {
     constructor() {
         this.limit = 50;
@@ -8063,31 +7866,6 @@ __decorate([
     (0, class_validator_1.IsNumber)(),
     __metadata("design:type", Number)
 ], MediaMetadataDto.prototype, "limit", void 0);
-var DialogsPeerType;
-(function (DialogsPeerType) {
-    DialogsPeerType["ALL"] = "all";
-    DialogsPeerType["USER"] = "user";
-    DialogsPeerType["GROUP"] = "group";
-    DialogsPeerType["CHANNEL"] = "channel";
-})(DialogsPeerType || (exports.DialogsPeerType = DialogsPeerType = {}));
-class BulkMessageOperationDto {
-}
-exports.BulkMessageOperationDto = BulkMessageOperationDto;
-__decorate([
-    (0, swagger_1.ApiProperty)({ description: 'Source chat ID', type: String, minLength: 1, maxLength: 255 }),
-    (0, class_validator_1.IsString)(),
-    __metadata("design:type", String)
-], BulkMessageOperationDto.prototype, "fromChatId", void 0);
-__decorate([
-    (0, swagger_1.ApiProperty)({ description: 'Target chat ID', type: String, minLength: 1, maxLength: 255 }),
-    (0, class_validator_1.IsString)(),
-    __metadata("design:type", String)
-], BulkMessageOperationDto.prototype, "toChatId", void 0);
-__decorate([
-    (0, swagger_1.ApiProperty)({ description: 'Message IDs to operate on', type: [Number], minItems: 1, maxItems: 100 }),
-    (0, class_transformer_1.Transform)(({ value }) => Array.isArray(value) ? value.map(Number) : value),
-    __metadata("design:type", Array)
-], BulkMessageOperationDto.prototype, "messageIds", void 0);
 
 
 /***/ },
@@ -8109,7 +7887,7 @@ var __metadata = (this && this.__metadata) || function (k, v) {
     if (typeof Reflect === "object" && typeof Reflect.metadata === "function") return Reflect.metadata(k, v);
 };
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.ChatNotificationSettingsDto = exports.NotificationSettingsDto = exports.NotificationSound = void 0;
+exports.NotificationSettingsDto = exports.NotificationSound = void 0;
 const class_validator_1 = __webpack_require__(/*! class-validator */ "class-validator");
 const swagger_1 = __webpack_require__(/*! @nestjs/swagger */ "@nestjs/swagger");
 var NotificationSound;
@@ -8145,18 +7923,6 @@ __decorate([
     (0, class_validator_1.IsOptional)(),
     __metadata("design:type", Number)
 ], NotificationSettingsDto.prototype, "muteUntil", void 0);
-class ChatNotificationSettingsDto {
-}
-exports.ChatNotificationSettingsDto = ChatNotificationSettingsDto;
-__decorate([
-    (0, swagger_1.ApiProperty)({ description: 'Chat ID to update settings for' }),
-    (0, class_validator_1.IsString)(),
-    __metadata("design:type", String)
-], ChatNotificationSettingsDto.prototype, "chatId", void 0);
-__decorate([
-    (0, swagger_1.ApiProperty)({ type: NotificationSettingsDto }),
-    __metadata("design:type", NotificationSettingsDto)
-], ChatNotificationSettingsDto.prototype, "settings", void 0);
 
 
 /***/ },
@@ -8178,7 +7944,7 @@ var __metadata = (this && this.__metadata) || function (k, v) {
     if (typeof Reflect === "object" && typeof Reflect.metadata === "function") return Reflect.metadata(k, v);
 };
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.ProfilePhotoDto = exports.SecuritySettingsDto = exports.PrivacySettingsDto = void 0;
+exports.ProfilePhotoDto = exports.PrivacySettingsDto = void 0;
 const class_validator_1 = __webpack_require__(/*! class-validator */ "class-validator");
 const swagger_1 = __webpack_require__(/*! @nestjs/swagger */ "@nestjs/swagger");
 const types_1 = __webpack_require__(/*! ../manager/types */ "./src/components/Telegram/manager/types.ts");
@@ -8221,20 +7987,6 @@ __decorate([
     (0, class_validator_1.IsEnum)(types_1.PrivacyLevelEnum),
     __metadata("design:type", String)
 ], PrivacySettingsDto.prototype, "groups", void 0);
-class SecuritySettingsDto {
-}
-exports.SecuritySettingsDto = SecuritySettingsDto;
-__decorate([
-    (0, swagger_1.ApiProperty)({ description: 'Enable/disable two-factor authentication' }),
-    (0, class_validator_1.IsBoolean)(),
-    __metadata("design:type", Boolean)
-], SecuritySettingsDto.prototype, "twoFactorAuth", void 0);
-__decorate([
-    (0, swagger_1.ApiProperty)({ description: 'Active sessions limit', required: false }),
-    (0, class_validator_1.IsOptional)(),
-    (0, class_validator_1.IsEnum)([1, 2, 3, 4, 5]),
-    __metadata("design:type", Number)
-], SecuritySettingsDto.prototype, "activeSessionsLimit", void 0);
 class ProfilePhotoDto {
 }
 exports.ProfilePhotoDto = ProfilePhotoDto;
@@ -8243,52 +7995,6 @@ __decorate([
     (0, class_validator_1.IsString)(),
     __metadata("design:type", String)
 ], ProfilePhotoDto.prototype, "name", void 0);
-
-
-/***/ },
-
-/***/ "./src/components/Telegram/dto/response-validation.dto.ts"
-/*!****************************************************************!*\
-  !*** ./src/components/Telegram/dto/response-validation.dto.ts ***!
-  \****************************************************************/
-(__unused_webpack_module, exports, __webpack_require__) {
-
-
-var __decorate = (this && this.__decorate) || function (decorators, target, key, desc) {
-    var c = arguments.length, r = c < 3 ? target : desc === null ? desc = Object.getOwnPropertyDescriptor(target, key) : desc, d;
-    if (typeof Reflect === "object" && typeof Reflect.decorate === "function") r = Reflect.decorate(decorators, target, key, desc);
-    else for (var i = decorators.length - 1; i >= 0; i--) if (d = decorators[i]) r = (c < 3 ? d(r) : c > 3 ? d(target, key, r) : d(target, key)) || r;
-    return c > 3 && r && Object.defineProperty(target, key, r), r;
-};
-var __metadata = (this && this.__metadata) || function (k, v) {
-    if (typeof Reflect === "object" && typeof Reflect.metadata === "function") return Reflect.metadata(k, v);
-};
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.PaginatedResponseDto = void 0;
-const swagger_1 = __webpack_require__(/*! @nestjs/swagger */ "@nestjs/swagger");
-class PaginatedResponseDto {
-}
-exports.PaginatedResponseDto = PaginatedResponseDto;
-__decorate([
-    (0, swagger_1.ApiProperty)({ description: 'Array of items' }),
-    __metadata("design:type", Array)
-], PaginatedResponseDto.prototype, "items", void 0);
-__decorate([
-    (0, swagger_1.ApiProperty)({ description: 'Total number of items' }),
-    __metadata("design:type", Number)
-], PaginatedResponseDto.prototype, "total", void 0);
-__decorate([
-    (0, swagger_1.ApiProperty)({ description: 'Current page number' }),
-    __metadata("design:type", Number)
-], PaginatedResponseDto.prototype, "page", void 0);
-__decorate([
-    (0, swagger_1.ApiProperty)({ description: 'Number of items per page' }),
-    __metadata("design:type", Number)
-], PaginatedResponseDto.prototype, "limit", void 0);
-__decorate([
-    (0, swagger_1.ApiProperty)({ description: 'Has more items to fetch' }),
-    __metadata("design:type", Boolean)
-], PaginatedResponseDto.prototype, "hasMore", void 0);
 
 
 /***/ },
@@ -8310,7 +8016,7 @@ var __metadata = (this && this.__metadata) || function (k, v) {
     if (typeof Reflect === "object" && typeof Reflect.metadata === "function") return Reflect.metadata(k, v);
 };
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.BatchProcessItemDto = exports.RescheduleMessageDto = exports.DeleteScheduledMessageDto = exports.GetScheduledMessagesDto = exports.ScheduleMessageDto = void 0;
+exports.ScheduleMessageDto = void 0;
 const class_validator_1 = __webpack_require__(/*! class-validator */ "class-validator");
 const swagger_1 = __webpack_require__(/*! @nestjs/swagger */ "@nestjs/swagger");
 const class_transformer_1 = __webpack_require__(/*! class-transformer */ "class-transformer");
@@ -8341,60 +8047,6 @@ __decorate([
     (0, class_validator_1.IsBoolean)(),
     __metadata("design:type", Boolean)
 ], ScheduleMessageDto.prototype, "silent", void 0);
-class GetScheduledMessagesDto extends batch_operations_dto_1.BaseBatchItemDto {
-    constructor() {
-        super(...arguments);
-        this.limit = 50;
-    }
-}
-exports.GetScheduledMessagesDto = GetScheduledMessagesDto;
-__decorate([
-    (0, swagger_1.ApiProperty)({ description: 'Maximum number of messages to return', required: false, default: 50 }),
-    (0, class_validator_1.IsOptional)(),
-    (0, class_validator_1.IsNumber)(),
-    (0, class_transformer_1.Transform)(({ value }) => parseInt(value)),
-    __metadata("design:type", Number)
-], GetScheduledMessagesDto.prototype, "limit", void 0);
-class DeleteScheduledMessageDto extends batch_operations_dto_1.BaseBatchItemDto {
-}
-exports.DeleteScheduledMessageDto = DeleteScheduledMessageDto;
-__decorate([
-    (0, swagger_1.ApiProperty)({ description: 'ID of the scheduled message to delete' }),
-    (0, class_validator_1.IsNumber)(),
-    __metadata("design:type", Number)
-], DeleteScheduledMessageDto.prototype, "messageId", void 0);
-class RescheduleMessageDto {
-}
-exports.RescheduleMessageDto = RescheduleMessageDto;
-__decorate([
-    (0, swagger_1.ApiProperty)({ description: 'Chat ID containing the message' }),
-    (0, class_validator_1.IsString)(),
-    __metadata("design:type", String)
-], RescheduleMessageDto.prototype, "chatId", void 0);
-__decorate([
-    (0, swagger_1.ApiProperty)({ description: 'Message ID to reschedule' }),
-    (0, class_validator_1.IsNumber)(),
-    __metadata("design:type", Number)
-], RescheduleMessageDto.prototype, "messageId", void 0);
-__decorate([
-    (0, swagger_1.ApiProperty)({ description: 'New schedule date (ISO string)' }),
-    (0, class_validator_1.IsDateString)(),
-    __metadata("design:type", String)
-], RescheduleMessageDto.prototype, "newScheduleDate", void 0);
-class BatchProcessItemDto {
-}
-exports.BatchProcessItemDto = BatchProcessItemDto;
-__decorate([
-    (0, swagger_1.ApiProperty)({ description: 'Chat ID or message ID depending on operation' }),
-    (0, class_validator_1.IsString)(),
-    __metadata("design:type", String)
-], BatchProcessItemDto.prototype, "chatId", void 0);
-__decorate([
-    (0, swagger_1.ApiProperty)({ description: 'Message ID for operations that require it', required: false }),
-    (0, class_validator_1.IsOptional)(),
-    (0, class_validator_1.IsNumber)(),
-    __metadata("design:type", Number)
-], BatchProcessItemDto.prototype, "messageId", void 0);
 
 
 /***/ },
@@ -17713,7 +17365,7 @@ var __param = (this && this.__param) || function (paramIndex, decorator) {
 };
 var ChannelIntelligenceReadService_1;
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.ChannelIntelligenceReadService = exports.JOIN_MAX_DELETE_RATIO_ENV = exports.DELETE_RATIO_EXCLUDE_V2 = exports.DELETE_RATIO_EXCLUDE_V1 = exports.MIN_CONVERSION_EVIDENCE = exports.JOIN_SCORING_V2_ENV = exports.SQ_PRIOR_RATE_FALLBACK = exports.PRIOR_RATE_FALLBACK = exports.PRIOR_TTL_MS = exports.SQ_MAX = exports.SQ_MIN = exports.SQ_PRIOR_STRENGTH = exports.WEIGHT_MAX = exports.WEIGHT_MIN = exports.PRIOR_STRENGTH = void 0;
+exports.ChannelIntelligenceReadService = exports.JOIN_MAX_DELETE_RATIO_ENV = exports.DELETE_RATIO_EXCLUDE_V2 = exports.MIN_CONVERSION_EVIDENCE = exports.JOIN_SCORING_V2_ENV = exports.SQ_PRIOR_RATE_FALLBACK = exports.PRIOR_RATE_FALLBACK = exports.PRIOR_TTL_MS = exports.SQ_MAX = exports.SQ_MIN = exports.SQ_PRIOR_STRENGTH = exports.WEIGHT_MAX = exports.WEIGHT_MIN = exports.PRIOR_STRENGTH = void 0;
 exports.getJoinDeleteRatioLimit = getJoinDeleteRatioLimit;
 exports.isJoinScoringV2Enabled = isJoinScoringV2Enabled;
 const common_1 = __webpack_require__(/*! @nestjs/common */ "@nestjs/common");
@@ -17730,7 +17382,6 @@ exports.PRIOR_RATE_FALLBACK = 0.03;
 exports.SQ_PRIOR_RATE_FALLBACK = 0.82;
 exports.JOIN_SCORING_V2_ENV = 'CHANNEL_JOIN_SCORING_V2';
 exports.MIN_CONVERSION_EVIDENCE = 10;
-exports.DELETE_RATIO_EXCLUDE_V1 = 0.5;
 exports.DELETE_RATIO_EXCLUDE_V2 = 0.3;
 exports.JOIN_MAX_DELETE_RATIO_ENV = 'CHANNEL_JOIN_MAX_DELETE_RATIO';
 function getJoinDeleteRatioLimit() {
@@ -29101,28 +28752,6 @@ __decorate([
     __metadata("design:type", String)
 ], CreateClientDto.prototype, "gpayId", void 0);
 __decorate([
-    (0, swagger_1.ApiPropertyOptional)({ description: 'Dedicated proxy IPs' }),
-    (0, class_validator_1.IsOptional)(),
-    (0, class_validator_1.IsArray)(),
-    (0, class_validator_1.ArrayUnique)(),
-    (0, class_validator_1.IsString)({ each: true }),
-    __metadata("design:type", Array)
-], CreateClientDto.prototype, "dedicatedIps", void 0);
-__decorate([
-    (0, swagger_1.ApiPropertyOptional)({ description: 'Preferred IP country (ISO 2-letter)' }),
-    (0, class_transformer_1.Transform)(({ value }) => value?.trim().toUpperCase()),
-    (0, class_validator_1.IsOptional)(),
-    (0, class_validator_1.Matches)(/^[A-Z]{2}$/, { message: 'preferredIpCountry must be a 2-letter ISO country code' }),
-    __metadata("design:type", String)
-], CreateClientDto.prototype, "preferredIpCountry", void 0);
-__decorate([
-    (0, swagger_1.ApiPropertyOptional)({ description: 'Auto-assign IPs to mobile numbers' }),
-    (0, class_validator_1.IsOptional)(),
-    (0, class_transformer_1.Type)(() => Boolean),
-    (0, class_validator_1.IsBoolean)(),
-    __metadata("design:type", Boolean)
-], CreateClientDto.prototype, "autoAssignIps", void 0);
-__decorate([
     (0, swagger_1.ApiPropertyOptional)({ description: 'First name pool for persona assignment' }),
     (0, class_validator_1.IsOptional)(),
     (0, class_validator_1.IsArray)(),
@@ -30126,21 +29755,6 @@ __decorate([
     (0, mongoose_1.Prop)({ required: false, default: null }),
     __metadata("design:type", String)
 ], Client.prototype, "gpayId", void 0);
-__decorate([
-    (0, swagger_1.ApiProperty)({ description: 'Dedicated proxy IPs', required: false }),
-    (0, mongoose_1.Prop)({ required: false, type: [String], default: [] }),
-    __metadata("design:type", Array)
-], Client.prototype, "dedicatedIps", void 0);
-__decorate([
-    (0, swagger_1.ApiProperty)({ description: 'Preferred IP country (ISO 2-letter)', required: false }),
-    (0, mongoose_1.Prop)({ required: false, default: null }),
-    __metadata("design:type", String)
-], Client.prototype, "preferredIpCountry", void 0);
-__decorate([
-    (0, swagger_1.ApiProperty)({ description: 'Auto-assign IPs to mobile numbers', required: false }),
-    (0, mongoose_1.Prop)({ required: false, type: Boolean, default: false }),
-    __metadata("design:type", Boolean)
-], Client.prototype, "autoAssignIps", void 0);
 __decorate([
     (0, swagger_1.ApiProperty)({ description: 'First name pool for persona assignment', required: false }),
     (0, mongoose_1.Prop)({ required: false, type: [String], default: [] }),
@@ -36754,108 +36368,6 @@ __decorate([
 
 /***/ },
 
-/***/ "./src/components/ip-management/dto/search-ip.dto.ts"
-/*!***********************************************************!*\
-  !*** ./src/components/ip-management/dto/search-ip.dto.ts ***!
-  \***********************************************************/
-(__unused_webpack_module, exports, __webpack_require__) {
-
-
-var __decorate = (this && this.__decorate) || function (decorators, target, key, desc) {
-    var c = arguments.length, r = c < 3 ? target : desc === null ? desc = Object.getOwnPropertyDescriptor(target, key) : desc, d;
-    if (typeof Reflect === "object" && typeof Reflect.decorate === "function") r = Reflect.decorate(decorators, target, key, desc);
-    else for (var i = decorators.length - 1; i >= 0; i--) if (d = decorators[i]) r = (c < 3 ? d(r) : c > 3 ? d(target, key, r) : d(target, key)) || r;
-    return c > 3 && r && Object.defineProperty(target, key, r), r;
-};
-var __metadata = (this && this.__metadata) || function (k, v) {
-    if (typeof Reflect === "object" && typeof Reflect.metadata === "function") return Reflect.metadata(k, v);
-};
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.SearchIpMobileMappingDto = exports.SearchProxyIpDto = void 0;
-const swagger_1 = __webpack_require__(/*! @nestjs/swagger */ "@nestjs/swagger");
-const class_validator_1 = __webpack_require__(/*! class-validator */ "class-validator");
-class SearchProxyIpDto {
-}
-exports.SearchProxyIpDto = SearchProxyIpDto;
-__decorate([
-    (0, swagger_1.ApiProperty)({ description: 'IP address to search for', required: false }),
-    (0, class_validator_1.IsOptional)(),
-    (0, class_validator_1.IsString)(),
-    __metadata("design:type", String)
-], SearchProxyIpDto.prototype, "ipAddress", void 0);
-__decorate([
-    (0, swagger_1.ApiProperty)({ description: 'Port number to search for', required: false }),
-    (0, class_validator_1.IsOptional)(),
-    (0, class_validator_1.IsNumber)(),
-    __metadata("design:type", Number)
-], SearchProxyIpDto.prototype, "port", void 0);
-__decorate([
-    (0, swagger_1.ApiProperty)({ description: 'Protocol type to search for', enum: ['http', 'https', 'socks5'], required: false }),
-    (0, class_validator_1.IsOptional)(),
-    (0, class_validator_1.IsEnum)(['http', 'https', 'socks5']),
-    __metadata("design:type", String)
-], SearchProxyIpDto.prototype, "protocol", void 0);
-__decorate([
-    (0, swagger_1.ApiProperty)({ description: 'Country code to search for', required: false }),
-    (0, class_validator_1.IsOptional)(),
-    (0, class_validator_1.IsString)(),
-    __metadata("design:type", String)
-], SearchProxyIpDto.prototype, "country", void 0);
-__decorate([
-    (0, swagger_1.ApiProperty)({ description: 'Status to search for', enum: ['active', 'inactive', 'blocked', 'maintenance'], required: false }),
-    (0, class_validator_1.IsOptional)(),
-    (0, class_validator_1.IsEnum)(['active', 'inactive', 'blocked', 'maintenance']),
-    __metadata("design:type", String)
-], SearchProxyIpDto.prototype, "status", void 0);
-__decorate([
-    (0, swagger_1.ApiProperty)({ description: 'Whether to search for assigned or unassigned IPs', required: false }),
-    (0, class_validator_1.IsOptional)(),
-    (0, class_validator_1.IsBoolean)(),
-    __metadata("design:type", Boolean)
-], SearchProxyIpDto.prototype, "isAssigned", void 0);
-__decorate([
-    (0, swagger_1.ApiProperty)({ description: 'Client ID to search for', required: false }),
-    (0, class_validator_1.IsOptional)(),
-    (0, class_validator_1.IsString)(),
-    __metadata("design:type", String)
-], SearchProxyIpDto.prototype, "assignedToClient", void 0);
-__decorate([
-    (0, swagger_1.ApiProperty)({ description: 'Provider to search for', required: false }),
-    (0, class_validator_1.IsOptional)(),
-    (0, class_validator_1.IsString)(),
-    __metadata("design:type", String)
-], SearchProxyIpDto.prototype, "provider", void 0);
-class SearchIpMobileMappingDto {
-}
-exports.SearchIpMobileMappingDto = SearchIpMobileMappingDto;
-__decorate([
-    (0, swagger_1.ApiProperty)({ description: 'Mobile number to search for', required: false }),
-    (0, class_validator_1.IsOptional)(),
-    (0, class_validator_1.IsString)(),
-    __metadata("design:type", String)
-], SearchIpMobileMappingDto.prototype, "mobile", void 0);
-__decorate([
-    (0, swagger_1.ApiProperty)({ description: 'IP address to search for', required: false }),
-    (0, class_validator_1.IsOptional)(),
-    (0, class_validator_1.IsString)(),
-    __metadata("design:type", String)
-], SearchIpMobileMappingDto.prototype, "ipAddress", void 0);
-__decorate([
-    (0, swagger_1.ApiProperty)({ description: 'Client ID to search for', required: false }),
-    (0, class_validator_1.IsOptional)(),
-    (0, class_validator_1.IsString)(),
-    __metadata("design:type", String)
-], SearchIpMobileMappingDto.prototype, "clientId", void 0);
-__decorate([
-    (0, swagger_1.ApiProperty)({ description: 'Status to search for', enum: ['active', 'inactive'], required: false }),
-    (0, class_validator_1.IsOptional)(),
-    (0, class_validator_1.IsEnum)(['active', 'inactive']),
-    __metadata("design:type", String)
-], SearchIpMobileMappingDto.prototype, "status", void 0);
-
-
-/***/ },
-
 /***/ "./src/components/ip-management/dto/update-proxy-ip.dto.ts"
 /*!*****************************************************************!*\
   !*** ./src/components/ip-management/dto/update-proxy-ip.dto.ts ***!
@@ -36902,7 +36414,6 @@ __exportStar(__webpack_require__(/*! ./ip-management.controller */ "./src/compon
 __exportStar(__webpack_require__(/*! ./schemas/proxy-ip.schema */ "./src/components/ip-management/schemas/proxy-ip.schema.ts"), exports);
 __exportStar(__webpack_require__(/*! ./dto/create-proxy-ip.dto */ "./src/components/ip-management/dto/create-proxy-ip.dto.ts"), exports);
 __exportStar(__webpack_require__(/*! ./dto/update-proxy-ip.dto */ "./src/components/ip-management/dto/update-proxy-ip.dto.ts"), exports);
-__exportStar(__webpack_require__(/*! ./dto/search-ip.dto */ "./src/components/ip-management/dto/search-ip.dto.ts"), exports);
 __exportStar(__webpack_require__(/*! ./dto/get-next-ip.dto */ "./src/components/ip-management/dto/get-next-ip.dto.ts"), exports);
 
 
@@ -49093,7 +48604,7 @@ var __param = (this && this.__param) || function (paramIndex, decorator) {
     return function (target, key) { decorator(target, key, paramIndex); }
 };
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.SessionController = exports.GetOldestSessionDto = exports.SearchAuditDto = exports.CreateSessionDto = void 0;
+exports.SessionController = exports.GetOldestSessionDto = exports.CreateSessionDto = void 0;
 const common_1 = __webpack_require__(/*! @nestjs/common */ "@nestjs/common");
 const swagger_1 = __webpack_require__(/*! @nestjs/swagger */ "@nestjs/swagger");
 const session_service_1 = __webpack_require__(/*! ./session.service */ "./src/components/session-manager/session.service.ts");
@@ -49128,48 +48639,6 @@ __decorate([
     (0, class_validator_1.IsBoolean)(),
     __metadata("design:type", Boolean)
 ], CreateSessionDto.prototype, "forceNew", void 0);
-class SearchAuditDto {
-}
-exports.SearchAuditDto = SearchAuditDto;
-__decorate([
-    (0, swagger_2.ApiPropertyOptional)({
-        description: 'Phone number to search for'
-    }),
-    (0, class_validator_1.IsOptional)(),
-    (0, class_validator_1.IsString)(),
-    __metadata("design:type", String)
-], SearchAuditDto.prototype, "mobile", void 0);
-__decorate([
-    (0, swagger_2.ApiPropertyOptional)({
-        description: 'Session status to filter by',
-        enum: ['created', 'active', 'expired', 'revoked', 'failed']
-    }),
-    (0, class_validator_1.IsOptional)(),
-    (0, class_validator_1.IsString)(),
-    __metadata("design:type", String)
-], SearchAuditDto.prototype, "status", void 0);
-__decorate([
-    (0, swagger_2.ApiPropertyOptional)({
-        description: 'Number of records to return',
-        default: 10,
-        minimum: 1
-    }),
-    (0, class_validator_1.IsOptional)(),
-    (0, class_validator_1.IsNumber)(),
-    (0, class_validator_1.Min)(1),
-    __metadata("design:type", Number)
-], SearchAuditDto.prototype, "limit", void 0);
-__decorate([
-    (0, swagger_2.ApiPropertyOptional)({
-        description: 'Number of records to skip',
-        default: 0,
-        minimum: 0
-    }),
-    (0, class_validator_1.IsOptional)(),
-    (0, class_validator_1.IsNumber)(),
-    (0, class_validator_1.Min)(0),
-    __metadata("design:type", Number)
-], SearchAuditDto.prototype, "offset", void 0);
 class GetOldestSessionDto {
 }
 exports.GetOldestSessionDto = GetOldestSessionDto;
@@ -53996,17 +53465,8 @@ var __metadata = (this && this.__metadata) || function (k, v) {
     if (typeof Reflect === "object" && typeof Reflect.metadata === "function") return Reflect.metadata(k, v);
 };
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.UsageStatisticsDto = exports.BulkEnrollPromoteClientsRequestDto = exports.BulkEnrollBufferClientsRequestDto = exports.BulkEnrollClientsRequestDto = exports.MarkUsedRequestDto = exports.DeactivationRequestDto = exports.ActivationRequestDto = exports.StatusUpdateRequestDto = exports.AcceptedStringResponseDto = void 0;
+exports.UsageStatisticsDto = exports.BulkEnrollPromoteClientsRequestDto = exports.BulkEnrollBufferClientsRequestDto = exports.BulkEnrollClientsRequestDto = exports.MarkUsedRequestDto = exports.DeactivationRequestDto = exports.ActivationRequestDto = exports.StatusUpdateRequestDto = void 0;
 const swagger_1 = __webpack_require__(/*! @nestjs/swagger */ "@nestjs/swagger");
-class AcceptedStringResponseDto {
-}
-exports.AcceptedStringResponseDto = AcceptedStringResponseDto;
-__decorate([
-    (0, swagger_1.ApiProperty)({
-        description: 'Acknowledgement returned when a long-running background operation is started.'
-    }),
-    __metadata("design:type", String)
-], AcceptedStringResponseDto.prototype, "message", void 0);
 class StatusUpdateRequestDto {
 }
 exports.StatusUpdateRequestDto = StatusUpdateRequestDto;
