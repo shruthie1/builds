@@ -58739,8 +58739,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "656f6494e37fb99afe8d2b23136fa440077af7b3" : 0;
-    const builtAt =  true ? "2026-11-11T08:06:22.484Z" : 0;
+    const sha =  true ? "14a69fb73a4267fdc5cbc3429c9fa4ac24742fc5" : 0;
+    const builtAt =  true ? "2026-11-11T08:54:49.365Z" : 0;
     return { sha, builtAt };
 }
 
@@ -95782,9 +95782,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   bodyPartsArray: () => (/* reexport safe */ _explicitPatterns__WEBPACK_IMPORTED_MODULE_7__.bodyPartsArray),
 /* harmony export */   botArray: () => (/* reexport safe */ _contextPatterns__WEBPACK_IMPORTED_MODULE_9__.botArray),
 /* harmony export */   botWords: () => (/* reexport safe */ _contextPatterns__WEBPACK_IMPORTED_MODULE_9__.botWords),
-/* harmony export */   braBoobArray: () => (/* reexport safe */ _utilityPatterns__WEBPACK_IMPORTED_MODULE_11__.braBoobArray),
 /* harmony export */   callWords: () => (/* reexport safe */ _servicePatterns__WEBPACK_IMPORTED_MODULE_3__.callWords),
-/* harmony export */   chestArray: () => (/* reexport safe */ _utilityPatterns__WEBPACK_IMPORTED_MODULE_11__.chestArray),
 /* harmony export */   clothingArray: () => (/* reexport safe */ _utilityPatterns__WEBPACK_IMPORTED_MODULE_11__.clothingArray),
 /* harmony export */   clothingWords: () => (/* reexport safe */ _utilityPatterns__WEBPACK_IMPORTED_MODULE_11__.clothingWords),
 /* harmony export */   completionWords: () => (/* reexport safe */ _paymentPatterns__WEBPACK_IMPORTED_MODULE_1__.completionWords),
@@ -95811,12 +95809,10 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   hindiServiceWords: () => (/* reexport safe */ _languagePatterns__WEBPACK_IMPORTED_MODULE_10__.hindiServiceWords),
 /* harmony export */   hornyWords: () => (/* reexport safe */ _explicitPatterns__WEBPACK_IMPORTED_MODULE_7__.hornyWords),
 /* harmony export */   howArray: () => (/* reexport safe */ _utilityPatterns__WEBPACK_IMPORTED_MODULE_11__.howArray),
-/* harmony export */   howMuchQuestionArray: () => (/* reexport safe */ _utilityPatterns__WEBPACK_IMPORTED_MODULE_11__.howMuchQuestionArray),
 /* harmony export */   howWords: () => (/* reexport safe */ _utilityPatterns__WEBPACK_IMPORTED_MODULE_11__.howWords),
 /* harmony export */   immediateWords: () => (/* reexport safe */ _temporalPatterns__WEBPACK_IMPORTED_MODULE_6__.immediateWords),
 /* harmony export */   insufficientWords: () => (/* reexport safe */ _paymentPatterns__WEBPACK_IMPORTED_MODULE_1__.insufficientWords),
 /* harmony export */   karWords: () => (/* reexport safe */ _actionPatterns__WEBPACK_IMPORTED_MODULE_4__.karWords),
-/* harmony export */   kitnaArray: () => (/* reexport safe */ _servicePatterns__WEBPACK_IMPORTED_MODULE_3__.kitnaArray),
 /* harmony export */   laterWords: () => (/* reexport safe */ _temporalPatterns__WEBPACK_IMPORTED_MODULE_6__.laterWords),
 /* harmony export */   listenArray: () => (/* reexport safe */ _mediaPatterns__WEBPACK_IMPORTED_MODULE_2__.listenArray),
 /* harmony export */   listenWords: () => (/* reexport safe */ _mediaPatterns__WEBPACK_IMPORTED_MODULE_2__.listenWords),
@@ -95847,29 +95843,23 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   priceWords: () => (/* reexport safe */ _paymentPatterns__WEBPACK_IMPORTED_MODULE_1__.priceWords),
 /* harmony export */   profileSimpleArray: () => (/* reexport safe */ _utilityPatterns__WEBPACK_IMPORTED_MODULE_11__.profileSimpleArray),
 /* harmony export */   profileWords: () => (/* reexport safe */ _utilityPatterns__WEBPACK_IMPORTED_MODULE_11__.profileWords),
-/* harmony export */   questionIndicatorsArray: () => (/* reexport safe */ _utilityPatterns__WEBPACK_IMPORTED_MODULE_11__.questionIndicatorsArray),
 /* harmony export */   questionWords: () => (/* reexport safe */ _utilityPatterns__WEBPACK_IMPORTED_MODULE_11__.questionWords),
-/* harmony export */   recordingArray: () => (/* reexport safe */ _mediaPatterns__WEBPACK_IMPORTED_MODULE_2__.recordingArray),
 /* harmony export */   serviceArray: () => (/* reexport safe */ _servicePatterns__WEBPACK_IMPORTED_MODULE_3__.serviceArray),
 /* harmony export */   serviceWords: () => (/* reexport safe */ _servicePatterns__WEBPACK_IMPORTED_MODULE_3__.serviceWords),
 /* harmony export */   showSendArray: () => (/* reexport safe */ _mediaPatterns__WEBPACK_IMPORTED_MODULE_2__.showSendArray),
 /* harmony export */   showSendWords: () => (/* reexport safe */ _mediaPatterns__WEBPACK_IMPORTED_MODULE_2__.showSendWords),
 /* harmony export */   sizeArray: () => (/* reexport safe */ _utilityPatterns__WEBPACK_IMPORTED_MODULE_11__.sizeArray),
-/* harmony export */   sizeDescriptorArray: () => (/* reexport safe */ _utilityPatterns__WEBPACK_IMPORTED_MODULE_11__.sizeDescriptorArray),
-/* harmony export */   sizeQuestionArray: () => (/* reexport safe */ _utilityPatterns__WEBPACK_IMPORTED_MODULE_11__.sizeQuestionArray),
 /* harmony export */   sizeWords: () => (/* reexport safe */ _utilityPatterns__WEBPACK_IMPORTED_MODULE_11__.sizeWords),
 /* harmony export */   startWords: () => (/* reexport safe */ _actionPatterns__WEBPACK_IMPORTED_MODULE_4__.startWords),
 /* harmony export */   talkWords: () => (/* reexport safe */ _socialPatterns__WEBPACK_IMPORTED_MODULE_8__.talkWords),
 /* harmony export */   technicalWords: () => (/* reexport safe */ _paymentPatterns__WEBPACK_IMPORTED_MODULE_1__.technicalWords),
 /* harmony export */   teluguServiceWords: () => (/* reexport safe */ _languagePatterns__WEBPACK_IMPORTED_MODULE_10__.teluguServiceWords),
-/* harmony export */   timeArray: () => (/* reexport safe */ _servicePatterns__WEBPACK_IMPORTED_MODULE_3__.timeArray),
 /* harmony export */   touchWords: () => (/* reexport safe */ _actionPatterns__WEBPACK_IMPORTED_MODULE_4__.touchWords),
 /* harmony export */   trustWords: () => (/* reexport safe */ _socialPatterns__WEBPACK_IMPORTED_MODULE_8__.trustWords),
 /* harmony export */   videoArray: () => (/* reexport safe */ _mediaPatterns__WEBPACK_IMPORTED_MODULE_2__.videoArray),
 /* harmony export */   videoWords: () => (/* reexport safe */ _mediaPatterns__WEBPACK_IMPORTED_MODULE_2__.videoWords),
 /* harmony export */   voiceArray: () => (/* reexport safe */ _mediaPatterns__WEBPACK_IMPORTED_MODULE_2__.voiceArray),
 /* harmony export */   voiceWords: () => (/* reexport safe */ _mediaPatterns__WEBPACK_IMPORTED_MODULE_2__.voiceWords),
-/* harmony export */   wantSeeArray: () => (/* reexport safe */ _utilityPatterns__WEBPACK_IMPORTED_MODULE_11__.wantSeeArray),
 /* harmony export */   whatArray: () => (/* reexport safe */ _utilityPatterns__WEBPACK_IMPORTED_MODULE_11__.whatArray),
 /* harmony export */   whatWords: () => (/* reexport safe */ _utilityPatterns__WEBPACK_IMPORTED_MODULE_11__.whatWords),
 /* harmony export */   whenArray: () => (/* reexport safe */ _utilityPatterns__WEBPACK_IMPORTED_MODULE_11__.whenArray),
@@ -96304,10 +96294,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   bodyPartsArray: () => (/* reexport safe */ _explicitPatterns__WEBPACK_IMPORTED_MODULE_7__.bodyPartsArray),
 /* harmony export */   botArray: () => (/* reexport safe */ _contextPatterns__WEBPACK_IMPORTED_MODULE_9__.botArray),
 /* harmony export */   botWords: () => (/* reexport safe */ _contextPatterns__WEBPACK_IMPORTED_MODULE_9__.botWords),
-/* harmony export */   braBoobArray: () => (/* reexport safe */ _utilityPatterns__WEBPACK_IMPORTED_MODULE_11__.braBoobArray),
 /* harmony export */   callRequestExclusionRegex: () => (/* reexport safe */ _callRequestRegex__WEBPACK_IMPORTED_MODULE_13__.callRequestExclusionRegex),
 /* harmony export */   callWords: () => (/* reexport safe */ _servicePatterns__WEBPACK_IMPORTED_MODULE_3__.callWords),
-/* harmony export */   chestArray: () => (/* reexport safe */ _utilityPatterns__WEBPACK_IMPORTED_MODULE_11__.chestArray),
 /* harmony export */   clothingArray: () => (/* reexport safe */ _utilityPatterns__WEBPACK_IMPORTED_MODULE_11__.clothingArray),
 /* harmony export */   clothingWords: () => (/* reexport safe */ _utilityPatterns__WEBPACK_IMPORTED_MODULE_11__.clothingWords),
 /* harmony export */   complainsOrAsksForCall: () => (/* reexport safe */ _callRequestRegex__WEBPACK_IMPORTED_MODULE_13__.complainsOrAsksForCall),
@@ -96350,7 +96338,6 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   hindiServiceWords: () => (/* reexport safe */ _languagePatterns__WEBPACK_IMPORTED_MODULE_10__.hindiServiceWords),
 /* harmony export */   hornyWords: () => (/* reexport safe */ _explicitPatterns__WEBPACK_IMPORTED_MODULE_7__.hornyWords),
 /* harmony export */   howArray: () => (/* reexport safe */ _utilityPatterns__WEBPACK_IMPORTED_MODULE_11__.howArray),
-/* harmony export */   howMuchQuestionArray: () => (/* reexport safe */ _utilityPatterns__WEBPACK_IMPORTED_MODULE_11__.howMuchQuestionArray),
 /* harmony export */   howWords: () => (/* reexport safe */ _utilityPatterns__WEBPACK_IMPORTED_MODULE_11__.howWords),
 /* harmony export */   immediateWords: () => (/* reexport safe */ _temporalPatterns__WEBPACK_IMPORTED_MODULE_6__.immediateWords),
 /* harmony export */   insufficientWords: () => (/* reexport safe */ _paymentPatterns__WEBPACK_IMPORTED_MODULE_1__.insufficientWords),
@@ -96365,7 +96352,6 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   isUrgencyRequest: () => (/* reexport safe */ _urgencyRegex__WEBPACK_IMPORTED_MODULE_20__.isUrgencyRequest),
 /* harmony export */   isVoicePraise: () => (/* reexport safe */ _voiceRegex__WEBPACK_IMPORTED_MODULE_21__.isVoicePraise),
 /* harmony export */   karWords: () => (/* reexport safe */ _actionPatterns__WEBPACK_IMPORTED_MODULE_4__.karWords),
-/* harmony export */   kitnaArray: () => (/* reexport safe */ _servicePatterns__WEBPACK_IMPORTED_MODULE_3__.kitnaArray),
 /* harmony export */   laterWords: () => (/* reexport safe */ _temporalPatterns__WEBPACK_IMPORTED_MODULE_6__.laterWords),
 /* harmony export */   listenArray: () => (/* reexport safe */ _mediaPatterns__WEBPACK_IMPORTED_MODULE_2__.listenArray),
 /* harmony export */   listenWords: () => (/* reexport safe */ _mediaPatterns__WEBPACK_IMPORTED_MODULE_2__.listenWords),
@@ -96409,9 +96395,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   priceWords: () => (/* reexport safe */ _paymentPatterns__WEBPACK_IMPORTED_MODULE_1__.priceWords),
 /* harmony export */   profileSimpleArray: () => (/* reexport safe */ _utilityPatterns__WEBPACK_IMPORTED_MODULE_11__.profileSimpleArray),
 /* harmony export */   profileWords: () => (/* reexport safe */ _utilityPatterns__WEBPACK_IMPORTED_MODULE_11__.profileWords),
-/* harmony export */   questionIndicatorsArray: () => (/* reexport safe */ _utilityPatterns__WEBPACK_IMPORTED_MODULE_11__.questionIndicatorsArray),
 /* harmony export */   questionWords: () => (/* reexport safe */ _utilityPatterns__WEBPACK_IMPORTED_MODULE_11__.questionWords),
-/* harmony export */   recordingArray: () => (/* reexport safe */ _mediaPatterns__WEBPACK_IMPORTED_MODULE_2__.recordingArray),
 /* harmony export */   serviceArray: () => (/* reexport safe */ _servicePatterns__WEBPACK_IMPORTED_MODULE_3__.serviceArray),
 /* harmony export */   serviceContextRegex: () => (/* reexport safe */ _durationRegex__WEBPACK_IMPORTED_MODULE_15__.serviceContextRegex),
 /* harmony export */   serviceDescriptionExclusionRegex: () => (/* reexport safe */ _serviceDescriptionRegex__WEBPACK_IMPORTED_MODULE_18__.serviceDescriptionExclusionRegex),
@@ -96420,15 +96404,12 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   showSendRegex: () => (/* reexport safe */ _contentRequestRegex__WEBPACK_IMPORTED_MODULE_14__.showSendRegex),
 /* harmony export */   showSendWords: () => (/* reexport safe */ _mediaPatterns__WEBPACK_IMPORTED_MODULE_2__.showSendWords),
 /* harmony export */   sizeArray: () => (/* reexport safe */ _utilityPatterns__WEBPACK_IMPORTED_MODULE_11__.sizeArray),
-/* harmony export */   sizeDescriptorArray: () => (/* reexport safe */ _utilityPatterns__WEBPACK_IMPORTED_MODULE_11__.sizeDescriptorArray),
-/* harmony export */   sizeQuestionArray: () => (/* reexport safe */ _utilityPatterns__WEBPACK_IMPORTED_MODULE_11__.sizeQuestionArray),
 /* harmony export */   sizeWords: () => (/* reexport safe */ _utilityPatterns__WEBPACK_IMPORTED_MODULE_11__.sizeWords),
 /* harmony export */   startWords: () => (/* reexport safe */ _actionPatterns__WEBPACK_IMPORTED_MODULE_4__.startWords),
 /* harmony export */   talkWords: () => (/* reexport safe */ _socialPatterns__WEBPACK_IMPORTED_MODULE_8__.talkWords),
 /* harmony export */   technicalWords: () => (/* reexport safe */ _paymentPatterns__WEBPACK_IMPORTED_MODULE_1__.technicalWords),
 /* harmony export */   teluguServiceWords: () => (/* reexport safe */ _languagePatterns__WEBPACK_IMPORTED_MODULE_10__.teluguServiceWords),
 /* harmony export */   testRegexFromArray: () => (/* reexport safe */ _utils__WEBPACK_IMPORTED_MODULE_0__.testRegexFromArray),
-/* harmony export */   timeArray: () => (/* reexport safe */ _servicePatterns__WEBPACK_IMPORTED_MODULE_3__.timeArray),
 /* harmony export */   touchWords: () => (/* reexport safe */ _actionPatterns__WEBPACK_IMPORTED_MODULE_4__.touchWords),
 /* harmony export */   trustWords: () => (/* reexport safe */ _socialPatterns__WEBPACK_IMPORTED_MODULE_8__.trustWords),
 /* harmony export */   urgencyExclusionRegex: () => (/* reexport safe */ _urgencyRegex__WEBPACK_IMPORTED_MODULE_20__.urgencyExclusionRegex),
@@ -96439,7 +96420,6 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   voiceArray: () => (/* reexport safe */ _mediaPatterns__WEBPACK_IMPORTED_MODULE_2__.voiceArray),
 /* harmony export */   voicePraiseExclusionRegex: () => (/* reexport safe */ _voiceRegex__WEBPACK_IMPORTED_MODULE_21__.voicePraiseExclusionRegex),
 /* harmony export */   voiceWords: () => (/* reexport safe */ _mediaPatterns__WEBPACK_IMPORTED_MODULE_2__.voiceWords),
-/* harmony export */   wantSeeArray: () => (/* reexport safe */ _utilityPatterns__WEBPACK_IMPORTED_MODULE_11__.wantSeeArray),
 /* harmony export */   whatArray: () => (/* reexport safe */ _utilityPatterns__WEBPACK_IMPORTED_MODULE_11__.whatArray),
 /* harmony export */   whatWords: () => (/* reexport safe */ _utilityPatterns__WEBPACK_IMPORTED_MODULE_11__.whatWords),
 /* harmony export */   whenArray: () => (/* reexport safe */ _utilityPatterns__WEBPACK_IMPORTED_MODULE_11__.whenArray),
@@ -96569,7 +96549,6 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   musicArray: () => (/* binding */ musicArray),
 /* harmony export */   musicWords: () => (/* binding */ musicWords),
 /* harmony export */   picWords: () => (/* binding */ picWords),
-/* harmony export */   recordingArray: () => (/* binding */ recordingArray),
 /* harmony export */   showSendArray: () => (/* binding */ showSendArray),
 /* harmony export */   showSendWords: () => (/* binding */ showSendWords),
 /* harmony export */   videoArray: () => (/* binding */ videoArray),
@@ -96613,11 +96592,6 @@ const showSendArray = [
     'anuppu', 'kodu', 'kalisu', 'kalsu', 'ayakku', 'ayachu', 'tharu'
 ];
 const showSendWords = (0,_utils__WEBPACK_IMPORTED_MODULE_0__.createRegexFromArray)(showSendArray);
-// ===== RECORDING/MESSAGE WORDS =====
-const recordingArray = [
-    'message', 'msg', 'mesage', 'messge',
-    'recording', 'record', 'rec'
-];
 // ===== MUSIC/CONTENT WORDS =====
 const musicArray = [
     'music', 'song', 'radio', 'news', 'story', 'book',
@@ -97171,10 +97145,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   demoArray: () => (/* binding */ demoArray),
 /* harmony export */   demoWords: () => (/* binding */ demoWords),
 /* harmony export */   fullWords: () => (/* binding */ fullWords),
-/* harmony export */   kitnaArray: () => (/* binding */ kitnaArray),
 /* harmony export */   serviceArray: () => (/* binding */ serviceArray),
-/* harmony export */   serviceWords: () => (/* binding */ serviceWords),
-/* harmony export */   timeArray: () => (/* binding */ timeArray)
+/* harmony export */   serviceWords: () => (/* binding */ serviceWords)
 /* harmony export */ });
 /* harmony import */ var _utils__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./utils */ "./src/pattern-handlers/regex/utils.ts");
 /**
@@ -97198,13 +97170,6 @@ const demoWords = (0,_utils__WEBPACK_IMPORTED_MODULE_0__.createRegexFromArray)(d
 // Boundaried so 'call'/'col' don't match inside collect/local/recall/medical/logical.
 // (Was `(ca+l+|co+l+|...)` which substring-matched those words.)
 const callWords = `(?<![a-zA-Z])(caa?l+|coll|kol|cal|col)(?![a-zA-Z])`;
-// ===== TIME/DURATION VARIATIONS =====
-const timeArray = [
-    'time', 'tim', 'duration', 'durat', 'minut', 'minutes', 'minute',
-    'mins', 'min', 'mint', 'hr ', 'hrs', 'hour',
-    'lamba', 'lamb', 'when', 'wen', 'kab'
-];
-const kitnaArray = ['kitna', 'kitne', 'kitn', 'dher', 'der', 'entha'];
 // ===== FULL/COMPLETE WORDS =====
 const fullArray = [
     'full', 'hour', 'complete', 'night', 'entire', 'whole'
@@ -97582,13 +97547,10 @@ const urgencyRequestRegex = { test: isUrgencyRequest };
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
-/* harmony export */   braBoobArray: () => (/* binding */ braBoobArray),
-/* harmony export */   chestArray: () => (/* binding */ chestArray),
 /* harmony export */   clothingArray: () => (/* binding */ clothingArray),
 /* harmony export */   clothingWords: () => (/* binding */ clothingWords),
 /* harmony export */   hiWords: () => (/* binding */ hiWords),
 /* harmony export */   howArray: () => (/* binding */ howArray),
-/* harmony export */   howMuchQuestionArray: () => (/* binding */ howMuchQuestionArray),
 /* harmony export */   howWords: () => (/* binding */ howWords),
 /* harmony export */   negativeArray: () => (/* binding */ negativeArray),
 /* harmony export */   negativeWords: () => (/* binding */ negativeWords),
@@ -97596,13 +97558,9 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   otherQuestionWords: () => (/* binding */ otherQuestionWords),
 /* harmony export */   profileSimpleArray: () => (/* binding */ profileSimpleArray),
 /* harmony export */   profileWords: () => (/* binding */ profileWords),
-/* harmony export */   questionIndicatorsArray: () => (/* binding */ questionIndicatorsArray),
 /* harmony export */   questionWords: () => (/* binding */ questionWords),
 /* harmony export */   sizeArray: () => (/* binding */ sizeArray),
-/* harmony export */   sizeDescriptorArray: () => (/* binding */ sizeDescriptorArray),
-/* harmony export */   sizeQuestionArray: () => (/* binding */ sizeQuestionArray),
 /* harmony export */   sizeWords: () => (/* binding */ sizeWords),
-/* harmony export */   wantSeeArray: () => (/* binding */ wantSeeArray),
 /* harmony export */   whatArray: () => (/* binding */ whatArray),
 /* harmony export */   whatWords: () => (/* binding */ whatWords),
 /* harmony export */   whenArray: () => (/* binding */ whenArray),
@@ -97613,7 +97571,7 @@ __webpack_require__.r(__webpack_exports__);
 /**
  * Utility Word Patterns
  *
- * Question, negative, size, clothing, want/see, profile patterns
+ * Question, negative, size, clothing, profile patterns
  */
 
 // ===== WHAT VARIATIONS =====
@@ -97631,7 +97589,6 @@ const howArray = [
     'ela', 'elaa', 'elaaga', 'ela undi', 'elaundi', 'elaa undi', 'elaaundi',
     'elaaga', 'elaga', 'ela unda', 'elaunda', 'elaa unda', 'elaaunda'
 ];
-const howMuchQuestionArray = ['how much', 'hw much'];
 const howWords = (0,_utils__WEBPACK_IMPORTED_MODULE_0__.createRegexFromArray)(howArray);
 // ===== WHEN VARIATIONS =====
 const whenArray = [
@@ -97667,25 +97624,6 @@ const sizeArray = [
     'chinna', 'china', 'what', 'wht', 'how', 'hw'
 ];
 const sizeWords = (0,_utils__WEBPACK_IMPORTED_MODULE_0__.createRegexFromArray)(sizeArray);
-// ===== SIZE QUESTION WORDS =====
-const sizeQuestionArray = ['what', 'wht', 'how', 'kitna', 'ktna', 'entha'];
-// ===== SIZE DESCRIPTORS =====
-const sizeDescriptorArray = [
-    'size', 'siz', 'big', 'bigg', 'small', 'smal',
-    'tight', 'tite', 'tght'
-];
-// ===== CHEST/SIZE WORDS =====
-const chestArray = [
-    'chest', 'chst', 'chhati', 'chati', 'size', 'siz',
-    'bra', 'panty', 'pnty', 'panties', 'pnties',
-    'underwear', 'undwear', 'milk', 'mlk', 'doodh', 'dudh', 'palu', 'plu'
-];
-// ===== BRA/BOOB WORDS =====
-const braBoobArray = [
-    'bra', 'bob', 'boob', 'breast', 'brst',
-    'chest', 'chst', 'milk', 'mlk', 'palu', 'plu',
-    'doodh', 'dudh'
-];
 // ===== CLOTHING WORDS =====
 const clothingArray = [
     'dress', 'dres', 'drs', 'clothes', 'cloth', 'clth',
@@ -97694,24 +97632,6 @@ const clothingArray = [
     'skirt', 'skrt'
 ];
 const clothingWords = (0,_utils__WEBPACK_IMPORTED_MODULE_0__.createRegexFromArray)(clothingArray);
-// ===== WANT/SEE WORDS =====
-const wantSeeArray = [
-    'want', 'wnt', 'wanna', 'wana',
-    'see', 'show', 'shw', 'look', 'luk',
-    'watch', 'wach', 'display',
-    // Hindi
-    'dikhao', 'dekh', 'dek', 'dekhna',
-    'chahiye', 'chiye',
-    // Telugu
-    'chudu', 'chdu', 'chudandi',
-    'chupinchu', 'chupnchu', 'kaval', 'kval', 'chupu', 'chupandi', 'chuchu', 'chuchana', 'chusta', 'chustava', 'chupthava',
-    // Tamil: kaattu/kaatu=show, paaru/paru=see/look, venum=want
-    'kaattu', 'kaatu', 'paaru', 'venum',
-    // Kannada: torsu/thorisu=show, nodu/nodi=see, beku=want
-    'torsu', 'thorisu', 'nodu', 'nodi', 'beku',
-    // Malayalam: kaanikku/kaanik=show, kaanu/nokku=see, venam=want
-    'kaanikku', 'kaanik', 'kaanu', 'nokku', 'venam'
-];
 // ===== PROFILE/DP WORDS =====
 const profileSimpleArray = [
     'dp', 'profile', 'prof', 'who', 'you', 'your', 'ur', 'yor', 'yur',
@@ -97720,13 +97640,6 @@ const profileSimpleArray = [
 const profileSimpleWords = (0,_utils__WEBPACK_IMPORTED_MODULE_0__.createRegexFromArray)(profileSimpleArray);
 // Special handling for "display pic/pik" pattern
 const profileWords = `(${profileSimpleWords}|display.{0,10}(pic|pik))`;
-// ===== QUESTION INDICATORS =====
-const questionIndicatorsArray = [
-    'how', 'kaise', 'kesao', 'kesae',
-    'look', 'dekh', 'lagta',
-    'hai', 'hae', 'ela', 'elaa',
-    'eppudu', 'entha', 'undi', 'undhi'
-];
 // ===== YES/ACCEPTANCE VARIATIONS =====
 const yesSimpleArray = [
     'yes', 'yess', 'haan', 'han',
