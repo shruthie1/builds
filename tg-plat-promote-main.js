@@ -19664,7 +19664,6 @@ async function runManualSpamBotProbe(mobile, client) {
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   ACTIVE_CHANNEL_BOOLEAN_FIELDS: () => (/* binding */ ACTIVE_CHANNEL_BOOLEAN_FIELDS),
-/* harmony export */   ACTIVE_CHANNEL_LEGACY_PERMISSION_FIELDS: () => (/* binding */ ACTIVE_CHANNEL_LEGACY_PERMISSION_FIELDS),
 /* harmony export */   ACTIVE_CHANNEL_WRITABLE_KEYS: () => (/* binding */ ACTIVE_CHANNEL_WRITABLE_KEYS),
 /* harmony export */   activeChannelCanSendUpdateExpression: () => (/* binding */ activeChannelCanSendUpdateExpression),
 /* harmony export */   activeChannelHydrationReasonUpdateExpression: () => (/* binding */ activeChannelHydrationReasonUpdateExpression),
@@ -19689,17 +19688,6 @@ const ACTIVE_CHANNEL_WRITABLE_KEYS = [
     'accessHash', 'bannedAt', 'reactRestrictedAt',
     'createdAt', 'updatedAt', 'lastHydratedAt', 'lastLiveCheckedAt',
     'lastHydrationStatus', 'lastHydrationReason', 'participantsCountCheckedAt',
-];
-/**
- * Legacy Telegram permission snapshots that used to be persisted independently.
- * They are observation-only inputs and must never be written by runtime code.
- * Remove existing copies with the explicit, one-time schema migration; normal
- * reads and writes intentionally leave old documents untouched.
- */
-const ACTIVE_CHANNEL_LEGACY_PERMISSION_FIELDS = [
-    'restricted',
-    'sendMessages',
-    'sendPlain',
 ];
 const WRITABLE_KEY_SET = new Set(ACTIVE_CHANNEL_WRITABLE_KEYS);
 /**
@@ -33017,7 +33005,6 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   REPLY_FAILURES_CLIENT_INDEX: () => (/* binding */ REPLY_FAILURES_CLIENT_INDEX),
 /* harmony export */   REPLY_FAILURES_TTL_INDEX: () => (/* binding */ REPLY_FAILURES_TTL_INDEX),
 /* harmony export */   REPLY_FAILURES_TTL_SECONDS: () => (/* binding */ REPLY_FAILURES_TTL_SECONDS),
-/* harmony export */   REPLY_FAILURE_TEXT_MAX: () => (/* binding */ REPLY_FAILURE_TEXT_MAX),
 /* harmony export */   ReplyFailuresRepository: () => (/* binding */ ReplyFailuresRepository)
 /* harmony export */ });
 /* harmony import */ var _base_repository__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../base-repository */ "../../packages/tg-db/src/base-repository.ts");
@@ -33033,8 +33020,6 @@ __webpack_require__.r(__webpack_exports__);
 const REPLY_FAILURES_TTL_SECONDS = 14 * 24 * 60 * 60;
 const REPLY_FAILURES_TTL_INDEX = 'ts_ttl';
 const REPLY_FAILURES_CLIENT_INDEX = 'clientId_ts';
-/** Longest stored text (characters). */
-const REPLY_FAILURE_TEXT_MAX = 300;
 class ReplyFailuresRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_0__.BaseRepository {
     constructor() {
         super(...arguments);
@@ -34048,7 +34033,6 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   REPLY_FAILURES_CLIENT_INDEX: () => (/* reexport safe */ _collections_reply_failures_repository__WEBPACK_IMPORTED_MODULE_10__.REPLY_FAILURES_CLIENT_INDEX),
 /* harmony export */   REPLY_FAILURES_TTL_INDEX: () => (/* reexport safe */ _collections_reply_failures_repository__WEBPACK_IMPORTED_MODULE_10__.REPLY_FAILURES_TTL_INDEX),
 /* harmony export */   REPLY_FAILURES_TTL_SECONDS: () => (/* reexport safe */ _collections_reply_failures_repository__WEBPACK_IMPORTED_MODULE_10__.REPLY_FAILURES_TTL_SECONDS),
-/* harmony export */   REPLY_FAILURE_TEXT_MAX: () => (/* reexport safe */ _collections_reply_failures_repository__WEBPACK_IMPORTED_MODULE_10__.REPLY_FAILURE_TEXT_MAX),
 /* harmony export */   ReplyFailuresRepository: () => (/* reexport safe */ _collections_reply_failures_repository__WEBPACK_IMPORTED_MODULE_10__.ReplyFailuresRepository),
 /* harmony export */   RepositoryContainer: () => (/* reexport safe */ _repositories__WEBPACK_IMPORTED_MODULE_18__.RepositoryContainer),
 /* harmony export */   StatsRepository: () => (/* reexport safe */ _collections_stats_repository__WEBPACK_IMPORTED_MODULE_9__.StatsRepository),
@@ -47100,8 +47084,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "c53803a1edcc248fa624d1bcf196c6d451e250cd" : 0;
-    const builtAt =  true ? "2026-11-10T04:00:47.918Z" : 0;
+    const sha =  true ? "f203946cf67985eb2cc72dbb2b143d5bd0931a35" : 0;
+    const builtAt =  true ? "2026-11-11T06:47:51.685Z" : 0;
     return { sha, builtAt };
 }
 
