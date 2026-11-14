@@ -58739,8 +58739,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "b9e7cc186d1f54b2e3474ebe809923ff93a1004e" : 0;
-    const builtAt =  true ? "2026-11-14T14:32:14.747Z" : 0;
+    const sha =  true ? "4202ebfd8f7aff2bdfb302a398e13d1d5a05c1e6" : 0;
+    const builtAt =  true ? "2026-11-14T15:09:17.286Z" : 0;
     return { sha, builtAt };
 }
 
@@ -102204,7 +102204,9 @@ class PaymentFlow {
             if (claim === 'again') {
                 // A duplicate Telegram update of a message that was already credited: it already got its reply/service.
                 this.io.warn(`[payment-gate] ${session.facts.chatId}/${session.facts.msgId} already credited (duplicate update): not crediting again`);
-                this.note('repeat', ['DUPLICATE_UPDATE']);
+                // Same row as the credit (chatId + profile + msgId): its review verdict stays 'credited'. 'repeat' here
+                // overwrote a served row's verdict (arpitha1 ****9176 ₹51, 2026-11-10) and CMS then refused its Uncredit.
+                this.note('credited', ['DUPLICATE_UPDATE']);
                 await notify({ title: 'Dupe ignored' });
                 return { handled: true };
             }
