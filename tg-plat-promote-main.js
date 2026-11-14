@@ -31937,6 +31937,28 @@ class PaymentProofsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_
             .limit(n)
             .toArray());
     }
+    /**
+     * This chat's NOT credited rows (every persona) whose reasons (`reasons`, `verdict.reasons` or `ask.reasons`) hold one
+     * of `reasons` (exact codes or prefixes as RegExp), or that carry a fake warning (`ask.kind` 'fraud'); newest first,
+     * without the image / OCR fields. The gate's fake-streak and chat-memory checks (tg-aut proof-gate/chat-fakes.ts).
+     * Uses chatId_1_createdAt_-1 (chatId + createdAt sort); the rest is filtered on that one chat's rows (7-day TTL).
+     * null on a failure (the gate fails closed), like creditedForChat.
+     */
+    async suspectRowsForChat(chatId, reasons, limit = 100) {
+        const id = String(chatId || '').trim();
+        if (!id)
+            return [];
+        const n = Math.max(1, Math.min(100, Math.floor(limit)));
+        const codes = [...reasons];
+        return this.guard(`suspectRowsForChat(${id})`, null, () => this.collection
+            .find({
+            chatId: id, servedAt: { $exists: false }, ...NOT_RECORD_ONLY,
+            $or: [{ reasons: { $in: codes } }, { 'verdict.reasons': { $in: codes } }, { 'ask.reasons': { $in: codes } }, { 'ask.kind': 'fraud' }],
+        }, { projection: { image: 0, ocr: 0 } })
+            .sort({ createdAt: -1 })
+            .limit(n)
+            .toArray());
+    }
     /** Set the ASK_PROOF state of one row (section 8). Returns true when a row matched. */
     async markProof(chatId, telegramMsgId, proof) {
         const id = String(chatId || '').trim();
@@ -47084,8 +47106,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "cff4cca3fd5e74481dcd92fd521ea17585267f8d" : 0;
-    const builtAt =  true ? "2026-11-12T04:10:36.676Z" : 0;
+    const sha =  true ? "dc5065a16baa2e486b6de3866ef54fc3e70f0baa" : 0;
+    const builtAt =  true ? "2026-11-14T15:50:06.179Z" : 0;
     return { sha, builtAt };
 }
 
