@@ -58739,8 +58739,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "b1bb742ca92540926273a7bfb5247053875157f3" : 0;
-    const builtAt =  true ? "2026-11-14T14:10:08.180Z" : 0;
+    const sha =  true ? "b9e7cc186d1f54b2e3474ebe809923ff93a1004e" : 0;
+    const builtAt =  true ? "2026-11-14T14:32:14.747Z" : 0;
     return { sha, builtAt };
 }
 
@@ -102837,8 +102837,8 @@ function sameNameFolded(a, b) {
         return false;
     if (na === nb)
         return true;
-    const ta = nameTokens(a);
-    const tb = nameTokens(b);
+    const ta = [...new Set(nameTokens(a))];
+    const tb = [...new Set(nameTokens(b))]; // "Kumar Kumar" is one token
     const [s, l] = ta.length <= tb.length ? [ta, tb] : [tb, ta];
     if (s.length < 2)
         return false;
@@ -103002,7 +103002,8 @@ const T_ID = /\bT\d{20,22}\b/;
 const NO_AMPM = /\b(?:january|february|march|april|may|june|july|august|september|october|november|december)\s+20\d\d\s+at\s+\d{1,2}:\d{2}(?!\s*[ap]\.?\s*m)/i;
 const BAR_CLOCK = /^\s*(\d{1,2})[:.\-](\d{2})\b/;
 const PAYMENT_STATUS = /payment status/i;
-const CUT_TXN_ID = /transaction id\s*[:：]?\s*[a-z0-9]{0,8}\b/i;
+/** 1-8 characters with a digit, then no more id characters (a \b let any longer id or the next label word match). */
+const CUT_TXN_ID = /transaction id\s*[:：]?\s*(?=[a-z]*\d)[a-z0-9]{1,8}(?![a-z0-9])/i;
 /** The device line some edited templates carry: a 10-digit number, then a 16-hex token (letters and digits). */
 const DEVICE_TOKEN = /\b\d{10}\b[\s•*：:]*\b((?=[0-9a-f]*[a-f])(?=[0-9a-f]*\d)[0-9a-f]{16})\b/i;
 function ms(v) {
@@ -103128,7 +103129,7 @@ function fabricatedTextReasons(text, opts = {}) {
  * "Order ID" of 18 digits (BharatPe, Paytm) is the app's own id. One unbroken digit run: a 12-digit reference printed in
  * groups never joins up with the next number.
  */
-const LONG_UPI_REF = /\b(?:utr|upi\s*ref(?:erence)?|upi\s*(?:transaction|txn)|rrn)(?:\s*(?:no|number|id))?\.?\s*[:#-]?\s*\d{16,}(?!\d)/i;
+const LONG_UPI_REF = /\b(?:utr|upi\s*ref(?:erence)?\.?|upi\s*(?:transaction|txn)|rrn)(?:\s*(?:no|number|id))?\.?\s*[:#-]?\s*\d{16,}(?!\d)/i;
 function upiRefTooLongReasons(text) {
     return LONG_UPI_REF.test(String(text ?? '').replace(/\s+/g, ' ')) ? ['UPI_REF_TOO_LONG'] : [];
 }
