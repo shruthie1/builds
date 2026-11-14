@@ -37913,7 +37913,7 @@ function addFamSplits(a, b) {
 
 
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.HISTORY_SERIES = exports.HISTORY_PAGE_RE = exports.HISTORY_PAGE_MAX_STALE_MS = exports.HISTORY_PAGE_FRESH_MS = exports.HISTORY_GRAIN = exports.HISTORY_RANGES = void 0;
+exports.BUFFER_ACTIVE_FROM = exports.HISTORY_SERIES = exports.HISTORY_PAGE_RE = exports.HISTORY_PAGE_MAX_STALE_MS = exports.HISTORY_PAGE_FRESH_MS = exports.HISTORY_GRAIN = exports.HISTORY_RANGES = void 0;
 exports.parseHistoryRange = parseHistoryRange;
 exports.historyWindow = historyWindow;
 exports.historyCoverSql = historyCoverSql;
@@ -38063,6 +38063,7 @@ WHERE month >= $1::date AND month <= $2::date${pred}
 GROUP BY 1`, params);
 }
 const POOL_SUMS = (total, active, c) => `coalesce(sum(${total}) FILTER (WHERE pool = 'b'${c}), 0) AS b_total,
+  coalesce(sum(${active}) FILTER (WHERE pool = 'b'${c}), 0) AS b_active,
   coalesce(sum(${total}) FILTER (WHERE pool = 'p'${c}), 0) AS p_total,
   coalesce(sum(${active}) FILTER (WHERE pool = 'p'${c}), 0) AS p_active`;
 function historyPoolSnapshotSql(w, clientId) {
@@ -38126,9 +38127,11 @@ exports.HISTORY_SERIES = [
     'failed',
     'newUsers',
     'poolBufferTotal',
+    'poolBufferActive',
     'poolPromoteTotal',
     'poolPromoteActive',
 ];
+exports.BUFFER_ACTIVE_FROM = '2026-11-08T22';
 const covers = (b, first) => b >= first.slice(0, Math.min(first.length, b.length));
 const startKey = (f) => (f.length === 7 ? `${f}-99T99` : f.length === 10 ? `${f}T99` : f);
 function chainSeries(buckets, chain) {
@@ -38198,6 +38201,10 @@ function assembleHistory(w, clientId, rows, now, timings = {}) {
         ...(w.grain !== 'hour' ? [{ source: 'daily_pool', first: cover.daily_pool, rows: rows.dailyPool, col, gauge: true }] : []),
         ...(w.grain === 'month' ? [{ source: 'monthly_pool', first: cover.monthly_pool, rows: rows.monthlyPool, col, gauge: true }] : []),
     ];
+    const bufferActiveChain = () => poolChain('b_active').map((l) => ({
+        ...l,
+        first: l.first && startKey(l.first) < startKey(exports.BUFFER_ACTIVE_FROM) ? exports.BUFFER_ACTIVE_FROM : l.first,
+    }));
     const series = {
         revenue: chainSeries(B, revenueChain('revenue')),
         payers: chainSeries(B, revenueChain('payers')),
@@ -38206,6 +38213,7 @@ function assembleHistory(w, clientId, rows, now, timings = {}) {
         failed: chainSeries(B, counterChain('failed')),
         newUsers: chainSeries(B, counterChain('new_users', true)),
         poolBufferTotal: chainSeries(B, poolChain('b_total')),
+        poolBufferActive: chainSeries(B, bufferActiveChain()),
         poolPromoteTotal: chainSeries(B, poolChain('p_total')),
         poolPromoteActive: chainSeries(B, poolChain('p_active')),
     };
