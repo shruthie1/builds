@@ -32090,6 +32090,9 @@ class PaymentProofsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_
      * Every SERVED row (any chat, any persona) that shares this screenshot's UTR or exact bytes, or whose picture is
      * within NEAR_HASH_MAX_DISTANCE bits. The caller classifies them (repeat / edited / unrelated). The row of the
      * message being judged is excluded. Null when the store failed (callers fail open).
+     * The UTR, exact-file and payment-minute lookups also return rows of OTHER chats that the gate held with an ask and
+     * never credited (gate review 2026-11-14 F3): a copy of a receipt already seen in any chat is not credited. Never
+     * the picture-hash lookup (dHash across chats is ruled out).
      */
     async servedCandidates(query) {
         const chatId = String(query.chatId || '').trim();
@@ -32097,6 +32100,10 @@ class PaymentProofsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_
             return [];
         const self = { chatId, profile: query.profile, telegramMsgId: query.telegramMsgId };
         const served = { servedAt: { $exists: true }, $nor: [self] };
+        const seenAnywhere = {
+            $or: [{ servedAt: { $exists: true } }, { chatId: { $ne: chatId }, ask: { $exists: true }, ...NOT_RECORD_ONLY }],
+            $nor: [self],
+        };
         // Three independent lookups, each guarded on its own: a slow / failing near-picture scan must not hide an
         // exact UTR or file match. Null only when every lookup that ran failed.
         const lookups = [];
@@ -32104,14 +32111,14 @@ class PaymentProofsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_
             const utr = query.utr;
             lookups.push(this.guard(`servedCandidates.utr(${chatId})`, null, async () => ({
                 by: 'utr',
-                docs: (await this.collection.find({ utr, ...served }).limit(10).toArray()).map((doc) => ({ distance: 0, doc })),
+                docs: (await this.collection.find({ utr, ...seenAnywhere }).limit(10).toArray()).map((doc) => ({ distance: 0, doc })),
             })));
         }
         if (query.imageSha256 && HEX64.test(query.imageSha256)) {
             const sha = query.imageSha256;
             lookups.push(this.guard(`servedCandidates.sha(${chatId})`, null, async () => ({
                 by: 'imageSha256',
-                docs: (await this.collection.find({ imageSha256: sha, ...served }).limit(10).toArray()).map((doc) => ({ distance: 0, doc })),
+                docs: (await this.collection.find({ imageSha256: sha, ...seenAnywhere }).limit(10).toArray()).map((doc) => ({ distance: 0, doc })),
             })));
         }
         if (query.imageHash && HEX64.test(query.imageHash)) {
@@ -32127,7 +32134,7 @@ class PaymentProofsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_
             lookups.push(this.guard(`servedCandidates.payment(${chatId})`, null, async () => ({
                 by: 'payment',
                 docs: (await this.collection.find({
-                    createdAt: { $gte: new Date(p.sinceMs) }, amount: p.amount, 'time.epochMs': { $gte: p.fromMs, $lt: p.toMs }, ...served,
+                    createdAt: { $gte: new Date(p.sinceMs) }, amount: p.amount, 'time.epochMs': { $gte: p.fromMs, $lt: p.toMs }, ...seenAnywhere,
                 }).limit(20).toArray()).map((doc) => ({ distance: 0, doc })),
             })));
         }
@@ -47106,8 +47113,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "dc5065a16baa2e486b6de3866ef54fc3e70f0baa" : 0;
-    const builtAt =  true ? "2026-11-14T15:50:06.179Z" : 0;
+    const sha =  true ? "3acb11e64aab71aeffb083ad081b6c76a49f8ebf" : 0;
+    const builtAt =  true ? "2026-11-14T18:31:21.459Z" : 0;
     return { sha, builtAt };
 }
 
