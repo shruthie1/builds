@@ -58739,8 +58739,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "14a69fb73a4267fdc5cbc3429c9fa4ac24742fc5" : 0;
-    const builtAt =  true ? "2026-11-11T08:54:49.365Z" : 0;
+    const sha =  true ? "b1bb742ca92540926273a7bfb5247053875157f3" : 0;
+    const builtAt =  true ? "2026-11-14T14:10:08.180Z" : 0;
     return { sha, builtAt };
 }
 
@@ -102252,6 +102252,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _decide__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./decide */ "./src/payments/proof-gate/decide.ts");
 /* harmony import */ var _payment_time__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../payment-time */ "./src/payments/payment-time.ts");
 /* harmony import */ var _resend__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ./resend */ "./src/payments/proof-gate/resend.ts");
+/* harmony import */ var _shadow__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ./shadow */ "./src/payments/proof-gate/shadow.ts");
 /**
  * Payment-screenshot gate: the I/O around ./decide over the `paymentProofs` collection (one row per payment
  * screenshot, 90-day TTL, shared by every persona process). Every call is time-bounded. No store configured at all
@@ -102259,6 +102260,7 @@ __webpack_require__.r(__webpack_exports__);
  * FAILS CLOSED on the credit path (v2 design 2026-11-07): begin / check / claim come back `unavailable` and the caller
  * holds the screenshot for a bounded re-check (processImage holdForLaterAnalysis); it is never credited on a guess.
  */
+
 
 
 
@@ -102328,12 +102330,17 @@ class GateSession {
         ]);
         if (served === null || recent === null || credited === null)
             return { kind: 'unavailable' };
+        this.logFraudShadow(recent);
         const verdict = (0,_decide__WEBPACK_IMPORTED_MODULE_1__.classifyAgainstServed)(f, served, this.chatServed(recent), this.deps.now());
         if (verdict.kind !== 'clear')
             return verdict;
         // Re-send or new payment (resend.ts, owner 2026-11-08): this user's credits of the same amount in the last 48 h,
         // any persona. A repeat is answered like every repeat; an ask is raised after the credit rules (flow.ts).
         this.resend = (0,_resend__WEBPACK_IMPORTED_MODULE_3__.decideResend)(f, credited ?? recent, this.deps.now());
+        // F2 (resend.ts step 4c): an earlier credit of this user with the same amount and printed minute to another payee
+        // (both UPI ids read): the payee was edited. The fake warning (flow.ts fraud), like every edited verdict.
+        if (this.resend.kind === 'edited')
+            return { kind: 'edited', reason: 'PAYEE_EDITED', matched: this.resend.matched };
         if (this.resend.kind === 'repeat') {
             const row = this.resend.matched;
             return { kind: 'repeat', by: (0,_resend__WEBPACK_IMPORTED_MODULE_3__.repeatBy)(this.resend.step), sameChat: row.chatId === f.chatId && row.profile === f.profile, matched: row };
@@ -102366,6 +102373,20 @@ class GateSession {
                 return { kind: 'needs-real-page', ask: 'old_time' };
         }
         return verdict;
+    }
+    /**
+     * Fraud shadow checks (shadow.ts, owner 2026-11-14): LOG ONLY, over the rows check() already read. Never throws and
+     * never changes a verdict.
+     */
+    logFraudShadow(recent) {
+        try {
+            const f = this.facts;
+            const codes = (0,_shadow__WEBPACK_IMPORTED_MODULE_4__.fraudShadowCodes)(f, f.timeText, recent, this.deps.now());
+            const clientId = process.env.clientId || f.profile;
+            for (const line of (0,_shadow__WEBPACK_IMPORTED_MODULE_4__.fraudShadowLines)(codes, { chatId: f.chatId, clientId, msgId: f.msgId, amount: f.amount }))
+                logger.info(line);
+        }
+        catch { /* log-only */ }
     }
     /** This user's newest rows (every persona, served or not), newest first. [] without the read, null on a timeout. */
     async recentRows() {
@@ -102670,10 +102691,12 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   RESEND_LOOKBACK_MS: () => (/* binding */ RESEND_LOOKBACK_MS),
 /* harmony export */   decideResend: () => (/* binding */ decideResend),
 /* harmony export */   foldReference: () => (/* binding */ foldReference),
+/* harmony export */   payeesDiffer: () => (/* binding */ payeesDiffer),
 /* harmony export */   relativeTime: () => (/* binding */ relativeTime),
 /* harmony export */   repeatBy: () => (/* binding */ repeatBy),
 /* harmony export */   resendPair: () => (/* binding */ resendPair),
 /* harmony export */   resendReference: () => (/* binding */ resendReference),
+/* harmony export */   sameNameFolded: () => (/* binding */ sameNameFolded),
 /* harmony export */   sideOfFacts: () => (/* binding */ sideOfFacts),
 /* harmony export */   sideOfRow: () => (/* binding */ sideOfRow)
 /* harmony export */ });
@@ -102696,7 +102719,19 @@ __webpack_require__.r(__webpack_exports__);
  *      only when this printed time is more than 15 min off its own arrival (else new: daily payers at one clock time,
  *      kavya1 1810212425 / arpitha1 8085659189); any other gap -> new;
  *   6. otherwise (same amount, payees not both read and different) -> ask for the payment details page.
- * Over all earlier credits: repeat beats ask beats new. Replaces the 24 h no-UTR-no-time same-amount ask; the servedSha /
+ *   4c (F2, owner 2026-11-14) runs before 4b: same exact amount, same printed minute, payees differ (payeesDiffer: both
+ *      UPI ids read and not the same id, AND the names, when both read, not the same folded) -> edited (PAYEE_EDITED,
+ *      the fake warning), and only when this screenshot arrived more than STALE_MS after its printed minute: a fresh
+ *      second payment to another payee in the same minute is genuine (journey L6 u, owner 2026-10-23 P3/P4); the edited
+ *      re-sends came 63 / 116 min after their printed minute. A name-only payee is not enough: kavya1 8201685729 70974 (a re-sent chat bubble whose note
+ *      "KavyaaGowda" was read as the payee) would have been called edited. The payee of an
+ *      already-credited receipt was edited (live ramya1 6430718746 217623 / 217637: a credited "Girls Community" /
+ *      "LAKSHMI STORES" receipt re-sent to another persona as "Mrs RAVVA LAKSHMI"). Same user only (the caller's rows
+ *      are this chat id's): a cross-user version flagged 6 genuine payers in the 7-day replay, this one 0.
+ * Payee names (F3, owner 2026-11-14) are compared folded in 4b / 4c: names that differ only by case, spacing,
+ * punctuation or an extra word ("Paid Girls Community" vs "Girls Community": every token of the shorter name, 2 or more
+ * tokens, is in the longer one) are the same payee (soak 3: ramya2 1497922046 259776 was credited twice as "new").
+ * Over all earlier credits: repeat beats edited beats ask beats new (the very same file stays the repeat reply). Replaces the 24 h no-UTR-no-time same-amount ask; the servedSha /
  * servedMin claim keys stay behind it. Stored payment times are already the time check's (AM/PM / midnight corrected:
  * signals.ts futurePaymentTimeReasons / amPmFlipConfirmed, payment-time.ts), so the 12 h / 24 h step is the only
  * tolerance here. Analysis: docs/PAYMENT-SCREENSHOT-FLOW.md "Re-send or new payment".
@@ -102785,6 +102820,53 @@ function relativeTime(flag, text, timeMs) {
         return false;
     return !clockPrinted(text, timeMs);
 }
+/** Payee-name tokens: lower case, a leading Mr / Mrs / Ms dropped, split on anything not a letter. */
+function nameTokens(raw) {
+    if (typeof raw !== 'string')
+        return [];
+    return raw.toLowerCase().replace(/^\s*(?:mrs|mr|ms)\.?\s+/, '').split(/[^a-z]+/).filter(Boolean);
+}
+/**
+ * F3: two payee names that are the same payee folded: equal after normalizePayeeName (case, spacing, punctuation), or
+ * every token of the shorter name (2 or more tokens) is a token of the longer ("Paid Girls Community" / "Girls Community").
+ */
+function sameNameFolded(a, b) {
+    const na = (0,_decide__WEBPACK_IMPORTED_MODULE_0__.normalizePayeeName)(a);
+    const nb = (0,_decide__WEBPACK_IMPORTED_MODULE_0__.normalizePayeeName)(b);
+    if (!na || !nb)
+        return false;
+    if (na === nb)
+        return true;
+    const ta = nameTokens(a);
+    const tb = nameTokens(b);
+    const [s, l] = ta.length <= tb.length ? [ta, tb] : [tb, ta];
+    if (s.length < 2)
+        return false;
+    const longer = new Set(l);
+    return s.every((t) => longer.has(t));
+}
+/** Step 4b: both payees read and different (otherPayee), names compared folded (sameNameFolded). */
+function otherPayeeFolded(a, b) {
+    const ua = (0,_decide__WEBPACK_IMPORTED_MODULE_0__.normalizePayeeUpi)(a.payeeUpiId);
+    const ub = (0,_decide__WEBPACK_IMPORTED_MODULE_0__.normalizePayeeUpi)(b.payeeUpiId);
+    if (ua && ub)
+        return !(0,_decide__WEBPACK_IMPORTED_MODULE_0__.sameUpiId)(ua, ub);
+    return !!(0,_decide__WEBPACK_IMPORTED_MODULE_0__.normalizePayeeName)(a.payeeName) && !!(0,_decide__WEBPACK_IMPORTED_MODULE_0__.normalizePayeeName)(b.payeeName) && !sameNameFolded(a.payeeName, b.payeeName);
+}
+/**
+ * Step 4c: both UPI ids read and not the same id (sameUpiId), and the names, when both read, not the same folded.
+ * Stricter than 4b: a name-only payee (a note read as the payee) never makes it, and a re-sent genuine receipt whose long
+ * UPI id was misread past the fuzzy tolerance is not called edited while its name agrees.
+ */
+function payeesDiffer(a, b) {
+    const ua = (0,_decide__WEBPACK_IMPORTED_MODULE_0__.normalizePayeeUpi)(a.payeeUpiId);
+    const ub = (0,_decide__WEBPACK_IMPORTED_MODULE_0__.normalizePayeeUpi)(b.payeeUpiId);
+    if (!ua || !ub || (0,_decide__WEBPACK_IMPORTED_MODULE_0__.sameUpiId)(ua, ub))
+        return false;
+    const na = (0,_decide__WEBPACK_IMPORTED_MODULE_0__.normalizePayeeName)(a.payeeName);
+    const nb = (0,_decide__WEBPACK_IMPORTED_MODULE_0__.normalizePayeeName)(b.payeeName);
+    return !(na && nb && sameNameFolded(a.payeeName, b.payeeName));
+}
 /** One later screenshot against one earlier credit of the same amount: the first step that applies. */
 function resendPair(later, earlier) {
     if (later.sha256 && later.sha256 === earlier.sha256)
@@ -102799,7 +102881,11 @@ function resendPair(later, earlier) {
     const te = earlier.timeMs;
     if (tp !== null && tp <= later.arrivalMs + FUTURE_SLACK_MS && tp > earlier.arrivalMs + AFTER_EARLIER_MS)
         return { kind: 'new', step: 'time-after-earlier' };
-    if ((0,_decide__WEBPACK_IMPORTED_MODULE_0__.otherPayee)(later, earlier))
+    if (tp !== null && te !== null && Math.floor(tp / MINUTE_MS) === Math.floor(te / MINUTE_MS) && later.arrivalMs - tp > STALE_MS
+        && typeof later.amount === 'number' && later.amount === earlier.amount && payeesDiffer(later, earlier)) {
+        return { kind: 'edited', step: 'payee-edited' };
+    }
+    if (otherPayeeFolded(later, earlier))
         return { kind: 'new', step: 'other-payee' };
     if (tp !== null && te !== null) {
         const d = Math.abs(Math.floor(tp / MINUTE_MS) - Math.floor(te / MINUTE_MS));
@@ -102814,7 +102900,7 @@ function resendPair(later, earlier) {
     }
     return { kind: 'ask', step: 'no-evidence' };
 }
-const RANK = { repeat: 0, ask: 1, new: 2 };
+const RANK = { repeat: 0, edited: 1, ask: 2, new: 3 };
 function rowMs(v) {
     return v instanceof Date ? v.getTime() : typeof v === 'string' || typeof v === 'number' ? new Date(v).getTime() : NaN;
 }
@@ -102828,6 +102914,7 @@ function sideOfRow(row) {
         arrivalMs: rowMs(row.createdAt),
         payeeUpiId: row.payeeUpiId ?? null,
         payeeName: row.payeeName ?? null,
+        ...(typeof row.amount === 'number' ? { amount: row.amount } : {}),
     };
 }
 function sideOfFacts(facts, arrivalMs) {
@@ -102838,11 +102925,12 @@ function sideOfFacts(facts, arrivalMs) {
         arrivalMs,
         payeeUpiId: facts.payeeUpiId ?? null,
         payeeName: facts.payeeName ?? null,
+        amount: facts.amount,
     };
 }
 /**
  * This screenshot against every earlier credit of this user (any persona) with the same amount, arrived within
- * RESEND_LOOKBACK_MS before it. Repeat beats ask beats new; the newest earlier credit wins a tie. `none` = no such credit.
+ * RESEND_LOOKBACK_MS before it. Repeat beats edited beats ask beats new; the newest earlier credit wins a tie. `none` = no such credit.
  */
 function decideResend(facts, rows, nowMs) {
     const arrival = facts.arrivalMs ?? nowMs;
@@ -102873,6 +102961,117 @@ function repeatBy(step) {
 
 /***/ },
 
+/***/ "./src/payments/proof-gate/shadow.ts"
+/*!*******************************************!*\
+  !*** ./src/payments/proof-gate/shadow.ts ***!
+  \*******************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   deviceToken: () => (/* binding */ deviceToken),
+/* harmony export */   fraudShadowCodes: () => (/* binding */ fraudShadowCodes),
+/* harmony export */   fraudShadowLines: () => (/* binding */ fraudShadowLines),
+/* harmony export */   rowShadowCodes: () => (/* binding */ rowShadowCodes),
+/* harmony export */   textShadowCodes: () => (/* binding */ textShadowCodes)
+/* harmony export */ });
+/* harmony import */ var _decide__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./decide */ "./src/payments/proof-gate/decide.ts");
+/* harmony import */ var _resend__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./resend */ "./src/payments/proof-gate/resend.ts");
+/**
+ * Fraud shadow checks (owner 2026-11-14, LOG ONLY): signals from the 7-day fraud analysis (2,351 proofs, 49 fraud
+ * credits) that are not proven enough to act on. Each one logs `[fraud-shadow] <CODE> chat=… client=… proof=… amount=…`
+ * and changes no decision. Pure functions over the screenshot's text and this user's rows the gate already read
+ * (recentForChat): no extra store read. Never throws (fraudShadowCodes catches everything).
+ *   S1 VIEW_DETAILS_AFTER_SAME_FILE: a no-reference "Payment Successful + View Details" screen, and this user re-sent a
+ *      file already credited at another persona of ours (cross_client SAME_FILE row) in the last 3 h (fraud 7, genuine 1).
+ *   S2 DEVICE_TOKEN_OTHER_PAYEE: the "10-digit + 16-hex" status line on this screenshot was on an earlier screenshot of
+ *      this user with a different payee in the last 6 h (fraud 4, genuine 0).
+ *   S3 NO_AMPM_CLOCK: "<d Month yyyy> at h:mm" with no AM/PM on a Payment Successful screen, unless the status-bar clock
+ *      reads 13:00 or later (a 24-hour phone) (fraud 7, genuine 0).
+ *   S4 PHONEPE_STATUS_CUT_TXN_ID: a PhonePe "Payment Status" page whose "Transaction ID" is cut off (8 characters or
+ *      fewer) and no reference read (fraud 1, genuine 0).
+ */
+
+
+const HOUR_MS = 60 * 60000;
+const SUCCESS = /payments? success/i;
+const VIEW_DETAILS = /view details/i;
+const TWELVE = /(?<!\d)\d{12}(?!\d)/;
+const T_ID = /\bT\d{20,22}\b/;
+const NO_AMPM = /\b(?:january|february|march|april|may|june|july|august|september|october|november|december)\s+20\d\d\s+at\s+\d{1,2}:\d{2}(?!\s*[ap]\.?\s*m)/i;
+const BAR_CLOCK = /^\s*(\d{1,2})[:.\-](\d{2})\b/;
+const PAYMENT_STATUS = /payment status/i;
+const CUT_TXN_ID = /transaction id\s*[:：]?\s*[a-z0-9]{0,8}\b/i;
+/** The device line some edited templates carry: a 10-digit number, then a 16-hex token (letters and digits). */
+const DEVICE_TOKEN = /\b\d{10}\b[\s•*：:]*\b((?=[0-9a-f]*[a-f])(?=[0-9a-f]*\d)[0-9a-f]{16})\b/i;
+function ms(v) {
+    return v instanceof Date ? v.getTime() : typeof v === 'string' || typeof v === 'number' ? new Date(v).getTime() : NaN;
+}
+/** A reference was read: a UTR, a PhonePe transaction id, or a 12-digit number / T-id in the text. */
+function hasReference(f, text) {
+    return !!f.utr || !!f.txnId || TWELVE.test(text) || T_ID.test(text) || (0,_decide__WEBPACK_IMPORTED_MODULE_0__.isRealReference)(f.utr);
+}
+function deviceToken(text) {
+    const m = DEVICE_TOKEN.exec(String(text ?? ''));
+    return m ? m[1].toLowerCase() : null;
+}
+function payeesDifferent(a, b) {
+    const ua = (0,_decide__WEBPACK_IMPORTED_MODULE_0__.normalizePayeeUpi)(a.payeeUpiId);
+    const ub = (0,_decide__WEBPACK_IMPORTED_MODULE_0__.normalizePayeeUpi)(b.payeeUpiId);
+    if (ua && ub)
+        return !(0,_decide__WEBPACK_IMPORTED_MODULE_0__.sameUpiId)(ua, ub);
+    return !!(0,_decide__WEBPACK_IMPORTED_MODULE_0__.normalizePayeeName)(a.payeeName) && !!(0,_decide__WEBPACK_IMPORTED_MODULE_0__.normalizePayeeName)(b.payeeName) && !(0,_resend__WEBPACK_IMPORTED_MODULE_1__.sameNameFolded)(a.payeeName, b.payeeName);
+}
+/** S3 / S4: text only. `raw` keeps line breaks (the status-bar clock is the first line). */
+function textShadowCodes(f, raw) {
+    const t = raw.replace(/\s+/g, ' ');
+    const codes = [];
+    if (SUCCESS.test(t) && NO_AMPM.test(t)) {
+        const bar = BAR_CLOCK.exec(raw);
+        if (!(bar && Number(bar[1]) >= 13))
+            codes.push('NO_AMPM_CLOCK');
+    }
+    if (PAYMENT_STATUS.test(t) && CUT_TXN_ID.test(t) && !hasReference(f, t))
+        codes.push('PHONEPE_STATUS_CUT_TXN_ID');
+    return codes;
+}
+/** S1 / S2: this user's rows the gate already read (any persona, newest first). */
+function rowShadowCodes(f, raw, rows, nowMs) {
+    const t = raw.replace(/\s+/g, ' ');
+    const at = f.arrivalMs ?? nowMs;
+    const others = rows.filter((r) => !(r.profile === f.profile && r.telegramMsgId === f.msgId));
+    const within = (r, h) => { const c = ms(r.createdAt); return Number.isFinite(c) && c <= at && at - c < h * HOUR_MS; };
+    const codes = [];
+    if (SUCCESS.test(t) && VIEW_DETAILS.test(t) && !hasReference(f, t)
+        && others.some((r) => within(r, 3) && r.verdict?.outcome === 'cross_client' && (r.verdict.reasons ?? []).includes('SAME_FILE'))) {
+        codes.push('VIEW_DETAILS_AFTER_SAME_FILE');
+    }
+    const tok = deviceToken(raw);
+    if (tok && others.some((r) => within(r, 6) && deviceToken(r.ocr?.precheckText) === tok && payeesDifferent(f, r)))
+        codes.push('DEVICE_TOKEN_OTHER_PAYEE');
+    return codes;
+}
+/** Every shadow code for this screenshot; [] on any error (a shadow check never reaches the gate's decision). */
+function fraudShadowCodes(f, raw, rows, nowMs) {
+    try {
+        const text = String(raw ?? '');
+        if (!text)
+            return [];
+        return [...textShadowCodes(f, text), ...rowShadowCodes(f, text, rows ?? [], nowMs)];
+    }
+    catch {
+        return [];
+    }
+}
+/** The log line, one per code: `[fraud-shadow] <CODE> chat=… client=… proof=… amount=…`. */
+function fraudShadowLines(codes, ctx) {
+    return codes.map((c) => `[fraud-shadow] ${c} chat=${ctx.chatId} client=${ctx.clientId} proof=${ctx.clientId}-${ctx.chatId}-${ctx.msgId} amount=${ctx.amount}`);
+}
+
+
+/***/ },
+
 /***/ "./src/payments/proof-gate/signals.ts"
 /*!********************************************!*\
   !*** ./src/payments/proof-gate/signals.ts ***!
@@ -102888,7 +103087,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   fabricatedTextReasons: () => (/* binding */ fabricatedTextReasons),
 /* harmony export */   futurePaymentTimeReasons: () => (/* binding */ futurePaymentTimeReasons),
 /* harmony export */   phonePeTxnTimeMs: () => (/* reexport safe */ _payment_time__WEBPACK_IMPORTED_MODULE_0__.phonePeTxnTimeMs),
-/* harmony export */   txnIdDateReasons: () => (/* binding */ txnIdDateReasons)
+/* harmony export */   txnIdDateReasons: () => (/* binding */ txnIdDateReasons),
+/* harmony export */   upiRefTooLongReasons: () => (/* binding */ upiRefTooLongReasons)
 /* harmony export */ });
 /* harmony import */ var _payment_time__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../payment-time */ "./src/payments/payment-time.ts");
 
@@ -102918,7 +103118,19 @@ function fabricatedTextReasons(text, opts = {}) {
         reasons.push('GENERATOR_SUCCESS_TEXT');
     reasons.push(...txnIdDateReasons(t, opts));
     reasons.push(...amountWordsReasons(t));
+    reasons.push(...upiRefTooLongReasons(t));
     return reasons;
+}
+/**
+ * A LABELLED UPI reference of 16 or more digits (owner 2026-11-14, 7-day analysis of 2,351 proofs): a UPI reference /
+ * RRN is 12 digits. All 3 such receipts were fakes (ramya1 8681033138, "UPI Ref No: 2611132237091848273916", 18 / 20 /
+ * 22 digits); the longest genuine read was 15 (an OCR merge). Only the UPI-reference labels: a bare "Transaction ID" /
+ * "Order ID" of 18 digits (BharatPe, Paytm) is the app's own id. One unbroken digit run: a 12-digit reference printed in
+ * groups never joins up with the next number.
+ */
+const LONG_UPI_REF = /\b(?:utr|upi\s*ref(?:erence)?|upi\s*(?:transaction|txn)|rrn)(?:\s*(?:no|number|id))?\.?\s*[:#-]?\s*\d{16,}(?!\d)/i;
+function upiRefTooLongReasons(text) {
+    return LONG_UPI_REF.test(String(text ?? '').replace(/\s+/g, ' ')) ? ['UPI_REF_TOO_LONG'] : [];
 }
 const IST_OFFSET_MS = 330 * 60000;
 // The PhonePe transaction-id time is parsed in payment-time.ts (the time check trusts it too); re-exported here for the gate.
