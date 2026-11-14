@@ -39601,6 +39601,9 @@ exports.channelDmsHistSql = channelDmsHistSql;
 exports.channelSendsHistSql = channelSendsHistSql;
 exports.channelSendsTodaySql = channelSendsTodaySql;
 exports.paidChatsSql = paidChatsSql;
+exports.likeContains = likeContains;
+exports.paidChatIdsSql = paidChatIdsSql;
+exports.paidChatsSearchSql = paidChatsSearchSql;
 exports.promoSendsSql = promoSendsSql;
 exports.promoMobilesHistSql = promoMobilesHistSql;
 exports.promoMobileDaysSql = promoMobileDaysSql;
@@ -39754,6 +39757,23 @@ FROM payment_event_owner
 WHERE ts >= $1::timestamptz AND ts < $2::timestamptz AND amount > 0
 GROUP BY client_id, chat_id
 ORDER BY max(ts) DESC`, [iso(dayStart), iso(dayEnd)]);
+}
+function likeContains(text) {
+    return `%${text.replace(/[\\%_]/g, '\\$&')}%`;
+}
+function paidChatIdsSql(from) {
+    return q('paid_chat_ids', `SELECT DISTINCT chat_id FROM payment_event_owner WHERE ts >= $1::timestamptz AND amount > 0`, [iso(from)]);
+}
+function paidChatsSearchSql(from, pattern, chatIds, exact, limit) {
+    return q('paid_chats_search', `SELECT client_id, chat_id, to_char(${IST}, 'YYYY-MM-DD') AS day, min(persona_id) AS persona_id,
+  count(*)::int AS credits, sum(amount)::bigint AS amount, sum(owner_amount)::bigint AS owner_amount,
+  bool_or(cheat_flagged) AS cheat_flagged, min(ts) AS first_at, max(ts) AS last_at
+FROM payment_event_owner
+WHERE ts >= $1::timestamptz AND amount > 0
+  AND (chat_id ILIKE $2 OR client_id ILIKE $2 OR persona_id ILIKE $2 OR chat_id = ANY($3::text[]))
+GROUP BY client_id, chat_id, to_char(${IST}, 'YYYY-MM-DD')
+ORDER BY (chat_id = $4::text) IS TRUE DESC, max(ts) DESC, client_id, chat_id
+LIMIT $5`, [iso(from), pattern, chatIds, exact, limit]);
 }
 function promoSendsSql(cur, prev) {
     return q('promo_sends', `SELECT ts >= $1::timestamptz AS cur, service, client_id, mobile, error_type,
@@ -39930,6 +39950,7 @@ exports.round = round;
 exports.ratio = ratio;
 exports.pooledConversion = pooledConversion;
 exports.withTimeout = withTimeout;
+exports.escapeRegExp = escapeRegExp;
 exports.historyNotes = historyNotes;
 exports.maskPayload = maskPayload;
 function maskMobile(m) {
@@ -39969,6 +39990,9 @@ function withTimeout(p, ms, label) {
         timer.unref?.();
     });
     return Promise.race([p, t]).finally(() => clearTimeout(timer));
+}
+function escapeRegExp(text) {
+    return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 exports.DMS_ATTRIBUTION_FROM = '2026-10-26';
 exports.REVENUE_HISTORY_FROM = '2026-10-04';
@@ -40040,6 +40064,8 @@ exports.parseDays = parseDays;
 exports.parseSvc = parseSvc;
 exports.parsePaidDate = parsePaidDate;
 exports.parseRange = parseRange;
+exports.parsePaidSearchQ = parsePaidSearchQ;
+exports.parsePaidSearchLimit = parsePaidSearchLimit;
 exports.parseOptionalClientId = parseOptionalClientId;
 const common_1 = __webpack_require__(/*! @nestjs/common */ "@nestjs/common");
 const swagger_1 = __webpack_require__(/*! @nestjs/swagger */ "@nestjs/swagger");
@@ -40126,6 +40152,24 @@ function parseRange(from, to, now) {
         throw new common_1.BadRequestException(`from must be on or after ${floor}`);
     return { from, to: end };
 }
+function parsePaidSearchQ(q) {
+    const v = String(q ?? '').trim().replace(/^@/, '').trim();
+    if (v.length < monitor_service_1.PAID_SEARCH_MIN_Q)
+        throw new common_1.BadRequestException(`q must be at least ${monitor_service_1.PAID_SEARCH_MIN_Q} characters`);
+    if (v.length > monitor_service_1.PAID_SEARCH_MAX_Q)
+        throw new common_1.BadRequestException(`q must be at most ${monitor_service_1.PAID_SEARCH_MAX_Q} characters`);
+    return v;
+}
+function parsePaidSearchLimit(limit) {
+    if (limit === undefined || limit === '')
+        return monitor_service_1.PAID_SEARCH_LIMIT;
+    if (!/^\d+$/.test(limit))
+        throw new common_1.BadRequestException(`limit must be an integer 1-${monitor_service_1.PAID_SEARCH_MAX_LIMIT}`);
+    const n = Number(limit);
+    if (n < 1 || n > monitor_service_1.PAID_SEARCH_MAX_LIMIT)
+        throw new common_1.BadRequestException(`limit must be an integer 1-${monitor_service_1.PAID_SEARCH_MAX_LIMIT}`);
+    return n;
+}
 function parseOptionalClientId(clientId) {
     if (clientId === undefined || clientId === '')
         return null;
@@ -40150,6 +40194,9 @@ let MonitorController = class MonitorController {
     }
     paidChats(date, clientId) {
         return this.service.paidChats(parsePaidDate(date, Date.now()), parseOptionalClientId(clientId));
+    }
+    searchPaidChats(q, limit) {
+        return this.service.searchPaidChats(parsePaidSearchQ(q), parsePaidSearchLimit(limit));
     }
     history(range, clientId, client) {
         return this.service.history((0, monitor_history_1.parseHistoryRange)(range), parseOptionalClientId(clientId || client));
@@ -40219,6 +40266,16 @@ __decorate([
     __metadata("design:paramtypes", [String, String]),
     __metadata("design:returntype", void 0)
 ], MonitorController.prototype, "paidChats", null);
+__decorate([
+    (0, common_1.Get)('paid-chats/search'),
+    (0, swagger_1.ApiQuery)({ name: 'q', required: true, description: 'search text, 2-64 chars; a leading @ is ignored' }),
+    (0, swagger_1.ApiQuery)({ name: 'limit', required: false, description: `rows, 1-${monitor_service_1.PAID_SEARCH_MAX_LIMIT} (default ${monitor_service_1.PAID_SEARCH_LIMIT})` }),
+    __param(0, (0, common_1.Query)('q')),
+    __param(1, (0, common_1.Query)('limit')),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [String, String]),
+    __metadata("design:returntype", void 0)
+], MonitorController.prototype, "searchPaidChats", null);
 __decorate([
     (0, common_1.Get)('history'),
     (0, swagger_1.ApiQuery)({ name: 'range', required: false, enum: monitor_history_1.HISTORY_RANGES }),
@@ -40374,7 +40431,7 @@ var __param = (this && this.__param) || function (paramIndex, decorator) {
 };
 var MonitorService_1;
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.MonitorService = exports.UNASSIGNED_POOL_KEY = exports.FLEET_DETAIL_ID = exports.PAID_ENRICH_MAX = exports.PAID_HIST_KEYS = exports.RANGE_ONLY_NOTE_PREFIX = exports.RANGE_ONLY_FIELDS = exports.RANGE_PAGE_RE = exports.RANGE_CLOSED_FRESH_MS = exports.PROMO_DAYS_HISTORY = exports.LIVE_SVCS = exports.HEARTBEAT_INDEX_KEY = exports.CLIENT_TTL_MS = exports.FLEET_TTL_MS = exports.PREWARM_PAGES = exports.MIDNIGHT_PREWARM_AFTER_MS = exports.PREWARM_DELAY_MS = exports.SNAPSHOT_TTL_SEC = exports.SNAPSHOT_KEY_PREFIX = exports.PART_REFRESH_AHEAD_MS = exports.SNAPSHOT_WARM_MAX_KEYS = exports.SNAPSHOT_WARM_IGNORE_GAP_MS = exports.SNAPSHOT_WARM_MAX_INTERVAL_MS = exports.SNAPSHOT_WARM_MIN_INTERVAL_MS = exports.SNAPSHOT_WARM_DEFAULT_INTERVAL_MS = exports.SNAPSHOT_WARM_MARGIN_MS = exports.SNAPSHOT_WARM_LEAD_MS = exports.SNAPSHOT_MAX_SERVE_STALE_MS = exports.SNAPSHOT_FRESH_MS = exports.RESTRICTED_FRESH_MS = exports.LIVE_TTL_MS = exports.CHANNEL_CANDIDATES = exports.HISTORY_DAYS = exports.POOL_FRESH_MS = exports.HISTORY_FRESH_MS = exports.TODAY_MAX_STALE_MS = exports.TODAY_FRESH_MS = exports.LIVE_REDIS_DEADLINE_MS = exports.MONGO_TIMEOUT_MS = exports.PG_TIMEOUT_MS = exports.MONITOR_REDIS = void 0;
+exports.MonitorService = exports.UNASSIGNED_POOL_KEY = exports.FLEET_DETAIL_ID = exports.PAID_IDS_TTL_MS = exports.PAID_SEARCH_MAX_Q = exports.PAID_SEARCH_MIN_Q = exports.PAID_SEARCH_MAX_LIMIT = exports.PAID_SEARCH_LIMIT = exports.PAID_ENRICH_MAX = exports.PAID_HIST_KEYS = exports.RANGE_ONLY_NOTE_PREFIX = exports.RANGE_ONLY_FIELDS = exports.RANGE_PAGE_RE = exports.RANGE_CLOSED_FRESH_MS = exports.PROMO_DAYS_HISTORY = exports.LIVE_SVCS = exports.HEARTBEAT_INDEX_KEY = exports.CLIENT_TTL_MS = exports.FLEET_TTL_MS = exports.PREWARM_PAGES = exports.MIDNIGHT_PREWARM_AFTER_MS = exports.PREWARM_DELAY_MS = exports.SNAPSHOT_TTL_SEC = exports.SNAPSHOT_KEY_PREFIX = exports.PART_REFRESH_AHEAD_MS = exports.SNAPSHOT_WARM_MAX_KEYS = exports.SNAPSHOT_WARM_IGNORE_GAP_MS = exports.SNAPSHOT_WARM_MAX_INTERVAL_MS = exports.SNAPSHOT_WARM_MIN_INTERVAL_MS = exports.SNAPSHOT_WARM_DEFAULT_INTERVAL_MS = exports.SNAPSHOT_WARM_MARGIN_MS = exports.SNAPSHOT_WARM_LEAD_MS = exports.SNAPSHOT_MAX_SERVE_STALE_MS = exports.SNAPSHOT_FRESH_MS = exports.RESTRICTED_FRESH_MS = exports.LIVE_TTL_MS = exports.CHANNEL_CANDIDATES = exports.HISTORY_DAYS = exports.POOL_FRESH_MS = exports.HISTORY_FRESH_MS = exports.TODAY_MAX_STALE_MS = exports.TODAY_FRESH_MS = exports.LIVE_REDIS_DEADLINE_MS = exports.MONGO_TIMEOUT_MS = exports.PG_TIMEOUT_MS = exports.MONITOR_REDIS = void 0;
 exports.rangeOfPage = rangeOfPage;
 exports.legacyOf = legacyOf;
 exports.fleetSummaryRow = fleetSummaryRow;
@@ -40448,6 +40505,11 @@ function legacyOf(v) {
 }
 exports.PAID_HIST_KEYS = 30;
 exports.PAID_ENRICH_MAX = 1000;
+exports.PAID_SEARCH_LIMIT = 100;
+exports.PAID_SEARCH_MAX_LIMIT = 200;
+exports.PAID_SEARCH_MIN_Q = 2;
+exports.PAID_SEARCH_MAX_Q = 64;
+exports.PAID_IDS_TTL_MS = 60_000;
 const isoOf = (v) => new Date(v).toISOString();
 exports.FLEET_DETAIL_ID = 'all';
 function fleetSummaryRow(f) {
@@ -40600,6 +40662,7 @@ let MonitorService = MonitorService_1 = class MonitorService {
             onBackgroundError: (key, err) => this.logger.warn(`monitor clients refresh ${key} failed: ${String(err?.message ?? err).slice(0, 200)}`),
         });
         this.liveCache = new monitor_cache_1.TtlCache(exports.LIVE_TTL_MS, 2);
+        this.paidIdsCache = new monitor_cache_1.TtlCache(exports.PAID_IDS_TTL_MS, 1);
         this.paidHistCache = new monitor_cache_1.SwrCache({
             freshMs: exports.HISTORY_FRESH_MS,
             maxKeys: exports.PAID_HIST_KEYS,
@@ -41724,6 +41787,44 @@ let MonitorService = MonitorService_1 = class MonitorService {
             totals.ownerAmount += c.ownerAmount;
         }
         return { date, tz: 'Asia/Kolkata', clientId, asOf: loaded.asOf, source: 'payment_event', chats, totals, notes };
+    }
+    async searchPaidChats(q, limit) {
+        const asOf = Date.now();
+        const timings = {};
+        const from = (0, monitor_time_1.istDayStart)(monitor_util_1.REVENUE_HISTORY_FROM);
+        const needle = q.toLowerCase();
+        const notes = [];
+        let rows;
+        try {
+            const paidIds = (await this.paidIdsCache.get('all', async () => {
+                const r = await this.pgRows((0, monitor_sql_1.paidChatIdsSql)(from), timings, false);
+                return r.map((x) => String(x.chat_id));
+            })).value;
+            let nameIds = [];
+            if (paidIds.length) {
+                try {
+                    const docs = await this.mongoFind('userData', { chatId: { $in: paidIds }, username: { $regex: (0, monitor_util_1.escapeRegExp)(q), $options: 'i' } }, { _id: 0, chatId: 1 }, 'mongo.userData_paid_search', timings);
+                    nameIds = [...new Set(docs.map((d) => d.chatId).filter((v) => typeof v === 'string'))];
+                }
+                catch (err) {
+                    const msg = String(err?.message ?? err).slice(0, 200);
+                    this.logger.warn(`monitor paid-chats search usernames failed: ${msg}`);
+                    notes.push(`username search unavailable: ${msg}`);
+                }
+            }
+            const exact = /^\d+$/.test(q) ? q : null;
+            rows = await this.pgRows((0, monitor_sql_1.paidChatsSearchSql)(from, (0, monitor_sql_1.likeContains)(q), nameIds, exact, limit + 1), timings, false);
+        }
+        catch (err) {
+            const msg = String(err?.message ?? err).slice(0, 200);
+            this.logger.warn(`monitor paid-chats search failed: ${msg}`);
+            throw new common_1.ServiceUnavailableException(`paid chat search unavailable: ${msg}`);
+        }
+        const truncated = rows.length > limit;
+        const hits = rows.slice(0, limit).map((r) => ({ ...toPaidChat(r), date: String(r.day) }));
+        await this.addUsernames(hits, notes);
+        const chats = hits.filter((c) => [c.username, c.chatId, c.clientId, c.profile].some((v) => String(v || '').toLowerCase().includes(needle)));
+        return { q, tz: 'Asia/Kolkata', from: monitor_util_1.REVENUE_HISTORY_FROM, asOf, source: 'payment_event', chats, truncated, notes };
     }
     async addUsernames(chats, notes) {
         if (!chats.length)
