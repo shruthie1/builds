@@ -38537,6 +38537,28 @@ class PaymentProofsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_
             .limit(n)
             .toArray());
     }
+    /**
+     * This chat's NOT credited rows (every persona) whose reasons (`reasons`, `verdict.reasons` or `ask.reasons`) hold one
+     * of `reasons` (exact codes or prefixes as RegExp), or that carry a fake warning (`ask.kind` 'fraud'); newest first,
+     * without the image / OCR fields. The gate's fake-streak and chat-memory checks (tg-aut proof-gate/chat-fakes.ts).
+     * Uses chatId_1_createdAt_-1 (chatId + createdAt sort); the rest is filtered on that one chat's rows (7-day TTL).
+     * null on a failure (the gate fails closed), like creditedForChat.
+     */
+    async suspectRowsForChat(chatId, reasons, limit = 100) {
+        const id = String(chatId || '').trim();
+        if (!id)
+            return [];
+        const n = Math.max(1, Math.min(100, Math.floor(limit)));
+        const codes = [...reasons];
+        return this.guard(`suspectRowsForChat(${id})`, null, () => this.collection
+            .find({
+            chatId: id, servedAt: { $exists: false }, ...NOT_RECORD_ONLY,
+            $or: [{ reasons: { $in: codes } }, { 'verdict.reasons': { $in: codes } }, { 'ask.reasons': { $in: codes } }, { 'ask.kind': 'fraud' }],
+        }, { projection: { image: 0, ocr: 0 } })
+            .sort({ createdAt: -1 })
+            .limit(n)
+            .toArray());
+    }
     /** Set the ASK_PROOF state of one row (section 8). Returns true when a row matched. */
     async markProof(chatId, telegramMsgId, proof) {
         const id = String(chatId || '').trim();
@@ -58739,8 +58761,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "4202ebfd8f7aff2bdfb302a398e13d1d5a05c1e6" : 0;
-    const builtAt =  true ? "2026-11-14T15:09:17.286Z" : 0;
+    const sha =  true ? "dc5065a16baa2e486b6de3866ef54fc3e70f0baa" : 0;
+    const builtAt =  true ? "2026-11-14T15:50:03.702Z" : 0;
     return { sha, builtAt };
 }
 
@@ -101216,6 +101238,132 @@ function isForeignPayeeUpi(payee, ownIds) {
 
 /***/ },
 
+/***/ "./src/payments/proof-gate/chat-fakes.ts"
+/*!***********************************************!*\
+  !*** ./src/payments/proof-gate/chat-fakes.ts ***!
+  \***********************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   CHAT_FAKE_HOLDS: () => (/* binding */ CHAT_FAKE_HOLDS),
+/* harmony export */   CHAT_PROVEN_FAKE: () => (/* binding */ CHAT_PROVEN_FAKE),
+/* harmony export */   FAKE_STREAK: () => (/* binding */ FAKE_STREAK),
+/* harmony export */   FAKE_STREAK_MIN: () => (/* binding */ FAKE_STREAK_MIN),
+/* harmony export */   SUSPECT_REASONS: () => (/* binding */ SUSPECT_REASONS),
+/* harmony export */   chatFakeHold: () => (/* binding */ chatFakeHold),
+/* harmony export */   fakeStreakOpen: () => (/* binding */ fakeStreakOpen),
+/* harmony export */   isFakeStreakCode: () => (/* binding */ isFakeStreakCode),
+/* harmony export */   isProvenFakeCode: () => (/* binding */ isProvenFakeCode),
+/* harmony export */   provenFakeInChat: () => (/* binding */ provenFakeInChat),
+/* harmony export */   provesFake: () => (/* binding */ provesFake)
+/* harmony export */ });
+/* harmony import */ var _decide__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./decide */ "./src/payments/proof-gate/decide.ts");
+/**
+ * Two holds over this chat's earlier REJECTED screenshots (owner 2026-11-14, "never block a genuine payer; ask when fake
+ * is not proven"). Either one sends the details-page request instead of crediting (flow.ts); only a real reference on
+ * a different picture answers it (NEEDS_REAL_REFERENCE_REASONS). The rows come from one read of this chat's rejected
+ * rows (repository suspectRowsForChat, every persona), made in parallel with the gate's other reads.
+ *
+ * FAKE_STREAK (variant V12): a fake warning of this user is open (inside its 15-min grace, or it blocked the user and
+ * is still open) and 2 or more screenshots were rejected as fake since it opened (the warning's own included). A
+ * credit with a plausible UTR used to close the warning then. 7-day replay (scratchpad fraud5/m7.mjs, 2,365 proofs):
+ * 7 fraud credits held (₹424), 0 genuine. "Rejected as fake" = a FAKE_STREAK_CODES reason or a fake warning; counting
+ * every rejection (repeat, over ₹1,000 ...) held 1 genuine payer (keerthi2 6633914461 98396), so it does not.
+ *
+ * CHAT_PROVEN_FAKE (chat memory): this screenshot shows no UTR and an earlier rejected screenshot of this chat (any
+ * persona, any time in the 7-day TTL) carries a proven fake code (PROVEN_FAKE_CODES). Replay (fraud5/m5.mjs V7w): 11
+ * fraud credits held (₹2,275); 1 genuine (meghana2 6809433050 300768, a likely double credit the details page clears).
+ */
+
+/** Reasons that make a rejected screenshot count toward FAKE_STREAK (fraud5/m7.mjs FAKEISH). */
+const FAKE_STREAK_EXACT = new Set([
+    'EDITED_PICTURE', 'AI_WATERMARK', 'UTR_REUSED_OTHER_AMOUNT', 'NO_REAL_REFERENCE', 'FAKE_TEXT', 'DISCLAIMER_SHORT',
+    'DISCLAIMER_LONG', 'GENERATOR_SUCCESS_TEXT', 'FUTURE_DATE', 'FUTURE_TIME', 'SECOND_FAKE', 'PERSONA_PAYEE', 'UPI_NOT_OURS',
+    'LAXMI_PAYEE', 'IMPOSSIBLE_REFERENCE',
+]);
+const FAKE_STREAK_PREFIX = [/^TXN_ID_/, /^BLOCKLIST/];
+/** Proven fake codes for CHAT_PROVEN_FAKE (owner list 2026-11-14). */
+const PROVEN_FAKE_EXACT = new Set([
+    'FUTURE_DATE', 'FUTURE_TIME', 'DATE_IN_FUTURE', 'LLM_FAKE_FUTURE_DATE', 'EDITED_PICTURE', 'FAKE_TEXT', 'AI_WATERMARK',
+    'GENERATOR_SUCCESS_TEXT', 'BLOCKLIST_A', 'NO_REAL_REFERENCE',
+]);
+const PROVEN_FAKE_PREFIX = [/^TXN_ID_/, /^DISCLAIMER_/];
+function isFakeStreakCode(code) {
+    return FAKE_STREAK_EXACT.has(code) || FAKE_STREAK_PREFIX.some((p) => p.test(code));
+}
+function isProvenFakeCode(code) {
+    return PROVEN_FAKE_EXACT.has(code) || PROVEN_FAKE_PREFIX.some((p) => p.test(code));
+}
+/**
+ * A rejected row's codes prove a fake. NO_REAL_REFERENCE counts under a fake warning (FAKE_WARNING_OPEN / BLOCKED_IGNORED),
+ * not when it only repeated the polite impossible-reference request (DETAILS_PAGE_AWAITED: "it may be a misread", flow.ts;
+ * journey "L impossible-reference ask ... window over is credited"). 7-day data: 2 such rows, neither in the replay's hits.
+ */
+function provesFake(codes) {
+    const awaited = codes.includes('DETAILS_PAGE_AWAITED');
+    return codes.some((c) => isProvenFakeCode(c) && !(awaited && c === 'NO_REAL_REFERENCE'));
+}
+/** Every code the read must return a row for (the union of both lists), for suspectRowsForChat. */
+const SUSPECT_REASONS = [
+    ...new Set([...FAKE_STREAK_EXACT, ...PROVEN_FAKE_EXACT]), ...FAKE_STREAK_PREFIX, ...PROVEN_FAKE_PREFIX,
+];
+/** The ask reasons these holds store (flow.ts); a screenshot that answers one is not held again. */
+const FAKE_STREAK = 'FAKE_STREAK';
+const CHAT_PROVEN_FAKE = 'CHAT_PROVEN_FAKE';
+const CHAT_FAKE_HOLDS = new Set([FAKE_STREAK, CHAT_PROVEN_FAKE]);
+/** Rejected screenshots since the warning opened that make the streak. */
+const FAKE_STREAK_MIN = 2;
+/** A rejected row stored this long before the warning's openedAt is the warning's own screenshot (m7: openedAt - 2 s). */
+const OWN_ROW_SLACK_MS = 2000;
+function ms(v) {
+    return v instanceof Date ? v.getTime() : typeof v === 'string' || typeof v === 'number' ? new Date(v).getTime() : NaN;
+}
+function codesOf(row) {
+    return [...(row.reasons ?? []), ...(row.verdict?.reasons ?? []), ...(row.ask?.reasons ?? [])];
+}
+function isSelf(facts, row) {
+    return row.profile === facts.profile && row.telegramMsgId === facts.msgId;
+}
+/** FAKE_STREAK: see the header. `open` = this user's open requests (gate openAsks), `rows` = suspectRowsForChat. */
+function fakeStreakOpen(facts, open, rows, nowMs) {
+    const warnings = open.filter((r) => !isSelf(facts, r) && ((0,_decide__WEBPACK_IMPORTED_MODULE_0__.fraudGraceOpen)(r, nowMs) || (0,_decide__WEBPACK_IMPORTED_MODULE_0__.gateBlockAnswerable)(r, nowMs)));
+    if (warnings.length === 0)
+        return false;
+    const since = Math.min(...warnings.map((r) => ms(r.ask.openedAt))) - OWN_ROW_SLACK_MS;
+    const arrival = facts.arrivalMs ?? nowMs;
+    let n = 0;
+    for (const row of rows) {
+        if (isSelf(facts, row) || row.servedAt)
+            continue;
+        const at = ms(row.createdAt);
+        if (!(at >= since && at < arrival))
+            continue;
+        if (row.ask?.kind === 'fraud' || codesOf(row).some(isFakeStreakCode))
+            n += 1;
+    }
+    return n >= FAKE_STREAK_MIN;
+}
+/** CHAT_PROVEN_FAKE: see the header. */
+function provenFakeInChat(facts, rows, nowMs) {
+    if (facts.utr)
+        return false;
+    const arrival = facts.arrivalMs ?? nowMs;
+    return rows.some((row) => !isSelf(facts, row) && !row.servedAt && ms(row.createdAt) < arrival && provesFake(codesOf(row)));
+}
+/** Which hold applies, FAKE_STREAK first; null = none. */
+function chatFakeHold(facts, open, rows, nowMs) {
+    if (fakeStreakOpen(facts, open, rows, nowMs))
+        return FAKE_STREAK;
+    if (provenFakeInChat(facts, rows, nowMs))
+        return CHAT_PROVEN_FAKE;
+    return null;
+}
+
+
+/***/ },
+
 /***/ "./src/payments/proof-gate/decide.ts"
 /*!*******************************************!*\
   !*** ./src/payments/proof-gate/decide.ts ***!
@@ -101283,8 +101431,8 @@ const CONFIRM_TIME_MS = 15 * MINUTE_MS;
 const FRAUD_GRACE_MS = 15 * MINUTE_MS;
 /** An open request can be answered for this long (also after the block). */
 const ASK_ANSWER_WINDOW_MS = 24 * 60 * MINUTE_MS;
-/** old_time reasons only a real reference answers (confirmsAsk). */
-const NEEDS_REAL_REFERENCE_REASONS = new Set(['IMPOSSIBLE_REFERENCE', 'NO_UTR_NO_TIME_SAME_AMOUNT']);
+/** old_time reasons only a real reference answers (confirmsAsk). FAKE_STREAK / CHAT_PROVEN_FAKE: chat-fakes.ts holds. */
+const NEEDS_REAL_REFERENCE_REASONS = new Set(['IMPOSSIBLE_REFERENCE', 'NO_UTR_NO_TIME_SAME_AMOUNT', 'FAKE_STREAK', 'CHAT_PROVEN_FAKE']);
 /** Uppercase, separators removed. Null for masked ("XXXX", "****"), too short, or no digits at all. */
 function normalizeUtr(raw) {
     if (typeof raw !== 'string')
@@ -102149,6 +102297,20 @@ class PaymentFlow {
                 await notify({ title: 'Asked pay page', summary: `Reference ${f.utr} has ${f.utr?.length} digits (real ones have 12).` });
                 return { handled: true };
             }
+            const fakeHold = session.chatFakeHold();
+            if (fakeHold) {
+                // chat-fakes.ts (owner 2026-11-14): a fake streak under an open warning (FAKE_STREAK), or no UTR in a chat
+                // with a proven fake (CHAT_PROVEN_FAKE). Fake is not proven for THIS screenshot: ask for the details page
+                // (only a real reference on another picture answers it), never credit, never block.
+                await session.openAsk('old_time', [fakeHold]);
+                this.note('old_time', [fakeHold]);
+                this.io.warn(`[payment-gate] ${f.chatId}: ${fakeHold}, asked for the details page, not crediting yet`);
+                await this.io.reply(this.pick(_messages__WEBPACK_IMPORTED_MODULE_1__.PAYMENT_ASK_REPEAT_MESSAGES));
+                await notify({ title: 'Asked pay page', summary: fakeHold === 'FAKE_STREAK'
+                        ? 'FAKE_STREAK: 2+ fake screenshots since the open fake warning; the details page decides.'
+                        : 'CHAT_PROVEN_FAKE: no UTR, and this chat sent a proven fake before; the details page decides.' });
+                return { handled: true };
+            }
             const resendStep = session.resendNeedsDetailsPage();
             if (resendStep) {
                 // The same amount was credited to this user (any persona) in the last 48 h and nothing on this screenshot
@@ -102255,6 +102417,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _payment_time__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../payment-time */ "./src/payments/payment-time.ts");
 /* harmony import */ var _resend__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ./resend */ "./src/payments/proof-gate/resend.ts");
 /* harmony import */ var _shadow__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ./shadow */ "./src/payments/proof-gate/shadow.ts");
+/* harmony import */ var _chat_fakes__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ./chat-fakes */ "./src/payments/proof-gate/chat-fakes.ts");
 /**
  * Payment-screenshot gate: the I/O around ./decide over the `paymentProofs` collection (one row per payment
  * screenshot, 90-day TTL, shared by every persona process). Every call is time-bounded. No store configured at all
@@ -102262,6 +102425,7 @@ __webpack_require__.r(__webpack_exports__);
  * FAILS CLOSED on the credit path (v2 design 2026-11-07): begin / check / claim come back `unavailable` and the caller
  * holds the screenshot for a bounded re-check (processImage holdForLaterAnalysis); it is never credited on a guess.
  */
+
 
 
 
@@ -102298,6 +102462,8 @@ class GateSession {
     constructor(deps, store, facts, creditAmount) {
         /** The re-send rule's verdict as check() read it (resendNeedsDetailsPage). */
         this.resend = { kind: 'none' };
+        /** The chat-fakes.ts hold as check() read it (chatFakeHold): FAKE_STREAK / CHAT_PROVEN_FAKE, else null. */
+        this.fakeHold = null;
         /** When the last claim() started (claimState tells this claim's landed write from an earlier one). */
         this.claimStartedAt = null;
         this.deps = deps;
@@ -102314,6 +102480,7 @@ class GateSession {
      */
     async check() {
         const f = this.facts;
+        this.fakeHold = null;
         // Rule 8 (decide.ts): look for the same payment (amount + printed minute) credited today anywhere. Read for every
         // receipt with a readable time: a receipt with no real reference is judged on it (rule 7), one with a reference
         // only against a credited reference it cuts or extends (decide.ts referenceCutOf, hole 1).
@@ -102321,7 +102488,7 @@ class GateSession {
         const payment = minuteMs !== null && f.amount > 0
             ? { amount: f.amount, sinceMs: (0,_payment_time__WEBPACK_IMPORTED_MODULE_2__.istDayStartMs)(f.arrivalMs ?? this.deps.now()), fromMs: minuteMs, toMs: minuteMs + 60000 }
             : null;
-        const [served, recent, credited] = await Promise.all([
+        const [served, recent, credited, suspect] = await Promise.all([
             this.bound(this.store.servedCandidates({
                 chatId: f.chatId, profile: f.profile, telegramMsgId: f.msgId,
                 ...(f.utr ? { utr: f.utr } : {}), imageSha256: f.sha256, ...(f.dHash ? { imageHash: f.dHash } : {}),
@@ -102329,8 +102496,9 @@ class GateSession {
             }), null, 'servedCandidates'),
             this.recentRows(),
             this.creditedRows(),
+            this.suspectRows(),
         ]);
-        if (served === null || recent === null || credited === null)
+        if (served === null || recent === null || credited === null || suspect === null)
             return { kind: 'unavailable' };
         this.logFraudShadow(recent);
         const verdict = (0,_decide__WEBPACK_IMPORTED_MODULE_1__.classifyAgainstServed)(f, served, this.chatServed(recent), this.deps.now());
@@ -102338,7 +102506,8 @@ class GateSession {
             return verdict;
         // Re-send or new payment (resend.ts, owner 2026-11-08): this user's credits of the same amount in the last 48 h,
         // any persona. A repeat is answered like every repeat; an ask is raised after the credit rules (flow.ts).
-        this.resend = (0,_resend__WEBPACK_IMPORTED_MODULE_3__.decideResend)(f, credited ?? recent, this.deps.now());
+        // G1 (owner 2026-11-14): this client's own QR note read as the payee name is no payee (resend.ts step 4b).
+        this.resend = (0,_resend__WEBPACK_IMPORTED_MODULE_3__.decideResend)(f, credited ?? recent, this.deps.now(), process.env.name ?? null);
         // F2 (resend.ts step 4c): an earlier credit of this user with the same amount and printed minute to another payee
         // (both UPI ids read): the payee was edited. The fake warning (flow.ts fraud), like every edited verdict.
         if (this.resend.kind === 'edited')
@@ -102360,6 +102529,10 @@ class GateSession {
                 : { kind: 'repeat', by: 'file', sameChat: held.chatId === f.chatId && held.profile === f.profile, matched: held };
         }
         const asked = (0,_decide__WEBPACK_IMPORTED_MODULE_1__.findConfirmedAsk)(f, open, now);
+        // chat-fakes.ts (owner 2026-11-14): a fake streak under an open warning, or a no-UTR screenshot in a chat with a
+        // proven fake, gets the details-page request after the credit rules (flow.ts). Not for the page that answers it.
+        const answersHold = (asked?.ask?.reasons ?? []).some((r) => _chat_fakes__WEBPACK_IMPORTED_MODULE_5__.CHAT_FAKE_HOLDS.has(r));
+        this.fakeHold = answersHold ? null : (0,_chat_fakes__WEBPACK_IMPORTED_MODULE_5__.chatFakeHold)(f, open, suspect, now);
         if (asked)
             return { kind: 'confirms', asked };
         // Only inside the 15-min grace period or while the flow's block stands: a later, unrelated genuine payment
@@ -102407,6 +102580,15 @@ class GateSession {
         return this.bound(this.store.creditedForChat(this.facts.chatId, since, CHAT_CREDITED_SCAN), null, 'creditedForChat');
     }
     /**
+     * This chat's rejected rows with a fake reason or a fake warning (chat-fakes.ts), every persona. [] without the read,
+     * null on a failure / timeout (fail closed: held and re-checked, like the other reads).
+     */
+    async suspectRows() {
+        if (!this.store.suspectRowsForChat)
+            return [];
+        return this.bound(this.store.suspectRowsForChat(this.facts.chatId, _chat_fakes__WEBPACK_IMPORTED_MODULE_5__.SUSPECT_REASONS, CHAT_CREDITED_SCAN), null, 'suspectRowsForChat');
+    }
+    /**
      * This user's own credited rows (every persona), for a different screenshot of a credited payment, with or without a
      * UTR (classifyAgainstServed, same-day rule 4). Only when that rule can apply: payment time readable.
      */
@@ -102437,6 +102619,10 @@ class GateSession {
      */
     resendNeedsDetailsPage() {
         return this.resend.kind === 'ask' ? this.resend.step : null;
+    }
+    /** chat-fakes.ts hold (as check() read it): ask for the payment details page, never credit. The code, else null. */
+    chatFakeHold() {
+        return this.fakeHold;
     }
     async openAsk(kind, reasons) {
         return this.bound(this.store.openAsk(this.facts.chatId, this.facts.profile, this.facts.msgId, kind, reasons), false, 'openAsk');
@@ -102693,6 +102879,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   RESEND_LOOKBACK_MS: () => (/* binding */ RESEND_LOOKBACK_MS),
 /* harmony export */   decideResend: () => (/* binding */ decideResend),
 /* harmony export */   foldReference: () => (/* binding */ foldReference),
+/* harmony export */   isOwnQrNote: () => (/* binding */ isOwnQrNote),
 /* harmony export */   payeesDiffer: () => (/* binding */ payeesDiffer),
 /* harmony export */   relativeTime: () => (/* binding */ relativeTime),
 /* harmony export */   repeatBy: () => (/* binding */ repeatBy),
@@ -102847,13 +103034,31 @@ function sameNameFolded(a, b) {
     const longer = new Set(l);
     return s.every((t) => longer.has(t));
 }
-/** Step 4b: both payees read and different (otherPayee), names compared folded (sameNameFolded). */
-function otherPayeeFolded(a, b) {
+/** Lower case, letters and digits only: the QR note (cloudinaryService.ts tn / pn) and a name compared this way. */
+function noteFold(raw) {
+    return typeof raw === 'string' ? raw.toLowerCase().replace(/[^a-z0-9]/g, '') : '';
+}
+/**
+ * G1 (owner 2026-11-14): this payee name is this client's own QR note (process.env.name without spaces, set as tn / pn
+ * by cloudinaryService.ts), compared case- and space-insensitively. Live kavya1 8201685729 70974: a chat-bubble re-show
+ * of the ₹50 credited at 12:16 (70533) with the note "KavyaaGowda" read as the payee was called "other payee" -> new.
+ */
+function isOwnQrNote(name, ownNote) {
+    const n = noteFold(ownNote);
+    return n.length > 0 && noteFold(name) === n;
+}
+/**
+ * Step 4b: both payees read and different (otherPayee), names compared folded (sameNameFolded). A name that is this
+ * client's own QR note (isOwnQrNote) is not read.
+ */
+function otherPayeeFolded(a, b, ownNote) {
     const ua = (0,_decide__WEBPACK_IMPORTED_MODULE_0__.normalizePayeeUpi)(a.payeeUpiId);
     const ub = (0,_decide__WEBPACK_IMPORTED_MODULE_0__.normalizePayeeUpi)(b.payeeUpiId);
     if (ua && ub)
         return !(0,_decide__WEBPACK_IMPORTED_MODULE_0__.sameUpiId)(ua, ub);
-    return !!(0,_decide__WEBPACK_IMPORTED_MODULE_0__.normalizePayeeName)(a.payeeName) && !!(0,_decide__WEBPACK_IMPORTED_MODULE_0__.normalizePayeeName)(b.payeeName) && !sameNameFolded(a.payeeName, b.payeeName);
+    const na = isOwnQrNote(a.payeeName, ownNote) ? null : a.payeeName;
+    const nb = isOwnQrNote(b.payeeName, ownNote) ? null : b.payeeName;
+    return !!(0,_decide__WEBPACK_IMPORTED_MODULE_0__.normalizePayeeName)(na) && !!(0,_decide__WEBPACK_IMPORTED_MODULE_0__.normalizePayeeName)(nb) && !sameNameFolded(na, nb);
 }
 /**
  * Step 4c: both UPI ids read and not the same id (sameUpiId), and the names, when both read, not the same folded.
@@ -102869,8 +103074,8 @@ function payeesDiffer(a, b) {
     const nb = (0,_decide__WEBPACK_IMPORTED_MODULE_0__.normalizePayeeName)(b.payeeName);
     return !(na && nb && sameNameFolded(a.payeeName, b.payeeName));
 }
-/** One later screenshot against one earlier credit of the same amount: the first step that applies. */
-function resendPair(later, earlier) {
+/** One later screenshot against one earlier credit of the same amount: the first step that applies. `ownNote`: G1. */
+function resendPair(later, earlier, ownNote) {
     if (later.sha256 && later.sha256 === earlier.sha256)
         return { kind: 'repeat', step: 'sha' };
     const ra = refsOf(later);
@@ -102887,7 +103092,7 @@ function resendPair(later, earlier) {
         && typeof later.amount === 'number' && later.amount === earlier.amount && payeesDiffer(later, earlier)) {
         return { kind: 'edited', step: 'payee-edited' };
     }
-    if (otherPayeeFolded(later, earlier))
+    if (otherPayeeFolded(later, earlier, ownNote))
         return { kind: 'new', step: 'other-payee' };
     if (tp !== null && te !== null) {
         const d = Math.abs(Math.floor(tp / MINUTE_MS) - Math.floor(te / MINUTE_MS));
@@ -102933,8 +103138,9 @@ function sideOfFacts(facts, arrivalMs) {
 /**
  * This screenshot against every earlier credit of this user (any persona) with the same amount, arrived within
  * RESEND_LOOKBACK_MS before it. Repeat beats edited beats ask beats new; the newest earlier credit wins a tie. `none` = no such credit.
+ * `ownNote`: this client's name (process.env.name), whose QR note is no payee in step 4b (isOwnQrNote).
  */
-function decideResend(facts, rows, nowMs) {
+function decideResend(facts, rows, nowMs, ownNote) {
     const arrival = facts.arrivalMs ?? nowMs;
     const later = sideOfFacts(facts, arrival);
     let best = null;
@@ -102949,7 +103155,7 @@ function decideResend(facts, rows, nowMs) {
         // No "arrived before this one" test: an album's first picture is credited (its row stored) after the second arrived.
         if (!Number.isFinite(at) || arrival - at > RESEND_LOOKBACK_MS)
             continue;
-        const v = resendPair(later, sideOfRow(row));
+        const v = resendPair(later, sideOfRow(row), ownNote);
         if (!best || RANK[v.kind] < RANK[best.kind] || (RANK[v.kind] === RANK[best.kind] && at > best.at))
             best = { ...v, matched: row, at };
     }
@@ -103084,6 +103290,7 @@ function fraudShadowLines(codes, ctx) {
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   TXN_ID_ASCENDING_TAIL: () => (/* binding */ TXN_ID_ASCENDING_TAIL),
 /* harmony export */   amPmFlipConfirmed: () => (/* binding */ amPmFlipConfirmed),
 /* harmony export */   amountWordsReasons: () => (/* binding */ amountWordsReasons),
 /* harmony export */   clockPrintedAs: () => (/* binding */ clockPrintedAs),
@@ -103091,6 +103298,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   futurePaymentTimeReasons: () => (/* binding */ futurePaymentTimeReasons),
 /* harmony export */   phonePeTxnTimeMs: () => (/* reexport safe */ _payment_time__WEBPACK_IMPORTED_MODULE_0__.phonePeTxnTimeMs),
 /* harmony export */   txnIdDateReasons: () => (/* binding */ txnIdDateReasons),
+/* harmony export */   txnIdSequentialReasons: () => (/* binding */ txnIdSequentialReasons),
 /* harmony export */   upiRefTooLongReasons: () => (/* binding */ upiRefTooLongReasons)
 /* harmony export */ });
 /* harmony import */ var _payment_time__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../payment-time */ "./src/payments/payment-time.ts");
@@ -103120,6 +103328,7 @@ function fabricatedTextReasons(text, opts = {}) {
     if (COMPLETED_SUCCESSFULLY.test(t))
         reasons.push('GENERATOR_SUCCESS_TEXT');
     reasons.push(...txnIdDateReasons(t, opts));
+    reasons.push(...txnIdSequentialReasons(t));
     reasons.push(...amountWordsReasons(t));
     reasons.push(...upiRefTooLongReasons(t));
     return reasons;
@@ -103447,6 +103656,31 @@ function txnIdDateReasons(text, opts = {}) {
         return timezoneExcused(labelled, id, opts.arrivalMs) ? [] : ['TXN_ID_DATE_MISMATCH'];
     }
     return [];
+}
+/** The PhonePe T-id's digits (T + 20-22 digits, the PHONEPE_LENGTH_T_NUMBER shape). */
+const PHONEPE_T_DIGITS = /\bt\s?(\d{20,22})\b/i;
+/** TXN_ID_SEQUENTIAL: a T-id ending in this many or more consecutive ascending digits. */
+const TXN_ID_ASCENDING_TAIL = 6;
+/**
+ * TXN_ID_SEQUENTIAL (owner 2026-11-14): a PhonePe transaction id (T + YYMMDDhhmmss + 8-10 random digits) ending in 6 or
+ * more consecutive ascending digits, 9 -> 0 counted as ascending ("..6789012345", "..1234567890", "..0012345678"): a
+ * receipt generator's id. 7-day replay (2,365 proofs, 464 with a T-id in the text): 10 such ids, all fake (3 credited:
+ * meghana1 8354625127 6745 / 6793, meghana1 6362093851 21538); the longest tail on a genuine credited id was 3 digits.
+ * Random odds of a 6-digit tail: 1 in 10^5. The T-id only: a UTR or any other number is never judged by this.
+ * A fraud reason (processImage fraudReasons, the fake warning), like TXN_ID_NOT_A_DATE.
+ */
+function txnIdSequentialReasons(text) {
+    const m = PHONEPE_T_DIGITS.exec(String(text ?? '').replace(/\s+/g, ' '));
+    if (!m)
+        return [];
+    const d = m[1];
+    let run = 1;
+    for (let i = d.length - 1; i > 0 && run < TXN_ID_ASCENDING_TAIL; i--) {
+        if ((Number(d[i - 1]) + 1) % 10 !== Number(d[i]))
+            break;
+        run += 1;
+    }
+    return run >= TXN_ID_ASCENDING_TAIL ? ['TXN_ID_SEQUENTIAL'] : [];
 }
 /**
  * The screenshot text prints this clock (`hour` 0-23) unambiguously: with an AM/PM that agrees, or in 24 h form
@@ -104263,17 +104497,13 @@ const PLAIN_WORD = /^[a-z][a-z._-]{2,39}$/i;
 /** The next receipt label: the value before it stood alone on its line even when line breaks became single spaces. */
 const NEXT_LABEL = /^(?:from|paid|debited|sent|utr|up[it]|transaction|txn|ref|banking)\b/i;
 /**
- * Rule 9 (owner 2026-10-25, live shruthi2 chat ..8937 "UPI ID: ShrutiGowda" under "Lakshmi Stores"): the vision read no
- * payee UPI id, and the payee half of the text (before the payer label) prints a "UPI ID:" whose value is one plain
- * word alone on its line (a line break, 2+ spaces, the end, or the next label after it), not an id: a payee id that is
+ * Rule 9 (owner 2026-10-25, live shruthi2 chat ..8937 "UPI ID: ShrutiGowda" under "Lakshmi Stores"): the vision read a
+ * payee UPI id that is one plain word (no '@', digit, mask or cut), or it read no payee UPI id and the payee half of
+ * the text (before the payer label) prints a "UPI ID:" whose value is one plain word alone on its line (a line break, 2+ spaces, the end, or the next label after it), not an id: a payee id that is
  * not ours. Not when the next token starts with "@" (an id wrapped by OCR), nor when the word is one of our UPI local
  * parts / a cut of one, or one of our banking names.
  */
 function labelledUpiNotAnId(e, ownUpiIds) {
-    if (e.payeeUpiId)
-        return false;
-    const payerAt = e.text.search(PAYER_LABEL);
-    const payeeHalf = payerAt >= 0 ? e.text.slice(0, payerAt) : e.text;
     // Our local parts, glyph-folded with and without letter pairs (rn/nn -> m ...), so a misread of our own id is ours.
     // Also, like checkPayeeUpi on a whole id, one OCR edit or neighbour swap (6+ characters) of our local part or of its
     // cut, and a lower case "i" read for "l" (folded on both sides): "lakshmstores", "lakshmistroes", "iakshmistores".
@@ -104293,6 +104523,13 @@ function labelledUpiNotAnId(e, ownUpiIds) {
                 || (v.length >= 6 && [v.length - 1, v.length, v.length + 1].some((n) => oneEdit(v, o.slice(0, n)))));
         });
     });
+    const notOurs = (value) => !isOurLocalCut(value) && !showsOurUpiId(value, ownUpiIds) && !hasOurPayeeName(value);
+    // The vision read the payee UPI id itself as a plain word (live nidhi2 1304409071 11261, 2026-11-13: CRED "Girls
+    // Community" over "NITHYAAGOWDA", credited): the same rule 9 value check on the field; the text label is not read then.
+    if (e.payeeUpiId)
+        return PLAIN_WORD.test(e.payeeUpiId) && !e.payeeUpiId.includes('..') && notOurs(e.payeeUpiId);
+    const payerAt = e.text.search(PAYER_LABEL);
+    const payeeHalf = payerAt >= 0 ? e.text.slice(0, payerAt) : e.text;
     for (const m of payeeHalf.matchAll(UPI_ID_VALUE)) {
         const value = m[1];
         if (!PLAIN_WORD.test(value) || value.includes('..'))
@@ -104306,11 +104543,8 @@ function labelledUpiNotAnId(e, ownUpiIds) {
         const alone = next === '' || gap.includes('\n') || gap.length >= 2 || NEXT_LABEL.test(next);
         if (!alone)
             continue;
-        if (isOurLocalCut(value))
-            continue;
-        if (showsOurUpiId(value, ownUpiIds) || hasOurPayeeName(value))
-            continue;
-        return true;
+        if (notOurs(value))
+            return true;
     }
     return false;
 }
