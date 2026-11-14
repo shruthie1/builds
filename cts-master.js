@@ -43149,6 +43149,7 @@ Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.MIN_UTR_LENGTH = exports.RISK = exports.MIN_CLIENT_CREDITS = exports.DEFAULT_REVIEW_OPTIONS = exports.FAKE_REASON_CODES = exports.FAKE_OUTCOMES = exports.FLAGGED_OUTCOMES = exports.REVIEW_FAKE_SCORE = exports.COUNT_STATES = exports.PROOF_STATES = void 0;
 exports.isFakeReason = isFakeReason;
 exports.proofIdOf = proofIdOf;
+exports.moneyCredited = moneyCredited;
 exports.parseProofId = parseProofId;
 exports.deriveLegacyOutcome = deriveLegacyOutcome;
 exports.stampOf = stampOf;
@@ -43182,6 +43183,13 @@ function proofIdOf(row) {
     if (typeof row.proofId === 'string' && row.proofId)
         return row.proofId;
     return `${row.clientId}-${row.chatId}-${row.telegramMsgId}`;
+}
+function moneyCredited(p) {
+    if (p.verdict?.outcome === 'credited')
+        return true;
+    if (p.servedAt)
+        return true;
+    return typeof p.creditAmount === 'number' && p.creditAmount > 0;
 }
 function parseProofId(proofId) {
     if (typeof proofId !== 'string' || proofId.length > 120)
@@ -44786,8 +44794,7 @@ function pgMessage(err) {
     return err.code ? `${err.message} (${err.code})` : err.message;
 }
 function isCredited(p) {
-    const outcome = p.verdict?.outcome;
-    return outcome ? outcome === 'credited' : !!p.servedAt;
+    return (0, payment_proofs_classify_1.moneyCredited)(p);
 }
 function creditOf(p) {
     return (0, uncredit_plan_1.amountOf)(p.creditAmount ?? p.amount);
