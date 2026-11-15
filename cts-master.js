@@ -38890,6 +38890,332 @@ function mapTtfp(rows) {
 
 /***/ },
 
+/***/ "./src/components/monitor/monitor-parked.ts"
+/*!**************************************************!*\
+  !*** ./src/components/monitor/monitor-parked.ts ***!
+  \**************************************************/
+(__unused_webpack_module, exports) {
+
+
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.PARKED_ROW_PROJECTION = exports.PARKED_CHAT_CHUNK = exports.PARKED_GC_DAYS = exports.PARKED_APPS = void 0;
+exports.oidMs = oidMs;
+exports.median = median;
+exports.rowFacts = rowFacts;
+exports.swapIndex = swapIndex;
+exports.swapWithin24h = swapWithin24h;
+exports.buildFacts = buildFacts;
+exports.statsOf = statsOf;
+exports.foldParked = foldParked;
+exports.coverageOf = coverageOf;
+exports.coverageNotes = coverageNotes;
+exports.loadParked = loadParked;
+exports.chatRows = chatRows;
+exports.PARKED_APPS = ['promote', 'tg-aut'];
+const DAY_MS = 86_400_000;
+exports.PARKED_GC_DAYS = 14;
+exports.PARKED_CHAT_CHUNK = 1000;
+const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
+const tsMs = (v) => {
+    const ms = v instanceof Date ? v.getTime() : typeof v === 'string' ? Date.parse(v) : v;
+    return typeof ms === 'number' && Number.isFinite(ms) ? ms : -Infinity;
+};
+const msOrNull = (v) => {
+    if (v === null || v === undefined)
+        return null;
+    const t = tsMs(v);
+    return t === -Infinity ? null : t;
+};
+function oidMs(id) {
+    if (id && typeof id.getTimestamp === 'function')
+        return id.getTimestamp().getTime();
+    const s = typeof id === 'string' ? id : id && typeof id.toHexString === 'function' ? id.toHexString() : null;
+    return s && /^[0-9a-f]{24}$/i.test(s) ? parseInt(s.slice(0, 8), 16) * 1000 : null;
+}
+function median(xs) {
+    if (!xs.length)
+        return null;
+    const s = [...xs].sort((a, b) => a - b);
+    const m = s.length >> 1;
+    return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
+}
+function rowFacts(r, all) {
+    const rep = tsMs(r.repliedAt);
+    const own = all.filter((d) => d.profile === r.persona);
+    const fake = all.some((d) => d.fakePaymentAt !== null && d.fakePaymentAt !== undefined);
+    const newest = (rows) => rows.reduce((best, d) => (best === null || tsMs(d.lastMsgTimeStamp) >= tsMs(best.lastMsgTimeStamp) ? d : best), null);
+    let moved = false;
+    let moveAt = null;
+    if (!r.preExisting) {
+        const created = own
+            .map((d) => ({ d, at: oidMs(d._id) }))
+            .filter((x) => num(x.d.msgCount) > 0 && x.at !== null && x.at > rep)
+            .map((x) => x.at);
+        moved = created.length > 0;
+        if (moved)
+            moveAt = Math.min(...created);
+    }
+    else {
+        const row = newest(own);
+        moved = row !== null && num(row.msgCount) > (r.msgCountAtReply ?? 0);
+        if (moved)
+            moveAt = msOrNull(r.reachedAt);
+    }
+    const landed = 'reachedClientId' in r
+        ? (r.reachedClientId ?? null)
+        : (newest(own.filter((d) => typeof d.clientId === 'string' && d.clientId !== ''))?.clientId ?? null);
+    return { rep, fake, moved, moveAt, landed };
+}
+function swapIndex(events) {
+    const out = new Map();
+    for (const e of events) {
+        const at = msOrNull(e.at);
+        if (!e.clientId || at === null)
+            continue;
+        (out.get(e.clientId) ?? out.set(e.clientId, []).get(e.clientId)).push(at);
+    }
+    for (const xs of out.values())
+        xs.sort((a, b) => a - b);
+    return out;
+}
+function swapWithin24h(swaps, clientId, rep, historyStart, now) {
+    if (historyStart === null || rep < historyStart || rep + DAY_MS > now)
+        return null;
+    return (swaps.get(clientId) ?? []).some((t) => t > rep && t <= rep + DAY_MS);
+}
+function buildFacts(rows, userDataByChat, swaps, historyStart, paid, now) {
+    return rows.map((r, i) => {
+        const f = rowFacts(r, userDataByChat.get(String(r.chatId)) ?? []);
+        return {
+            ...f,
+            clientId: r.clientId,
+            app: r.app,
+            chatId: String(r.chatId),
+            persona: r.persona,
+            preExisting: r.preExisting === true,
+            newFields: 'sentHandle' in r && r.sentHandle !== undefined,
+            paid: paid === null ? null : (paid[i] ?? { paidRs: 0, paidCount: 0 }),
+            swap24: swapWithin24h(swaps, r.clientId, f.rep, historyStart, now),
+        };
+    });
+}
+function emptyStats() {
+    return {
+        replied: 0,
+        moved: 0,
+        newReplied: 0,
+        newMoved: 0,
+        alreadyReplied: 0,
+        alreadyMoved: 0,
+        paidChats: 0,
+        paidRs: 0,
+        fakeChats: 0,
+        medianMoveMin: null,
+        cohortNoSwap24h: { replied: 0, moved: 0 },
+        cohortSwap24h: { replied: 0, moved: 0 },
+        landedOtherClient: 0,
+    };
+}
+function statsOf(facts) {
+    const s = emptyStats();
+    const mins = [];
+    const fakes = new Set();
+    const money = new Map();
+    let moneyKnown = true;
+    for (const f of facts) {
+        s.replied += 1;
+        if (f.moved)
+            s.moved += 1;
+        if (f.preExisting) {
+            s.alreadyReplied += 1;
+            if (f.moved)
+                s.alreadyMoved += 1;
+        }
+        else {
+            s.newReplied += 1;
+            if (f.moved)
+                s.newMoved += 1;
+        }
+        if (f.fake)
+            fakes.add(f.chatId);
+        if (f.moved && f.moveAt !== null)
+            mins.push((f.moveAt - f.rep) / 60_000);
+        if (f.moved && f.landed && f.landed !== f.clientId)
+            s.landedOtherClient += 1;
+        if (f.swap24 !== null) {
+            const c = f.swap24 ? s.cohortSwap24h : s.cohortNoSwap24h;
+            c.replied += 1;
+            if (f.moved)
+                c.moved += 1;
+        }
+        if (f.paid === null)
+            moneyKnown = false;
+        else {
+            const k = `${f.chatId}|${f.persona}`;
+            const prev = money.get(k);
+            if (!prev || f.rep < prev.rep)
+                money.set(k, { rep: f.rep, paid: f.paid });
+        }
+    }
+    s.fakeChats = fakes.size;
+    const m = median(mins);
+    s.medianMoveMin = m === null ? null : Math.round(m);
+    if (!moneyKnown) {
+        s.paidChats = null;
+        s.paidRs = null;
+    }
+    else {
+        const paidChats = new Set();
+        let rs = 0;
+        for (const [k, v] of money) {
+            if (v.paid.paidRs > 0)
+                paidChats.add(k.slice(0, k.lastIndexOf('|')));
+            rs += v.paid.paidRs;
+        }
+        s.paidChats = paidChats.size;
+        s.paidRs = rs;
+    }
+    return s;
+}
+function foldParked(facts, client) {
+    const scoped = client === null ? facts : facts.filter((f) => f.clientId === client);
+    const byApp = {};
+    for (const app of exports.PARKED_APPS)
+        byApp[app] = statsOf(scoped.filter((f) => f.app === app));
+    const groups = new Map();
+    for (const f of scoped) {
+        const k = `${f.app}\u0000${f.clientId}`;
+        (groups.get(k) ?? groups.set(k, []).get(k)).push(f);
+    }
+    const clients = [...groups.entries()]
+        .map(([k, fs]) => {
+        const [app, clientId] = k.split('\u0000');
+        return { clientId, app, ...statsOf(fs) };
+    })
+        .sort((a, b) => b.replied - a.replied || a.clientId.localeCompare(b.clientId) || a.app.localeCompare(b.app));
+    return { totals: statsOf(scoped), byApp, clients };
+}
+function coverageOf(rows, parkedFrom, swapHistoryFrom) {
+    return {
+        parkedFrom: parkedFrom === null ? null : new Date(parkedFrom).toISOString(),
+        swapHistoryFrom: swapHistoryFrom === null ? null : new Date(swapHistoryFrom).toISOString(),
+        withNewFields: rows.filter((r) => 'sentHandle' in r && r.sentHandle !== undefined).length,
+        rows: rows.length,
+    };
+}
+function coverageNotes(c, start, moneyDown) {
+    const notes = [];
+    if (c.parkedFrom && Date.parse(c.parkedFrom) > start) {
+        notes.push(`parkedChats keeps ${exports.PARKED_GC_DAYS} days: replies before ${c.parkedFrom} are gone.`);
+    }
+    if (!c.swapHistoryFrom)
+        notes.push('No became_main history: swap cohorts are empty.');
+    else if (Date.parse(c.swapHistoryFrom) > start)
+        notes.push(`Swap history starts ${c.swapHistoryFrom}: earlier replies stay out of the swap cohorts.`);
+    if (c.rows > c.withNewFields) {
+        notes.push(`${c.rows - c.withNewFields} of ${c.rows} rows predate the 2026-11-15 fields: landing client falls back to the newest userData row.`);
+    }
+    if (moneyDown)
+        notes.push(`Money unavailable (Postgres): ${moneyDown}`);
+    return notes;
+}
+exports.PARKED_ROW_PROJECTION = {
+    _id: 0,
+    clientId: 1,
+    app: 1,
+    chatId: 1,
+    persona: 1,
+    status: 1,
+    repliedAt: 1,
+    preExisting: 1,
+    msgCountAtReply: 1,
+    reachedAt: 1,
+    reachedClientId: 1,
+    sentHandle: 1,
+    sentMainMobile: 1,
+    variant: 1,
+    replyText: 1,
+};
+async function loadParked(io, o) {
+    const [rows, parkedFirst, swapFirst] = await Promise.all([
+        io.find('parkedChats', o.filter, exports.PARKED_ROW_PROJECTION, 'mongo.parkedChats'),
+        o.coverage ? io.first('parkedChats', {}, { gcAt: 1 }, { _id: 0, gcAt: 1 }, 'mongo.parkedChats_from') : null,
+        o.coverage ? io.first('accountRoleEvents', { event: 'became_main' }, { at: 1 }, { _id: 0, at: 1 }, 'mongo.accountRoleEvents_from') : null,
+    ]);
+    const replied = rows.filter((r) => r.status === 'replied' && msOrNull(r.repliedAt) !== null);
+    const chatIds = [...new Set(replied.map((r) => String(r.chatId)))];
+    const clientIds = [...new Set(replied.map((r) => r.clientId))];
+    const ud = new Map();
+    for (let i = 0; i < chatIds.length; i += exports.PARKED_CHAT_CHUNK) {
+        const part = chatIds.slice(i, i + exports.PARKED_CHAT_CHUNK);
+        const docs = await io.find('userData', { chatId: { $in: part } }, { _id: 1, chatId: 1, profile: 1, msgCount: 1, clientId: 1, fakePaymentAt: 1, lastMsgTimeStamp: 1 }, 'mongo.userData_parked');
+        for (const d of docs) {
+            const k = String(d.chatId);
+            (ud.get(k) ?? ud.set(k, []).get(k)).push(d);
+        }
+    }
+    let events = [];
+    if (o.coverage && clientIds.length) {
+        const reps = replied.map((r) => tsMs(r.repliedAt));
+        const lo = new Date(Math.min(...reps));
+        const hi = new Date(Math.max(...reps) + DAY_MS);
+        events = await io.find('accountRoleEvents', { event: 'became_main', clientId: { $in: clientIds }, at: { $gt: lo, $lte: hi } }, { _id: 0, clientId: 1, at: 1 }, 'mongo.accountRoleEvents_parked');
+    }
+    let paid = [];
+    let moneyDown = null;
+    if (replied.length) {
+        try {
+            const pgRows = await io.pg(o.paidSql(replied.map((r) => ({ chatId: String(r.chatId), persona: r.persona, repliedAt: tsMs(r.repliedAt) })), o.until));
+            paid = [];
+            for (const p of pgRows)
+                paid[Number(p.i) - 1] = { paidRs: Number(p.paid_rs) || 0, paidCount: Number(p.paid_count) || 0 };
+        }
+        catch (err) {
+            paid = null;
+            moneyDown = String(err?.message ?? err).slice(0, 200);
+        }
+    }
+    const historyStart = o.coverage ? msOrNull(swapFirst?.at) : null;
+    const gc = msOrNull(parkedFirst?.gcAt);
+    return {
+        all: rows,
+        rows: replied,
+        facts: buildFacts(replied, ud, swapIndex(events), historyStart, paid, o.now),
+        coverage: o.coverage ? { parkedFrom: gc === null ? null : gc - exports.PARKED_GC_DAYS * DAY_MS, swapHistoryFrom: historyStart } : null,
+        moneyDown,
+    };
+}
+function chatRows(loaded) {
+    const rows = loaded.all;
+    const byRow = new Map();
+    loaded.rows.forEach((r, i) => byRow.set(r, loaded.facts[i]));
+    return rows
+        .map((r) => {
+        const f = byRow.get(r);
+        return {
+            clientId: r.clientId,
+            app: r.app,
+            persona: r.persona,
+            status: r.status ?? null,
+            repliedAt: r.repliedAt ? new Date(r.repliedAt).toISOString() : null,
+            ...(r.variant !== undefined ? { variant: r.variant } : {}),
+            ...(r.sentHandle !== undefined ? { sentHandle: r.sentHandle } : {}),
+            ...(r.replyText !== undefined ? { replyText: r.replyText } : {}),
+            preExisting: r.preExisting === true,
+            moved: f ? f.moved : false,
+            moveAt: f && f.moveAt !== null ? new Date(f.moveAt).toISOString() : null,
+            landedClientId: f ? f.landed : null,
+            paidRs: f ? (f.paid ? f.paid.paidRs : null) : 0,
+            paidCount: f ? (f.paid ? f.paid.paidCount : null) : 0,
+            fake: f ? f.fake : false,
+        };
+    })
+        .sort((a, b) => (b.repliedAt ?? '').localeCompare(a.repliedAt ?? ''));
+}
+
+
+/***/ },
+
 /***/ "./src/components/monitor/monitor-promotions.ts"
 /*!******************************************************!*\
   !*** ./src/components/monitor/monitor-promotions.ts ***!
@@ -39755,6 +40081,7 @@ exports.paidOriginSql = paidOriginSql;
 exports.restMobilesSql = restMobilesSql;
 exports.deadChannelsSql = deadChannelsSql;
 exports.attributionDailySql = attributionDailySql;
+exports.parkedPaidSql = parkedPaidSql;
 const IST = `(ts AT TIME ZONE 'Asia/Kolkata')`;
 const iso = (ms) => new Date(ms).toISOString();
 function q(name, sql, params) {
@@ -40014,6 +40341,13 @@ FROM k
 LEFT JOIN nu ON nu.d = k.d AND nu.client_id IS NOT DISTINCT FROM k.client_id
 LEFT JOIN dm ON dm.d = k.d AND dm.client_id IS NOT DISTINCT FROM k.client_id
 LEFT JOIN rev ON rev.d = k.d AND rev.client_id IS NOT DISTINCT FROM k.client_id`, [from, to, iso(fromMs), iso(endMs), lookbackDays]);
+}
+function parkedPaidSql(rows, until) {
+    return q('parked_paid', `SELECT r.i, sum(p.owner_amount)::bigint AS paid_rs, count(*)::int AS paid_count
+FROM unnest($1::text[], $2::text[], $3::timestamptz[]) WITH ORDINALITY AS r(chat_id, persona, replied_at, i)
+JOIN payment_event_owner p ON p.chat_id = r.chat_id AND p.persona_id = r.persona
+WHERE p.ts > r.replied_at AND p.ts < $4::timestamptz AND p.amount > 0 AND p.amount < 1000
+GROUP BY r.i`, [rows.map((r) => r.chatId), rows.map((r) => r.persona), rows.map((r) => iso(r.repliedAt)), iso(until)]);
 }
 
 
@@ -40276,6 +40610,7 @@ const monitor_reactions_1 = __webpack_require__(/*! ./monitor-reactions */ "./sr
 const monitor_util_1 = __webpack_require__(/*! ./monitor-util */ "./src/components/monitor/monitor-util.ts");
 const monitor_service_1 = __webpack_require__(/*! ./monitor.service */ "./src/components/monitor/monitor.service.ts");
 const CLIENT_ID_RE = /^[A-Za-z0-9_-]{1,40}$/;
+const CHAT_ID_RE = /^-?\d{1,20}$/;
 function parsePeriod(period) {
     if (period === undefined || period === '')
         return 'today';
@@ -40416,6 +40751,16 @@ let MonitorController = class MonitorController {
         const c = parseOptionalClientId(client);
         return r ? this.service.funnelRange(r, c) : this.service.funnel(parsePeriod(period), c);
     }
+    parked(from, to, client) {
+        const now = Date.now();
+        const r = parseRange(from, to, now) ?? { from: (0, monitor_time_1.istDate)(now), to: (0, monitor_time_1.istDate)(now) };
+        return this.service.parked(r, parseOptionalClientId(client));
+    }
+    parkedChat(chatId) {
+        if (!CHAT_ID_RE.test(chatId ?? ''))
+            throw new common_1.BadRequestException('invalid chatId');
+        return this.service.parkedChat(chatId);
+    }
     async client(clientId, days, from, to) {
         if (!CLIENT_ID_RE.test(clientId ?? ''))
             throw new common_1.BadRequestException('invalid clientId');
@@ -40530,6 +40875,26 @@ __decorate([
     __metadata("design:returntype", void 0)
 ], MonitorController.prototype, "funnel", null);
 __decorate([
+    (0, common_1.Get)('parked'),
+    (0, swagger_1.ApiQuery)({ name: 'from', required: false, description: 'IST YYYY-MM-DD (default today)' }),
+    (0, swagger_1.ApiQuery)({ name: 'to', required: false, description: 'IST YYYY-MM-DD inclusive (default = from)' }),
+    (0, swagger_1.ApiQuery)({ name: 'client', required: false }),
+    __param(0, (0, common_1.Query)('from')),
+    __param(1, (0, common_1.Query)('to')),
+    __param(2, (0, common_1.Query)('client')),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [String, String, String]),
+    __metadata("design:returntype", void 0)
+], MonitorController.prototype, "parked", null);
+__decorate([
+    (0, common_1.Get)('parked/chat/:chatId'),
+    (0, swagger_1.ApiParam)({ name: 'chatId' }),
+    __param(0, (0, common_1.Param)('chatId')),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [String]),
+    __metadata("design:returntype", void 0)
+], MonitorController.prototype, "parkedChat", null);
+__decorate([
     (0, common_1.Get)('client/:clientId'),
     (0, swagger_1.ApiParam)({ name: 'clientId' }),
     (0, swagger_1.ApiQuery)({ name: 'days', required: false, enum: ['7', '30'] }),
@@ -40631,7 +40996,7 @@ var __param = (this && this.__param) || function (paramIndex, decorator) {
 };
 var MonitorService_1;
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.MonitorService = exports.UNASSIGNED_POOL_KEY = exports.FLEET_DETAIL_ID = exports.PAID_IDS_TTL_MS = exports.PAID_SEARCH_MAX_Q = exports.PAID_SEARCH_MIN_Q = exports.PAID_SEARCH_MAX_LIMIT = exports.PAID_SEARCH_LIMIT = exports.PAID_ENRICH_MAX = exports.PAID_HIST_KEYS = exports.RANGE_ONLY_NOTE_PREFIX = exports.RANGE_ONLY_FIELDS = exports.RANGE_PAGE_RE = exports.RANGE_CLOSED_FRESH_MS = exports.PROMO_DAYS_HISTORY = exports.LIVE_SVCS = exports.HEARTBEAT_INDEX_KEY = exports.CLIENT_TTL_MS = exports.FLEET_TTL_MS = exports.PREWARM_PAGES = exports.MIDNIGHT_PREWARM_AFTER_MS = exports.PREWARM_DELAY_MS = exports.SNAPSHOT_TTL_SEC = exports.SNAPSHOT_KEY_PREFIX = exports.PART_REFRESH_AHEAD_MS = exports.SNAPSHOT_WARM_MAX_KEYS = exports.SNAPSHOT_WARM_IGNORE_GAP_MS = exports.SNAPSHOT_WARM_MAX_INTERVAL_MS = exports.SNAPSHOT_WARM_MIN_INTERVAL_MS = exports.SNAPSHOT_WARM_DEFAULT_INTERVAL_MS = exports.SNAPSHOT_WARM_MARGIN_MS = exports.SNAPSHOT_WARM_LEAD_MS = exports.SNAPSHOT_MAX_SERVE_STALE_MS = exports.SNAPSHOT_FRESH_MS = exports.RESTRICTED_FRESH_MS = exports.LIVE_TTL_MS = exports.CHANNEL_CANDIDATES = exports.HISTORY_DAYS = exports.POOL_FRESH_MS = exports.HISTORY_FRESH_MS = exports.TODAY_MAX_STALE_MS = exports.TODAY_FRESH_MS = exports.LIVE_REDIS_DEADLINE_MS = exports.MONGO_TIMEOUT_MS = exports.PG_TIMEOUT_MS = exports.MONITOR_REDIS = void 0;
+exports.MonitorService = exports.UNASSIGNED_POOL_KEY = exports.FLEET_DETAIL_ID = exports.PAID_IDS_TTL_MS = exports.PAID_SEARCH_MAX_Q = exports.PAID_SEARCH_MIN_Q = exports.PAID_SEARCH_MAX_LIMIT = exports.PAID_SEARCH_LIMIT = exports.PAID_ENRICH_MAX = exports.PAID_HIST_KEYS = exports.RANGE_ONLY_NOTE_PREFIX = exports.RANGE_ONLY_FIELDS = exports.RANGE_PAGE_RE = exports.RANGE_CLOSED_FRESH_MS = exports.PROMO_DAYS_HISTORY = exports.LIVE_SVCS = exports.HEARTBEAT_INDEX_KEY = exports.CLIENT_TTL_MS = exports.FLEET_TTL_MS = exports.PREWARM_PAGES = exports.MIDNIGHT_PREWARM_AFTER_MS = exports.PREWARM_DELAY_MS = exports.SNAPSHOT_TTL_SEC = exports.SNAPSHOT_KEY_PREFIX = exports.PART_REFRESH_AHEAD_MS = exports.SNAPSHOT_WARM_MAX_KEYS = exports.SNAPSHOT_WARM_IGNORE_GAP_MS = exports.SNAPSHOT_WARM_MAX_INTERVAL_MS = exports.SNAPSHOT_WARM_MIN_INTERVAL_MS = exports.SNAPSHOT_WARM_DEFAULT_INTERVAL_MS = exports.SNAPSHOT_WARM_MARGIN_MS = exports.SNAPSHOT_WARM_LEAD_MS = exports.SNAPSHOT_MAX_SERVE_STALE_MS = exports.SNAPSHOT_FRESH_MS = exports.PARKED_CHAT_PG_TIMEOUT_MS = exports.PARKED_CHAT_TTL_MS = exports.RESTRICTED_FRESH_MS = exports.LIVE_TTL_MS = exports.CHANNEL_CANDIDATES = exports.HISTORY_DAYS = exports.POOL_FRESH_MS = exports.HISTORY_FRESH_MS = exports.TODAY_MAX_STALE_MS = exports.TODAY_FRESH_MS = exports.LIVE_REDIS_DEADLINE_MS = exports.MONGO_TIMEOUT_MS = exports.PG_TIMEOUT_MS = exports.MONITOR_REDIS = void 0;
 exports.rangeOfPage = rangeOfPage;
 exports.legacyOf = legacyOf;
 exports.fleetSummaryRow = fleetSummaryRow;
@@ -40650,6 +41015,7 @@ const monitor_promotions_1 = __webpack_require__(/*! ./monitor-promotions */ "./
 const monitor_reactions_1 = __webpack_require__(/*! ./monitor-reactions */ "./src/components/monitor/monitor-reactions.ts");
 const monitor_mongo_1 = __webpack_require__(/*! ./monitor-mongo */ "./src/components/monitor/monitor-mongo.ts");
 const monitor_sql_1 = __webpack_require__(/*! ./monitor-sql */ "./src/components/monitor/monitor-sql.ts");
+const monitor_parked_1 = __webpack_require__(/*! ./monitor-parked */ "./src/components/monitor/monitor-parked.ts");
 const monitor_time_1 = __webpack_require__(/*! ./monitor-time */ "./src/components/monitor/monitor-time.ts");
 const monitor_history_1 = __webpack_require__(/*! ./monitor-history */ "./src/components/monitor/monitor-history.ts");
 const monitor_enrich_1 = __webpack_require__(/*! ./monitor-enrich */ "./src/components/monitor/monitor-enrich.ts");
@@ -40666,6 +41032,8 @@ exports.HISTORY_DAYS = 60;
 exports.CHANNEL_CANDIDATES = 40;
 exports.LIVE_TTL_MS = 5_000;
 exports.RESTRICTED_FRESH_MS = 60 * 60_000;
+exports.PARKED_CHAT_TTL_MS = 30_000;
+exports.PARKED_CHAT_PG_TIMEOUT_MS = 3_000;
 exports.SNAPSHOT_FRESH_MS = exports.TODAY_FRESH_MS;
 exports.SNAPSHOT_MAX_SERVE_STALE_MS = 120_000;
 exports.SNAPSHOT_WARM_LEAD_MS = 15_000;
@@ -40881,6 +41249,10 @@ let MonitorService = MonitorService_1 = class MonitorService {
         this.prewarming = null;
         this.pgGate = new monitor_cache_1.ConcurrencyGate(2, 1);
         this.restrictedCache = new monitor_cache_1.SwrCache({ freshMs: exports.RESTRICTED_FRESH_MS, maxKeys: 2 });
+        this.parkedTodayCache = new monitor_cache_1.SwrCache({ freshMs: exports.TODAY_FRESH_MS, maxStaleMs: exports.TODAY_MAX_STALE_MS, maxKeys: 10 });
+        this.parkedClosedCache = new monitor_cache_1.SwrCache({ freshMs: exports.HISTORY_FRESH_MS, maxKeys: 20 });
+        this.parkedChatCache = new monitor_cache_1.TtlCache(exports.PARKED_CHAT_TTL_MS, 200);
+        this.parkedChatPgTimeoutMs = exports.PARKED_CHAT_PG_TIMEOUT_MS;
         this.poolHealthShadow = null;
         const store = typeof redis?.get === 'function' && typeof redis?.set === 'function'
             ? { get: (k) => redis.get(k), set: (k, v, mode, ttl) => redis.set(k, v, mode, ttl) }
@@ -42756,6 +43128,90 @@ let MonitorService = MonitorService_1 = class MonitorService {
         });
         entries.sort((a, b) => a.svc.localeCompare(b.svc) || a.clientId.localeCompare(b.clientId));
         return { entries, notes: ctx.notes };
+    }
+    parkedIO(timings, background, pgTimeoutMs) {
+        return {
+            find: (coll, filter, projection, name) => this.mongoFind(coll, filter, projection, name, timings),
+            first: async (coll, filter, sort, projection, name) => {
+                const t = Date.now();
+                try {
+                    const cursor = this.connection
+                        .collection(coll)
+                        .find(filter, { projection, maxTimeMS: monitor_mongo_1.MONGO_MAX_TIME_MS, readPreference: 'secondaryPreferred' })
+                        .sort(sort)
+                        .limit(1);
+                    const docs = (await (0, monitor_util_1.withTimeout)(cursor.toArray(), exports.MONGO_TIMEOUT_MS, name));
+                    return docs[0] ?? null;
+                }
+                finally {
+                    timings[name] = Date.now() - t;
+                }
+            },
+            pg: (q) => (pgTimeoutMs === undefined ? this.pgRows(q, timings, background) : (0, monitor_util_1.withTimeout)(this.pgRows(q, timings, background), pgTimeoutMs, q.name)),
+        };
+    }
+    async parked(r, clientId) {
+        const now = Date.now();
+        const today = (0, monitor_time_1.istDate)(now);
+        const start = (0, monitor_time_1.istDayStart)(r.from);
+        const end = Math.min((0, monitor_time_1.istDayStart)((0, monitor_time_1.addDays)(r.to, 1)), now);
+        const live = r.to >= today;
+        let loaded;
+        try {
+            const res = await (live ? this.parkedTodayCache : this.parkedClosedCache).get(`${r.from}:${r.to}`, async (background) => {
+                const asOf = Date.now();
+                const timings = {};
+                const value = await (0, monitor_parked_1.loadParked)(this.parkedIO(timings, background), {
+                    filter: { status: 'replied', repliedAt: { $gte: new Date(start), $lt: new Date(end) } },
+                    until: asOf,
+                    now: asOf,
+                    paidSql: monitor_sql_1.parkedPaidSql,
+                    coverage: true,
+                });
+                if (value.moneyDown)
+                    this.logger.warn(`monitor parked money failed: ${value.moneyDown}`);
+                return { value, asOf, timings };
+            }, live ? (0, monitor_time_1.istDayStart)((0, monitor_time_1.addDays)(today, 1)) : Number.POSITIVE_INFINITY);
+            loaded = res.value;
+        }
+        catch (err) {
+            const msg = String(err?.message ?? err).slice(0, 200);
+            this.logger.warn(`monitor parked ${r.from}..${r.to} failed: ${msg}`);
+            throw new common_1.ServiceUnavailableException(`parked unavailable: ${msg}`);
+        }
+        const v = loaded.value;
+        const scoped = clientId === null ? v.rows : v.rows.filter((x) => x.clientId === clientId);
+        const coverage = (0, monitor_parked_1.coverageOf)(scoped, v.coverage?.parkedFrom ?? null, v.coverage?.swapHistoryFrom ?? null);
+        return {
+            from: r.from,
+            to: r.to,
+            tz: 'Asia/Kolkata',
+            asOf: loaded.asOf,
+            clientId,
+            coverage,
+            ...(0, monitor_parked_1.foldParked)(v.facts, clientId),
+            notes: (0, monitor_parked_1.coverageNotes)(coverage, start, v.moneyDown),
+        };
+    }
+    async parkedChat(chatId) {
+        try {
+            const hit = await this.parkedChatCache.get(chatId, async () => {
+                const asOf = Date.now();
+                const v = await (0, monitor_parked_1.loadParked)(this.parkedIO({}, true, this.parkedChatPgTimeoutMs), {
+                    filter: { chatId },
+                    until: asOf,
+                    now: asOf,
+                    paidSql: monitor_sql_1.parkedPaidSql,
+                    coverage: false,
+                });
+                return { chatId, asOf, rows: (0, monitor_parked_1.chatRows)(v), notes: v.moneyDown ? [`Money unavailable (Postgres): ${v.moneyDown}`] : [] };
+            });
+            return hit.value;
+        }
+        catch (err) {
+            const msg = String(err?.message ?? err).slice(0, 200);
+            throw new common_1.ServiceUnavailableException(`parked chat unavailable: ${msg}`);
+        }
     }
 };
 exports.MonitorService = MonitorService;
