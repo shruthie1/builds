@@ -31483,6 +31483,13 @@ class ParkedChatsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_0_
             set.sentMessageId = outcome.sentMessageId;
         if (outcome.variant !== undefined)
             set.variant = outcome.variant;
+        if (outcome.sentHandle !== undefined)
+            set.sentHandle = outcome.sentHandle;
+        if (outcome.sentMainMobile !== undefined)
+            set.sentMainMobile = outcome.sentMainMobile;
+        // Bounded: the three templates render to < 300 chars; a longer text is cut, never dropped.
+        if (outcome.replyText !== undefined)
+            set.replyText = outcome.replyText.slice(0, 1000);
         return this.guard(`markReplied(${_id})`, false, async () => (await this.collection.updateOne({ _id, status: 'claimed' }, { $set: set })).modifiedCount === 1);
     }
     async markFailed(episodeId, chatId, error) {
@@ -31549,7 +31556,7 @@ class ParkedChatsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_0_
         if (!persona || ids.length === 0)
             return out;
         const docs = await this.guardStrict(`readUserDataCounts(${persona})`, () => this.connection.collection('userData')
-            .find({ chatId: { $in: ids }, $or: [{ profile: persona }, { fakePaymentAt: { $ne: null } }] }, { projection: { chatId: 1, profile: 1, msgCount: 1, canReply: 1, payAmount: 1, lastMsgTimeStamp: 1, limitTime: 1, fakePaymentAt: 1, totalCount: 1 }, maxTimeMS: 5000 })
+            .find({ chatId: { $in: ids }, $or: [{ profile: persona }, { fakePaymentAt: { $ne: null } }] }, { projection: { chatId: 1, profile: 1, msgCount: 1, canReply: 1, payAmount: 1, lastMsgTimeStamp: 1, limitTime: 1, fakePaymentAt: 1, totalCount: 1, clientId: 1 }, maxTimeMS: 5000 })
             .toArray());
         const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : undefined);
         // P4 verification fix 5: lastMsgTimeStamp / limitTime may be stored as BSON dates: read them as ms, not unknown.
@@ -31577,6 +31584,10 @@ class ParkedChatsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_0_
             if (pay > 0)
                 row.payAmount = pay;
             const last = ms(doc.lastMsgTimeStamp);
+            // Follow-through 2026-11-15: the landing client is the clientId of the newest persona row.
+            const rowClient = typeof doc.clientId === 'string' && doc.clientId ? doc.clientId : undefined;
+            if (rowClient && (row.clientId === undefined || (last ?? -Infinity) >= (prev?.lastMsgTimeStamp ?? -Infinity)))
+                row.clientId = rowClient;
             if (last !== undefined)
                 row.lastMsgTimeStamp = Math.max(prev?.lastMsgTimeStamp ?? last, last);
             const limit = ms(doc.limitTime);
@@ -31590,10 +31601,30 @@ class ParkedChatsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_0_
         }
         return out;
     }
-    async markReached(ids, at) {
+    /**
+     * Sets reachedAt once. With `landed` (follow-through 2026-11-15) each row also gets reachedClientId in the same
+     * write: one updateMany per distinct landing client (one or two per reconcile run). Rows not in `landed` get
+     * reachedAt only, as before.
+     */
+    async markReached(ids, at, landed) {
         if (ids.length === 0)
             return 0;
-        return this.guard('markReached', 0, async () => (await this.collection.updateMany({ _id: { $in: ids }, status: 'replied', reachedAt: null }, { $set: { reachedAt: at } })).modifiedCount);
+        const groups = new Map();
+        for (const id of ids) {
+            const has = landed?.has(id) === true;
+            const client = has ? (landed.get(id) ?? null) : undefined;
+            const key = has ? `c:${client ?? ''}` : 'none';
+            const g = groups.get(key) ?? { set: has ? { reachedAt: at, reachedClientId: client } : { reachedAt: at }, ids: [] };
+            g.ids.push(id);
+            groups.set(key, g);
+        }
+        // Each group is guarded on its own: a failing group counts 0 and is logged, and the return value is the rows
+        // actually written (the reconciler compares it with what it asked for before counting parked_reached).
+        let n = 0;
+        for (const g of groups.values()) {
+            n += await this.guard('markReached', 0, async () => (await this.collection.updateMany({ _id: { $in: g.ids }, status: 'replied', reachedAt: null }, { $set: g.set })).modifiedCount);
+        }
+        return n;
     }
     async get(episodeId, chatId) {
         const _id = parkedChatId(episodeId, chatId);
@@ -37911,13 +37942,17 @@ async function reconcileReached(deps) {
     const report = { checked: rows.length, reached: 0, reachedWithin24h: 0, reachedPreExisting: 0 };
     let preExisting = 0;
     const reachedIds = [];
+    /** Follow-through data (2026-11-15): userData.clientId the user was found on, per reached row. */
+    const landed = new Map();
     const within24hByMobile = new Map();
     for (const [persona, list] of byPersona) {
         const counts = await deps.chats.readUserDataCounts(persona, [...new Set(list.map((r) => r.chatId))]);
         for (const row of list) {
-            if (!isReached(row, counts.get(row.chatId)))
+            const current = counts.get(row.chatId);
+            if (!isReached(row, current))
                 continue;
             reachedIds.push(row._id);
+            landed.set(row._id, typeof current?.clientId === 'string' && current.clientId ? current.clientId : null);
             if (row.preExisting) {
                 preExisting += 1;
                 continue;
@@ -37929,7 +37964,7 @@ async function reconcileReached(deps) {
     }
     if (reachedIds.length === 0)
         return report;
-    report.reached = await deps.chats.markReached(reachedIds, new Date(nowMs));
+    report.reached = await deps.chats.markReached(reachedIds, new Date(nowMs), landed);
     // Count only when this process wrote the rows (another runner may have marked them first).
     if (report.reached === reachedIds.length) {
         report.reachedPreExisting = preExisting;
@@ -38284,9 +38319,11 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   openParkedSession: () => (/* reexport safe */ _session_parked_session__WEBPACK_IMPORTED_MODULE_6__.openParkedSession),
 /* harmony export */   parkedCaps: () => (/* reexport safe */ _reply_pacing__WEBPACK_IMPORTED_MODULE_11__.parkedCaps),
 /* harmony export */   pickTemplate: () => (/* reexport safe */ _reply_templates__WEBPACK_IMPORTED_MODULE_9__.pickTemplate),
+/* harmony export */   pickTemplateIndex: () => (/* reexport safe */ _reply_templates__WEBPACK_IMPORTED_MODULE_9__.pickTemplateIndex),
 /* harmony export */   preFetchSkip: () => (/* reexport safe */ _scan_scanner__WEBPACK_IMPORTED_MODULE_13__.preFetchSkip),
 /* harmony export */   reconcileReached: () => (/* reexport safe */ _attribution_reconciler__WEBPACK_IMPORTED_MODULE_20__.reconcileReached),
 /* harmony export */   renderParkedReply: () => (/* reexport safe */ _reply_templates__WEBPACK_IMPORTED_MODULE_9__.renderParkedReply),
+/* harmony export */   renderParkedReplyDetailed: () => (/* reexport safe */ _reply_templates__WEBPACK_IMPORTED_MODULE_9__.renderParkedReplyDetailed),
 /* harmony export */   renderSpintax: () => (/* reexport safe */ _reply_templates__WEBPACK_IMPORTED_MODULE_9__.renderSpintax),
 /* harmony export */   resolveParkedTuning: () => (/* reexport safe */ _run_tuning__WEBPACK_IMPORTED_MODULE_23__.resolveParkedTuning),
 /* harmony export */   resolvingParkedStores: () => (/* reexport safe */ _run_resolving_stores__WEBPACK_IMPORTED_MODULE_22__.resolvingParkedStores),
@@ -38779,7 +38816,9 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   PARKED_REPLY_TEMPLATES: () => (/* binding */ PARKED_REPLY_TEMPLATES),
 /* harmony export */   pickTemplate: () => (/* binding */ pickTemplate),
+/* harmony export */   pickTemplateIndex: () => (/* binding */ pickTemplateIndex),
 /* harmony export */   renderParkedReply: () => (/* binding */ renderParkedReply),
+/* harmony export */   renderParkedReplyDetailed: () => (/* binding */ renderParkedReplyDetailed),
 /* harmony export */   renderSpintax: () => (/* binding */ renderSpintax)
 /* harmony export */ });
 /**
@@ -38791,9 +38830,12 @@ const PARKED_REPLY_TEMPLATES = [
     "Msg me here {Dear|Baby|Babe}!! {😍|🔥|💕|😘|❤️|🥰}👇:\n\n\nhttps://t.me/{USERNAME} {😘|💖|🔥|💕}",
     "I am waiting for you {Baby|Dear|Babe} {😍|🔥|💕|😘|❤️|🥰|💖}!!\n\n                  👇👇👇👇\n\n\n**@{USERNAME} @{USERNAME} {😍|🔥}\n@{USERNAME} @{USERNAME} {💕|😘}**",
 ];
+/** Index into PARKED_REPLY_TEMPLATES for one random draw. */
+function pickTemplateIndex(random) {
+    return Math.min(PARKED_REPLY_TEMPLATES.length - 1, Math.max(0, Math.floor(random * PARKED_REPLY_TEMPLATES.length)));
+}
 function pickTemplate(random) {
-    const index = Math.min(PARKED_REPLY_TEMPLATES.length - 1, Math.max(0, Math.floor(random * PARKED_REPLY_TEMPLATES.length)));
-    return PARKED_REPLY_TEMPLATES[index];
+    return PARKED_REPLY_TEMPLATES[pickTemplateIndex(random)];
 }
 /** USERNAME first, then each `{a|b|c}` group picks floor(random() × n). */
 function renderSpintax(template, handle, random) {
@@ -38803,8 +38845,16 @@ function renderSpintax(template, handle, random) {
         return choices[Math.floor(random() * choices.length)];
     });
 }
+/**
+ * The reply text plus the template it came from (follow-through data, 2026-11-15: parkedChats.variant = `t<templateId>`).
+ * Same random draws, in the same order, as renderParkedReply.
+ */
+function renderParkedReplyDetailed(handle, random) {
+    const templateId = pickTemplateIndex(random());
+    return { text: renderSpintax(PARKED_REPLY_TEMPLATES[templateId], handle, random), templateId };
+}
 function renderParkedReply(handle, random) {
-    return renderSpintax(pickTemplate(random()), handle, random);
+    return renderParkedReplyDetailed(handle, random).text;
 }
 
 
@@ -39000,13 +39050,17 @@ async function replyTo(ctx, chat, route) {
         await skip(ctx, chat, decision.reason, inboundAt);
         return (0,_reply_reply_policy__WEBPACK_IMPORTED_MODULE_6__.endsChatLoop)(decision.reason) ? 'stop_loop' : 'next';
     }
-    const handle = await io(ctx, deps.adapter.mainHandle(), 'mainHandle');
+    // Follow-through data (2026-11-15): handle and main mobile from one read when the adapter offers it.
+    const main = deps.adapter.mainAccount
+        ? await io(ctx, deps.adapter.mainAccount(), 'mainAccount')
+        : { handle: await io(ctx, deps.adapter.mainHandle(), 'mainHandle'), mobile: null };
+    const handle = main.handle;
     if (!(0,_reply_copy_guard__WEBPACK_IMPORTED_MODULE_4__.isValidHandle)(handle) || deps.rejectHandle?.(handle) === true) {
         (0,_pass_context__WEBPACK_IMPORTED_MODULE_12__.countSkip)(result, 'no_handle');
         deps.logger.warn(`[parked] no valid main handle for ${ep.clientId}; nothing sent from ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_10__.maskMobile)(ep.mobile)}`);
         return 'stop_loop';
     }
-    const text = (0,_reply_templates__WEBPACK_IMPORTED_MODULE_7__.renderParkedReply)(handle, deps.random);
+    const { text, templateId } = (0,_reply_templates__WEBPACK_IMPORTED_MODULE_7__.renderParkedReplyDetailed)(handle, deps.random);
     if (!(0,_reply_copy_guard__WEBPACK_IMPORTED_MODULE_4__.isPlainCopy)(text)) {
         deps.logger.error(`[parked] reply text failed the copy guard; not sent (${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_10__.maskMobile)(ep.mobile)})`);
         return 'stop_loop';
@@ -39061,7 +39115,15 @@ async function replyTo(ctx, chat, route) {
     ctx.sentThisPass += 1;
     ctx.sentToday += 1;
     await rpc(ctx, ctx.dialogs.markAsRead(chat.id), 'markAsRead').catch((error) => deps.logger.warn(`[parked] markAsRead failed for ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_10__.maskMobile)(ep.mobile)}: ${(0,_pass_context__WEBPACK_IMPORTED_MODULE_12__.describeError)(error)}`));
-    await io(ctx, deps.stores.chats.markReplied(ep._id, chat.id, { sentMessageId: sent?.id, msgCountAtReply: row?.msgCount ?? 0, preExisting: row !== undefined }, now), 'markReplied');
+    await io(ctx, deps.stores.chats.markReplied(ep._id, chat.id, {
+        sentMessageId: sent?.id,
+        msgCountAtReply: row?.msgCount ?? 0,
+        preExisting: row !== undefined,
+        variant: `t${templateId}`,
+        sentHandle: handle,
+        sentMainMobile: main.mobile ?? null,
+        replyText: text,
+    }, now), 'markReplied');
     if (deps.adapter.recordSent) {
         await io(ctx, deps.adapter.recordSent(ep.mobile, chat.id, now.getTime()), 'recordSent').catch((error) => {
             if (ctx.guard?.tripped)
@@ -40147,7 +40209,7 @@ function resolvingParkedStores(resolve) {
         memoSkip: (key, reason, now) => soft(false, (s) => s.chats.memoSkip(key, reason, now)),
         findDecisions: (episodeId, chatIds) => strict((s) => s.chats.findDecisions(episodeId, chatIds)),
         findUnreached: (clientId, since, limit, app) => soft([], (s) => s.chats.findUnreached(clientId, since, limit, app)),
-        markReached: (ids, at) => soft(0, (s) => s.chats.markReached(ids, at)),
+        markReached: (ids, at, landed) => soft(0, (s) => s.chats.markReached(ids, at, landed)),
         readUserDataCounts: (persona, chatIds) => strict((s) => s.chats.readUserDataCounts(persona, chatIds)),
     };
     const leases = {
@@ -46036,6 +46098,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   createPromoteParkedAdapter: () => (/* binding */ createPromoteParkedAdapter),
 /* harmony export */   onPromotePermanentError: () => (/* binding */ onPromotePermanentError),
 /* harmony export */   parseScoredSends: () => (/* binding */ parseScoredSends),
+/* harmony export */   promoteMainAccount: () => (/* binding */ promoteMainAccount),
 /* harmony export */   promoteMainHandle: () => (/* binding */ promoteMainHandle)
 /* harmony export */ });
 /* harmony import */ var _data_user_data_crud__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../data/user-data-crud */ "./src/data/user-data-crud.ts");
@@ -46068,19 +46131,28 @@ const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_3__.Logger('pa
  * null when it is missing, blank or the read fails: the caller must not send (review S7, P-7).
  */
 async function promoteMainHandle(mobile = '') {
+    return (await promoteMainAccount(mobile)).handle;
+}
+/**
+ * clients.username and clients.mobile of this client from one read (follow-through 2026-11-15: parkedChats stores
+ * both with each reply). handle null when missing or unreadable; mobile null when absent.
+ */
+async function promoteMainAccount(mobile = '') {
     try {
         const clientData = await _data_user_data_crud__WEBPACK_IMPORTED_MODULE_0__.UserDataDtoCrud.getInstance().getClient(process.env.clientId);
         // Leading '@' stripped, as normalizeHandle does (telegram-manager.ts), so the template never shows '@@x'.
         const username = typeof clientData?.username === 'string' ? clientData.username.trim().replace(/^@+/, '').trim() : '';
+        // Canonical form, as tg-aut's readClientSwap stores it (no '+'), so sentMainMobile compares across apps.
+        const mainMobile = (0,_tg_core_account_lease_mobile__WEBPACK_IMPORTED_MODULE_5__.canonicalMobile)(clientData?.mobile) || null;
         if (!username) {
             logger.warn(`⚠️ No clients.username for ${process.env.clientId}; not replying${mobile ? ` from ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_7__.maskMobile)(mobile)}` : ''}`);
-            return null;
+            return { handle: null, mobile: mainMobile };
         }
-        return username;
+        return { handle: username, mobile: mainMobile };
     }
     catch (error) {
         logger.warn(`⚠️ Could not get username from DB${mobile ? ` for ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_7__.maskMobile)(mobile)}` : ''}; not replying`, error instanceof Error ? error.message : String(error));
-        return null;
+        return { handle: null, mobile: null };
     }
 }
 /** Today's permanent-error write: the promoteClients doc goes inactive with the parsed message. */
@@ -46203,7 +46275,8 @@ function createPromoteParkedAdapter(deps) {
             const own = rows.promote.find((r) => r.clientId === clientId && r.status === 'active');
             return own && own.session ? own.session : null;
         },
-        mainHandle: () => deps.mainHandle(),
+        mainHandle: async () => (deps.mainAccount ? (await deps.mainAccount()).handle : deps.mainHandle()),
+        ...(deps.mainAccount ? { mainAccount: () => deps.mainAccount() } : {}),
         async accountFacts(mobile) {
             const repos = requireRepos(deps);
             const now = deps.now();
@@ -46446,6 +46519,7 @@ function promoteAdapterDeps(clientId) {
             m.pexpire(key, ttlMs);
         }),
         mainHandle: () => (0,_parked_adapter__WEBPACK_IMPORTED_MODULE_15__.promoteMainHandle)(),
+        mainAccount: () => (0,_parked_adapter__WEBPACK_IMPORTED_MODULE_15__.promoteMainAccount)(),
         onPermanentError: (mobile, details) => (0,_parked_adapter__WEBPACK_IMPORTED_MODULE_15__.onPromotePermanentError)(mobile, details),
         notifyDigest: (rows) => notify(digestNotification(rows), _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_7__.ChannelCategory.PROM_LOGS2, 'Parked responder digest'),
         alert: (title, text) => notify({ title, severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_7__.NotificationSeverity.WARNING, summary: text, tags: ['parked', 'rpc-denied'] }, _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_7__.ChannelCategory.ACCOUNT_NOTIFICATIONS, 'Parked responder alert'),
@@ -47113,8 +47187,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "3acb11e64aab71aeffb083ad081b6c76a49f8ebf" : 0;
-    const builtAt =  true ? "2026-11-14T18:31:21.459Z" : 0;
+    const sha =  true ? "f006e929a1a495f820634941ef658a01d53b2f94" : 0;
+    const builtAt =  true ? "2026-11-15T07:53:23.390Z" : 0;
     return { sha, builtAt };
 }
 
