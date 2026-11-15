@@ -37723,6 +37723,146 @@ exports.SnapshotWarmer = SnapshotWarmer;
 
 /***/ },
 
+/***/ "./src/components/monitor/monitor-enrich.ts"
+/*!**************************************************!*\
+  !*** ./src/components/monitor/monitor-enrich.ts ***!
+  \**************************************************/
+(__unused_webpack_module, exports, __webpack_require__) {
+
+
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.OVERLAP_NOTE = exports.DOUBLE_CREDIT_WINDOW_MS = exports.ATTRIBUTION_NOTE = exports.REST_NOTE = void 0;
+exports.restFlags = restFlags;
+exports.deadChannelWindow = deadChannelWindow;
+exports.deadChannelsOf = deadChannelsOf;
+exports.attributionFirstDay = attributionFirstDay;
+exports.attributionDays = attributionDays;
+exports.paymentOverlaps = paymentOverlaps;
+const monitor_sql_1 = __webpack_require__(/*! ./monitor-sql */ "./src/components/monitor/monitor-sql.ts");
+const monitor_time_1 = __webpack_require__(/*! ./monitor-time */ "./src/components/monitor/monitor-time.ts");
+const monitor_util_1 = __webpack_require__(/*! ./monitor-util */ "./src/components/monitor/monitor-util.ts");
+function restFlags(rows, day) {
+    const out = new Map();
+    for (const r of rows) {
+        const mobile = r.mobile == null ? '' : String(r.mobile);
+        const sent = (0, monitor_util_1.num)(r.sent);
+        const banned = (0, monitor_util_1.num)(r.banned);
+        if (!mobile || sent < monitor_sql_1.REST_RULE.MIN_SENDS || banned <= monitor_sql_1.REST_RULE.BAN_RATE * sent)
+            continue;
+        out.set(mobile, { day, sent, banned, banRate: banned / sent });
+    }
+    return out;
+}
+exports.REST_NOTE = `mobiles[].rest = the mobile's ban rate on the previous IST day was above ${monitor_sql_1.REST_RULE.BAN_RATE * 100}% on at least ${monitor_sql_1.REST_RULE.MIN_SENDS} sends (daily_mobile, every client and namespace of the mobile); null = not flagged.`;
+function deadChannelWindow(today) {
+    return { from: (0, monitor_time_1.addDays)(today, -monitor_sql_1.DEAD_CHANNEL_RULE.DAYS), to: (0, monitor_time_1.addDays)(today, -1) };
+}
+function deadChannelsOf(rows, titles, from, to) {
+    const first = rows[0] ?? {};
+    const totalSends = (0, monitor_util_1.num)(first.total_sent);
+    const sends = (0, monitor_util_1.num)(first.dead_sent);
+    return {
+        from,
+        to,
+        days: monitor_sql_1.DEAD_CHANNEL_RULE.DAYS,
+        minDelivered: monitor_sql_1.DEAD_CHANNEL_RULE.MIN_DELIVERED,
+        count: (0, monitor_util_1.num)(first.n),
+        sends,
+        delivered: (0, monitor_util_1.num)(first.dead_delivered),
+        totalSends,
+        shareOfSends: (0, monitor_util_1.ratio)(sends, totalSends),
+        channels: rows
+            .filter((r) => r.channel_id != null)
+            .map((r) => {
+            const id = String(r.channel_id);
+            return { title: titles.get(id) ?? `channel …${id.slice(-4)}`, sends: (0, monitor_util_1.num)(r.sent), delivered: (0, monitor_util_1.num)(r.delivered) };
+        }),
+    };
+}
+function attributionFirstDay(today) {
+    const byRetention = (0, monitor_time_1.addDays)(today, -(monitor_sql_1.ATTRIBUTION_RULE.CE_RETENTION_DAYS - monitor_sql_1.ATTRIBUTION_RULE.LOOKBACK_DAYS));
+    const byTableStart = (0, monitor_time_1.addDays)(monitor_sql_1.ATTRIBUTION_RULE.CE_FIRST_DAY, monitor_sql_1.ATTRIBUTION_RULE.LOOKBACK_DAYS);
+    return byRetention > byTableStart ? byRetention : byTableStart;
+}
+function attributionDays(rows, from, to, client) {
+    const by = new Map();
+    for (const r of rows) {
+        const d = String(r.d);
+        if (d < from || d > to)
+            continue;
+        if (client !== null && r.client_id !== client)
+            continue;
+        const e = by.get(d) ?? { nu: 0, dm: 0, rev: 0, revDm: 0 };
+        e.nu += (0, monitor_util_1.num)(r.new_users);
+        e.dm += (0, monitor_util_1.num)(r.dms);
+        e.rev += (0, monitor_util_1.num)(r.revenue);
+        e.revDm += (0, monitor_util_1.num)(r.revenue_dm);
+        by.set(d, e);
+    }
+    return [...by.keys()].sort().map((date) => {
+        const e = by.get(date);
+        return {
+            date,
+            newUsers: e.nu,
+            dmUsers: e.dm,
+            newUserChannelShare: (0, monitor_util_1.ratio)(e.dm, e.nu),
+            revenue: e.rev,
+            revenueWithDm: e.revDm,
+            revenueDmShare: (0, monitor_util_1.ratio)(e.revDm, e.rev),
+        };
+    });
+}
+exports.ATTRIBUTION_NOTE = `attribution.daily: newUserChannelShare = DM conversions (conversion_event kind dm, every DM row has a channel) / new users (daily_client, every namespace); revenueDmShare = revenue (credits under ₹1,000) whose chat had a DM row by the same persona in the ${monitor_sql_1.ATTRIBUTION_RULE.LOOKBACK_DAYS} days before the payment / revenue. Closed IST days only, from today - ${monitor_sql_1.ATTRIBUTION_RULE.CE_RETENTION_DAYS - monitor_sql_1.ATTRIBUTION_RULE.LOOKBACK_DAYS} (conversion_event keeps ${monitor_sql_1.ATTRIBUTION_RULE.CE_RETENTION_DAYS} days).`;
+exports.DOUBLE_CREDIT_WINDOW_MS = 120_000;
+function paymentOverlaps(credits, client) {
+    const clientsByChat = new Map();
+    const byKey = new Map();
+    for (const c of credits) {
+        if (!c.chat || !(c.amount > 0))
+            continue;
+        const cl = c.client ?? '';
+        let s = clientsByChat.get(c.chat);
+        if (!s)
+            clientsByChat.set(c.chat, (s = new Set()));
+        s.add(cl);
+        const k = `${c.chat}|${c.amount}`;
+        const l = byKey.get(k);
+        if (l)
+            l.push(c);
+        else
+            byKey.set(k, [c]);
+    }
+    let multiClientChats = 0;
+    for (const s of clientsByChat.values())
+        if (s.size > 1 && (client === null || s.has(client)))
+            multiClientChats++;
+    let doublePairs = 0;
+    let crossClientPairs = 0;
+    let doubleAmount = 0;
+    for (const l of byKey.values()) {
+        if (l.length < 2)
+            continue;
+        l.sort((a, b) => a.ms - b.ms);
+        for (let i = 1; i < l.length; i++) {
+            const a = l[i - 1];
+            const b = l[i];
+            if (b.ms - a.ms > exports.DOUBLE_CREDIT_WINDOW_MS)
+                continue;
+            if (client !== null && a.client !== client && b.client !== client)
+                continue;
+            doublePairs++;
+            if ((a.client ?? '') !== (b.client ?? ''))
+                crossClientPairs++;
+            doubleAmount += b.amount;
+        }
+    }
+    return { multiClientChats, doublePairs, crossClientPairs, doubleAmount, windowSec: exports.DOUBLE_CREDIT_WINDOW_MS / 1000 };
+}
+exports.OVERLAP_NOTE = `paymentOverlaps: multiClientChats = chats with credits on more than one client in the range; doublePairs = consecutive credits of the same chat and amount within ${exports.DOUBLE_CREDIT_WINDOW_MS / 1000} s on any client (possible double credit, research rule), crossClientPairs = of those, on two clients.`;
+
+
+/***/ },
+
 /***/ "./src/components/monitor/monitor-family.ts"
 /*!**************************************************!*\
   !*** ./src/components/monitor/monitor-family.ts ***!
@@ -39058,6 +39198,7 @@ function buildPromotions(i) {
                 idle: f === 'promote' && assignedSet.has(key('promote', a.clientId, a.mobile)) && a.sent <= exports.PROMO_LIMITS.IDLE_ASSIGNED_SENDS,
                 heartbeat: hb,
                 route24h: f === 'promote' && i.route && a.mobile ? (i.route.get(a.mobile) ?? null) : null,
+                ...(i.rest ? { rest: (a.mobile && i.rest.get(a.mobile)) || null } : {}),
             };
         })
             .sort((x, y) => y.sent - x.sent || String(x.clientId).localeCompare(String(y.clientId)) || String(x.mobile).localeCompare(String(y.mobile)));
@@ -39091,6 +39232,7 @@ function buildPromotions(i) {
                     ids.add(id);
         const clients = [...ids].map((id) => {
             const mine = fc.filter((a) => a.clientId === id);
+            const before = promo(fp.filter((a) => a.clientId === id), null, w.window, limitedPrev);
             const last = mine.reduce((m, a) => (a.lastAt !== null && (m === null || a.lastAt > m) ? a.lastAt : m), null);
             const row = {
                 clientId: id,
@@ -39100,6 +39242,7 @@ function buildPromotions(i) {
                 ...(f === 'promote' ? { reachAlert: reachAlertOf(routedSum(mine, 'routed_reached'), routedSum(mine, 'routed_users')) } : {}),
                 mobilesAssigned: f === 'promote' && i.assigned ? assigned.filter((a) => a.clientId === id).length : null,
                 lastSendAt: last !== null ? new Date(last).toISOString() : null,
+                previous: { sent: before.sent, delivered: before.delivered, banned: before.banned, deliveryRate: before.deliveryRate, banRate: before.banRate },
             };
             if (f === 'tg-aut')
                 row.engine = i.heartbeats?.engines.get(id) ?? null;
@@ -39587,7 +39730,7 @@ function readRestrictedChannels(rows) {
 
 
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.ROUTED_COLUMNS = exports.REACTION_COLUMNS = void 0;
+exports.ATTRIBUTION_RULE = exports.DEAD_CHANNEL_RULE = exports.REST_RULE = exports.ROUTED_COLUMNS = exports.REACTION_COLUMNS = void 0;
 exports.paymentRowsSql = paymentRowsSql;
 exports.dailyClientSql = dailyClientSql;
 exports.routedDailySql = routedDailySql;
@@ -39609,6 +39752,9 @@ exports.promoMobilesHistSql = promoMobilesHistSql;
 exports.promoMobileDaysSql = promoMobileDaysSql;
 exports.promoMobilesTodaySql = promoMobilesTodaySql;
 exports.paidOriginSql = paidOriginSql;
+exports.restMobilesSql = restMobilesSql;
+exports.deadChannelsSql = deadChannelsSql;
+exports.attributionDailySql = attributionDailySql;
 const IST = `(ts AT TIME ZONE 'Asia/Kolkata')`;
 const iso = (ms) => new Date(ms).toISOString();
 function q(name, sql, params) {
@@ -39809,11 +39955,65 @@ WHERE day = $1::date
 GROUP BY 1, 2, 3`, [today]);
 }
 function paidOriginSql(dmFrom, payFrom) {
-    return q('paid_origin', `SELECT DISTINCT ON (c.chat_id, c.client_id) c.chat_id, c.client_id, c.service
-FROM conversion_event c
+    return q('paid_origin', `SELECT DISTINCT ON (p.chat_id, p.client_id) p.chat_id, p.client_id, c.service
+FROM (SELECT DISTINCT chat_id, client_id, persona_id FROM payment_event_owner WHERE ts >= $2::timestamptz AND amount > 0) p
+JOIN conversion_event c ON c.chat_id = p.chat_id AND c.profile = p.persona_id
 WHERE c.kind = 'dm' AND c.ts >= $1::timestamptz AND c.client_id IS NOT NULL
-  AND (c.chat_id, c.client_id) IN (SELECT chat_id, client_id FROM payment_event_owner WHERE ts >= $2::timestamptz AND amount > 0)
-ORDER BY c.chat_id, c.client_id, c.ts`, [iso(dmFrom), iso(payFrom)]);
+ORDER BY p.chat_id, p.client_id, c.ts`, [iso(dmFrom), iso(payFrom)]);
+}
+exports.REST_RULE = { MIN_SENDS: 20, BAN_RATE: 0.3 };
+function restMobilesSql(day) {
+    return q('rest_mobiles', `SELECT mobile, sum(sent) AS sent, sum(banned) AS banned
+FROM daily_mobile
+WHERE day = $1::date
+GROUP BY mobile
+HAVING sum(sent) >= $2::int AND sum(banned) > $3::numeric * sum(sent)`, [day, exports.REST_RULE.MIN_SENDS, exports.REST_RULE.BAN_RATE]);
+}
+exports.DEAD_CHANNEL_RULE = { DAYS: 30, MIN_DELIVERED: 200, LIMIT: 50 };
+function deadChannelsSql(from, to, minDelivered = exports.DEAD_CHANNEL_RULE.MIN_DELIVERED, limit = exports.DEAD_CHANNEL_RULE.LIMIT) {
+    return q('dead_channels', `WITH c AS (
+  SELECT channel_id, sum(sent) AS sent, sum(delivered) AS delivered, sum(dms) AS dms
+  FROM daily_channel WHERE day BETWEEN $1::date AND $2::date GROUP BY channel_id
+), s AS (
+  SELECT coalesce(sum(sent), 0) AS total_sent,
+    count(*) FILTER (WHERE delivered >= $3 AND dms = 0) AS n,
+    coalesce(sum(sent) FILTER (WHERE delivered >= $3 AND dms = 0), 0) AS dead_sent,
+    coalesce(sum(delivered) FILTER (WHERE delivered >= $3 AND dms = 0), 0) AS dead_delivered
+  FROM c
+)
+SELECT s.total_sent, s.n, s.dead_sent, s.dead_delivered, d.channel_id, d.sent, d.delivered
+FROM s LEFT JOIN LATERAL (
+  SELECT channel_id, sent, delivered FROM c WHERE delivered >= $3 AND dms = 0 ORDER BY delivered DESC, channel_id LIMIT $4
+) d ON true`, [from, to, minDelivered, limit]);
+}
+exports.ATTRIBUTION_RULE = { LOOKBACK_DAYS: 30, CE_RETENTION_DAYS: 62, CE_FIRST_DAY: '2026-10-03' };
+function attributionDailySql(from, to, fromMs, endMs, lookbackDays = exports.ATTRIBUTION_RULE.LOOKBACK_DAYS) {
+    return q('attribution_daily', `WITH nu AS (
+  SELECT day::text AS d, client_id, sum(new_users) AS new_users
+  FROM daily_client WHERE day BETWEEN $1::date AND $2::date GROUP BY 1, 2
+), dm AS (
+  SELECT ${IST}::date::text AS d, client_id, count(DISTINCT conversion_id) AS dms
+  FROM conversion_event WHERE kind = 'dm' AND ts >= $3::timestamptz AND ts < $4::timestamptz GROUP BY 1, 2
+), pay AS (
+  SELECT id, ts, chat_id, client_id, persona_id, owner_amount
+  FROM payment_event_owner WHERE ts >= $3::timestamptz AND ts < $4::timestamptz AND amount > 0 AND amount < 1000
+), hit AS (
+  SELECT DISTINCT p.id
+  FROM pay p JOIN conversion_event c ON c.chat_id = p.chat_id AND c.profile = p.persona_id
+  WHERE c.kind = 'dm' AND c.ts >= $3::timestamptz - make_interval(days => $5) AND c.ts <= p.ts AND c.ts >= p.ts - make_interval(days => $5)
+), rev AS (
+  SELECT (p.ts AT TIME ZONE 'Asia/Kolkata')::date::text AS d, p.client_id, sum(p.owner_amount) AS revenue,
+    coalesce(sum(p.owner_amount) FILTER (WHERE h.id IS NOT NULL), 0) AS revenue_dm
+  FROM pay p LEFT JOIN hit h ON h.id = p.id GROUP BY 1, 2
+), k AS (
+  SELECT d, client_id FROM nu UNION SELECT d, client_id FROM dm UNION SELECT d, client_id FROM rev
+)
+SELECT k.d, k.client_id, coalesce(nu.new_users, 0) AS new_users, coalesce(dm.dms, 0) AS dms,
+  coalesce(rev.revenue, 0) AS revenue, coalesce(rev.revenue_dm, 0) AS revenue_dm
+FROM k
+LEFT JOIN nu ON nu.d = k.d AND nu.client_id IS NOT DISTINCT FROM k.client_id
+LEFT JOIN dm ON dm.d = k.d AND dm.client_id IS NOT DISTINCT FROM k.client_id
+LEFT JOIN rev ON rev.d = k.d AND rev.client_id IS NOT DISTINCT FROM k.client_id`, [from, to, iso(fromMs), iso(endMs), lookbackDays]);
 }
 
 
@@ -40452,6 +40652,7 @@ const monitor_mongo_1 = __webpack_require__(/*! ./monitor-mongo */ "./src/compon
 const monitor_sql_1 = __webpack_require__(/*! ./monitor-sql */ "./src/components/monitor/monitor-sql.ts");
 const monitor_time_1 = __webpack_require__(/*! ./monitor-time */ "./src/components/monitor/monitor-time.ts");
 const monitor_history_1 = __webpack_require__(/*! ./monitor-history */ "./src/components/monitor/monitor-history.ts");
+const monitor_enrich_1 = __webpack_require__(/*! ./monitor-enrich */ "./src/components/monitor/monitor-enrich.ts");
 const monitor_util_1 = __webpack_require__(/*! ./monitor-util */ "./src/components/monitor/monitor-util.ts");
 exports.MONITOR_REDIS = 'MONITOR_REDIS';
 exports.PG_TIMEOUT_MS = 10_500;
@@ -41461,7 +41662,7 @@ let MonitorService = MonitorService_1 = class MonitorService {
         const inScope = (c) => fleetScope || c === scope;
         const mobTo = rw && r.to < yday ? r.to : undefined;
         const t = (on, name, fn) => (on ? this.section(name, ctx, fn) : Promise.resolve(null));
-        const [meta, fleet, payH, payT, dcH, dcT, dmsH, dmT, ydayHourly, live, mobH, mobT, channelRows, cohH, cohT, cohYH, ttfp, pool] = await Promise.all([
+        const [meta, fleet, payH, payT, dcH, dcT, dmsH, dmT, ydayHourly, live, mobH, mobT, channelRows, cohH, cohT, cohYH, ttfp, pool, dead] = await Promise.all([
             this.section('clients', ctx, () => this.clientMeta(ctx)),
             this.section('summary', ctx, () => (rw ? this.buildFleetW(rw, (0, monitor_time_1.presetOf)(rw.range, today), now, background) : this.buildFleet(legacyDays === 7 ? '7d' : '30d', now, background))),
             this.section('payments', ctx, () => this.payHist(ctx)),
@@ -41480,6 +41681,7 @@ let MonitorService = MonitorService_1 = class MonitorService {
             t(withToday, 'hourly_new_users', () => this.cohortsYdayHourly(ctx)),
             this.section('time_to_first_pay', ctx, () => this.timeToFirstPay(scope, r.start, ctx, withToday ? undefined : r.end)),
             this.section('pool', ctx, () => this.pool(ctx)),
+            fleetScope ? this.section('dead_channels', ctx, () => this.deadChannels(ctx)) : Promise.resolve(null),
         ]);
         if (fleet)
             ctx.merge(fleet.cache, Date.now());
@@ -41653,6 +41855,7 @@ let MonitorService = MonitorService_1 = class MonitorService {
         if (fleetScope) {
             notes.push('channels = top 20 fleet-wide by attributed DMs (conversion_event, incl. DMs without a client before 2026-10-26); channels with sends but no DMs are not listed.');
             notes.push('mobiles = top 20 accounts fleet-wide by tg-aut new users; clientId = the client that owned the mobile on its last day in range.');
+            notes.push('deadChannels = channels with delivered >= minDelivered and 0 DMs over the last 30 closed IST days (daily_channel, fleet; fixed window, not the page range); shareOfSends = their sends / every channel\'s sends.');
         }
         else {
             notes.push('channels = top 20 by attributed DMs (conversion_event); channels with sends but no DMs are not listed.');
@@ -41671,6 +41874,7 @@ let MonitorService = MonitorService_1 = class MonitorService {
             distributions: { amount, hourOfDay, timeToFirstPay, repeat },
             mobiles,
             channels,
+            ...(fleetScope ? { deadChannels: dead } : {}),
             pool: pool ? { buffersEligible: p?.eligible ?? 0, buffersTotal: p?.total ?? 0, harsh: p?.harsh ?? 0, promoteActive: p?.promoteActive ?? 0 } : null,
             notes,
             timingsMs: ctx.timings,
@@ -42002,7 +42206,10 @@ let MonitorService = MonitorService_1 = class MonitorService {
             mobiles.add(a.mobile);
             promote.add(a.mobile);
         }
-        const acct = await this.section('redis_state', ctx, () => this.redisAccountState([...mobiles].sort(), promote, ctx));
+        const [acct, rest] = await Promise.all([
+            this.section('redis_state', ctx, () => this.redisAccountState([...mobiles].sort(), promote, ctx)),
+            this.section('rest_mobiles', ctx, () => this.restMobiles(ctx)),
+        ]);
         const entries = (live?.entries ?? []).map((e) => ({ svc: e.svc, clientId: e.clientId, payload: e.payload, state: classifyHeartbeat(e.payload, now).state }));
         const inputs = {
             w,
@@ -42016,8 +42223,11 @@ let MonitorService = MonitorService_1 = class MonitorService {
             names: new Map((meta ?? []).map((m) => [m.clientId, m.name])),
             routedCols,
             client,
+            rest,
         };
         const body = (0, monitor_promotions_1.buildPromotions)(inputs);
+        if (rest)
+            body.notes.push(monitor_enrich_1.REST_NOTE);
         if (client !== null && meta && !meta.some((m) => m.clientId === client))
             ctx.notes.push(`clientId ${client} is not in the clients collection.`);
         let fleet;
@@ -42244,6 +42454,31 @@ let MonitorService = MonitorService_1 = class MonitorService {
             return rows.map((r) => [`${r.chat_id}|${r.client_id}`, r.service ?? null]);
         }).then((l) => new Map(l.value));
     }
+    restMobiles(ctx) {
+        return this.part(ctx, 'history', 'rest_mobiles', async (now, t, bg) => {
+            const day = (0, monitor_time_1.addDays)((0, monitor_time_1.istDate)(now), -1);
+            const rows = await this.pgRows((0, monitor_sql_1.restMobilesSql)(day), t, bg);
+            return [...(0, monitor_enrich_1.restFlags)(rows, day)];
+        }).then((l) => new Map(l.value));
+    }
+    deadChannels(ctx) {
+        return this.part(ctx, 'history', 'dead_channels', (now, t, bg) => {
+            const win = (0, monitor_enrich_1.deadChannelWindow)((0, monitor_time_1.istDate)(now));
+            return this.pgRows((0, monitor_sql_1.deadChannelsSql)(win.from, win.to), t, bg);
+        }).then(async (l) => {
+            const win = (0, monitor_enrich_1.deadChannelWindow)((0, monitor_time_1.istDate)(l.asOf));
+            const ids = l.value.filter((r) => r.channel_id != null).map((r) => String(r.channel_id));
+            const titles = ids.length ? await this.channelTitles(ids, ctx) : new Map();
+            return (0, monitor_enrich_1.deadChannelsOf)(l.value, titles, win.from, win.to);
+        });
+    }
+    attributionDaily(ctx) {
+        return this.part(ctx, 'history', 'attribution_daily', (now, t, bg) => {
+            const today = (0, monitor_time_1.istDate)(now);
+            const from = (0, monitor_enrich_1.attributionFirstDay)(today);
+            return this.pgRows((0, monitor_sql_1.attributionDailySql)(from, (0, monitor_time_1.addDays)(today, -1), (0, monitor_time_1.istDayStart)(from), (0, monitor_time_1.istDayStart)(today)), t, bg);
+        }).then((l) => l.value);
+    }
     routedDaily(ctx, kind, cols) {
         if (kind === 'hist') {
             return this.part(ctx, 'history', `routed_hist:${cols.join(',')}`, (now, t, bg) => {
@@ -42277,7 +42512,7 @@ let MonitorService = MonitorService_1 = class MonitorService {
             : `${client ? `client:${client}` : 'detail:all'}:r:${w.range.from}:${w.range.to}`;
         const routed = await this.section('routed_columns', ctx, () => this.routedColumns(ctx));
         const routedCols = routed?.client ?? [];
-        const [fleet, payH, payT, origin, dmsH, dmY, dmT, dcH, dcT, routedRows, routedToday, detail] = await Promise.all([
+        const [fleet, payH, payT, origin, dmsH, dmY, dmT, dcH, dcT, routedRows, routedToday, detail, attribRows] = await Promise.all([
             this.section('summary', ctx, () => this.snap(fleetPage, false)),
             this.section('revenue', ctx, () => this.payHist(ctx)),
             withToday ? this.section('revenue_today', ctx, () => this.payToday(ctx)) : null,
@@ -42290,6 +42525,7 @@ let MonitorService = MonitorService_1 = class MonitorService {
             routedCols.length ? this.section('routed', ctx, () => this.routedDaily(ctx, intraday ? 'today' : 'hist', routedCols)) : null,
             routedCols.length && mixed ? this.section('routed', ctx, () => this.routedDaily(ctx, 'today', routedCols)) : null,
             byDay ? this.section('detail', ctx, () => this.snap(detailPage, false)) : null,
+            byDay ? this.section('attribution_daily', ctx, () => this.attributionDaily(ctx)) : null,
         ]);
         if (fleet)
             ctx.merge(fleet.cache, Date.now());
@@ -42389,8 +42625,17 @@ let MonitorService = MonitorService_1 = class MonitorService {
                 byOrigin: origins(curCredits, dmsCur, fleet.fleet.newUsers, null),
             }
             : undefined;
+        const attribFrom = (0, monitor_enrich_1.attributionFirstDay)(w.today);
+        const attribution = attribRows
+            ? { from: attribFrom, lookbackDays: monitor_sql_1.ATTRIBUTION_RULE.LOOKBACK_DAYS, daily: (0, monitor_enrich_1.attributionDays)(attribRows, w.range.from, closedTo, client) }
+            : null;
+        const overlaps = curCredits ? (0, monitor_enrich_1.paymentOverlaps)(curCredits, client) : null;
         const notes = [...(0, monitor_util_1.historyNotes)([w.range, w.prevRange]), ...ctx.notes];
-        notes.push('byOrigin: direct = first attributed DM from a tg-aut promotion (service t), routed = from a promote account (service p); payers/revenue by origin are attributed only (chats with an attributed DM since 2026-10-25), the rest is unattributed.');
+        if (attribution)
+            notes.push(monitor_enrich_1.ATTRIBUTION_NOTE);
+        if (overlaps)
+            notes.push(monitor_enrich_1.OVERLAP_NOTE);
+        notes.push('byOrigin: direct = first attributed DM from a tg-aut promotion (service t), routed = from a promote account (service p); payers/revenue by origin are attributed only (chats with an attributed DM by the same persona since 2026-10-25, on any client of that persona), the rest is unattributed.');
         notes.push('byOrigin newUsers: direct/routed = attributed DMs of that origin; unattributed = newUsers minus both (floored at 0).');
         if (!routedCols.includes('routes_sent'))
             notes.push('routed: history starts when counters ship (daily_client route columns not present yet).');
@@ -42424,6 +42669,8 @@ let MonitorService = MonitorService_1 = class MonitorService {
             ttfp: detail?.distributions?.timeToFirstPay ?? null,
             repeat: detail?.distributions?.repeat ?? null,
             ...(fleetBlock ? { fleet: fleetBlock } : {}),
+            attribution,
+            paymentOverlaps: overlaps,
             notes,
             timingsMs: ctx.timings,
             cache: ctx.cache(Date.now()),
