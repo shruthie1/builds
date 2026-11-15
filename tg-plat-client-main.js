@@ -52671,15 +52671,16 @@ FAKE MARKERS
   - PhoText: look carefully (corners, edges, behind the text) for the word "PhoText" / "photext" in any case, size or opacity. It is the watermark of a photo-editing app used to fake payment screenshots. If it is there, copy it verbatim into the text, add "PhoText watermark" to fakeEvidence and set fakeSignals generator_stamp with fakeScore 0.9 or more.
   - aiWatermarkPresent: true if a small four-pointed sparkle/star or an "AI generated" mark is visible; give aiWatermarkLocation (e.g. bottom-right) and a short factual aiWatermarkEvidence. false if you looked and saw none; null if you cannot tell.
 
-AUTHENTICITY (fakeScore, fakeVerdict, fakeSignals, fakeEvidence) - is this a real payment-app screenshot?
+AUTHENTICITY (fakeScore, fakeVerdict, fakeSignals, fakeEvidence) - is this a real payment, as a screenshot or a photo of the screen?
   - Judge ONLY from what is visible. Never guess from the payee, the amount or the user.
   - fakeScore 0.0-1.0 (0 certainly genuine, 1 certainly fake). fakeVerdict genuine | suspicious | fake. Genuine: fakeScore < 0.4.
   - A genuine screenshot of a real bank/UPI app (GPay, PhonePe, Paytm, BHIM, bank apps) scores LOW (0.0-0.2). Banners, ads, offers, cashback cards, the "Gemini" button or other app UI in a real app are NOT fake signals.
+  - A photo of the payment screen taken with another phone is normal: payers often photograph their phone or laptop screen. Moire patterns, glare, reflections, blur, an angle or perspective, a visible bezel or screen edges are NOT a fake signal and must not raise fakeScore. Judge the payment shown on that screen exactly as you would judge a screenshot.
   - Many real UPI apps look different from GPay/PhonePe: Fam/FamX ("Paid with fam", "Powered by trio"), CRED, Amazon Pay, MobiKwik, Navi, super.money, slice, POP, bank apps and Paytm QR receipts. A ticket, receipt or torn-paper style card is how some of them draw a payment; an unfamiliar or receipt-style layout is NOT evidence of a fake (not_real_app_layout only for a layout that copies a known app and gets it visibly wrong).
-  - fakeScore >= 0.85 ONLY with concrete visible evidence, for example: a stamp/watermark/text saying entertainment, sample, demo, prank, not real, or the name of a receipt-generator or photo/text editor app (e.g. a "PhoText" watermark: signal generator_stamp); visibly edited or pasted digits; mismatched fonts or alignment in the amount/name/UTR; a layout that is not the real app; values that are impossible on their face (a time like 25:70); a photo of another screen.
+  - fakeScore >= 0.85 ONLY with concrete visible evidence, for example: a stamp/watermark/text saying entertainment, sample, demo, prank, not real, or the name of a receipt-generator or photo/text editor app (e.g. a "PhoText" watermark: signal generator_stamp); visibly edited or pasted digits; mismatched fonts or alignment in the amount/name/UTR; a layout that is not the real app; values that are impossible on their face (a time like 25:70).
   - You do NOT know today's date. Never treat a date or year as future, past or impossible; dates are checked by code.
   - Unsure or just low quality / cropped: fakeScore 0.3-0.5, verdict suspicious or genuine. Low quality alone is not evidence of fraud.
-  - fakeSignals: only these values: disclaimer_text, generator_stamp, ai_watermark, edited_amount, font_mismatch, not_real_app_layout, impossible_values, photo_of_screen, cropped_or_missing_status, other. [] if none.
+  - fakeSignals: only these values: disclaimer_text, generator_stamp, ai_watermark, edited_amount, font_mismatch, not_real_app_layout, impossible_values, cropped_or_missing_status, other. [] if none.
   - fakeEvidence: at most 5 short strings, each a verbatim on-image phrase or a brief visual fact. [] if genuine.
 
 CONFIDENCE (decimal 0.0-1.0)
@@ -52693,7 +52694,7 @@ function analysisPromptWithKeys(keysBlock) {
     return `${ANALYSIS_PROMPT}\n\n${keysBlock}`;
 }
 /** Second-opinion prompt (design section 5), single instruction, blind to the first answer. */
-const VERIFICATION_PROMPT = "Look at this image. Answer only from what is visible; do not assume it is a payment or a fake. 1) Is there a small four-pointed sparkle/star watermark or an 'AI generated' mark? Where? 2) Copy verbatim any text saying the transaction is not real, sample, demo, prank, entertainment or similar. 3) The paid amount in rupees. 4) Status: success only if a success tick/word is visible. 5) The UTR/transaction id. 6) The receiver's UPI id. 7) Does the word 'PhoText' (any case, even a faint watermark) appear anywhere? If yes it is a fake made with a photo-editing app: quote it in fakeEvidence. 8) Judge authenticity only from concrete visible evidence: is this an unedited screenshot of a real bank/UPI app (GPay, PhonePe, Paytm, BHIM, Fam, CRED, bank apps and others), or is there visible proof it was fabricated or edited? Give fakeScore 0.0 (certainly genuine) to 1.0 (certainly fake), fakeVerdict genuine|suspicious|fake, fakeSignals (only: disclaimer_text, generator_stamp, ai_watermark, edited_amount, font_mismatch, not_real_app_layout, impossible_values, photo_of_screen, cropped_or_missing_status, other) and up to 5 short fakeEvidence strings of visible facts. You do not know today's date: never call a date future or impossible. Banners, ads and app buttons inside a real app are not fake signals; many real UPI apps (Fam/FamX 'Paid with fam', CRED, Amazon Pay, MobiKwik, Navi, super.money, slice, POP, bank apps, Paytm QR receipts) draw a ticket/receipt-style card, and an unfamiliar or receipt-style layout is not evidence of a fake; score 0.85 or more only with concrete visible evidence; a watermark of a photo/text editor app (e.g. 'PhoText') is such evidence (generator_stamp, quote it in fakeEvidence). Return null for anything not clearly visible.";
+const VERIFICATION_PROMPT = "Look at this image. Answer only from what is visible; do not assume it is a payment or a fake. 1) Is there a small four-pointed sparkle/star watermark or an 'AI generated' mark? Where? 2) Copy verbatim any text saying the transaction is not real, sample, demo, prank, entertainment or similar. 3) The paid amount in rupees. 4) Status: success only if a success tick/word is visible. 5) The UTR/transaction id. 6) The receiver's UPI id. 7) Does the word 'PhoText' (any case, even a faint watermark) appear anywhere? If yes it is a fake made with a photo-editing app: quote it in fakeEvidence. 8) Judge authenticity only from concrete visible evidence: is this a real payment from a bank/UPI app, as a screenshot or a photo of the screen, (GPay, PhonePe, Paytm, BHIM, Fam, CRED, bank apps and others), or is there visible proof it was fabricated or edited? Give fakeScore 0.0 (certainly genuine) to 1.0 (certainly fake), fakeVerdict genuine|suspicious|fake, fakeSignals (only: disclaimer_text, generator_stamp, ai_watermark, edited_amount, font_mismatch, not_real_app_layout, impossible_values, cropped_or_missing_status, other) and up to 5 short fakeEvidence strings of visible facts. You do not know today's date: never call a date future or impossible. A photo of the payment screen taken with another phone is normal: moire, glare, reflections, blur, an angle or perspective and visible screen edges are not a fake signal and must not raise fakeScore. Banners, ads and app buttons inside a real app are not fake signals; many real UPI apps (Fam/FamX 'Paid with fam', CRED, Amazon Pay, MobiKwik, Navi, super.money, slice, POP, bank apps, Paytm QR receipts) draw a ticket/receipt-style card, and an unfamiliar or receipt-style layout is not evidence of a fake; score 0.85 or more only with concrete visible evidence; a watermark of a photo/text editor app (e.g. 'PhoText') is such evidence (generator_stamp, quote it in fakeEvidence). Return null for anything not clearly visible.";
 
 
 /***/ },
@@ -52727,7 +52728,7 @@ __webpack_require__.r(__webpack_exports__);
 const FAKE_VERDICTS = ['genuine', 'suspicious', 'fake'];
 const FAKE_SIGNALS = [
     'disclaimer_text', 'generator_stamp', 'ai_watermark', 'edited_amount', 'font_mismatch',
-    'not_real_app_layout', 'impossible_values', 'photo_of_screen', 'cropped_or_missing_status', 'other',
+    'not_real_app_layout', 'impossible_values', 'cropped_or_missing_status', 'other',
 ];
 /** Authenticity group, flat on the wire (fake* keys) and shared by the main schema and the second-opinion schema. */
 const AUTHENTICITY_FIELDS = [
@@ -58839,8 +58840,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "e0af69a789c4a7db3e84ba3fd363ae05b9de72b9" : 0;
-    const builtAt =  true ? "2026-11-15T08:24:33.426Z" : 0;
+    const sha =  true ? "0bc7f765a1666ed7804f339e96e6a4fccfd9812f" : 0;
+    const builtAt =  true ? "2026-11-15T08:59:21.605Z" : 0;
     return { sha, builtAt };
 }
 
@@ -101055,7 +101056,8 @@ const SECOND_OPINION_ASK_SCORE = 0.5;
  *  by code), cropped and "other" alone only ask for proof: live 2026-10-11..19, 26 of 67 model-pair blocks rested on
  *  those alone (a Fam torn-paper receipt, "year 2026 is future", an iPhone ad) and 4 of them were the same image
  *  accepted on a later send. A photo of a screen is how many genuine payers send proof (phone photographing a laptop /
- *  another phone): it says nothing about an edit, so it only asks for proof too (claude-review F3). */
+ *  another phone): it says nothing about an edit, so it is not a fake signal at all (photo_of_screen left the tg-vision
+ *  contract 2026-11-15; claude-review F3). */
 const CONCRETE_FAKE_SIGNALS = ['edited_amount', 'font_mismatch', 'generator_stamp', 'disclaimer_text', 'ai_watermark'];
 /** A payment dated further than this after the extraction time cannot be real (IST/UTC mix-ups are 5.5 h). */
 const FUTURE_DATE_SKEW_MS = 6 * 60 * 60 * 1000;
