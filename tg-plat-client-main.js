@@ -58840,8 +58840,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "7d25faae104fda4aad7f1a602ecae449451b22dd" : 0;
-    const builtAt =  true ? "2026-11-15T09:53:11.451Z" : 0;
+    const sha =  true ? "68c1a90222185bf4d803cd39c86ffd77be228569" : 0;
+    const builtAt =  true ? "2026-11-15T10:38:17.637Z" : 0;
     return { sha, builtAt };
 }
 
@@ -59634,8 +59634,8 @@ async function proceedWithCallSetup(userDetails, chatId, reason) {
     // Service used up (10 videos, tier's shows delivered): the ring would be refused at dial (canCallUser), so no
     // "Wait, I am Calling you" / "Checking", no ladder and no ring. paidReply true ends the "any text = initiate the
     // call" loop (respond-to-msgs), as requestCall does when it does not call (kavya1 1942485923, 2026-10-22).
-    // This row having watched every video of the due show is used up too (showStillServable); videos seen only on
-    // other personas are replayed by the dial (selectNextVideo), so they never hold the call here.
+    // Watched videos never hold the call: the dial replays one seen on another persona, or restarts a full own row from
+    // its least recently played paid video (selectNextVideo).
     if (!(0,_payments_service_eligibility__WEBPACK_IMPORTED_MODULE_6__.showStillServable)(userDetails)) {
         logger.log(`[CALL] ${chatId}: service used up (${usedUpWhy(userDetails)}); no call (${reason})`);
         try {
@@ -63500,11 +63500,6 @@ class InHouseCallService {
                 this.safeWarn({ title: 'No video', summary: 'Video unavailable or unreadable; using the legacy ring.', fields: [{ label: 'Chat', value: chatId, code: false }] }, 'no_video');
                 return { status: 'fallback', reason: 'no_video', videoType: planned.videoType };
             }
-            // This row watched every video of the due show: no ring and no "pay again" (a payment would buy no show); ops are told.
-            if (planned.reason === 'all_watched') {
-                this.safeWarn({ title: 'All videos watched', summary: "Every video of the due show already watched on this persona's row; not rung (a row never replays its own videos).", fields: [{ label: 'Chat', value: chatId, code: false }] }, `all_watched:${chatId}`);
-                return { status: 'not_eligible' };
-            }
             // VCUI would show "payment required" here, never a call: ask to pay instead of a bare ring.
             if (planned.user && (Number(planned.user.highestPayAmount) || 0) >= PAID_THRESHOLD) {
                 this.promptToPayAgain(chatId, planned.user, 'not_eligible');
@@ -63815,9 +63810,9 @@ class InHouseCallService {
         let durationSec = null;
         for (;;) {
             const next = (0,_video_policy__WEBPACK_IMPORTED_MODULE_1__.selectNextVideo)(user, others.videos, unusable);
-            // This row watched every video of the due show (a replay never repeats this row's own videos): no ring.
+            // Null only when no show is due (a full own row restarts, selectNextVideo): canCallUser above already said one is.
             if (!next)
-                return { plan: null, reason: 'all_watched' };
+                return { plan: null, reason: 'not_eligible' };
             videoType = next.videoType;
             if (unusable.has(next.videoId))
                 return { plan: null, reason: 'no_video', videoType };
@@ -63845,7 +63840,7 @@ class InHouseCallService {
         }
         if (!url || durationSec === null)
             return { plan: null, reason: 'no_video', videoType };
-        this.logReplay(chatId, videoId, otherRows);
+        this.logReplay(chatId, user, videoId, otherRows);
         const progress = user.callProgress?.[String(videoId)];
         const startSec = (0,_video_policy__WEBPACK_IMPORTED_MODULE_1__.resumeOffset)(progress, durationSec, now);
         const attempts = (0,_video_policy__WEBPACK_IMPORTED_MODULE_1__.priorAttempts)(progress, now) + 1;
@@ -64197,14 +64192,18 @@ class InHouseCallService {
             ],
         }, `video_failed:${videoId}`);
     }
-    /** Ops warning, at most once per WARN_DEDUPE_MS per key (default: kind + chat, e.g. "In-house partial: 555"). */
-    /** A video seen on another persona row is a replay (selectNextVideo's fallback): logged so repeats can be counted. */
-    logReplay(chatId, videoId, otherRows) {
-        const seenOn = otherRows.filter((row) => (row.videos ?? []).map(Number).includes(videoId)).map((row) => row.profile ?? '?');
+    /** A replay (selectNextVideo's steps 2 and 3): logged so repeats can be counted. */
+    logReplay(chatId, user, videoId, otherRows) {
+        if ((0,_video_policy__WEBPACK_IMPORTED_MODULE_1__.videoIds)(user.videos).includes(videoId)) {
+            this.logger.log(`[in-house-calls] ${chatId}: every video of the due show is on this persona's row; replaying video_${videoId} (least recently played first)`);
+            return;
+        }
+        const seenOn = otherRows.filter((row) => (0,_video_policy__WEBPACK_IMPORTED_MODULE_1__.videoIds)(row.videos).includes(videoId)).map((row) => row.profile ?? '?');
         if (seenOn.length === 0)
             return;
         this.logger.log(`[in-house-calls] ${chatId}: no new video left; replaying video_${videoId} seen on another persona (${seenOn.join(', ')})`);
     }
+    /** Ops warning, at most once per WARN_DEDUPE_MS per key (default: kind + chat, e.g. "In-house partial: 555"). */
     safeWarn(notice, key) {
         if (!this.deps.warn)
             return;
@@ -64890,6 +64889,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   resumeOffset: () => (/* binding */ resumeOffset),
 /* harmony export */   selectNextVideo: () => (/* binding */ selectNextVideo),
 /* harmony export */   summariseOtherProfiles: () => (/* binding */ summariseOtherProfiles),
+/* harmony export */   videoIds: () => (/* binding */ videoIds),
 /* harmony export */   videoUrl: () => (/* binding */ videoUrl)
 /* harmony export */ });
 /* harmony import */ var fs__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! fs */ "fs");
@@ -64952,6 +64952,7 @@ function videoUrl(videoId, env = process.env, exists = (fs__WEBPACK_IMPORTED_MOD
     return local;
 }
 const DAY_MS = 24 * 60 * 60 * 1000;
+/** A `videos` value as numeric ids: anything that is not an array reads as none, non-numeric entries are dropped. */
 function videoIds(values) {
     return (Array.isArray(values) ? values : []).map(Number).filter(Number.isFinite);
 }
@@ -65088,29 +65089,35 @@ function rowsPerVideo(videosWatchedElsewhere) {
         rows.set(id, (rows.get(id) ?? 0) + 1);
     return rows;
 }
+/** When this row last played `videoId` (callProgress updatedAt); 0 when never recorded (played before callProgress). */
+function lastPlayedAt(user, videoId) {
+    return Number(user.callProgress?.[String(videoId)]?.updatedAt) || 0;
+}
 /**
  * The next video of the due rung's list (demo: the demo list, a repeat demo starting with REPEAT_DEMO_VIDEOS; second
- * and full shows: showVideos(highest)), skipping `unusable` files when another candidate is left:
- *  1. a video no persona row of this chat has watched, in list order;
- *  2. none left: a video watched only on other persona rows, the one seen on the fewest rows, ties in list order.
- *     A paid user gets a replay instead of silence (owner 2026-11-15, docs/design/2026-11-15-all-watched-show-restart.md).
- * A video on this row is never picked: every show adds its video here, so the replays run out and the loop ends.
- * Null when no show is due or this row has watched every video of the list.
+ * and full shows: showVideos(highest)). One ordered list, and the first usable file in it wins (preferUsable):
+ *  1. videos no persona row of this chat has watched, in list order;
+ *  2. videos watched only on other persona rows, the one seen on the fewest rows first, ties in list order;
+ *  3. this row's own videos of the list, least recently played first (never-recorded ones in the order watched): the
+ *     own-row restart, so a full row replays its oldest paid video instead of going silent (owner 2026-11-15,
+ *     docs/design/2026-11-15-all-watched-show-restart.md). A paid rung's list holds no demo video, so never video 1.
+ * The pick never makes a show owed: the ladder (servableRung) does, and every delivered show raises fullShow, so a
+ * payment buys exactly the shows it bought, replays included. Null when no show is due.
  */
 function selectNextVideo(user, videosWatchedElsewhere = [], unusable = new Set()) {
-    const own = videoIds(user.videos);
     // The rung canCallUser serves when spacing is not in the way (the ring itself was allowed by canCallUser).
     const rung = (0,_payments_ladder__WEBPACK_IMPORTED_MODULE_4__.servableRung)(user, true);
     if (!rung)
         return null;
+    const own = [...new Set(videoIds(user.videos))];
     const options = rung === 'demo'
         ? (own.length > 0 ? [...REPEAT_DEMO_VIDEOS, ...DEMO_VIDEOS.filter((id) => !REPEAT_DEMO_VIDEOS.includes(id))] : DEMO_VIDEOS)
         : showVideos((0,_payments_ladder__WEBPACK_IMPORTED_MODULE_4__.amountOf)(user.highestPayAmount));
     const elsewhere = rowsPerVideo(videosWatchedElsewhere);
-    const notOnThisRow = options.filter((id) => !own.includes(id));
-    const unwatched = notOnThisRow.filter((id) => !elsewhere.has(id));
-    const fewestRowsFirst = [...notOnThisRow].sort((a, b) => (elsewhere.get(a) ?? 0) - (elsewhere.get(b) ?? 0));
-    const videoId = preferUsable(unwatched, unusable) ?? preferUsable(fewestRowsFirst, unusable);
+    // Stable sorts: unwatched (0 rows) first in list order, then the fewest rows; own videos in the order watched.
+    const notOnThisRow = options.filter((id) => !own.includes(id)).sort((a, b) => (elsewhere.get(a) ?? 0) - (elsewhere.get(b) ?? 0));
+    const onThisRow = own.filter((id) => options.includes(id)).sort((a, b) => lastPlayedAt(user, a) - lastPlayedAt(user, b));
+    const videoId = preferUsable([...notOnThisRow, ...onThisRow], unusable);
     return videoId === undefined ? null : { videoId, videoType: RUNG_VIDEO_TYPE[rung] };
 }
 /** VCUI classifyService: the media tier decides which completion handler runs. */
@@ -105405,8 +105412,8 @@ const NO_OTHER_PROFILES = { blockedElsewhere: false, demoGiven: 0, latestCallTim
  * 2026-10-22). Not part of hasPendingPaidService / canProceedWithService: the repeat-payment credit reads those.
  */
 function showStillServable(userDetail, now = Date.now()) {
-    // No video left that this row has not watched: no show would follow the promise (a row never replays its own videos).
-    return (0,_calls_inhouse_video_policy__WEBPACK_IMPORTED_MODULE_1__.canCallUser)({ ...userDetail, callTime: 0 }, NO_OTHER_PROFILES, now) && (0,_calls_inhouse_video_policy__WEBPACK_IMPORTED_MODULE_1__.selectNextVideo)({ ...userDetail, callTime: 0 }) !== null;
+    // No video check: whenever a show is due the dial has one (selectNextVideo restarts a full own row).
+    return (0,_calls_inhouse_video_policy__WEBPACK_IMPORTED_MODULE_1__.canCallUser)({ ...userDetail, callTime: 0 }, NO_OTHER_PROFILES, now);
 }
 /**
  * Used up: no show at the current pay, and either the tier still owes one (the call would promise and never ring)
