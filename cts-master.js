@@ -37775,7 +37775,7 @@ function deadChannelsOf(rows, titles, from, to) {
             .filter((r) => r.channel_id != null)
             .map((r) => {
             const id = String(r.channel_id);
-            return { title: titles.get(id) ?? `channel …${id.slice(-4)}`, sends: (0, monitor_util_1.num)(r.sent), delivered: (0, monitor_util_1.num)(r.delivered) };
+            return { id, title: titles.get(id) ?? `channel …${id.slice(-4)}`, sends: (0, monitor_util_1.num)(r.sent), delivered: (0, monitor_util_1.num)(r.delivered) };
         }),
     };
 }
@@ -37812,7 +37812,7 @@ function attributionDays(rows, from, to, client) {
         };
     });
 }
-exports.ATTRIBUTION_NOTE = `attribution.daily: newUserChannelShare = DM conversions (conversion_event kind dm, every DM row has a channel) / new users (daily_client, every namespace); revenueDmShare = revenue (credits under ₹1,000) whose chat had a DM row by the same persona in the ${monitor_sql_1.ATTRIBUTION_RULE.LOOKBACK_DAYS} days before the payment / revenue. Closed IST days only, from today - ${monitor_sql_1.ATTRIBUTION_RULE.CE_RETENTION_DAYS - monitor_sql_1.ATTRIBUTION_RULE.LOOKBACK_DAYS} (conversion_event keeps ${monitor_sql_1.ATTRIBUTION_RULE.CE_RETENTION_DAYS} days).`;
+exports.ATTRIBUTION_NOTE = `attribution.daily: newUserChannelShare = DM conversions (conversion_event kind dm, every DM row has a channel) / new users (daily_client, namespace tg-aut, as every other monitor new-user count); revenueDmShare = revenue (credits under ₹1,000) whose chat had a DM row by the same persona in the ${monitor_sql_1.ATTRIBUTION_RULE.LOOKBACK_DAYS} days before the payment / revenue. Closed IST days only, from today - ${monitor_sql_1.ATTRIBUTION_RULE.CE_RETENTION_DAYS - monitor_sql_1.ATTRIBUTION_RULE.LOOKBACK_DAYS} (conversion_event keeps ${monitor_sql_1.ATTRIBUTION_RULE.CE_RETENTION_DAYS} days).`;
 exports.DOUBLE_CREDIT_WINDOW_MS = 120_000;
 function paymentOverlaps(credits, client) {
     const clientsByChat = new Map();
@@ -37853,12 +37853,12 @@ function paymentOverlaps(credits, client) {
             doublePairs++;
             if ((a.client ?? '') !== (b.client ?? ''))
                 crossClientPairs++;
-            doubleAmount += b.amount;
+            doubleAmount += b.revenue;
         }
     }
     return { multiClientChats, doublePairs, crossClientPairs, doubleAmount, windowSec: exports.DOUBLE_CREDIT_WINDOW_MS / 1000 };
 }
-exports.OVERLAP_NOTE = `paymentOverlaps: multiClientChats = chats with credits on more than one client in the range; doublePairs = consecutive credits of the same chat and amount within ${exports.DOUBLE_CREDIT_WINDOW_MS / 1000} s on any client (possible double credit, research rule), crossClientPairs = of those, on two clients.`;
+exports.OVERLAP_NOTE = `paymentOverlaps: multiClientChats = chats with credits on more than one client in the range; doublePairs = consecutive credits of the same chat and amount within ${exports.DOUBLE_CREDIT_WINDOW_MS / 1000} s on any client (possible double credit, research rule), crossClientPairs = of those, on two clients; doubleAmount = owner revenue of the second credit of each pair (credits under ₹1,000, as the page revenue).`;
 
 
 /***/ },
@@ -39986,10 +39986,10 @@ FROM s LEFT JOIN LATERAL (
   SELECT channel_id, sent, delivered FROM c WHERE delivered >= $3 AND dms = 0 ORDER BY delivered DESC, channel_id LIMIT $4
 ) d ON true`, [from, to, minDelivered, limit]);
 }
-exports.ATTRIBUTION_RULE = { LOOKBACK_DAYS: 30, CE_RETENTION_DAYS: 62, CE_FIRST_DAY: '2026-10-03' };
+exports.ATTRIBUTION_RULE = { LOOKBACK_DAYS: 30, CE_RETENTION_DAYS: 62, CE_FIRST_DAY: '2026-10-04' };
 function attributionDailySql(from, to, fromMs, endMs, lookbackDays = exports.ATTRIBUTION_RULE.LOOKBACK_DAYS) {
     return q('attribution_daily', `WITH nu AS (
-  SELECT day::text AS d, client_id, sum(new_users) AS new_users
+  SELECT day::text AS d, client_id, coalesce(sum(new_users) FILTER (WHERE namespace = 'tg-aut'), 0) AS new_users
   FROM daily_client WHERE day BETWEEN $1::date AND $2::date GROUP BY 1, 2
 ), dm AS (
   SELECT ${IST}::date::text AS d, client_id, count(DISTINCT conversion_id) AS dms
