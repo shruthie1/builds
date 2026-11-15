@@ -58839,8 +58839,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "f006e929a1a495f820634941ef658a01d53b2f94" : 0;
-    const builtAt =  true ? "2026-11-15T07:53:25.266Z" : 0;
+    const sha =  true ? "e40ccf0257c4e4d462a8ad75f97f509e4932dbcf" : 0;
+    const builtAt =  true ? "2026-11-15T08:11:45.341Z" : 0;
     return { sha, builtAt };
 }
 
@@ -85222,14 +85222,23 @@ async function sendAnalysisUnavailableNotice(chatId, note, extra = [], title = "
 }
 // Payment gate (owner rules 2026-10-13): payments/proof-gate/flow.ts decides; this wires it to Telegram + userData.
 /**
- * Would this screenshot reach the payment gate (successful payment to us, not the failed / "connecting" /
- * questionable-caption branches)? A blocked user's photo is only processed when it does; everything else from a
- * blocked user stays silent (owner 2026-10-13).
+ * Owner option (a), 2026-11-15: a payment to us whose status the model left unknown (none of success / failed / finished
+ * set). It goes through the proof gate like a success page (credited only with a real reference, else the details-page
+ * ask); failed / pending words keep it a failed payment (isLocalFailed, checked where this is used).
+ */
+function statusUnknownToUs(imageDetails, sanitizedData) {
+    return !!sanitizedData.isPaymentMine && !imageDetails.isSuccess && !imageDetails.isFailed && !imageDetails.isFinished;
+}
+/**
+ * Would this screenshot reach the payment gate (successful or status-unknown payment to us, not the failed /
+ * "connecting" / questionable-caption branches)? A blocked user's photo is only processed when it does; everything
+ * else from a blocked user stays silent (owner 2026-10-13).
  */
 function reachesPaymentGate(imageDetails, sanitizedData, caption) {
     const text = String(imageDetails.text ?? "").toLowerCase().replace(/(\r\n|\n|\r)/g, " ");
     return !!sanitizedData.isPaymentRelated && !!sanitizedData.isPaymentMine && !!sanitizedData.isFinishedPayment
-        && !sanitizedData.isFailedPayment && !!imageDetails.isSuccess && !imageDetails.isFailed && !(0,_payments_screenshot_parse_image__WEBPACK_IMPORTED_MODULE_14__.isLocalFailed)(imageDetails)
+        && !sanitizedData.isFailedPayment && (!!imageDetails.isSuccess || statusUnknownToUs(imageDetails, sanitizedData))
+        && !imageDetails.isFailed && !(0,_payments_screenshot_parse_image__WEBPACK_IMPORTED_MODULE_14__.isLocalFailed)(imageDetails)
         && (0,_payments_screenshot_helpers__WEBPACK_IMPORTED_MODULE_31__.isNotQuestionable)(caption?.toLowerCase())
         && !(0,_payments_screenshot_parse_image__WEBPACK_IMPORTED_MODULE_14__.isFailedPaymentToScreen)(text)
         && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, [`${process.env.name} connecting`, "failed to connect"]);
@@ -86009,7 +86018,7 @@ async function processImage(event) {
             return;
         }
         proof = startProofRecord(event, chatId, db, photoBuffer, imageDetails);
-        // Every held outcome (status unclear, not finished, no amount, failed, a credit-rule reject) stores a 'held' request
+        // Every held outcome (not finished, no amount, failed, a credit-rule reject) stores a 'held' request
         // on its paymentProofs row, so the next touch from any client sees it (gate.ts). Best effort: never blocks the reply.
         const storeHeldAsk = (code) => paymentFlowFor(event, chatId, db, imageDetails, proof).storeHeld(screenshotRef(event, chatId, photoBuffer, imageDetails, printedPaymentMs(imageDetails)), code)
             .catch((error) => (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_20__.parseError)(error, `[ProcessImage] ${chatId}: storing the held request failed`, false));
@@ -86119,11 +86128,14 @@ async function processImage(event) {
             else {
                 const isLocalFailedImg = (0,_payments_screenshot_parse_image__WEBPACK_IMPORTED_MODULE_14__.isLocalFailed)(imageDetails);
                 logger.log("isLocalFailedImg: ", isLocalFailedImg);
+                const statusUnknown = statusUnknownToUs(imageDetails, sanitizedData);
                 if ((sanitizedData.isFinishedPayment ||
                     (!sanitizedData.isFinishedPayment && isLocalFailedImg)) &&
                     (0,_payments_screenshot_helpers__WEBPACK_IMPORTED_MODULE_31__.isNotQuestionable)(event.message?.text?.toLowerCase())) {
                     if (sanitizedData.isFailedPayment ||
-                        (isLocalFailedImg && !sanitizedData.isFinishedPayment)) {
+                        (isLocalFailedImg && !sanitizedData.isFinishedPayment) ||
+                        // Status unknown: failed / pending words decide (a success page's words cannot excuse them here).
+                        (isLocalFailedImg && statusUnknown)) {
                         proof.outcome("not_receipt", ["FAILED_PAYMENT"]);
                         await rejectFailedPaymentScreenshot(event, chatId, imageDetails, photoBuffer, broadcastName);
                         await storeHeldAsk("FAILED_PAYMENT");
@@ -86134,7 +86146,9 @@ async function processImage(event) {
                         if (fraudReasons.length > 0) {
                             await blockFakePaymentScreenshot(event, chatId, db, imageDetails, photoBuffer, userDetails, fraudReasons, proof);
                         }
-                        else if (sanitizedData.isPaymentMine && imageDetails.isSuccess) {
+                        else if (sanitizedData.isPaymentMine && (imageDetails.isSuccess || statusUnknown)) {
+                            // A status-unknown payment to us takes the same path (option (a), 2026-11-15): the gate's history checks,
+                            // the credit rules, then a real reference credits and none asks for the details page (outcome.ts).
                             // Owner 2026-10-25: a receipt of ₹1,000 or more is never credited, with or without UTR (the one threshold,
                             // @tg/vision isCreditableAmount). Same reply as the old 15,000 ceiling; no cheat / fraud mark (a misread of a
                             // genuine receipt must not punish the payer).
@@ -86166,6 +86180,7 @@ async function processImage(event) {
                                         // No store (outage): no re-send check, so the credit rules judge on the old 10-minute view.
                                         creditRules: () => (0,_payments_screenshot_helpers__WEBPACK_IMPORTED_MODULE_31__.handleMyPayment)(imageDetails, userDetails, session ? isWithinPastTenMinutesImage : (0,_payments_payment_time__WEBPACK_IMPORTED_MODULE_19__.withoutProofStore)(isWithinPastTenMinutesImage, arrivalMs), didPayOthers, arrivalMs),
                                         answerResend: async () => (resendAnswered = await answerResendFor(event, chatId, db)()),
+                                        ...(statusUnknown ? { statusUnknown: true } : {}),
                                     });
                                     if ("hold" in judged && judged.hold) {
                                         // Store error / timeout: never credited. Bounded re-checks, then the ops notice (fail closed).
@@ -86177,7 +86192,7 @@ async function processImage(event) {
                                     // The gate claimed this payment's own identity (UTR / picture hash): its full amount is new revenue.
                                     const gateIdentified = Boolean(session && releaseClaim && (session.facts.utr || session.facts.dHash));
                                     if (isPaymentProperlyMine?.isvalid)
-                                        proof.outcome("credited");
+                                        proof.outcome("credited", statusUnknown ? [_payments_proof_gate_outcome__WEBPACK_IMPORTED_MODULE_44__.STATUS_UNKNOWN] : []);
                                     else if (isPaymentProperlyMine) {
                                         const [outcome, code] = rejectOutcome(isPaymentProperlyMine.title);
                                         proof.outcome(outcome, blockedAnswering ? [code, "BLOCKED_IGNORED"] : [code]);
@@ -86288,20 +86303,9 @@ async function processImage(event) {
                                 }
                             }
                         }
-                        else if (sanitizedData.isPaymentMine && !imageDetails.isSuccess && !imageDetails.isFailed && !imageDetails.isFinished) {
-                            // A payment to us whose status the model left unknown (pending / unreadable, none of success / failed /
-                            // finished set) is not "someone else's payment": never delete or count it, ask for the screenshot again
-                            // like the no-amount branch (RCA 2026-10-21: 62 such deletes since 10-10, 3 confirmed false rejects).
-                            proof.outcome("not_receipt", ["STATUS_UNCLEAR"]);
-                            await sendMessageWithTimeout(event.client, chatId, { message: (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_12__.pickOneMsg)(UNCLEAR_SCREENSHOT_MESSAGES) });
-                            await storeHeldAsk("STATUS_UNCLEAR");
-                            await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_30__.notifyChat)(chatId, {
-                                title: 'Status unclear (asked again)',
-                                summary: 'Payment to us, but the payment status could not be read; asked for the full screenshot.',
-                                fields: [fact('Amount', amount)],
-                            });
-                        }
                         else {
+                            // The STATUS_UNCLEAR reply (a status-unknown payment to us asked for the full screenshot before the gate ran)
+                            // was removed 2026-11-15 (option (a)): that screenshot goes through the gate above.
                             proof.outcome("not_ours", ["NOT_PAID_TO_US"]);
                             await (0,_telegram_delete_messages__WEBPACK_IMPORTED_MODULE_6__.deleteMessage)(event);
                             await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_30__.notifyChat)(chatId, { title: 'Not mine deleted', summary: 'Asked to pay me.' });
@@ -101522,7 +101526,7 @@ const FRAUD_GRACE_MS = 15 * MINUTE_MS;
 /** An open request can be answered for this long (also after the block). */
 const ASK_ANSWER_WINDOW_MS = 24 * 60 * MINUTE_MS;
 /** old_time reasons only a real reference answers (confirmsAsk). FAKE_STREAK / CHAT_PROVEN_FAKE: chat-fakes.ts holds. */
-const NEEDS_REAL_REFERENCE_REASONS = new Set(['IMPOSSIBLE_REFERENCE', 'NO_UTR_NO_TIME_SAME_AMOUNT', 'FAKE_STREAK', 'CHAT_PROVEN_FAKE', 'NO_UTR_VELOCITY', 'MODEL_DOUBT', 'COPY_ACROSS_PERSONAS']);
+const NEEDS_REAL_REFERENCE_REASONS = new Set(['IMPOSSIBLE_REFERENCE', 'NO_UTR_NO_TIME_SAME_AMOUNT', 'FAKE_STREAK', 'CHAT_PROVEN_FAKE', 'NO_UTR_VELOCITY', 'MODEL_DOUBT', 'COPY_ACROSS_PERSONAS', 'STATUS_UNKNOWN']);
 /** Uppercase, separators removed. Null for masked ("XXXX", "****"), too short, or no digits at all. */
 function normalizeUtr(raw) {
     if (typeof raw !== 'string')
@@ -102173,7 +102177,7 @@ class PaymentFlow {
         }
     }
     /**
-     * A held screenshot (not finished, status unclear, no amount, failed, old or unconfirmed time): its row carries a
+     * A held screenshot (not finished, no amount, failed, old or unconfirmed time): its row carries a
      * `held` request, so the user's next screenshot on any persona sees it and the next credit closes it (v2 item 3).
      * Best effort: false when no row or request could be stored. Never throws.
      */
@@ -102368,15 +102372,16 @@ class PaymentFlow {
      */
     async judge(args) {
         const { session, canReply, creditRules } = args;
-        // No store configured at all: the credit rules alone (the behaviour from before the gate).
+        // No store configured at all: the credit rules alone (the behaviour from before the gate). A status-unknown
+        // screenshot is never credited without its history (option (a)): held like a store failure.
         if (!session)
-            return { handled: false, verdict: await creditRules() };
+            return args.statusUnknown ? this.storeUnavailable('status-unknown screenshot', 'no store') : { handled: false, verdict: await creditRules() };
         const blocked = canReply === 0;
         // Blocked by this flow: only a real credit (which unblocks) is announced; the ask still goes to the user.
         const notify = (notice) => (blocked ? Promise.resolve() : this.io.notifyOps(notice));
         const f = session.facts;
         const history = await session.check(); // sets the holds read below
-        const evidence = { facts: f, history, holds: session.postRulesHolds(), blocked };
+        const evidence = { facts: f, history, holds: session.postRulesHolds(), blocked, ...(args.statusUnknown ? { statusUnknown: true } : {}) };
         let outcome = (0,_outcome__WEBPACK_IMPORTED_MODULE_1__.decideGate)(evidence);
         if (outcome.kind === 'rules') {
             evidence.rules = await creditRules();
@@ -103138,6 +103143,7 @@ const STORE_HOLD_MESSAGES = [
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   STATUS_UNKNOWN: () => (/* binding */ STATUS_UNKNOWN),
 /* harmony export */   decideGate: () => (/* binding */ decideGate),
 /* harmony export */   rejectIsAsk: () => (/* binding */ rejectIsAsk)
 /* harmony export */ });
@@ -103153,6 +103159,8 @@ __webpack_require__.r(__webpack_exports__);
  */
 
 
+/** A status-unknown screenshot with no real reference: the details-page ask (only a real reference answers it). */
+const STATUS_UNKNOWN = 'STATUS_UNKNOWN';
 const OPS_SUMMARY = {
     IMPOSSIBLE_REFERENCE: 'Reference has an impossible length (real ones have 12 digits).',
     FAKE_STREAK: 'FAKE_STREAK: 2+ fake screenshots since the open fake warning; the details page decides.',
@@ -103162,6 +103170,7 @@ const OPS_SUMMARY = {
     NO_UTR_NO_TIME_SAME_AMOUNT: 'Same amount credited in the last 48 h; nothing shows this is a new payment.',
     DETAILS_PAGE_AWAITED: 'Screenshot shows no real transaction reference; the details page is still awaited.',
     FAKE_WARNING_OPEN: 'Screenshot shows no real transaction reference.',
+    [STATUS_UNKNOWN]: 'STATUS_UNKNOWN: the payment status could not be read and no real transaction reference shows; the details page decides.',
 };
 function ask(wording, open, note, reasons) {
     return { kind: 'ask', wording, open, note, reasons, ops: reasons.map((r) => OPS_SUMMARY[r]).find(Boolean) ?? reasons.join(', ') };
@@ -103198,6 +103207,13 @@ function decideGate(e) {
         return ask('old', 'old_time', 'old_time', ['IMPOSSIBLE_REFERENCE']);
     if (e.holds.chatFake)
         return ask('again', 'old_time', 'old_time', [e.holds.chatFake]);
+    // Status unknown (option (a)): a real reference is the evidence the status cannot give; without one, the details
+    // page. Neutral wording (`copy`): it says nothing about time, age or fakes. Before R1 and the asks below it: such a
+    // screenshot is not a credit, so it must never open the sticky NO_UTR_VELOCITY ask that holds the chat's later
+    // no-UTR credits for 24 h (replay 2026-11-15: shruthi1 ****5644, two ₹600 status-unknown, then a genuine ₹25 held).
+    // R1's ₹ total counts credited rows only (history.ts noUtrVelocityHold), so an asked row never adds to it.
+    if (e.statusUnknown && !(0,_decide__WEBPACK_IMPORTED_MODULE_0__.isRealReference)(e.facts.utr))
+        return ask('copy', 'old_time', 'old_time', [STATUS_UNKNOWN]);
     if (e.holds.noUtrVelocity)
         return ask('again', 'old_time', 'old_time', [_history__WEBPACK_IMPORTED_MODULE_1__.NO_UTR_VELOCITY]);
     // R2 (review F2): a copy on another persona is asked, never "not my payment".
@@ -105077,7 +105093,11 @@ function isValidPayment(imageData) {
     }
     // PhonePe's success details page ("Paid to" + "Transfer Details") is finished even when the model leaves status unknown.
     const isPaidToDetailsPage = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_4__.containsAll)(text, ['paid to', 'transfer details']) && !imageData.isFailed && !isLocalFailed(imageData);
-    return (imageData.confidence > 0.9 ? imageData.isFinished || isPaidToDetailsPage : true) &&
+    // Owner option (a), 2026-11-15: a payment to us whose status the model left unknown (none of success / failed /
+    // finished) and that prints no failed / pending words is judged by the proof gate (credited only with a real
+    // reference, else the details-page ask), not answered "finish the payment" here. The other checks below still apply.
+    const isStatusUnknownToUs = hasKnownPayeeSignal && !imageData.isSuccess && !imageData.isFailed && !imageData.isFinished && !isLocalFailed(imageData);
+    return (imageData.confidence > 0.9 ? imageData.isFinished || isPaidToDetailsPage || isStatusUnknownToUs : true) &&
         (!isUnsubmittedPayScreen || hasStrongCompletionEvidence) &&
         !hasAlwaysInvalidContext &&
         (!hasInteractionsText || (hasStrongCompletionEvidence && hasKnownPayeeSignal)) &&
