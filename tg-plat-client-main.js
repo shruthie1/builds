@@ -58966,8 +58966,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "9dfffd4c50cc92e63df7ac3aa90cb78176e57a2f" : 0;
-    const builtAt =  true ? "2026-11-15T10:43:01.761Z" : 0;
+    const sha =  true ? "588c78b45a5d83cc73eb1ddba92c0a36892b6b78" : 0;
+    const builtAt =  true ? "2026-11-15T11:30:17.484Z" : 0;
     return { sha, builtAt };
 }
 
@@ -86449,8 +86449,6 @@ async function processImage(event) {
                             }
                         }
                         else {
-                            // The STATUS_UNCLEAR reply (a status-unknown payment to us asked for the full screenshot before the gate ran)
-                            // was removed 2026-11-15 (option (a)): that screenshot goes through the gate above.
                             proof.outcome("not_ours", ["NOT_PAID_TO_US"]);
                             await (0,_telegram_delete_messages__WEBPACK_IMPORTED_MODULE_6__.deleteMessage)(event);
                             await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_30__.notifyChat)(chatId, { title: 'Not mine deleted', summary: 'Asked to pay me.' });
@@ -102224,11 +102222,13 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ });
 /* harmony import */ var _decide__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./decide */ "./src/payments/proof-gate/decide.ts");
 /* harmony import */ var _outcome__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./outcome */ "./src/payments/proof-gate/outcome.ts");
-/* harmony import */ var _messages__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./messages */ "./src/payments/proof-gate/messages.ts");
-/* harmony import */ var _proof_check_messages__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../proof-check/messages */ "./src/payments/proof-check/messages.ts");
-/* harmony import */ var _conversation_state_upsell_quiet__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../../conversation/state/upsell-quiet */ "./src/conversation/state/upsell-quiet.ts");
-/* harmony import */ var _fingerprint__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ../fingerprint */ "./src/payments/fingerprint.ts");
-/* harmony import */ var _proof_archive_verdict__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ../proof-archive/verdict */ "./src/payments/proof-archive/verdict.ts");
+/* harmony import */ var _history__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./history */ "./src/payments/proof-gate/history.ts");
+/* harmony import */ var _messages__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ./messages */ "./src/payments/proof-gate/messages.ts");
+/* harmony import */ var _proof_check_messages__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../proof-check/messages */ "./src/payments/proof-check/messages.ts");
+/* harmony import */ var _conversation_state_upsell_quiet__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ../../conversation/state/upsell-quiet */ "./src/conversation/state/upsell-quiet.ts");
+/* harmony import */ var _fingerprint__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ../fingerprint */ "./src/payments/fingerprint.ts");
+/* harmony import */ var _proof_archive_verdict__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ../proof-archive/verdict */ "./src/payments/proof-archive/verdict.ts");
+
 
 
 
@@ -102269,7 +102269,7 @@ function rawAmount(details) {
     return Number.isFinite(n) ? n : 0;
 }
 function gateFacts(ref) {
-    const fp = (0,_fingerprint__WEBPACK_IMPORTED_MODULE_5__.imageFingerprint)(ref.photo);
+    const fp = (0,_fingerprint__WEBPACK_IMPORTED_MODULE_6__.imageFingerprint)(ref.photo);
     return {
         chatId: ref.chatId,
         profile: ref.profile,
@@ -102282,7 +102282,7 @@ function gateFacts(ref) {
         ...(ref.arrivalMs !== undefined ? { arrivalMs: ref.arrivalMs } : {}),
         payeeUpiId: ref.details.payeeUpiId ?? null,
         payeeName: ref.details.payeeName || null,
-        txnId: (0,_proof_archive_verdict__WEBPACK_IMPORTED_MODULE_6__.txnIdOf)(ref.details.text) ?? null,
+        txnId: (0,_proof_archive_verdict__WEBPACK_IMPORTED_MODULE_7__.txnIdOf)(ref.details.text) ?? null,
         ...(ref.timeRelative ? { timeRelative: true } : {}),
         timeText: [ref.ocrText, ref.details.text].filter(Boolean).join('\n'),
     };
@@ -102357,14 +102357,14 @@ class PaymentFlow {
                 return;
             }
             this.note('fake_blocked', [...reasons, 'SECOND_FAKE']);
-            await this.io.reply(this.pick(_messages__WEBPACK_IMPORTED_MODULE_2__.FRAUD_BLOCKED_MESSAGES));
+            await this.io.reply(this.pick(_messages__WEBPACK_IMPORTED_MODULE_3__.FRAUD_BLOCKED_MESSAGES));
             await this.io.block();
             this.io.fraudCleared?.();
             await this.io.notifyOps({ title: 'Fake pay blocked', fields: [{ label: 'Reason', value: label, code: false }] });
             return;
         }
         this.io.warn(`[payment-gate] fraud screenshot (${label}) for ${chatId}: warned, blocking in ${_decide__WEBPACK_IMPORTED_MODULE_0__.FRAUD_GRACE_MS / 60000} min unless a real payment page arrives`);
-        await this.io.reply(this.pick(_messages__WEBPACK_IMPORTED_MODULE_2__.FRAUD_WARNING_MESSAGES));
+        await this.io.reply(this.pick(_messages__WEBPACK_IMPORTED_MODULE_3__.FRAUD_WARNING_MESSAGES));
         this.io.fraudWarned?.();
         await this.io.notifyOps({ title: 'User warned', summary: 'Blocked in 15 min unless the real payment page arrives.', fields: [{ label: 'Reason', value: label, code: false }] });
         const due = { chatId, profile, msgId, label, openedAtMs: Date.now() };
@@ -102401,7 +102401,7 @@ class PaymentFlow {
         this.io.fraudCleared?.();
         // Fired by a touch on another persona than the one that warned: block silently there (that persona never warned).
         if (!due.quiet)
-            await this.io.reply(this.pick(_messages__WEBPACK_IMPORTED_MODULE_2__.FRAUD_BLOCKED_MESSAGES));
+            await this.io.reply(this.pick(_messages__WEBPACK_IMPORTED_MODULE_3__.FRAUD_BLOCKED_MESSAGES));
         await this.io.notifyOps({ title: 'No pay in 15 min', fields: [{ label: 'Reason', value: label, code: false }] });
     }
     /**
@@ -102413,8 +102413,7 @@ class PaymentFlow {
      */
     async modelDoubt(session, canReply, answerResend) {
         const history = await session.check();
-        const holds = { chatFake: null, noUtrVelocity: false, copy: null, resendAsk: null, sameMinute: null, lagVouch: null };
-        const outcome = (0,_outcome__WEBPACK_IMPORTED_MODULE_1__.decideGate)({ facts: session.facts, history, holds, blocked: canReply === 0, rules: { isvalid: true, msg: '' } });
+        const outcome = (0,_outcome__WEBPACK_IMPORTED_MODULE_1__.decideGate)({ facts: session.facts, history, holds: _history__WEBPACK_IMPORTED_MODULE_2__.NO_HOLDS, blocked: canReply === 0, rules: { isvalid: true, msg: '' } });
         const f = session.facts;
         switch (outcome.kind) {
             case 'hold':
@@ -102444,7 +102443,7 @@ class PaymentFlow {
         }
         await session.openAsk('old_time', ['MODEL_DOUBT']);
         this.note('old_time', ['MODEL_DOUBT']);
-        await this.io.reply(this.pick(_messages__WEBPACK_IMPORTED_MODULE_2__.ASK_FAMILY.old));
+        await this.io.reply(this.pick(_messages__WEBPACK_IMPORTED_MODULE_3__.ASK_FAMILY.old));
         return 'asked';
     }
     /**
@@ -102461,14 +102460,14 @@ class PaymentFlow {
         this.io.warn(`[payment-gate] repeat of a credited payment for ${chatId} (by ${by}, ${where}): not crediting`);
         // Upsell quiet after a ₹200+ show (conversation/state/upsell-quiet): the show's own screenshot resent is not
         // answered with "pay now" (the screenshot itself does not end the quiet here; only a credit does).
-        await this.io.reply(this.pick((0,_conversation_state_upsell_quiet__WEBPACK_IMPORTED_MODULE_4__.inUpsellQuiet)(chatId) ? _conversation_state_upsell_quiet__WEBPACK_IMPORTED_MODULE_4__.UPSELL_QUIET_REPLIES : _proof_check_messages__WEBPACK_IMPORTED_MODULE_3__.OLD_PAYMENT_MESSAGES));
+        await this.io.reply(this.pick((0,_conversation_state_upsell_quiet__WEBPACK_IMPORTED_MODULE_5__.inUpsellQuiet)(chatId) ? _conversation_state_upsell_quiet__WEBPACK_IMPORTED_MODULE_5__.UPSELL_QUIET_REPLIES : _proof_check_messages__WEBPACK_IMPORTED_MODULE_4__.OLD_PAYMENT_MESSAGES));
         await this.io.notifyOps({ title: 'Repeat payment', fields: [{ label: 'Same', value: REPEAT_BY[by] ?? by, code: false }, { label: 'Where', value: where, code: false }] });
     }
     /** Owner (2026-10-21): a payment already credited in ANOTHER chat / persona is not ours: no credit, no block. */
     async notMine(chatId, by, where) {
         this.note('cross_client', ['CREDITED_ELSEWHERE', `SAME_${by}`]);
         this.io.warn(`[payment-gate] payment credited elsewhere for ${chatId} (by ${by}, ${where}): not my payment, not crediting`);
-        await this.io.reply(_messages__WEBPACK_IMPORTED_MODULE_2__.NOT_MY_PAYMENT_MESSAGE);
+        await this.io.reply(_messages__WEBPACK_IMPORTED_MODULE_3__.NOT_MY_PAYMENT_MESSAGE);
         await this.io.notifyOps({ title: 'Not my payment', fields: [{ label: 'Same', value: REPEAT_BY[by] ?? by, code: false }, { label: 'Where', value: where, code: false }] });
     }
     /** Store error / timeout: never credit; the caller holds the picture for a bounded re-check (then ops review). */
@@ -102568,11 +102567,11 @@ class PaymentFlow {
         this.note(outcome.note, outcome.reasons);
         this.io.warn(`[payment-gate] ${f.chatId}: ${outcome.reasons.join(',')}: asked for the details page, not crediting`);
         if (outcome.wording === 'warned') {
-            await this.io.reply(this.pick(_messages__WEBPACK_IMPORTED_MODULE_2__.FRAUD_WARNING_OPEN_MESSAGES));
+            await this.io.reply(this.pick(_messages__WEBPACK_IMPORTED_MODULE_3__.FRAUD_WARNING_OPEN_MESSAGES));
             await this.io.notifyOps({ title: 'Not credited', summary: outcome.ops });
             return;
         }
-        await this.io.reply(this.pick(_messages__WEBPACK_IMPORTED_MODULE_2__.ASK_FAMILY[outcome.wording]));
+        await this.io.reply(this.pick(_messages__WEBPACK_IMPORTED_MODULE_3__.ASK_FAMILY[outcome.wording]));
         const summary = outcome.reasons[0] === 'IMPOSSIBLE_REFERENCE' ? `Reference ${f.utr} has ${f.utr?.length} digits (real ones have 12).` : outcome.ops;
         await notify({ title: 'Asked pay page', summary });
     }
@@ -102711,7 +102710,7 @@ function withTimeout(work, ms, fallback, what) {
 class GateSession {
     constructor(deps, store, facts, creditAmount) {
         /** The post-rules holds as check() read them (history.ts). */
-        this.holds = { chatFake: null, noUtrVelocity: false, copy: null, resendAsk: null, sameMinute: null, lagVouch: null };
+        this.holds = _history__WEBPACK_IMPORTED_MODULE_6__.NO_HOLDS;
         /** The open asks check() read (undefined = not read yet, null = the read failed). */
         this.openRows = undefined;
         /** When the last claim() started (claimState tells this claim's landed write from an earlier one). */
@@ -103010,18 +103009,13 @@ function proofGateFrom(getRepositories) {
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
-/* harmony export */   CLOCK_LAG_MATCH_MS: () => (/* binding */ CLOCK_LAG_MATCH_MS),
 /* harmony export */   COPY_ACROSS_PERSONAS: () => (/* binding */ COPY_ACROSS_PERSONAS),
-/* harmony export */   COPY_WINDOW_MS: () => (/* binding */ COPY_WINDOW_MS),
+/* harmony export */   NO_HOLDS: () => (/* binding */ NO_HOLDS),
+/* harmony export */   NO_UTR_NO_TIME_SAME_AMOUNT: () => (/* binding */ NO_UTR_NO_TIME_SAME_AMOUNT),
 /* harmony export */   NO_UTR_VELOCITY: () => (/* binding */ NO_UTR_VELOCITY),
-/* harmony export */   NO_UTR_VELOCITY_LIMIT: () => (/* binding */ NO_UTR_VELOCITY_LIMIT),
-/* harmony export */   NO_UTR_VELOCITY_STICKY_MS: () => (/* binding */ NO_UTR_VELOCITY_STICKY_MS),
-/* harmony export */   NO_UTR_VELOCITY_WINDOW_MS: () => (/* binding */ NO_UTR_VELOCITY_WINDOW_MS),
 /* harmony export */   PRINTED_BEFORE_CALL_NO_UTR: () => (/* binding */ PRINTED_BEFORE_CALL_NO_UTR),
-/* harmony export */   SAME_MINUTE_LOOKBACK_MS: () => (/* binding */ SAME_MINUTE_LOOKBACK_MS),
 /* harmony export */   SAME_MINUTE_OTHER_AMOUNT: () => (/* binding */ SAME_MINUTE_OTHER_AMOUNT),
 /* harmony export */   clockLagVouch: () => (/* binding */ clockLagVouch),
-/* harmony export */   copiedAcrossPersonas: () => (/* binding */ copiedAcrossPersonas),
 /* harmony export */   historyVerdict: () => (/* binding */ historyVerdict),
 /* harmony export */   noUtrVelocityHold: () => (/* binding */ noUtrVelocityHold),
 /* harmony export */   sameMinuteOtherAmount: () => (/* binding */ sameMinuteOtherAmount)
@@ -103031,7 +103025,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _chat_fakes__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./chat-fakes */ "./src/payments/proof-gate/chat-fakes.ts");
 /**
  * What this user's history says about one payment screenshot: ONE pure decision over ONE read batch (gate.ts check()).
- * Order (rewrite 2026-11-14, design gate-rewrite/design.md): the same payment credited before, or held by the gate in
+ * Order (rewrite 2026-11-14, docs/PAYMENT-SCREENSHOT-FLOW.md section 0): the same payment credited before, or held by the gate in
  * ANOTHER chat (classifyAgainstServed), then the re-send rule resend.ts, the very same held file, an open ask this
  * screenshot answers, an open ask only a real reference answers, then the post-rules holds (chat fakes, R1, same
  * minute other amount, R2, re-send ask) for outcome.ts to raise after the credit rules accepted, and the clock-lag fact
@@ -103049,6 +103043,8 @@ const NO_UTR_VELOCITY_STICKY_MS = 24 * 60 * 60000;
 /** R2 (owner 2026-11-14): the same amount credited on another persona of this chat, printed within 2 min. */
 const COPY_WINDOW_MS = 2 * 60000;
 const COPY_ACROSS_PERSONAS = 'COPY_ACROSS_PERSONAS';
+/** The re-send ask (resend.ts steps 'next-minute' / 'no-evidence'); only this first reason is stored on the row. */
+const NO_UTR_NO_TIME_SAME_AMOUNT = 'NO_UTR_NO_TIME_SAME_AMOUNT';
 const COPY_LOOKBACK_MS = 7 * 24 * 60 * 60000;
 /** Same printed minute, other amount (owner 2026-11-15, ramya2: a credited ₹50 receipt edited to ₹150). */
 const SAME_MINUTE_OTHER_AMOUNT = 'SAME_MINUTE_OTHER_AMOUNT';
@@ -103207,9 +103203,9 @@ function historyVerdict(f, rows, nowMs, ownName) {
         return { verdict: { kind: 'unavailable' }, holds: NO_HOLDS, open, resend };
     const held = (0,_decide__WEBPACK_IMPORTED_MODULE_0__.heldSameFile)(f, [...open, ...recent]);
     if (held?.ask && held.ask.kind !== 'held') {
-        const verdict = held.ask.state === 'open'
-            ? { kind: 'needs-real-page', ask: held.ask.kind === 'fraud' ? 'fraud' : 'old_time' }
-            : { kind: 'repeat', by: 'file', sameChat: held.chatId === f.chatId && held.profile === f.profile, matched: held };
+        let verdict = { kind: 'repeat', by: 'file', sameChat: held.chatId === f.chatId && held.profile === f.profile, matched: held };
+        if (held.ask.state === 'open')
+            verdict = held.ask.kind === 'fraud' ? { kind: 'needs-real-page', ask: 'fraud' } : { kind: 'needs-real-page', ask: 'old_time', reasons: held.ask.reasons ?? [] };
         return { verdict, holds: NO_HOLDS, open, resend };
     }
     const asked = (0,_decide__WEBPACK_IMPORTED_MODULE_0__.findConfirmedAsk)(f, open, nowMs);
@@ -103220,7 +103216,8 @@ function historyVerdict(f, rows, nowMs, ownName) {
         noUtrVelocity: answered.has(NO_UTR_VELOCITY) ? false : noUtrVelocityHold(f, creditedRows, open, recent, nowMs),
         // R2 only where the re-send rule found nothing to ask about (its own details-page ask stands).
         copy: answered.has(COPY_ACROSS_PERSONAS) || resend.kind === 'ask' ? null : copiedAcrossPersonas(f, creditedRows, nowMs),
-        resendAsk: resend.kind === 'ask' ? resend.step : null,
+        // A real reference answering the re-send ask: credited (review 2026-11-15, it was asked again forever).
+        resendAsk: resend.kind === 'ask' && !(answered.has(NO_UTR_NO_TIME_SAME_AMOUNT) && (0,_decide__WEBPACK_IMPORTED_MODULE_0__.isRealReference)(f.utr)) ? resend.step : null,
         sameMinute: answered.has(SAME_MINUTE_OTHER_AMOUNT) ? null : sameMinuteOtherAmount(f, creditedRows, nowMs),
         lagVouch: clockLagVouch(f, creditedRows, nowMs),
     };
@@ -103232,7 +103229,7 @@ function historyVerdict(f, rows, nowMs, ownName) {
         if (others.some((r) => (0,_decide__WEBPACK_IMPORTED_MODULE_0__.fraudGraceOpen)(r, nowMs) || (0,_decide__WEBPACK_IMPORTED_MODULE_0__.gateBlockAnswerable)(r, nowMs)))
             return { verdict: { kind: 'needs-real-page', ask: 'fraud' }, holds, open, resend };
         if (others.some((r) => (0,_decide__WEBPACK_IMPORTED_MODULE_0__.impossibleReferenceAskOpen)(r, nowMs)))
-            return { verdict: { kind: 'needs-real-page', ask: 'old_time' }, holds, open, resend };
+            return { verdict: { kind: 'needs-real-page', ask: 'old_time', reasons: ['IMPOSSIBLE_REFERENCE'] }, holds, open, resend };
     }
     return { verdict: servedVerdict, holds, open, resend };
 }
@@ -103308,7 +103305,10 @@ const FRAUD_BLOCK_SOON_MESSAGES = [
     "No more fake please 🙄\n\nReal payment bhejo now, warna blocked",
     "Few mins left baby\n\nSend the real payment or I'm blocking you",
 ];
-/** The details page is needed (a reference of impossible length): polite, it may be a misread. */
+/**
+ * ASK_FAMILY.old: the payment looks old. A reference of impossible length (IMPOSSIBLE_REFERENCE), a model-only doubt
+ * (MODEL_DOUBT), or a re-send printed the minute after a credit of the same amount ('next-minute').
+ */
 const OLD_TIME_ASK_MESSAGES = [
     "Baby this payment looks old 🤔\n\n Open your payment app History, tap it and send me that page..\nthen we can start 😘",
     "Hmm This is Old one Dear...\n\nsend me the payment details page from History!\nthen I will start right away 💋",
@@ -103320,15 +103320,15 @@ const PAYMENT_ASK_REPEAT_MESSAGES = [
     "Arre wait baby, I still can't see it yaar\n\nJust send the payment details page from History\n\nThen we start 😘",
     "Haan haan I know baby\n\nBut I need the History page na\n\nTap the payment in your app and send me that screenshot",
 ];
-/** No reference and no readable time, same amount credited in the last 24 h: polite details-page request. */
+/** ASK_FAMILY.noTime: no time read or confirmed; also the re-send ask with nothing to tell it apart (same amount credited in 48 h). */
 const DETAILS_PAGE_ASK_MESSAGES = [
     "Baby I can't see the time on this one 🤔\n\nOpen your payment app History, tap the payment and send me that page..",
     "Hmm this pic has no time on it 🙈\n\nSend me the payment page from your History na..",
     "I can't read when you paid 🤔\n\nGo to History in your payment app, open the payment and send that screen..",
 ];
 /**
- * R2 COPY_ACROSS_PERSONAS (owner 2026-11-14): the same amount was just credited on another persona of this chat. Neutral
- * details-page ask: never says the payment is old, has no time, or is fake.
+ * ASK_FAMILY.copy: the neutral details-page ask, never says the payment is old, has no time, or is fake. Used by R2
+ * COPY_ACROSS_PERSONAS, STATUS_UNKNOWN, SAME_MINUTE_OTHER_AMOUNT and PRINTED_BEFORE_CALL_NO_UTR.
  */
 const COPY_ASK_MESSAGES = [
     "Baby send me the payment page once 🙈\nOpen your payment app History, tap this payment and send that screen..",
@@ -103338,8 +103338,9 @@ const COPY_ASK_MESSAGES = [
 /**
  * The one details-page ask family (rewrite 2026-11-14). Every member asks for the same thing (the payment details page
  * from History); the wording differs only where the user needs to know why: `old` (the payment looks old or its
- * reference is impossible), `noTime` (no payment time could be read or confirmed), `copy` (R2: the same amount was
- * credited on another persona; neutral), `again` (nothing shows yet; the generic hold, and the repeat of an open ask).
+ * reference is impossible), `noTime` (no payment time could be read or confirmed), `copy` (neutral: R2, STATUS_UNKNOWN,
+ * SAME_MINUTE_OTHER_AMOUNT, PRINTED_BEFORE_CALL_NO_UTR), `again` (nothing shows yet; the generic hold, and the repeat of
+ * an open ask). outcome.ts HOLD_WORDING maps each stored hold to its member.
  */
 const ASK_FAMILY = {
     old: OLD_TIME_ASK_MESSAGES,
@@ -103372,7 +103373,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _decide__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./decide */ "./src/payments/proof-gate/decide.ts");
 /* harmony import */ var _history__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./history */ "./src/payments/proof-gate/history.ts");
 /**
- * The ONE gate decision for a payment screenshot to us (rewrite 2026-11-14, design gate-rewrite/design.md). Pure: it
+ * The ONE gate decision for a payment screenshot to us (rewrite 2026-11-14, docs/PAYMENT-SCREENSHOT-FLOW.md section 0). Pure: it
  * reads one evidence object (the history verdict + holds from GateSession.check(), the user's block state, the facts and,
  * once asked for, the credit rules' verdict) and returns one outcome with its reason codes. flow.ts executes it.
  *
@@ -103390,15 +103391,34 @@ const OPS_SUMMARY = {
     [_history__WEBPACK_IMPORTED_MODULE_1__.NO_UTR_VELOCITY]: 'NO_UTR_VELOCITY: no UTR, and this chat\'s no-UTR credits in 24 h reach ₹600; the details page decides.',
     [_history__WEBPACK_IMPORTED_MODULE_1__.SAME_MINUTE_OTHER_AMOUNT]: 'SAME_MINUTE_OTHER_AMOUNT: a payment printed in the same minute with another amount was credited on this chat in 48 h; the details page decides.',
     [_history__WEBPACK_IMPORTED_MODULE_1__.COPY_ACROSS_PERSONAS]: 'COPY_ACROSS_PERSONAS: the same amount, printed within 2 min, was credited on another persona of this chat; the details page decides.',
-    NO_UTR_NO_TIME_SAME_AMOUNT: 'Same amount credited in the last 48 h; nothing shows this is a new payment.',
+    [_history__WEBPACK_IMPORTED_MODULE_1__.NO_UTR_NO_TIME_SAME_AMOUNT]: 'Same amount credited in the last 48 h; nothing shows this is a new payment.',
     DETAILS_PAGE_AWAITED: 'Screenshot shows no real transaction reference; the details page is still awaited.',
     FAKE_WARNING_OPEN: 'Screenshot shows no real transaction reference.',
     [_history__WEBPACK_IMPORTED_MODULE_1__.PRINTED_BEFORE_CALL_NO_UTR]: 'PRINTED_BEFORE_CALL_NO_UTR: printed before our last call, no UTR, and no real-UTR credit of this chat shows the same clock lag; the details page decides.',
     [STATUS_UNKNOWN]: 'STATUS_UNKNOWN: the payment status could not be read and no real transaction reference shows; the details page decides.',
 };
+/**
+ * How each stored old_time hold is told: its own ask (decideGate below, flow.ts modelDoubt for MODEL_DOUBT) and the same
+ * file re-sent while it is open (review 2026-11-15: that re-send was always told `old`). `old` only where the ask is about
+ * age. A reason not listed here (the re-send ask, whose step is not stored) is told `again`.
+ */
+const HOLD_WORDING = {
+    IMPOSSIBLE_REFERENCE: 'old',
+    MODEL_DOUBT: 'old',
+    FAKE_STREAK: 'again',
+    CHAT_PROVEN_FAKE: 'again',
+    [_history__WEBPACK_IMPORTED_MODULE_1__.NO_UTR_VELOCITY]: 'again',
+    [STATUS_UNKNOWN]: 'copy',
+    [_history__WEBPACK_IMPORTED_MODULE_1__.SAME_MINUTE_OTHER_AMOUNT]: 'copy',
+    [_history__WEBPACK_IMPORTED_MODULE_1__.COPY_ACROSS_PERSONAS]: 'copy',
+    [_history__WEBPACK_IMPORTED_MODULE_1__.PRINTED_BEFORE_CALL_NO_UTR]: 'copy',
+};
+const holdWording = (reasons) => reasons.map((r) => HOLD_WORDING[r]).find(Boolean) ?? 'again';
 function ask(wording, open, note, reasons) {
     return { kind: 'ask', wording, open, note, reasons, ops: reasons.map((r) => OPS_SUMMARY[r]).find(Boolean) ?? reasons.join(', ') };
 }
+/** A post-rules hold: stored as an old_time ask that only a real reference answers, told in its HOLD_WORDING. */
+const holdAsk = (reason) => ask(holdWording([reason]), 'old_time', 'old_time', [reason]);
 /** The decision, in the design's order. Call again with `rules` when it returns { kind: 'rules' }. */
 function decideGate(e) {
     const h = e.history;
@@ -103417,7 +103437,7 @@ function decideGate(e) {
         return { kind: 'fake', reasons: [h.reason] };
     if (h.kind === 'needs-real-page') {
         return h.ask === 'old_time'
-            ? ask('old', null, 'old_time', ['NO_REAL_REFERENCE', 'DETAILS_PAGE_AWAITED'])
+            ? ask(holdWording(h.reasons), null, 'old_time', ['NO_REAL_REFERENCE', 'DETAILS_PAGE_AWAITED'])
             : ask('warned', null, 'fraud_ask', ['NO_REAL_REFERENCE', 'FAKE_WARNING_OPEN']);
     }
     // A confirming screenshot runs the same credit rules as any other (an old receipt after a warning is still old).
@@ -103428,35 +103448,35 @@ function decideGate(e) {
     const confirmed = h.kind === 'confirms' ? h.asked : null;
     // Holds after the rules accepted: fake is not proven for THIS screenshot; the details page decides.
     if ((0,_decide__WEBPACK_IMPORTED_MODULE_0__.isImpossibleReference)(e.facts.utr))
-        return ask('old', 'old_time', 'old_time', ['IMPOSSIBLE_REFERENCE']);
+        return holdAsk('IMPOSSIBLE_REFERENCE');
     if (e.holds.chatFake)
-        return ask('again', 'old_time', 'old_time', [e.holds.chatFake]);
+        return holdAsk(e.holds.chatFake);
     // Status unknown (option (a)): a real reference is the evidence the status cannot give; without one, the details
     // page. Neutral wording (`copy`): it says nothing about time, age or fakes. Before R1 and the asks below it: such a
     // screenshot is not a credit, so it must never open the sticky NO_UTR_VELOCITY ask that holds the chat's later
     // no-UTR credits for 24 h (replay 2026-11-15: shruthi1 ****5644, two ₹600 status-unknown, then a genuine ₹25 held).
     // R1's ₹ total counts credited rows only (history.ts noUtrVelocityHold), so an asked row never adds to it.
     if (e.statusUnknown && !(0,_decide__WEBPACK_IMPORTED_MODULE_0__.isRealReference)(e.facts.utr))
-        return ask('copy', 'old_time', 'old_time', [STATUS_UNKNOWN]);
+        return holdAsk(STATUS_UNKNOWN);
     if (e.holds.noUtrVelocity)
-        return ask('again', 'old_time', 'old_time', [_history__WEBPACK_IMPORTED_MODULE_1__.NO_UTR_VELOCITY]);
+        return holdAsk(_history__WEBPACK_IMPORTED_MODULE_1__.NO_UTR_VELOCITY);
     // Same printed minute, other amount (owner 2026-11-15): looks like a credited receipt with its amount edited. Not proven
     // fake (owner: ask when unproven); the neutral details-page ask, which only a real reference answers.
     if (e.holds.sameMinute)
-        return ask('copy', 'old_time', 'old_time', [_history__WEBPACK_IMPORTED_MODULE_1__.SAME_MINUTE_OTHER_AMOUNT]);
+        return holdAsk(_history__WEBPACK_IMPORTED_MODULE_1__.SAME_MINUTE_OTHER_AMOUNT);
     // R2 (review F2): a copy on another persona is asked, never "not my payment".
     if (e.holds.copy)
-        return ask('copy', 'old_time', 'old_time', [_history__WEBPACK_IMPORTED_MODULE_1__.COPY_ACROSS_PERSONAS]);
+        return holdAsk(_history__WEBPACK_IMPORTED_MODULE_1__.COPY_ACROSS_PERSONAS);
     if (e.holds.resendAsk) {
         // 'next-minute': printed a minute after a credited one of the same amount, it looks like that old payment.
-        return ask(e.holds.resendAsk === 'next-minute' ? 'old' : 'noTime', 'old_time', 'old_time', ['NO_UTR_NO_TIME_SAME_AMOUNT', `RESEND_${e.holds.resendAsk}`]);
+        return ask(e.holds.resendAsk === 'next-minute' ? 'old' : 'noTime', 'old_time', 'old_time', [_history__WEBPACK_IMPORTED_MODULE_1__.NO_UTR_NO_TIME_SAME_AMOUNT, `RESEND_${e.holds.resendAsk}`]);
     }
     // Owner option D (2026-11-15): the rules accepted only by their leniency (printed before our last call, fewer than 4
     // videos, no fresh real UTR). 3.3 days of logs: 5 such credits, ₹975, 3 of them fraud (₹800). Credited only when an
     // earlier real-UTR credit of this chat shows the same clock lag (history.ts clockLagVouch); otherwise the details page.
     // `copy` wording: the time WAS read (so not `noTime`) and the payment may well be new (so not `old`); neutral.
     if (e.rules.lenient && !e.holds.lagVouch)
-        return ask('copy', 'old_time', 'old_time', [_history__WEBPACK_IMPORTED_MODULE_1__.PRINTED_BEFORE_CALL_NO_UTR]);
+        return holdAsk(_history__WEBPACK_IMPORTED_MODULE_1__.PRINTED_BEFORE_CALL_NO_UTR);
     return { kind: 'credit', confirmed, reasons: confirmed ? ['CONFIRMS_ASK'] : [] };
 }
 /**
