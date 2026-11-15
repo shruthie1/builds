@@ -4850,7 +4850,14 @@ const ROUTE_COUNTER_COLUMNS = ["routes_sent", "routed_reached", "route_calls_ok"
  * on a database that has the 10-29 columns but not this one.
  */
 const ROUTED_USERS_COLUMNS = ["routed_users"];
-const COUNTER_COLUMNS = [...BASE_COUNTER_COLUMNS, ...ROUTE_COUNTER_COLUMNS, ...ROUTED_USERS_COLUMNS];
+/**
+ * Parked-responder counters (analytics/upgrade-2026-11-06-parked-counters.sql, applied 2026-11-07), written by
+ * both apps' ParkedAdapter.recordDailyCounters since 2026-11-15. Same deploy-order safety one tier up again: a
+ * statement names them only when a row carries a non-zero parked counter. hourly_client has no parked columns.
+ */
+const PARKED_COUNTER_COLUMNS = ["parked_inbound", "parked_replies", "parked_reached"];
+const PRE_PARKED_COUNTER_COLUMNS = [...BASE_COUNTER_COLUMNS, ...ROUTE_COUNTER_COLUMNS, ...ROUTED_USERS_COLUMNS];
+const COUNTER_COLUMNS = [...PRE_PARKED_COUNTER_COLUMNS, ...PARKED_COUNTER_COLUMNS];
 const COUNTER_COLUMN_SET = new Set(COUNTER_COLUMNS);
 const COUNTER_FIELDS = [
     "sent", "delivered", "banned", "failed",
@@ -4858,6 +4865,7 @@ const COUNTER_FIELDS = [
     "reactionsSuccess", "reactionsRestricted", "reactionsFailed", "reactionsFloods",
     "routesSent", "routedReached", "routeCallsOk", "routeCallsFailed",
     "routedUsers",
+    "parkedInbound", "parkedReplies", "parkedReached",
 ];
 const accumulate = (t, cols = COUNTER_COLUMNS) => cols.map((c) => `${c} = ${t}.${c} + EXCLUDED.${c}`).join(", ");
 const DAILY_CLIENT_KEY = ["day", "client_id", "namespace"];
@@ -4961,6 +4969,7 @@ const TABLES = {
         legacyColumns: [
             [...DAILY_CLIENT_KEY, ...BASE_COUNTER_COLUMNS],
             [...DAILY_CLIENT_KEY, ...BASE_COUNTER_COLUMNS, ...ROUTE_COUNTER_COLUMNS],
+            [...DAILY_CLIENT_KEY, ...PRE_PARKED_COUNTER_COLUMNS],
         ],
         tiers: [
             {
@@ -4971,6 +4980,10 @@ const TABLES = {
                 columns: [...DAILY_CLIENT_KEY, ...BASE_COUNTER_COLUMNS, ...ROUTE_COUNTER_COLUMNS],
                 conflict: DAILY_CLIENT_CONFLICT + accumulate("daily_client", [...BASE_COUNTER_COLUMNS, ...ROUTE_COUNTER_COLUMNS]),
             },
+            {
+                columns: [...DAILY_CLIENT_KEY, ...PRE_PARKED_COUNTER_COLUMNS],
+                conflict: DAILY_CLIENT_CONFLICT + accumulate("daily_client", PRE_PARKED_COUNTER_COLUMNS),
+            },
         ],
     },
     daily_mobile: {
@@ -4980,6 +4993,7 @@ const TABLES = {
         legacyColumns: [
             [...DAILY_MOBILE_KEY, ...BASE_COUNTER_COLUMNS],
             [...DAILY_MOBILE_KEY, ...BASE_COUNTER_COLUMNS, ...ROUTE_COUNTER_COLUMNS],
+            [...DAILY_MOBILE_KEY, ...PRE_PARKED_COUNTER_COLUMNS],
         ],
         tiers: [
             {
@@ -4989,6 +5003,10 @@ const TABLES = {
             {
                 columns: [...DAILY_MOBILE_KEY, ...BASE_COUNTER_COLUMNS, ...ROUTE_COUNTER_COLUMNS],
                 conflict: DAILY_MOBILE_CONFLICT + accumulate("daily_mobile", [...BASE_COUNTER_COLUMNS, ...ROUTE_COUNTER_COLUMNS]),
+            },
+            {
+                columns: [...DAILY_MOBILE_KEY, ...PRE_PARKED_COUNTER_COLUMNS],
+                conflict: DAILY_MOBILE_CONFLICT + accumulate("daily_mobile", PRE_PARKED_COUNTER_COLUMNS),
             },
         ],
     },
@@ -5000,7 +5018,7 @@ const TABLES = {
 };
 /**
  * The (columns, values, conflict) a daily_* INSERT actually uses: the smallest tier (pre-2026-10-29,
- * then pre-2026-10-30) that holds every non-zero counter of the rows, else the full list.
+ * pre-2026-10-30, then pre-2026-11-06) that holds every non-zero counter of the rows, else the full list.
  * Deterministic on a fixed row set, so a retried batch builds the same statement.
  */
 function counterStatementShape(table, rows) {
@@ -46180,9 +46198,11 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _reply_templates__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ../reply/templates */ "../../packages/tg-parked/src/reply/templates.ts");
 /* harmony import */ var _scan_chat_filters__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ../scan/chat-filters */ "../../packages/tg-parked/src/scan/chat-filters.ts");
 /* harmony import */ var _scan_scanner__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ../scan/scanner */ "../../packages/tg-parked/src/scan/scanner.ts");
-/* harmony import */ var _tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! @tg/core/utils/dc-ip-family */ "../../packages/tg-core/src/utils/dc-ip-family.ts");
-/* harmony import */ var _metrics_pass_log__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ../metrics/pass-log */ "../../packages/tg-parked/src/metrics/pass-log.ts");
-/* harmony import */ var _pass_context__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! ./pass-context */ "../../packages/tg-parked/src/run/pass-context.ts");
+/* harmony import */ var _inbound_seen__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ./inbound-seen */ "../../packages/tg-parked/src/run/inbound-seen.ts");
+/* harmony import */ var _tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! @tg/core/utils/dc-ip-family */ "../../packages/tg-core/src/utils/dc-ip-family.ts");
+/* harmony import */ var _metrics_pass_log__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! ../metrics/pass-log */ "../../packages/tg-parked/src/metrics/pass-log.ts");
+/* harmony import */ var _pass_context__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! ./pass-context */ "../../packages/tg-parked/src/run/pass-context.ts");
+
 
 
 
@@ -46203,18 +46223,18 @@ function guarded(ctx, promise) {
     return ctx.guard ? ctx.guard.race(promise) : promise;
 }
 function rpc(ctx, promise, label) {
-    return guarded(ctx, (0,_pass_context__WEBPACK_IMPORTED_MODULE_12__.withTimeout)(promise, Math.min(ctx.deps.limits.rpcDeadlineMs, Math.max(0, remaining(ctx))), label));
+    return guarded(ctx, (0,_pass_context__WEBPACK_IMPORTED_MODULE_13__.withTimeout)(promise, Math.min(ctx.deps.limits.rpcDeadlineMs, Math.max(0, remaining(ctx))), label));
 }
 /** A Mongo / Redis call of the loop: capped (storeTimeoutMs) and raced against the lease watcher. */
 function io(ctx, promise, label) {
-    return guarded(ctx, (0,_pass_context__WEBPACK_IMPORTED_MODULE_12__.storeCall)(ctx.deps, promise, label));
+    return guarded(ctx, (0,_pass_context__WEBPACK_IMPORTED_MODULE_13__.storeCall)(ctx.deps, promise, label));
 }
 function chatKey(ctx, chat, lastInboundAt) {
     const { ep } = ctx;
     return { episodeId: ep._id, app: ep.app, mobile: ep.mobile, clientId: ep.clientId, persona: ep.persona, chatId: chat.id, lastMessageId: chat.lastMessageId, lastInboundAt };
 }
 async function skip(ctx, chat, reason, lastInboundAt = 0) {
-    (0,_pass_context__WEBPACK_IMPORTED_MODULE_12__.countSkip)(ctx.result, reason);
+    (0,_pass_context__WEBPACK_IMPORTED_MODULE_13__.countSkip)(ctx.result, reason);
     if (_scan_scanner__WEBPACK_IMPORTED_MODULE_9__.MEMO_REASONS.has(reason))
         await io(ctx, ctx.deps.stores.chats.memoSkip(chatKey(ctx, chat, lastInboundAt), reason, new Date(ctx.deps.now())), 'memoSkip');
 }
@@ -46226,10 +46246,10 @@ async function checkpoint(ctx) {
     if (remaining(ctx) <= 0)
         return { outcome: 'deadline' };
     // Re-review 2 nit: capped like every store call; a stalled check counts as lost (fail closed, like a store error).
-    const lease = await guarded(ctx, (0,_pass_context__WEBPACK_IMPORTED_MODULE_12__.storeCall)(ctx.deps, (0,_tg_core_account_lease__WEBPACK_IMPORTED_MODULE_0__.checkParkedLease)(ctx.deps.stores.leases, ctx.ep.mobile, ctx.deps.owner, ctx.fence), 'checkParkedLease')
+    const lease = await guarded(ctx, (0,_pass_context__WEBPACK_IMPORTED_MODULE_13__.storeCall)(ctx.deps, (0,_tg_core_account_lease__WEBPACK_IMPORTED_MODULE_0__.checkParkedLease)(ctx.deps.stores.leases, ctx.ep.mobile, ctx.deps.owner, ctx.fence), 'checkParkedLease')
         .catch(() => 'lost'));
     if (lease !== 'held') {
-        ctx.deps.logger.warn(`[parked] lease ${lease} for ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_10__.maskMobile)(ctx.ep.mobile)}; ending the pass`);
+        ctx.deps.logger.warn(`[parked] lease ${lease} for ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_11__.maskMobile)(ctx.ep.mobile)}; ending the pass`);
         return { outcome: 'lease_busy' };
     }
     return null;
@@ -46240,7 +46260,7 @@ async function sendGates(ctx) {
     if (!(await io(ctx, deps.stores.control.isEnabled(ep.app, ep.clientId), 'control')))
         return { outcome: 'disabled' };
     const facts = await io(ctx, deps.adapter.accountFacts(ep.mobile, ep), 'accountFacts');
-    const elig = (0,_registry_eligibility__WEBPACK_IMPORTED_MODULE_3__.evaluateEligibility)({ app: ep.app, clientId: ep.clientId, liveSinceMs: ep.liveSince ? ep.liveSince.getTime() : null, expiresAtMs: (0,_pass_context__WEBPACK_IMPORTED_MODULE_12__.effectiveExpiresAtMs)(deps.limits, ep) }, facts, deps.now());
+    const elig = (0,_registry_eligibility__WEBPACK_IMPORTED_MODULE_3__.evaluateEligibility)({ app: ep.app, clientId: ep.clientId, liveSinceMs: ep.liveSince ? ep.liveSince.getTime() : null, expiresAtMs: (0,_pass_context__WEBPACK_IMPORTED_MODULE_13__.effectiveExpiresAtMs)(deps.limits, ep) }, facts, deps.now());
     if (elig.kind === 'stop')
         return { outcome: 'skipped_ineligible', stopReason: elig.reason };
     if (elig.kind === 'wait')
@@ -46270,13 +46290,13 @@ async function replyTo(ctx, chat, route) {
         : { handle: await io(ctx, deps.adapter.mainHandle(), 'mainHandle'), mobile: null };
     const handle = main.handle;
     if (!(0,_reply_copy_guard__WEBPACK_IMPORTED_MODULE_4__.isValidHandle)(handle) || deps.rejectHandle?.(handle) === true) {
-        (0,_pass_context__WEBPACK_IMPORTED_MODULE_12__.countSkip)(result, 'no_handle');
-        deps.logger.warn(`[parked] no valid main handle for ${ep.clientId}; nothing sent from ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_10__.maskMobile)(ep.mobile)}`);
+        (0,_pass_context__WEBPACK_IMPORTED_MODULE_13__.countSkip)(result, 'no_handle');
+        deps.logger.warn(`[parked] no valid main handle for ${ep.clientId}; nothing sent from ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_11__.maskMobile)(ep.mobile)}`);
         return 'stop_loop';
     }
     const { text, templateId } = (0,_reply_templates__WEBPACK_IMPORTED_MODULE_7__.renderParkedReplyDetailed)(handle, deps.random);
     if (!(0,_reply_copy_guard__WEBPACK_IMPORTED_MODULE_4__.isPlainCopy)(text)) {
-        deps.logger.error(`[parked] reply text failed the copy guard; not sent (${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_10__.maskMobile)(ep.mobile)})`);
+        deps.logger.error(`[parked] reply text failed the copy guard; not sent (${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_11__.maskMobile)(ep.mobile)})`);
         return 'stop_loop';
     }
     const snapshot = await io(ctx, deps.stores.chats.readUserDataCounts(ep.persona, [chat.id]), 'readUserDataCounts');
@@ -46302,7 +46322,7 @@ async function replyTo(ctx, chat, route) {
         return gate;
     const now = new Date(deps.now());
     if ((await io(ctx, deps.stores.chats.claim(chatKey(ctx, chat, inboundAt), now), 'claim')) === 'taken') {
-        (0,_pass_context__WEBPACK_IMPORTED_MODULE_12__.countSkip)(result, 'already_replied');
+        (0,_pass_context__WEBPACK_IMPORTED_MODULE_13__.countSkip)(result, 'already_replied');
         return 'next';
     }
     let sent;
@@ -46315,7 +46335,7 @@ async function replyTo(ctx, chat, route) {
         const cls = (0,_errors_error_policy__WEBPACK_IMPORTED_MODULE_2__.classifyParkedError)(error);
         if (cls.kind === 'flood' || cls.kind === 'peer_flood' || cls.kind === 'rpc_denied') {
             // The server (or our own allowlist) refused the send before acting: the chat may be claimed again.
-            await (0,_pass_context__WEBPACK_IMPORTED_MODULE_12__.storeCall)(deps, deps.stores.chats.releaseClaim(ep._id, chat.id, cls.kind), 'releaseClaim').catch(() => false);
+            await (0,_pass_context__WEBPACK_IMPORTED_MODULE_13__.storeCall)(deps, deps.stores.chats.releaseClaim(ep._id, chat.id, cls.kind), 'releaseClaim').catch(() => false);
         }
         else if (cls.kind === 'per_chat') {
             await io(ctx, deps.stores.chats.markFailed(ep._id, chat.id, cls.code), 'markFailed');
@@ -46328,7 +46348,7 @@ async function replyTo(ctx, chat, route) {
     result.replied += 1;
     ctx.sentThisPass += 1;
     ctx.sentToday += 1;
-    await rpc(ctx, ctx.dialogs.markAsRead(chat.id), 'markAsRead').catch((error) => deps.logger.warn(`[parked] markAsRead failed for ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_10__.maskMobile)(ep.mobile)}: ${(0,_pass_context__WEBPACK_IMPORTED_MODULE_12__.describeError)(error)}`));
+    await rpc(ctx, ctx.dialogs.markAsRead(chat.id), 'markAsRead').catch((error) => deps.logger.warn(`[parked] markAsRead failed for ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_11__.maskMobile)(ep.mobile)}: ${(0,_pass_context__WEBPACK_IMPORTED_MODULE_13__.describeError)(error)}`));
     await io(ctx, deps.stores.chats.markReplied(ep._id, chat.id, {
         sentMessageId: sent?.id,
         msgCountAtReply: row?.msgCount ?? 0,
@@ -46342,14 +46362,14 @@ async function replyTo(ctx, chat, route) {
         await io(ctx, deps.adapter.recordSent(ep.mobile, chat.id, now.getTime()), 'recordSent').catch((error) => {
             if (ctx.guard?.tripped)
                 throw error;
-            deps.logger.warn(`[parked] recordSent failed: ${(0,_pass_context__WEBPACK_IMPORTED_MODULE_12__.describeError)(error)}`);
+            deps.logger.warn(`[parked] recordSent failed: ${(0,_pass_context__WEBPACK_IMPORTED_MODULE_13__.describeError)(error)}`);
         });
     }
     // Review 4: replies per ACCOUNT per IST day live on accountLeases, so a new episode inherits the count.
-    const accountToday = await io(ctx, deps.stores.leases.recordReply(ep.mobile, (0,_pass_context__WEBPACK_IMPORTED_MODULE_12__.istDay)(now.getTime())), 'recordReply').catch((error) => {
+    const accountToday = await io(ctx, deps.stores.leases.recordReply(ep.mobile, (0,_pass_context__WEBPACK_IMPORTED_MODULE_13__.istDay)(now.getTime())), 'recordReply').catch((error) => {
         if (ctx.guard?.tripped)
             throw error;
-        deps.logger.warn(`[parked] recordReply failed for ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_10__.maskMobile)(ep.mobile)}: ${(0,_pass_context__WEBPACK_IMPORTED_MODULE_12__.describeError)(error)}`);
+        deps.logger.warn(`[parked] recordReply failed for ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_11__.maskMobile)(ep.mobile)}: ${(0,_pass_context__WEBPACK_IMPORTED_MODULE_13__.describeError)(error)}`);
         return 0;
     });
     if (accountToday > ctx.sentToday)
@@ -46360,14 +46380,14 @@ async function replyTo(ctx, chat, route) {
     // Observe only: it changes nothing.
     const touchedMs = (0,_reply_reply_policy__WEBPACK_IMPORTED_MODULE_6__.userDataMs)(row?.lastMsgTimeStamp);
     const touchedAfterSwap = touchedMs !== undefined && touchedMs > ep.parkedAt.getTime();
-    deps.logger.info(`[parked] replied app=${ep.app} ep=${(0,_metrics_pass_log__WEBPACK_IMPORTED_MODULE_11__.episodeHash)(ep._id)} chat=${(0,_metrics_pass_log__WEBPACK_IMPORTED_MODULE_11__.episodeHash)(String(chat.id))} inboundAgeS=${Math.max(0, Math.round((now.getTime() - inboundAt) / 1000))} preExisting=${row !== undefined} paid=${(row?.payAmount ?? 0) > 0} touchedAfterSwap=${touchedAfterSwap}`);
+    deps.logger.info(`[parked] replied app=${ep.app} ep=${(0,_metrics_pass_log__WEBPACK_IMPORTED_MODULE_12__.episodeHash)(ep._id)} chat=${(0,_metrics_pass_log__WEBPACK_IMPORTED_MODULE_12__.episodeHash)(String(chat.id))} inboundAgeS=${Math.max(0, Math.round((now.getTime() - inboundAt) / 1000))} preExisting=${row !== undefined} paid=${(row?.payAmount ?? 0) > 0} touchedAfterSwap=${touchedAfterSwap}`);
     deps.adapter.recordDailyCounters?.(ep.mobile, { parkedReplies: 1 });
     return 'sent';
 }
 async function runChatLoop(deps, input) {
     const ctx = { ...input, deps, sentThisPass: 0 };
     const { ep, result } = ctx;
-    await guarded(ctx, (0,_pass_context__WEBPACK_IMPORTED_MODULE_12__.withTimeout)(ctx.dialogs.initialize(_constants__WEBPACK_IMPORTED_MODULE_1__.DIALOG_LIMIT), Math.max(0, remaining(ctx)), 'dialogs.initialize'));
+    await guarded(ctx, (0,_pass_context__WEBPACK_IMPORTED_MODULE_13__.withTimeout)(ctx.dialogs.initialize(_constants__WEBPACK_IMPORTED_MODULE_1__.DIALOG_LIMIT), Math.max(0, remaining(ctx)), 'dialogs.initialize'));
     const chats = ctx.dialogs.unreadPersonal();
     result.unreadDialogs = chats.length;
     if (chats.length === 0)
@@ -46382,7 +46402,8 @@ async function runChatLoop(deps, input) {
         else
             todo.push(chat);
     }
-    result.newInbound = todo.filter((c) => !decisions.has(c.id)).length;
+    // parked_inbound: each (episode, chat) once per IST day (inbound-seen.ts), not once per pass.
+    result.newInbound = (0,_inbound_seen__WEBPACK_IMPORTED_MODULE_10__.inboundSeenFor)(deps.adapter).firstSeen(ep._id, todo.filter((c) => !decisions.has(c.id)).map((c) => String(c.id)), deps.now());
     if (todo.length === 0)
         return null;
     const routes = deps.adapter.routeState ? await io(ctx, deps.adapter.routeState(ep.mobile, todo.map((c) => c.id), deps.now()), 'routeState') : new Map();
@@ -46471,6 +46492,77 @@ function reportLostEpisode(logger, ep, stopReason, connected) {
     if (!ep.lastDefer || connected || !LOST_EPISODE_STOP_REASONS.has(stopReason))
         return;
     logger.error(`[parked] episode lost app=${ep.app} client=${ep.clientId} ep=${(0,_metrics_pass_log__WEBPACK_IMPORTED_MODULE_2__.episodeHash)(ep._id)} mobile=${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_1__.maskMobile)(ep.mobile)} stop=${stopReason} lastDefer=${ep.lastDefer.reason} passes=${ep.passes ?? 0}`);
+}
+
+
+/***/ },
+
+/***/ "../../packages/tg-parked/src/run/inbound-seen.ts"
+/*!********************************************************!*\
+  !*** ../../packages/tg-parked/src/run/inbound-seen.ts ***!
+  \********************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   INBOUND_SEEN_MAX: () => (/* binding */ INBOUND_SEEN_MAX),
+/* harmony export */   InboundSeen: () => (/* binding */ InboundSeen),
+/* harmony export */   inboundSeenFor: () => (/* binding */ inboundSeenFor)
+/* harmony export */ });
+/* harmony import */ var _pass_context__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./pass-context */ "../../packages/tg-parked/src/run/pass-context.ts");
+
+/**
+ * parked_inbound semantics (design §4.7): distinct (episode, chat) first seen with an in-window inbound per IST day.
+ * A chat a pass leaves undecided (cool-down, limit, deadline) has no parkedChats row, so `findDecisions` cannot tell a
+ * later pass it was already counted, and nothing stored says "first seen" without a new write. This set does it in
+ * memory, with no DB write: keys `episodeId|chatId` for the current IST day, cleared when the day rolls over.
+ *
+ * Every chat marked here is emitted: pass-runner.ts records parkedInbound in its `finally`, so a pass that throws
+ * after the chat loop marked chats still counts them.
+ *
+ * Accepted gaps: a process restart (or the episode moving to another process) can count a still-undecided chat once
+ * more that day; at INBOUND_SEEN_MAX keys the set is cleared (same effect). Both only over-count, never drop.
+ */
+const INBOUND_SEEN_MAX = 20000;
+class InboundSeen {
+    constructor(max = INBOUND_SEEN_MAX) {
+        this.day = '';
+        this.seen = new Set();
+        this.max = max;
+    }
+    /** How many of `chatIds` this set had not seen today for the episode; records them. */
+    firstSeen(episodeId, chatIds, nowMs) {
+        const day = (0,_pass_context__WEBPACK_IMPORTED_MODULE_0__.istDay)(nowMs);
+        if (day !== this.day) {
+            this.day = day;
+            this.seen.clear();
+        }
+        let n = 0;
+        for (const chatId of new Set(chatIds)) {
+            const key = `${episodeId}|${chatId}`;
+            if (this.seen.has(key))
+                continue;
+            if (this.seen.size >= this.max)
+                this.seen.clear();
+            this.seen.add(key);
+            n += 1;
+        }
+        return n;
+    }
+    size() {
+        return this.seen.size;
+    }
+}
+/** One set per adapter (one adapter per process and app), so passes of the same process share it. */
+const byAdapter = new WeakMap();
+function inboundSeenFor(adapter) {
+    let s = byAdapter.get(adapter);
+    if (!s) {
+        s = new InboundSeen();
+        byAdapter.set(adapter, s);
+    }
+    return s;
 }
 
 
@@ -47141,8 +47233,6 @@ async function connectAndLoop(deps, ep, facts, session, fence, deadlineAt, resul
             if (end.floodUntilMs !== undefined)
                 result.floodUntilMs = end.floodUntilMs;
         }
-        if (result.newInbound > 0)
-            deps.adapter.recordDailyCounters?.(ep.mobile, { parkedInbound: result.newInbound });
         if (result.outcome === 'ok' && result.replied > 0 && facts.floodCount > 0) {
             await guard.race((0,_pass_context__WEBPACK_IMPORTED_MODULE_8__.storeCall)(deps, deps.stores.leases.clearFloodCount(ep.mobile), 'clearFloodCount')).catch(() => false);
             result.floodCount = 0;
@@ -47160,6 +47250,16 @@ async function connectAndLoop(deps, ep, facts, session, fence, deadlineAt, resul
         deps.logger.warn(`[parked] pass on ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_1__.maskMobile)(ep.mobile)} ended ${result.outcome}: ${result.error}`);
     }
     finally {
+        // parked_inbound: emitted here so a pass that throws after the chat loop marked chats seen
+        // (inbound-seen.ts) still records them; otherwise the next pass skips them and they are lost.
+        if (result.newInbound > 0) {
+            try {
+                deps.adapter.recordDailyCounters?.(ep.mobile, { parkedInbound: result.newInbound });
+            }
+            catch (error) {
+                deps.logger.warn(`[parked] parked_inbound not recorded for ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_1__.maskMobile)(ep.mobile)}: ${(0,_pass_context__WEBPACK_IMPORTED_MODULE_8__.describeError)(error)}`);
+            }
+        }
         try {
             dialogs?.cleanup();
         }
@@ -56845,6 +56945,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   RELEASE_FALLBACK_MS: () => (/* binding */ RELEASE_FALLBACK_MS),
 /* harmony export */   SWAP_MATCH_AFTER_MS: () => (/* binding */ SWAP_MATCH_AFTER_MS),
 /* harmony export */   SWAP_MATCH_WINDOW_MS: () => (/* binding */ SWAP_MATCH_WINDOW_MS),
+/* harmony export */   TGAUT_DAILY_NAMESPACE: () => (/* binding */ TGAUT_DAILY_NAMESPACE),
 /* harmony export */   TGAUT_PARK_MAX_AGE_MS: () => (/* binding */ TGAUT_PARK_MAX_AGE_MS),
 /* harmony export */   canonicalMobile: () => (/* reexport safe */ _tg_core_account_lease_mobile__WEBPACK_IMPORTED_MODULE_2__.canonicalMobile),
 /* harmony export */   createLiveBuildGate: () => (/* binding */ createLiveBuildGate),
@@ -56855,6 +56956,10 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _tg_core_account_lease_mobile__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! @tg/core/account-lease/mobile */ "../../packages/tg-core/src/account-lease/mobile.ts");
 /* harmony import */ var _tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! @tg/core/utils/dc-ip-family */ "../../packages/tg-core/src/utils/dc-ip-family.ts");
 /* harmony import */ var _tg_db_collections_account_facet_read__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! @tg/db/collections/account-facet-read */ "../../packages/tg-db/src/collections/account-facet-read.ts");
+/* harmony import */ var _tg_parked_run_pass_context__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! @tg/parked/run/pass-context */ "../../packages/tg-parked/src/run/pass-context.ts");
+/* harmony import */ var _tg_analytics__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! @tg/analytics */ "../../packages/tg-analytics/src/index.ts");
+
+
 
 
 
@@ -56917,6 +57022,8 @@ const CONFIRM_MAX = 50;
 const LIVE_GATE_TTL_MS = 5 * 60 * 1000;
 const LIVE_GATE_RETRY_MS = 60 * 1000;
 const TGAUT_PARK_MAX_AGE_MS = _tg_parked_constants__WEBPACK_IMPORTED_MODULE_1__.PARK_MAX_AGE_MS['tg-aut'];
+/** daily_client / daily_mobile namespace of this app (data/user-data-crud.ts DAILY_ANALYTICS_NAMESPACE). */
+const TGAUT_DAILY_NAMESPACE = 'tg-aut';
 /** Re-exported shared helper (final review C5: one canonicalisation for parked code). */
 
 function requireRepos(deps) {
@@ -57296,9 +57403,28 @@ function createTgAutParkedAdapter(deps, gate) {
             deps.logger.warn(`[parked] tg-aut permanent error on the old main ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_3__.maskMobile)(mobile)}: ${code}: ${message}`);
             await deps.onPermanentError?.(mobile, code, message);
         },
-        /** Postgres parked_* counters are not written by this build (same as promote P3). */
-        recordDailyCounters() {
-            // intentionally empty
+        /**
+         * Postgres daily_client + daily_mobile parked_* (fix 2026-11-15; design "Follow-through data"). Forwards what
+         * @tg/parked emits: parkedInbound = (episode, chat) first seen per IST day in this process (a restart can count
+         * a still-undecided chat once more that day), parkedReplies = one per claimed markReplied, parkedReached = only
+         * when this reconciler wrote every reachedAt. Keyed by this process's clientId, namespace 'tg-aut', the parked
+         * mobile (canonical: the form CMS writes to clients.mobile, so the old process's env.mobile) and the process
+         * persona. Never throws.
+         */
+        recordDailyCounters(mobile, counters) {
+            try {
+                const pick = (v) => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : 0);
+                const c = { parkedInbound: pick(counters?.parkedInbound), parkedReplies: pick(counters?.parkedReplies), parkedReached: pick(counters?.parkedReached) };
+                if (!clientId || !mobile || !(c.parkedInbound || c.parkedReplies || c.parkedReached))
+                    return;
+                const key = { day: (0,_tg_parked_run_pass_context__WEBPACK_IMPORTED_MODULE_5__.istDay)(deps.now()), clientId, namespace: TGAUT_DAILY_NAMESPACE };
+                const sink = deps.analytics ? deps.analytics() : (0,_tg_analytics__WEBPACK_IMPORTED_MODULE_6__.getAnalytics)();
+                sink.recordDailyClient({ ...key, ...c });
+                sink.recordDailyMobile({ ...key, mobile, profile: deps.envPersona() || null, ...c });
+            }
+            catch (error) {
+                deps.logger.warn(`[parked] daily counters not recorded for ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_3__.maskMobile)(mobile)}: ${error?.message ?? error}`);
+            }
         },
         notifyDigest: deps.notifyDigest ? (rows) => deps.notifyDigest(rows) : undefined,
         alert: deps.alert ? (title, text) => deps.alert(title, text) : undefined,
@@ -58840,8 +58966,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "68c1a90222185bf4d803cd39c86ffd77be228569" : 0;
-    const builtAt =  true ? "2026-11-15T10:38:17.637Z" : 0;
+    const sha =  true ? "9dfffd4c50cc92e63df7ac3aa90cb78176e57a2f" : 0;
+    const builtAt =  true ? "2026-11-15T10:43:01.761Z" : 0;
     return { sha, builtAt };
 }
 
