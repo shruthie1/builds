@@ -58839,8 +58839,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "e40ccf0257c4e4d462a8ad75f97f509e4932dbcf" : 0;
-    const builtAt =  true ? "2026-11-15T08:11:45.341Z" : 0;
+    const sha =  true ? "e96c2cc41103f4b8ff85498a48e0c15b17d507d9" : 0;
+    const builtAt =  true ? "2026-11-15T08:15:03.112Z" : 0;
     return { sha, builtAt };
 }
 
@@ -85230,6 +85230,17 @@ function statusUnknownToUs(imageDetails, sanitizedData) {
     return !!sanitizedData.isPaymentMine && !imageDetails.isSuccess && !imageDetails.isFailed && !imageDetails.isFinished;
 }
 /**
+ * Owner option A, 2026-11-15: a finished, successful payment paid to us skips the caption question check
+ * (isNotQuestionable) and goes to the proof gate, whose history, copy, fake and ask checks decide. Fam's automatic share
+ * caption has a "?" and a typed one can say "your": genuine payments got the "finish the payment" reply. Every other
+ * branch (not ours, not finished, failed, status unknown) keeps the caption check.
+ */
+function captionCheckApplies(imageDetails, sanitizedData) {
+    const finishedToUs = !!sanitizedData.isPaymentMine && !!sanitizedData.isFinishedPayment && !sanitizedData.isFailedPayment
+        && !!imageDetails.isSuccess && !imageDetails.isFailed && !(0,_payments_screenshot_parse_image__WEBPACK_IMPORTED_MODULE_14__.isLocalFailed)(imageDetails);
+    return !finishedToUs;
+}
+/**
  * Would this screenshot reach the payment gate (successful or status-unknown payment to us, not the failed /
  * "connecting" / questionable-caption branches)? A blocked user's photo is only processed when it does; everything
  * else from a blocked user stays silent (owner 2026-10-13).
@@ -85239,7 +85250,7 @@ function reachesPaymentGate(imageDetails, sanitizedData, caption) {
     return !!sanitizedData.isPaymentRelated && !!sanitizedData.isPaymentMine && !!sanitizedData.isFinishedPayment
         && !sanitizedData.isFailedPayment && (!!imageDetails.isSuccess || statusUnknownToUs(imageDetails, sanitizedData))
         && !imageDetails.isFailed && !(0,_payments_screenshot_parse_image__WEBPACK_IMPORTED_MODULE_14__.isLocalFailed)(imageDetails)
-        && (0,_payments_screenshot_helpers__WEBPACK_IMPORTED_MODULE_31__.isNotQuestionable)(caption?.toLowerCase())
+        && (!captionCheckApplies(imageDetails, sanitizedData) || (0,_payments_screenshot_helpers__WEBPACK_IMPORTED_MODULE_31__.isNotQuestionable)(caption?.toLowerCase()))
         && !(0,_payments_screenshot_parse_image__WEBPACK_IMPORTED_MODULE_14__.isFailedPaymentToScreen)(text)
         && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, [`${process.env.name} connecting`, "failed to connect"]);
 }
@@ -86131,7 +86142,7 @@ async function processImage(event) {
                 const statusUnknown = statusUnknownToUs(imageDetails, sanitizedData);
                 if ((sanitizedData.isFinishedPayment ||
                     (!sanitizedData.isFinishedPayment && isLocalFailedImg)) &&
-                    (0,_payments_screenshot_helpers__WEBPACK_IMPORTED_MODULE_31__.isNotQuestionable)(event.message?.text?.toLowerCase())) {
+                    (!captionCheckApplies(imageDetails, sanitizedData) || (0,_payments_screenshot_helpers__WEBPACK_IMPORTED_MODULE_31__.isNotQuestionable)(event.message?.text?.toLowerCase()))) {
                     if (sanitizedData.isFailedPayment ||
                         (isLocalFailedImg && !sanitizedData.isFinishedPayment) ||
                         // Status unknown: failed / pending words decide (a success page's words cannot excuse them here).
