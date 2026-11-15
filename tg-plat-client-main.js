@@ -10047,7 +10047,13 @@ class ChannelIntelligenceService {
         });
         const blockMode = readRecentDeleteBlockMode();
         if (v2On && blockMode !== 'off' && reason !== 'gone') {
-            await this.applyRecentDeleteBlock(safeChannelId, now, blockMode);
+            // A failed ring read or write must not skip the lifetime ratio rule below.
+            try {
+                await this.applyRecentDeleteBlock(safeChannelId, now, blockMode);
+            }
+            catch (error) {
+                poolLog.warn('recent-delete-block-failed', { chan: safeChannelId, err: error instanceof Error ? error.message : String(error) });
+            }
         }
         await this.collection.updateOne({
             channelId: safeChannelId,
@@ -10065,7 +10071,8 @@ class ChannelIntelligenceService {
      * after the deletion's own $push. The lifetime ratio rule above stays as it was.
      */
     async applyRecentDeleteBlock(channelId, now, mode) {
-        const doc = await this.collection.findOne({ channelId });
+        // Only the v2 fields below: the full doc carries messagePool, read on every non-gone deletion.
+        const doc = await this.collection.findOne({ channelId }, { projection: { 'v2.recent': 1, 'v2.blockUntilMs': 1, 'v2.wouldBlockReason': 1, 'v2.wouldBlockAtMs': 1 } });
         const decision = recentDeleteBlockDecision(doc?.v2?.recent);
         if (!decision)
             return;
@@ -51526,7 +51533,8 @@ class ReactionService {
                 }
                 await this.healthCheckIfNeeded();
                 // REACT_RESTRICT_PAUSE=on: too many restricted outcomes today; resume at IST midnight.
-                const restrictPausedMs = this.restrictPause.pausedForMs(Date.now());
+                // The pause holds only while the mode is still 'on': flipping it to off/record ends a running pause.
+                const restrictPausedMs = (0,_ReactionExperiments__WEBPACK_IMPORTED_MODULE_17__.readRestrictPauseMode)() === 'on' ? this.restrictPause.pausedForMs(Date.now()) : 0;
                 if (restrictPausedMs > 0) {
                     await this.interruptibleSleep(Math.min(restrictPausedMs, 10 * 60 * 1000));
                     continue;
@@ -60377,8 +60385,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "28f4d6898dc4b86eeab073067ae1e7fd527c3a4f" : 0;
-    const builtAt =  true ? "2026-11-15T12:48:09.658Z" : 0;
+    const sha =  true ? "3463015fda5c11119eb8b1e73925fa288f7ce78a" : 0;
+    const builtAt =  true ? "2026-11-15T13:53:44.043Z" : 0;
     return { sha, builtAt };
 }
 
