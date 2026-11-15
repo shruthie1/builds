@@ -58840,8 +58840,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "0bc7f765a1666ed7804f339e96e6a4fccfd9812f" : 0;
-    const builtAt =  true ? "2026-11-15T08:59:21.605Z" : 0;
+    const sha =  true ? "0d9e37f401401beb217f4de18d9881c8b8174aac" : 0;
+    const builtAt =  true ? "2026-11-15T09:09:59.818Z" : 0;
     return { sha, builtAt };
 }
 
@@ -101539,7 +101539,7 @@ const FRAUD_GRACE_MS = 15 * MINUTE_MS;
 /** An open request can be answered for this long (also after the block). */
 const ASK_ANSWER_WINDOW_MS = 24 * 60 * MINUTE_MS;
 /** old_time reasons only a real reference answers (confirmsAsk). FAKE_STREAK / CHAT_PROVEN_FAKE: chat-fakes.ts holds. */
-const NEEDS_REAL_REFERENCE_REASONS = new Set(['IMPOSSIBLE_REFERENCE', 'NO_UTR_NO_TIME_SAME_AMOUNT', 'FAKE_STREAK', 'CHAT_PROVEN_FAKE', 'NO_UTR_VELOCITY', 'MODEL_DOUBT', 'COPY_ACROSS_PERSONAS', 'STATUS_UNKNOWN', 'SAME_MINUTE_OTHER_AMOUNT']);
+const NEEDS_REAL_REFERENCE_REASONS = new Set(['IMPOSSIBLE_REFERENCE', 'NO_UTR_NO_TIME_SAME_AMOUNT', 'FAKE_STREAK', 'CHAT_PROVEN_FAKE', 'NO_UTR_VELOCITY', 'MODEL_DOUBT', 'COPY_ACROSS_PERSONAS', 'STATUS_UNKNOWN', 'SAME_MINUTE_OTHER_AMOUNT', 'PRINTED_BEFORE_CALL_NO_UTR']);
 /** Uppercase, separators removed. Null for masked ("XXXX", "****"), too short, or no digits at all. */
 function normalizeUtr(raw) {
     if (typeof raw !== 'string')
@@ -102280,7 +102280,7 @@ class PaymentFlow {
      */
     async modelDoubt(session, canReply, answerResend) {
         const history = await session.check();
-        const holds = { chatFake: null, noUtrVelocity: false, copy: null, resendAsk: null, sameMinute: null };
+        const holds = { chatFake: null, noUtrVelocity: false, copy: null, resendAsk: null, sameMinute: null, lagVouch: null };
         const outcome = (0,_outcome__WEBPACK_IMPORTED_MODULE_1__.decideGate)({ facts: session.facts, history, holds, blocked: canReply === 0, rules: { isvalid: true, msg: '' } });
         const f = session.facts;
         switch (outcome.kind) {
@@ -102578,7 +102578,7 @@ function withTimeout(work, ms, fallback, what) {
 class GateSession {
     constructor(deps, store, facts, creditAmount) {
         /** The post-rules holds as check() read them (history.ts). */
-        this.holds = { chatFake: null, noUtrVelocity: false, copy: null, resendAsk: null, sameMinute: null };
+        this.holds = { chatFake: null, noUtrVelocity: false, copy: null, resendAsk: null, sameMinute: null, lagVouch: null };
         /** The open asks check() read (undefined = not read yet, null = the read failed). */
         this.openRows = undefined;
         /** When the last claim() started (claimState tells this claim's landed write from an earlier one). */
@@ -102877,14 +102877,17 @@ function proofGateFrom(getRepositories) {
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   CLOCK_LAG_MATCH_MS: () => (/* binding */ CLOCK_LAG_MATCH_MS),
 /* harmony export */   COPY_ACROSS_PERSONAS: () => (/* binding */ COPY_ACROSS_PERSONAS),
 /* harmony export */   COPY_WINDOW_MS: () => (/* binding */ COPY_WINDOW_MS),
 /* harmony export */   NO_UTR_VELOCITY: () => (/* binding */ NO_UTR_VELOCITY),
 /* harmony export */   NO_UTR_VELOCITY_LIMIT: () => (/* binding */ NO_UTR_VELOCITY_LIMIT),
 /* harmony export */   NO_UTR_VELOCITY_STICKY_MS: () => (/* binding */ NO_UTR_VELOCITY_STICKY_MS),
 /* harmony export */   NO_UTR_VELOCITY_WINDOW_MS: () => (/* binding */ NO_UTR_VELOCITY_WINDOW_MS),
+/* harmony export */   PRINTED_BEFORE_CALL_NO_UTR: () => (/* binding */ PRINTED_BEFORE_CALL_NO_UTR),
 /* harmony export */   SAME_MINUTE_LOOKBACK_MS: () => (/* binding */ SAME_MINUTE_LOOKBACK_MS),
 /* harmony export */   SAME_MINUTE_OTHER_AMOUNT: () => (/* binding */ SAME_MINUTE_OTHER_AMOUNT),
+/* harmony export */   clockLagVouch: () => (/* binding */ clockLagVouch),
 /* harmony export */   copiedAcrossPersonas: () => (/* binding */ copiedAcrossPersonas),
 /* harmony export */   historyVerdict: () => (/* binding */ historyVerdict),
 /* harmony export */   noUtrVelocityHold: () => (/* binding */ noUtrVelocityHold),
@@ -102898,7 +102901,8 @@ __webpack_require__.r(__webpack_exports__);
  * Order (rewrite 2026-11-14, design gate-rewrite/design.md): the same payment credited before, or held by the gate in
  * ANOTHER chat (classifyAgainstServed), then the re-send rule resend.ts, the very same held file, an open ask this
  * screenshot answers, an open ask only a real reference answers, then the post-rules holds (chat fakes, R1, same
- * minute other amount, R2, re-send ask) for outcome.ts to raise after the credit rules accepted.
+ * minute other amount, R2, re-send ask) for outcome.ts to raise after the credit rules accepted, and the clock-lag fact
+ * that lets a leniency accept credit (clockLagVouch).
  */
 
 
@@ -102916,7 +102920,13 @@ const COPY_LOOKBACK_MS = 7 * 24 * 60 * 60000;
 /** Same printed minute, other amount (owner 2026-11-15, ramya2: a credited ₹50 receipt edited to ₹150). */
 const SAME_MINUTE_OTHER_AMOUNT = 'SAME_MINUTE_OTHER_AMOUNT';
 const SAME_MINUTE_LOOKBACK_MS = 48 * 60 * 60000;
-const NO_HOLDS = { chatFake: null, noUtrVelocity: false, copy: null, resendAsk: null, sameMinute: null };
+/**
+ * Owner option D (2026-11-15): a receipt the credit rules accepted only by their leniency (printed before our last call,
+ * no fresh real UTR) is asked for the details page, unless this chat's clock lag is vouched for (clockLagVouch).
+ */
+const PRINTED_BEFORE_CALL_NO_UTR = 'PRINTED_BEFORE_CALL_NO_UTR';
+const CLOCK_LAG_MATCH_MS = 5 * 60000;
+const NO_HOLDS = { chatFake: null, noUtrVelocity: false, copy: null, resendAsk: null, sameMinute: null, lagVouch: null };
 function ms(v) {
     return v instanceof Date ? v.getTime() : typeof v === 'string' || typeof v === 'number' ? new Date(v).getTime() : NaN;
 }
@@ -102987,6 +102997,34 @@ function sameMinuteOtherAmount(f, credited, nowMs) {
     return null;
 }
 /**
+ * Clock lag (owner option D, 2026-11-15): an earlier credited row of this chat (any persona), credited before this screenshot
+ * arrived, WITH a real UTR, whose lag (arrival minus printed time) is within ±5 min of this screenshot's lag. A phone clock
+ * behind IST prints every receipt the same minutes behind (arpitha1 ****9182, nidhi2 ****1554: about 91 min). Only a real
+ * UTR vouches, so a chain of no-UTR credits cannot vouch for itself. Rows come from the credited read (48 h).
+ */
+function clockLagVouch(f, credited, nowMs) {
+    if (f.timeMs === null)
+        return null;
+    const at = f.arrivalMs ?? nowMs;
+    const lag = at - f.timeMs;
+    for (const r of credited) {
+        if (r.chatId !== f.chatId || isSelf(f, r))
+            continue;
+        const served = ms(r.servedAt);
+        if (!Number.isFinite(served) || served >= at)
+            continue;
+        if (!(0,_decide__WEBPACK_IMPORTED_MODULE_0__.isRealReference)((0,_decide__WEBPACK_IMPORTED_MODULE_0__.normalizeUtr)(r.utr || r.servedUtr || null)))
+            continue;
+        const printed = rowTimeMs(r);
+        const arrived = creditedAt(r);
+        if (printed === null || !Number.isFinite(arrived))
+            continue;
+        if (Math.abs(arrived - printed - lag) <= CLOCK_LAG_MATCH_MS)
+            return r;
+    }
+    return null;
+}
+/**
  * R1: this screenshot has no UTR, and this chat's credited no-UTR ₹ in the last 24 h (any persona) plus this amount is
  * ₹600 or more; or a NO_UTR_VELOCITY ask was raised after the newest UTR-bearing credit and within 24 h (sticky, owner
  * 2026-11-14; review F4: the hold ends at a UTR credit OR 24 h after the newest held screenshot, whichever is first).
@@ -103051,6 +103089,7 @@ function historyVerdict(f, rows, nowMs, ownName) {
         copy: answered.has(COPY_ACROSS_PERSONAS) || resend.kind === 'ask' ? null : copiedAcrossPersonas(f, creditedRows, nowMs),
         resendAsk: resend.kind === 'ask' ? resend.step : null,
         sameMinute: answered.has(SAME_MINUTE_OTHER_AMOUNT) ? null : sameMinuteOtherAmount(f, creditedRows, nowMs),
+        lagVouch: clockLagVouch(f, creditedRows, nowMs),
     };
     if (asked)
         return { verdict: { kind: 'confirms', asked }, holds, open, resend };
@@ -103221,6 +103260,7 @@ const OPS_SUMMARY = {
     NO_UTR_NO_TIME_SAME_AMOUNT: 'Same amount credited in the last 48 h; nothing shows this is a new payment.',
     DETAILS_PAGE_AWAITED: 'Screenshot shows no real transaction reference; the details page is still awaited.',
     FAKE_WARNING_OPEN: 'Screenshot shows no real transaction reference.',
+    [_history__WEBPACK_IMPORTED_MODULE_1__.PRINTED_BEFORE_CALL_NO_UTR]: 'PRINTED_BEFORE_CALL_NO_UTR: printed before our last call, no UTR, and no real-UTR credit of this chat shows the same clock lag; the details page decides.',
     [STATUS_UNKNOWN]: 'STATUS_UNKNOWN: the payment status could not be read and no real transaction reference shows; the details page decides.',
 };
 function ask(wording, open, note, reasons) {
@@ -103278,6 +103318,12 @@ function decideGate(e) {
         // 'next-minute': printed a minute after a credited one of the same amount, it looks like that old payment.
         return ask(e.holds.resendAsk === 'next-minute' ? 'old' : 'noTime', 'old_time', 'old_time', ['NO_UTR_NO_TIME_SAME_AMOUNT', `RESEND_${e.holds.resendAsk}`]);
     }
+    // Owner option D (2026-11-15): the rules accepted only by their leniency (printed before our last call, fewer than 4
+    // videos, no fresh real UTR). 3.3 days of logs: 5 such credits, ₹975, 3 of them fraud (₹800). Credited only when an
+    // earlier real-UTR credit of this chat shows the same clock lag (history.ts clockLagVouch); otherwise the details page.
+    // `copy` wording: the time WAS read (so not `noTime`) and the payment may well be new (so not `old`); neutral.
+    if (e.rules.lenient && !e.holds.lagVouch)
+        return ask('copy', 'old_time', 'old_time', [_history__WEBPACK_IMPORTED_MODULE_1__.PRINTED_BEFORE_CALL_NO_UTR]);
     return { kind: 'credit', confirmed, reasons: confirmed ? ['CONFIRMS_ASK'] : [] };
 }
 /**
@@ -104519,8 +104565,8 @@ function judgeRecentTime({ image, user, check, videoCount, atMs }) {
     const callOver5MinsAgo = callTime < nowMs - CALL_GAP_MS;
     const callWithin5Mins = callTime >= nowMs - CALL_GAP_MS;
     if (leniencyVideos && callOver5MinsAgo) {
-        logger.log(`SCENARIO: time invalid BUT leniency (videos<4=${leniencyVideos} callOver5MinsAgo=${callOver5MinsAgo}) | ACCEPT | chatId=${chatId}`);
-        return accept();
+        logger.log(`SCENARIO: time invalid BUT leniency (videos<4=${leniencyVideos} callOver5MinsAgo=${callOver5MinsAgo}) | ACCEPT lenient | chatId=${chatId}`);
+        return { isvalid: true, msg: "", lenient: true };
     }
     if (callWithin5Mins && age <= FRESH_PAYMENT_MS) {
         logger.log(`SCENARIO: call within 5mins + payment within 2.5mins | ACCEPT | chatId=${chatId}`);
