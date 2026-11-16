@@ -60393,8 +60393,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "3699fb87e32849edd1468b1b8bab68847d057309" : 0;
-    const builtAt =  true ? "2026-11-16T04:06:17.601Z" : 0;
+    const sha =  true ? "982837ca58fc2e4a16e435bf4f6b1b6028ae69c2" : 0;
+    const builtAt =  true ? "2026-11-16T04:13:21.193Z" : 0;
     return { sha, builtAt };
 }
 
@@ -103364,7 +103364,10 @@ function classifyAgainstServed(facts, matches, chatServed = [], nowMs = Date.now
         // Both payment times readable and minutes apart: a second real payment from the same app (its receipt looks
         // the same), not an edit. An amount edit keeps the original time. Prod 2026-10-15, shruthi2 8887389864:
         // ₹50 at 16:34 credited, ₹150 paid at 16:46 flagged "edited" because neither page showed a readable UTR.
-        const otherPayment = theirTime !== null && facts.timeMs !== null && Math.abs(theirTime - facts.timeMs) > SAME_TIME_MS;
+        // Printed times are cut to the minute, so 2 minutes apart (SAME_TIME_MS) already counts as another payment here;
+        // only 0 or 1 minute apart can be an edit. Live divya2 ****9057 2026-11-16: ₹25 printed 06:58 credited, the
+        // genuine ₹50 printed 07:00 was flagged EDITED_PICTURE. The same-amount repeat windows (above, rule 4) keep <=.
+        const otherPayment = theirTime !== null && facts.timeMs !== null && Math.abs(theirTime - facts.timeMs) >= SAME_TIME_MS;
         const numbersChanged = !sameAmount(row.amount, facts.amount) || (!!facts.utr && !!rowUtr && facts.utr !== rowUtr);
         if (numbersChanged && !freshReference && !otherPayment)
             edited ?? (edited = { kind: 'edited', reason: 'EDITED_PICTURE', matched: row });
