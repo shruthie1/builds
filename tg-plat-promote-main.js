@@ -43216,6 +43216,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   REACT_HOLDOUT_SALT: () => (/* binding */ REACT_HOLDOUT_SALT),
 /* harmony export */   RECENT_SIGNAL_WINDOW_MS: () => (/* binding */ RECENT_SIGNAL_WINDOW_MS),
+/* harmony export */   RESTRICT_PAUSE_EARLY_MIN_ATTEMPTS: () => (/* binding */ RESTRICT_PAUSE_EARLY_MIN_ATTEMPTS),
+/* harmony export */   RESTRICT_PAUSE_EARLY_SHARE: () => (/* binding */ RESTRICT_PAUSE_EARLY_SHARE),
 /* harmony export */   RESTRICT_PAUSE_LOG_EVERY: () => (/* binding */ RESTRICT_PAUSE_LOG_EVERY),
 /* harmony export */   RESTRICT_PAUSE_MIN_ATTEMPTS: () => (/* binding */ RESTRICT_PAUSE_MIN_ATTEMPTS),
 /* harmony export */   RESTRICT_PAUSE_SHARE: () => (/* binding */ RESTRICT_PAUSE_SHARE),
@@ -43224,6 +43226,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   nextIstMidnightMs: () => (/* binding */ nextIstMidnightMs),
 /* harmony export */   reactionHoldoutArm: () => (/* binding */ reactionHoldoutArm),
 /* harmony export */   readHoldoutMode: () => (/* binding */ readHoldoutMode),
+/* harmony export */   readRestrictPauseEarly: () => (/* binding */ readRestrictPauseEarly),
 /* harmony export */   readRestrictPauseMode: () => (/* binding */ readRestrictPauseMode),
 /* harmony export */   readSignalWindowMode: () => (/* binding */ readSignalWindowMode),
 /* harmony export */   readSkipBroadcast: () => (/* binding */ readSkipBroadcast),
@@ -43236,7 +43239,8 @@ __webpack_require__.r(__webpack_exports__);
  * Flags are read on each pool refresh / outcome, so a remote-config change applies without a restart
  * of the loop (the process still reads process.env as copied at boot).
  *
- *   REACT_RESTRICT_PAUSE  record | on | off   per account per IST day, restricted >= 20% over >= 50 attempts
+ *   REACT_RESTRICT_PAUSE  record | on | off   per account per IST day: restricted >= 20% over >= 50 attempts (base),
+ *                                             or >= 80% over >= 20 attempts (early; REACT_RESTRICT_PAUSE_EARLY_MIN/_SHARE)
  *   REACT_SIGNAL_WINDOW   all-time | recent   source of the 35% proven-DM pool slots
  *   REACT_HOLDOUT         off | record | on   50/50 channel holdout, salt 'react-holdout-2026-11'
  *   REACT_SKIP_BROADCAST  off | on            drop broadcast channels from the pool
@@ -43251,6 +43255,20 @@ function raw(env, key) {
 function readRestrictPauseMode(env = process.env) {
     const v = raw(env, 'REACT_RESTRICT_PAUSE');
     return v === 'on' || v === 'off' ? v : 'record';
+}
+const RESTRICT_PAUSE_EARLY_MIN_ATTEMPTS = 20;
+const RESTRICT_PAUSE_EARLY_SHARE = 0.8;
+/**
+ * Early restrict-pause rule: REACT_RESTRICT_PAUSE_EARLY_MIN (whole number >= 1, default 20) and
+ * REACT_RESTRICT_PAUSE_EARLY_SHARE (0 < share <= 1, default 0.8). A bad value falls back to its default.
+ */
+function readRestrictPauseEarly(env = process.env) {
+    const min = Number(raw(env, 'REACT_RESTRICT_PAUSE_EARLY_MIN') || NaN);
+    const share = Number(raw(env, 'REACT_RESTRICT_PAUSE_EARLY_SHARE') || NaN);
+    return {
+        minAttempts: Number.isInteger(min) && min >= 1 ? min : RESTRICT_PAUSE_EARLY_MIN_ATTEMPTS,
+        share: Number.isFinite(share) && share > 0 && share <= 1 ? share : RESTRICT_PAUSE_EARLY_SHARE,
+    };
 }
 /** REACT_SIGNAL_WINDOW: 'recent'; anything else (or unset) = 'all-time'. */
 function readSignalWindowMode(env = process.env) {
@@ -43306,7 +43324,7 @@ class RestrictPauseTracker {
         this.crossedAtAttempts = 0;
         this.pausedUntilMs = 0;
     }
-    record(outcome, nowMs, mode) {
+    record(outcome, nowMs, mode, early = { minAttempts: RESTRICT_PAUSE_EARLY_MIN_ATTEMPTS, share: RESTRICT_PAUSE_EARLY_SHARE }) {
         const day = istDayKey(nowMs);
         if (day !== this.day) {
             this.day = day;
@@ -43317,8 +43335,9 @@ class RestrictPauseTracker {
         this.attempts += 1;
         if (outcome === 'restricted')
             this.restricted += 1;
-        const decision = { action: 'none', day, attempts: this.attempts, restricted: this.restricted, untilMs: 0 };
-        if (mode === 'off' || !this.over())
+        const decision = { action: 'none', rule: null, day, attempts: this.attempts, restricted: this.restricted, untilMs: 0 };
+        const rule = mode === 'off' ? null : this.overRule(early);
+        if (!rule)
             return decision;
         const first = this.crossedAtAttempts === 0;
         if (first)
@@ -43327,10 +43346,10 @@ class RestrictPauseTracker {
             if (this.pausedUntilMs > nowMs)
                 return decision;
             this.pausedUntilMs = nextIstMidnightMs(nowMs);
-            return { ...decision, action: 'pause', untilMs: this.pausedUntilMs };
+            return { ...decision, action: 'pause', rule, untilMs: this.pausedUntilMs };
         }
         const sampled = first || (this.attempts - this.crossedAtAttempts) % RESTRICT_PAUSE_LOG_EVERY === 0;
-        return sampled ? { ...decision, action: 'would-pause', untilMs: nextIstMidnightMs(nowMs) } : decision;
+        return sampled ? { ...decision, action: 'would-pause', rule, untilMs: nextIstMidnightMs(nowMs) } : decision;
     }
     /** Remaining pause in ms (0 = not paused). Only 'on' ever sets a pause. */
     pausedForMs(nowMs) {
@@ -43339,8 +43358,13 @@ class RestrictPauseTracker {
     snapshot() {
         return { day: this.day, attempts: this.attempts, restricted: this.restricted, pausedUntilMs: this.pausedUntilMs };
     }
-    over() {
-        return this.attempts >= RESTRICT_PAUSE_MIN_ATTEMPTS && this.restricted / this.attempts >= RESTRICT_PAUSE_SHARE;
+    overRule(early) {
+        const share = this.attempts > 0 ? this.restricted / this.attempts : 0;
+        if (this.attempts >= early.minAttempts && share >= early.share)
+            return 'early';
+        if (this.attempts >= RESTRICT_PAUSE_MIN_ATTEMPTS && share >= RESTRICT_PAUSE_SHARE)
+            return 'base';
+        return null;
     }
 }
 // ── recent signal window ─────────────────────────────────────────────────────────────────────
@@ -44707,17 +44731,18 @@ class ReactionService {
         }
     }
     /**
-     * REACT_RESTRICT_PAUSE (default record): restricted >= 20% of >= 50 attempts in this IST day.
+     * REACT_RESTRICT_PAUSE (default record): restricted >= 20% of >= 50 attempts (rule=base) or
+     * >= 80% of >= 20 attempts (rule=early; REACT_RESTRICT_PAUSE_EARLY_MIN/_SHARE) in this IST day.
      * 'on' pauses reactions until IST midnight; 'record' logs a sampled `reaction-would-pause` line.
      */
     noteRestrictPause(outcome) {
         try {
             const now = Date.now();
-            const d = this.restrictPause.record(outcome, now, (0,_ReactionExperiments__WEBPACK_IMPORTED_MODULE_17__.readRestrictPauseMode)());
+            const d = this.restrictPause.record(outcome, now, (0,_ReactionExperiments__WEBPACK_IMPORTED_MODULE_17__.readRestrictPauseMode)(), (0,_ReactionExperiments__WEBPACK_IMPORTED_MODULE_17__.readRestrictPauseEarly)());
             if (d.action === 'none')
                 return;
             const share = d.attempts > 0 ? (d.restricted / d.attempts).toFixed(3) : '0';
-            const line = `day=${d.day}; attempts=${d.attempts}; restricted=${d.restricted}; share=${share}; until=${new Date(d.untilMs).toISOString()}`;
+            const line = `rule=${d.rule}; day=${d.day}; attempts=${d.attempts}; restricted=${d.restricted}; share=${share}; until=${new Date(d.untilMs).toISOString()}`;
             if (d.action === 'pause') {
                 logger.warn(`[${this.instanceId}] reaction-pause: restricted share over limit, reactions paused until IST midnight; ${line}`);
             }
@@ -48739,8 +48764,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "3699fb87e32849edd1468b1b8bab68847d057309" : 0;
-    const builtAt =  true ? "2026-11-16T04:06:04.126Z" : 0;
+    const sha =  true ? "7d11f3252e245f9a3b162b71fcc7e64ff0f975a2" : 0;
+    const builtAt =  true ? "2026-11-16T04:32:22.410Z" : 0;
     return { sha, builtAt };
 }
 
