@@ -21443,6 +21443,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   DEAD_HANDOFF_MAX_FAILURES: () => (/* binding */ DEAD_HANDOFF_MAX_FAILURES),
 /* harmony export */   DEAD_HANDOFF_RETRY_BASE_MS: () => (/* binding */ DEAD_HANDOFF_RETRY_BASE_MS),
+/* harmony export */   HANDOFF_DEGRADED_HOLD_MS: () => (/* binding */ HANDOFF_DEGRADED_HOLD_MS),
 /* harmony export */   HANDOFF_FAILURE_BACKOFF_MS: () => (/* binding */ HANDOFF_FAILURE_BACKOFF_MS),
 /* harmony export */   HANDOFF_LIMITED_MIN_DAYS: () => (/* binding */ HANDOFF_LIMITED_MIN_DAYS),
 /* harmony export */   HANDOFF_MAX_CONSECUTIVE_FAILURES: () => (/* binding */ HANDOFF_MAX_CONSECUTIVE_FAILURES),
@@ -21476,8 +21477,13 @@ const HANDOFF_MAX_CONSECUTIVE_FAILURES = 5;
 const HANDOFF_NO_CANDIDATE_BACKOFF_MS = 2 * 60 * 60 * 1000;
 /** … 15, 30, 60, 120 min while CMS reports unprobed candidates (moreCandidatesPending) … */
 const HANDOFF_PENDING_BACKOFF_MS = 15 * 60 * 1000;
-/** … and stop after this many no_candidate answers in a row (a `degraded` one stops at once). */
+/** … and stop after this many no_candidate answers in a row. */
 const HANDOFF_MAX_CONSECUTIVE_NO_CANDIDATES = 5;
+/**
+ * A `degraded` no_candidate holds requests this long, then asks again (about one CMS upgrade interval;
+ * CMS clears the marker). Was a stop until restart: keerthi1 stayed suppressed 16 h after the clear (2026-11-16).
+ */
+const HANDOFF_DEGRADED_HOLD_MS = 60 * 60 * 1000;
 /** After a successful swap CMS restarts the process; no new request meanwhile. */
 const HANDOFF_POST_SWAP_MS = 5 * 60 * 1000;
 /**
@@ -21535,7 +21541,7 @@ function wantsSwap(h, client, now) {
  * - swapped: both counters reset; no new request for 5 min.
  * - stale_report (this process runs a replaced mobile): failures reset; stop.
  * - cooldown (CMS's own): wait exactly `remainingMs` when > 0; not a failure; counters unchanged.
- * - no_candidate: failures reset; `degraded` stops at once; otherwise noCandidates+1, stop at 5, else
+ * - no_candidate: failures reset; `degraded` waits HANDOFF_DEGRADED_HOLD_MS (counters kept); otherwise noCandidates+1, stop at 5, else
  *   wait 2/4/8/16 h (15/30/60/120 min while `moreCandidatesPending`).
  * - failed: failures+1 (noCandidates kept), stop at 5, else wait 15/30/60/120 min.
  * The returned state is meant to be persisted: a restart keeps it (no implicit re-arm). Only a new
@@ -21558,7 +21564,7 @@ function applyHandoffResult(handoff, result, now) {
                 : handoff;
         case 'no_candidate': {
             if (result.degraded === true) {
-                return { ...handoff, failures: 0, nextAttemptAt: null, stopped: 'degraded: the CMS upgrade job owns this client' };
+                return { ...handoff, failures: 0, nextAttemptAt: now + HANDOFF_DEGRADED_HOLD_MS };
             }
             const noCandidates = handoff.noCandidates + 1;
             if (noCandidates >= HANDOFF_MAX_CONSECUTIVE_NO_CANDIDATES) {
@@ -21613,6 +21619,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   DEAD_HANDOFF_MAX_FAILURES: () => (/* reexport safe */ _handoff__WEBPACK_IMPORTED_MODULE_6__.DEAD_HANDOFF_MAX_FAILURES),
 /* harmony export */   DEAD_HANDOFF_RETRY_BASE_MS: () => (/* reexport safe */ _handoff__WEBPACK_IMPORTED_MODULE_6__.DEAD_HANDOFF_RETRY_BASE_MS),
+/* harmony export */   HANDOFF_DEGRADED_HOLD_MS: () => (/* reexport safe */ _handoff__WEBPACK_IMPORTED_MODULE_6__.HANDOFF_DEGRADED_HOLD_MS),
 /* harmony export */   HANDOFF_FAILURE_BACKOFF_MS: () => (/* reexport safe */ _handoff__WEBPACK_IMPORTED_MODULE_6__.HANDOFF_FAILURE_BACKOFF_MS),
 /* harmony export */   HANDOFF_LIMITED_MIN_DAYS: () => (/* reexport safe */ _handoff__WEBPACK_IMPORTED_MODULE_6__.HANDOFF_LIMITED_MIN_DAYS),
 /* harmony export */   HANDOFF_MAX_CONSECUTIVE_FAILURES: () => (/* reexport safe */ _handoff__WEBPACK_IMPORTED_MODULE_6__.HANDOFF_MAX_CONSECUTIVE_FAILURES),
@@ -23538,6 +23545,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   EntityCacheManager: () => (/* reexport safe */ _cache_EntityCacheManager__WEBPACK_IMPORTED_MODULE_16__.EntityCacheManager),
 /* harmony export */   EntityNotFoundError: () => (/* reexport safe */ _telegram_utils_getSafeEntity__WEBPACK_IMPORTED_MODULE_17__.EntityNotFoundError),
 /* harmony export */   ErrorUtils: () => (/* reexport safe */ _utils_parseError__WEBPACK_IMPORTED_MODULE_1__.ErrorUtils),
+/* harmony export */   HANDOFF_DEGRADED_HOLD_MS: () => (/* reexport safe */ _account_health__WEBPACK_IMPORTED_MODULE_41__.HANDOFF_DEGRADED_HOLD_MS),
 /* harmony export */   HANDOFF_FAILURE_BACKOFF_MS: () => (/* reexport safe */ _account_health__WEBPACK_IMPORTED_MODULE_41__.HANDOFF_FAILURE_BACKOFF_MS),
 /* harmony export */   HANDOFF_LIMITED_MIN_DAYS: () => (/* reexport safe */ _account_health__WEBPACK_IMPORTED_MODULE_41__.HANDOFF_LIMITED_MIN_DAYS),
 /* harmony export */   HANDOFF_MAX_CONSECUTIVE_FAILURES: () => (/* reexport safe */ _account_health__WEBPACK_IMPORTED_MODULE_41__.HANDOFF_MAX_CONSECUTIVE_FAILURES),
@@ -60385,8 +60393,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "3463015fda5c11119eb8b1e73925fa288f7ce78a" : 0;
-    const builtAt =  true ? "2026-11-15T13:53:44.043Z" : 0;
+    const sha =  true ? "3699fb87e32849edd1468b1b8bab68847d057309" : 0;
+    const builtAt =  true ? "2026-11-16T04:06:17.601Z" : 0;
     return { sha, builtAt };
 }
 
@@ -125535,6 +125543,7 @@ function isAuthMine(auth) {
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   SETUP_CLIENT_BACKOFF_MS: () => (/* binding */ SETUP_CLIENT_BACKOFF_MS),
+/* harmony export */   SETUP_CLIENT_DEGRADED_HOLD_MS: () => (/* binding */ SETUP_CLIENT_DEGRADED_HOLD_MS),
 /* harmony export */   SETUP_CLIENT_FAILURE_BACKOFF_MS: () => (/* binding */ SETUP_CLIENT_FAILURE_BACKOFF_MS),
 /* harmony export */   SETUP_CLIENT_MAX_FAILURES: () => (/* binding */ SETUP_CLIENT_MAX_FAILURES),
 /* harmony export */   SETUP_CLIENT_MAX_NO_CANDIDATE: () => (/* binding */ SETUP_CLIENT_MAX_NO_CANDIDATE),
@@ -125588,20 +125597,30 @@ const SETUP_CLIENT_MAX_FAILURES = _tg_core_account_health_handoff__WEBPACK_IMPOR
  * Owner rule (2026-10-11) applied to no_candidate too (2026-10-24): consecutive no_candidate answers
  * back off 2, 4, 8, 16 h (15, 30, 60, 120 min while CMS reports unprobed candidates) and stop after
  * SETUP_CLIENT_MAX_NO_CANDIDATE in a row, until the process restarts. A no_candidate that says the
- * client is already `degraded` stops at once: the CMS upgrade job owns moving it to a better account.
+ * client is already `degraded` holds requests for SETUP_CLIENT_DEGRADED_HOLD_MS: the CMS upgrade job owns
+ * moving it to a better account and clears the marker, so the next request after the hold asks again.
  */
 const SETUP_CLIENT_MAX_NO_CANDIDATE = _tg_core_account_health_handoff__WEBPACK_IMPORTED_MODULE_0__.HANDOFF_MAX_CONSECUTIVE_NO_CANDIDATES;
+/**
+ * 2026-11-16: was a stop until restart. Live, keerthi1 stayed suppressed for 16 h after CMS cleared its
+ * degraded marker and a ready buffer existed. 1 h is about one CMS upgrade interval; CMS stays the only
+ * source of truth for `degraded`.
+ */
+const SETUP_CLIENT_DEGRADED_HOLD_MS = _tg_core_account_health_handoff__WEBPACK_IMPORTED_MODULE_0__.HANDOFF_DEGRADED_HOLD_MS;
 let swapSuppressedUntil = 0;
 let inFlight = null;
 let consecutiveFailures = 0;
 let consecutiveNoCandidates = 0;
 let stopReason = null;
+/** The swapSuppressedUntil value set by the last degraded no_candidate (names the hold in the message). */
+let degradedHoldUntil = 0;
 function resetSetupClientBackoff() {
     swapSuppressedUntil = 0;
     inFlight = null;
     consecutiveFailures = 0;
     consecutiveNoCandidates = 0;
     stopReason = null;
+    degradedHoldUntil = 0;
 }
 function stopRequests(reason) {
     swapSuppressedUntil = Number.POSITIVE_INFINITY;
@@ -125618,7 +125637,8 @@ function noteSetupFailure() {
 function noteNoCandidate(result) {
     consecutiveFailures = 0;
     if (result.degraded === true) {
-        stopRequests('setupClient requests stopped: this client runs on a degraded account and the CMS upgrade job moves it up; a process restart re-arms them');
+        swapSuppressedUntil = Date.now() + SETUP_CLIENT_DEGRADED_HOLD_MS;
+        degradedHoldUntil = swapSuppressedUntil;
         return;
     }
     consecutiveNoCandidates++;
@@ -125644,7 +125664,9 @@ async function requestClientSetup(url, request, expectedClientId, options = {}) 
             swapped: false,
             clientId: expectedClientId ?? '',
             message: Number.isFinite(remainingMs)
-                ? `setupClient request suppressed locally for another ${Math.ceil(remainingMs / 1000)}s after a no_candidate, swapped or failed result`
+                ? swapSuppressedUntil === degradedHoldUntil
+                    ? `setupClient requests held for another ${Math.ceil(remainingMs / 1000)}s: this client runs on a degraded account and the CMS upgrade job moves it up; requests re-arm 1 h after the degraded no_candidate`
+                    : `setupClient request suppressed locally for another ${Math.ceil(remainingMs / 1000)}s after a no_candidate, swapped or failed result`
                 : stopReason ?? 'setupClient requests stopped; a process restart re-arms them',
             cooldownRemainingMs: remainingMs,
             suppressedLocally: true,
