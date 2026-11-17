@@ -40211,17 +40211,23 @@ function normalizePromoteStatsData(data) {
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   PERSONA_ASSIGNMENT_PROJECTION: () => (/* binding */ PERSONA_ASSIGNMENT_PROJECTION),
+/* harmony export */   PROMOTE_HARSH_REST_MS: () => (/* binding */ PROMOTE_HARSH_REST_MS),
 /* harmony export */   PROMOTE_RUNTIME_MIN_AGE_DAYS: () => (/* binding */ PROMOTE_RUNTIME_MIN_AGE_DAYS),
 /* harmony export */   PromoteRepository: () => (/* binding */ PromoteRepository),
+/* harmony export */   SELECTION_READ_DEADLINE_MS: () => (/* binding */ SELECTION_READ_DEADLINE_MS),
+/* harmony export */   canonicalPromoteMobile: () => (/* binding */ canonicalPromoteMobile),
 /* harmony export */   emptyPromoteAvailability: () => (/* binding */ emptyPromoteAvailability),
 /* harmony export */   getPromoteRuntimeEligibilityFilter: () => (/* binding */ getPromoteRuntimeEligibilityFilter),
-/* harmony export */   personaAssignmentFilter: () => (/* binding */ personaAssignmentFilter)
+/* harmony export */   personaAssignmentFilter: () => (/* binding */ personaAssignmentFilter),
+/* harmony export */   promoteSpamSkipReason: () => (/* binding */ promoteSpamSkipReason)
 /* harmony export */ });
 /* harmony import */ var _tg_persona_persona_timestamps__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/persona/persona-timestamps */ "../../packages/tg-persona/src/persona-timestamps.ts");
 /* harmony import */ var _base_repository__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../base-repository */ "../../packages/tg-db/src/base-repository.ts");
 /* harmony import */ var _account_role_events_repository__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./account-role-events.repository */ "../../packages/tg-db/src/collections/account-role-events.repository.ts");
 /* harmony import */ var _promote_stats_normalize__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ./promote-stats.normalize */ "../../packages/tg-db/src/collections/promote-stats.normalize.ts");
 /* harmony import */ var _tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! @tg/core/utils/dc-ip-family */ "../../packages/tg-core/src/utils/dc-ip-family.ts");
+/* harmony import */ var _account_facet_common__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ./account-facet-common */ "../../packages/tg-db/src/collections/account-facet-common.ts");
+
 
 
 
@@ -40241,6 +40247,36 @@ const getPromoteRuntimeEligibilityFilter = () => ({
     channels: { $gte: PROMOTE_RUNTIME_CHANNEL_FLOOR },
     warmupPhase: PROMOTE_RUNTIME_PHASE,
 });
+/**
+ * Boot-selection spam skip (owner 2026-11-17; RCA: harsh promote mobiles sent 59% banned). Fields and rest length
+ * follow the CMS buffer gate buildSpamEligibleFilter (buffer-client.schema.ts: 30-day harsh rest = CMS
+ * HARSH_RECHECK_AFTER_MS, harsh without a time stays eligible, limitedUntil in the future blocks), with ONE deliberate
+ * difference: the rest counts from accountHealth.verdictAt (the latest re-check), falling back to spamCheckedAt.
+ * accountHealth.spamCheckedAt only moves on a status CHANGE (account-health.repository.ts), so it holds the FIRST
+ * harsh date; a harsh verdict re-confirmed on day 25 must still block on day 31.
+ * Parked episodes are NOT skipped (2026-11-17 data: parked promote mobiles ban at 1.6%, the healthiest group).
+ */
+const PROMOTE_HARSH_REST_MS = 30 * 24 * 60 * 60 * 1000;
+const SELECTION_READ_MAX_TIME_MS = 3000;
+/** Client-side deadline of the selection read (a stalled socket cannot hold the boot); a little above maxTimeMS. */
+const SELECTION_READ_DEADLINE_MS = 3500;
+/** Digits only: accountHealth `_id` is the mobile without '+'. */
+const canonicalPromoteMobile = (mobile) => String(mobile ?? '').replace(/\D/g, '');
+const timeMs = (value) => {
+    if (value === null || value === undefined || value === '')
+        return null;
+    const ms = value instanceof Date ? value.getTime() : Date.parse(String(value));
+    return Number.isFinite(ms) ? ms : null;
+};
+/** Why a promote candidate must not be selected (harsh before limited), or null. */
+function promoteSpamSkipReason(verdict, now) {
+    const nowMs = now.getTime();
+    const checkedMs = timeMs(verdict?.verdictAt) ?? timeMs(verdict?.spamCheckedAt);
+    if (verdict?.spamStatus === 'harsh' && checkedMs !== null && checkedMs > nowMs - PROMOTE_HARSH_REST_MS)
+        return 'harsh';
+    const untilMs = timeMs(verdict?.limitedUntil);
+    return untilMs !== null && untilMs > nowMs ? 'limited' : null;
+}
 /**
  * Filter for "accounts of this client that already hold a persona assignment". Shared by the
  * promoteClients read below and by the apps' bufferClients read (step 4 of the dbservice removal),
@@ -40473,6 +40509,29 @@ class PromoteRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_1__.Ba
                 .sort({ availableDate: 1, lastUsed: 1, createdAt: 1, channels: -1 })
                 .toArray();
         });
+    }
+    /**
+     * Boot-selection health of promote candidates (PROMO_SKIP_SPAM_STATUS, mobile-manager.ts): the accountHealth
+     * SpamBot verdict per mobile (`_id` = canonical mobile; every promote verdict is mirrored there). Keys are
+     * canonical digits. Null on a read error or after SELECTION_READ_DEADLINE_MS (caller keeps the old selection).
+     */
+    async readPromoteSelectionHealth(mobiles) {
+        const canon = [...new Set(mobiles.map(canonicalPromoteMobile).filter(Boolean))];
+        if (canon.length === 0)
+            return { health: {} };
+        const forms = canon.flatMap((m) => [m, `+${m}`]);
+        const rows = await this.guard('readPromoteSelectionHealth', null, () => (0,_account_facet_common__WEBPACK_IMPORTED_MODULE_5__.withFacetDeadline)(this.connection.collection('accountHealth')
+            .find({ _id: { $in: forms } }, { projection: { spamStatus: 1, spamCheckedAt: 1, verdictAt: 1, limitedUntil: 1 }, maxTimeMS: SELECTION_READ_MAX_TIME_MS })
+            .toArray(), SELECTION_READ_DEADLINE_MS, 'readPromoteSelectionHealth'));
+        if (!rows)
+            return null;
+        const health = {};
+        for (const row of rows) {
+            const key = canonicalPromoteMobile(String(row._id));
+            if (key)
+                health[key] = { spamStatus: row.spamStatus ?? null, spamCheckedAt: row.spamCheckedAt ?? null, verdictAt: row.verdictAt ?? null, limitedUntil: row.limitedUntil ?? null };
+        }
+        return { health };
     }
     async getTotalAvailablePromoteClients() {
         return this.guard('getTotalAvailablePromoteClients', emptyPromoteAvailability(), async () => {
@@ -41891,6 +41950,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   PARKED_CHATS_REACH_INDEX: () => (/* reexport safe */ _collections_parked_chats_repository__WEBPACK_IMPORTED_MODULE_13__.PARKED_CHATS_REACH_INDEX),
 /* harmony export */   PARKED_EPISODE_GC_MS: () => (/* reexport safe */ _collections_parked_accounts_repository__WEBPACK_IMPORTED_MODULE_12__.PARKED_EPISODE_GC_MS),
 /* harmony export */   PERSONA_ASSIGNMENT_PROJECTION: () => (/* reexport safe */ _collections_promote_repository__WEBPACK_IMPORTED_MODULE_7__.PERSONA_ASSIGNMENT_PROJECTION),
+/* harmony export */   PROMOTE_HARSH_REST_MS: () => (/* reexport safe */ _collections_promote_repository__WEBPACK_IMPORTED_MODULE_7__.PROMOTE_HARSH_REST_MS),
 /* harmony export */   PROMOTE_RUNTIME_MIN_AGE_DAYS: () => (/* reexport safe */ _collections_promote_repository__WEBPACK_IMPORTED_MODULE_7__.PROMOTE_RUNTIME_MIN_AGE_DAYS),
 /* harmony export */   ParkedAccountsRepository: () => (/* reexport safe */ _collections_parked_accounts_repository__WEBPACK_IMPORTED_MODULE_12__.ParkedAccountsRepository),
 /* harmony export */   ParkedChatsRepository: () => (/* reexport safe */ _collections_parked_chats_repository__WEBPACK_IMPORTED_MODULE_13__.ParkedChatsRepository),
@@ -41901,6 +41961,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   REPLY_FAILURES_TTL_SECONDS: () => (/* reexport safe */ _collections_reply_failures_repository__WEBPACK_IMPORTED_MODULE_10__.REPLY_FAILURES_TTL_SECONDS),
 /* harmony export */   ReplyFailuresRepository: () => (/* reexport safe */ _collections_reply_failures_repository__WEBPACK_IMPORTED_MODULE_10__.ReplyFailuresRepository),
 /* harmony export */   RepositoryContainer: () => (/* reexport safe */ _repositories__WEBPACK_IMPORTED_MODULE_18__.RepositoryContainer),
+/* harmony export */   SELECTION_READ_DEADLINE_MS: () => (/* reexport safe */ _collections_promote_repository__WEBPACK_IMPORTED_MODULE_7__.SELECTION_READ_DEADLINE_MS),
 /* harmony export */   StatsRepository: () => (/* reexport safe */ _collections_stats_repository__WEBPACK_IMPORTED_MODULE_9__.StatsRepository),
 /* harmony export */   USER_DATA_DEFAULTS: () => (/* reexport safe */ _collections_user_data_repository__WEBPACK_IMPORTED_MODULE_3__.USER_DATA_DEFAULTS),
 /* harmony export */   UserDataRepository: () => (/* reexport safe */ _collections_user_data_repository__WEBPACK_IMPORTED_MODULE_3__.UserDataRepository),
@@ -41911,6 +41972,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildAccountHealthWrite: () => (/* reexport safe */ _collections_account_health_repository__WEBPACK_IMPORTED_MODULE_16__.buildAccountHealthWrite),
 /* harmony export */   buildAccountRoleEvent: () => (/* reexport safe */ _collections_account_role_events_repository__WEBPACK_IMPORTED_MODULE_15__.buildAccountRoleEvent),
 /* harmony export */   buildLiveChannelUpsert: () => (/* reexport safe */ _collections_channels_repository__WEBPACK_IMPORTED_MODULE_6__.buildLiveChannelUpsert),
+/* harmony export */   canonicalPromoteMobile: () => (/* reexport safe */ _collections_promote_repository__WEBPACK_IMPORTED_MODULE_7__.canonicalPromoteMobile),
 /* harmony export */   classifyRoleEventReason: () => (/* reexport safe */ _collections_account_role_events_repository__WEBPACK_IMPORTED_MODULE_15__.classifyRoleEventReason),
 /* harmony export */   createChannelsStore: () => (/* reexport safe */ _collections_channels_repository__WEBPACK_IMPORTED_MODULE_6__.createChannelsStore),
 /* harmony export */   createRepositories: () => (/* reexport safe */ _repositories__WEBPACK_IMPORTED_MODULE_18__.createRepositories),
@@ -41926,6 +41988,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   normalizeRoleEventMobile: () => (/* reexport safe */ _collections_account_role_events_repository__WEBPACK_IMPORTED_MODULE_15__.normalizeRoleEventMobile),
 /* harmony export */   parkedChatId: () => (/* reexport safe */ _collections_parked_chats_repository__WEBPACK_IMPORTED_MODULE_13__.parkedChatId),
 /* harmony export */   personaAssignmentFilter: () => (/* reexport safe */ _collections_promote_repository__WEBPACK_IMPORTED_MODULE_7__.personaAssignmentFilter),
+/* harmony export */   promoteSpamSkipReason: () => (/* reexport safe */ _collections_promote_repository__WEBPACK_IMPORTED_MODULE_7__.promoteSpamSkipReason),
 /* harmony export */   readDatabaseSize: () => (/* reexport safe */ _database_info__WEBPACK_IMPORTED_MODULE_17__.readDatabaseSize),
 /* harmony export */   recordDailyAnalytics: () => (/* reexport safe */ _collections_daily_stats_repository__WEBPACK_IMPORTED_MODULE_5__.recordDailyAnalytics),
 /* harmony export */   sanitizeAvailableMsgs: () => (/* reexport safe */ _collections_channels_repository__WEBPACK_IMPORTED_MODULE_6__.sanitizeAvailableMsgs),
@@ -60461,8 +60524,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "ef85060964d2383a27e57d3aaae1ed9235b92e1e" : 0;
-    const builtAt =  true ? "2026-11-17T05:01:45.453Z" : 0;
+    const sha =  true ? "83b9e3f9a4e85c5467239ae7403b22e9536be2a9" : 0;
+    const builtAt =  true ? "2026-11-17T05:02:06.287Z" : 0;
     return { sha, builtAt };
 }
 
