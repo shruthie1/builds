@@ -49170,8 +49170,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "f07b83773c3bc7fa8a2c88ac3df64ea5d5ebc3e6" : 0;
-    const builtAt =  true ? "2026-11-17T06:44:37.456Z" : 0;
+    const sha =  true ? "c5229c2e040a5ea198051c418ed06bd550487e94" : 0;
+    const builtAt =  true ? "2026-11-17T18:43:43.104Z" : 0;
     return { sha, builtAt };
 }
 
@@ -52586,6 +52586,27 @@ const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_15__.Logger("P
  * (promote runs N telegram clients per process); all state is per-instance.
  */
 class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_17__.BasePromotionEngine {
+    /**
+     * P1: true when the promotion runner is alive and still cycling, so the 5-min health pass must not
+     * restart it. False when there is no live supervisor, when the watchdog already stopped the runner
+     * (running === false) but a hung await keeps the supervisor 'running', or when there is no declared
+     * sleep and no cycle start/finish, send, send failure or deletion in RUNNER_PROGRESS_STALE_MS. A wedged runner then gets the old restart path.
+     */
+    isRunnerAlive(now = Date.now()) {
+        if (!this.isPromotionSupervisorRunning())
+            return false;
+        const runner = this.promotionSupervisor?.getHealth().runner;
+        if (!runner || runner.running === false)
+            return false;
+        // One cycle can hold many sends with 12-20 min rests, so per-send signals count as progress too.
+        // Not lastQueueCheck*: a separate timer updates those even when the send loop is wedged.
+        // A declared sleep shields the runner only up to the stale window, so a long wait can't hide a hang.
+        if (typeof runner.sleepUntil === 'number' && runner.sleepUntil > now
+            && runner.sleepUntil - now <= PromotionEngine.RUNNER_PROGRESS_STALE_MS)
+            return true;
+        const lastProgress = Math.max(runner.lastCycleStartedAt ?? 0, runner.lastCycleFinishedAt ?? 0, runner.lastSuccessfulSendAt ?? 0, runner.lastSendFailureAt ?? 0, runner.lastDeletionAt ?? 0);
+        return lastProgress > 0 && now - lastProgress <= PromotionEngine.RUNNER_PROGRESS_STALE_MS;
+    }
     constructor(client, dialogManager, options) {
         super(client, dialogManager, options.instanceName || dialogManager.instanceName || process.env.clientId || "defaultClient", options.instanceId || dialogManager.instanceId || process.env.mobile || "defaultMobile");
         // --- Public mutable fields preserved from the old Promotion API ---
@@ -53143,6 +53164,8 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_17__.Ba
             .catch(error => (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_6__.parseError)(error, `[${this.mobile}] Failed to update promote client availability`, false));
     }
 }
+/** A cycle that has neither started nor finished in 50 min is wedged (supervisor watchdog is 45 min). */
+PromotionEngine.RUNNER_PROGRESS_STALE_MS = 50 * 60 * 1000;
 
 
 /***/ },
@@ -58595,6 +58618,14 @@ class TelegramService {
         const tgManager = this.mobileManager.getTelegramManager(mobile);
         return tgManager?.promoterInstance?.restartPromotion();
     }
+    /**
+     * True when the mobile's promotion runner is alive and making progress
+     * (PromotionEngine.isRunnerAlive). A wedged runner or an engine without
+     * the method returns false, so the health pass restarts it as before.
+     */
+    isRunnerAlive(mobile) {
+        return this.mobileManager.getTelegramManager(mobile)?.promoterInstance?.isRunnerAlive?.() === true;
+    }
     getDaysLeft(mobile) {
         const tgManager = this.mobileManager.getTelegramManager(mobile);
         if (!tgManager?.promoterInstance) {
@@ -58914,7 +58945,11 @@ class TelegramService {
         for (const mobile of mobiles) {
             const lastMessageTime = this.getLastMessageTime(mobile);
             if (lastMessageTime && lastMessageTime < twentyMinutesAgo) {
-                await this.restartPromotion(mobile);
+                // Report stale mobiles; restart only a dead runner. Restarting a live
+                // runner every 5 min health pass kept quiet mobiles from ever finishing a cycle.
+                if (!this.isRunnerAlive(mobile)) {
+                    await this.restartPromotion(mobile);
+                }
                 const minutesAgo = Math.floor((Date.now() - lastMessageTime) / (60 * 1000));
                 mobilesWithOldMessages.push(`${mobile} : ${minutesAgo} mins`);
             }
