@@ -46001,6 +46001,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
 /* harmony import */ var _diagnostics_memory_cleanup__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! ../diagnostics/memory-cleanup */ "./src/diagnostics/memory-cleanup.ts");
 /* harmony import */ var _tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_17__ = __webpack_require__(/*! @tg/core/utils/dc-ip-family */ "../../packages/tg-core/src/utils/dc-ip-family.ts");
+/* harmony import */ var _tg_core_utils_Redis_Redis_Client__WEBPACK_IMPORTED_MODULE_18__ = __webpack_require__(/*! @tg/core/utils/Redis/Redis.Client */ "../../packages/tg-core/src/utils/Redis/Redis.Client.ts");
+
 
 
 
@@ -46047,6 +46049,8 @@ class HealthMonitor {
         // Per-mobile debounce for the "stale/unhealthy but inbound still confident, skipping
         // replacement" warning — fires on every health tick otherwise (flood across many mobiles).
         this.lastSkipReplacementWarnAt = new Map();
+        // Debounce for gate-swap "deferred"/"skipped" lines. The budget itself lives in Redis.
+        this.lastGateSwapDeferWarnAt = new Map();
         this.mobileManager = _mobile_manager__WEBPACK_IMPORTED_MODULE_8__.MobileManager.getInstance();
         this.telegramService = _telegram_telegram_service__WEBPACK_IMPORTED_MODULE_0__.TelegramService.getInstance();
         this.config = { ...DEFAULT_HEALTH_CONFIG, ...config };
@@ -46534,6 +46538,65 @@ class HealthMonitor {
     isForcedRecoveryPlan(recoveryPlan) {
         return recoveryPlan?.actions.some((action) => action.component === "manual.force") ?? false;
     }
+    /** Debounced (per mobile, 30 min) log line for gate swaps that do not happen. */
+    warnGateSwapOnce(mobile, line) {
+        const now = Date.now();
+        const lastWarnAt = this.lastGateSwapDeferWarnAt.get(mobile);
+        if (lastWarnAt !== undefined && now - lastWarnAt < HealthMonitor.SKIP_REPLACEMENT_WARN_DEBOUNCE_MS)
+            return;
+        if (this.lastGateSwapDeferWarnAt.size >= HealthMonitor.MAX_SKIP_REPLACEMENT_WARN_ENTRIES && !this.lastGateSwapDeferWarnAt.has(mobile)) {
+            const oldestKey = this.lastGateSwapDeferWarnAt.keys().next().value;
+            if (oldestKey !== undefined)
+                this.lastGateSwapDeferWarnAt.delete(oldestKey);
+        }
+        this.lastGateSwapDeferWarnAt.set(mobile, now);
+        logger.warn(`[${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_17__.maskMobile)(mobile)}] ${line}`);
+    }
+    /**
+     * Gate-triggered swap budget per clientId, persisted in Redis so a restart does not reset it:
+     * at most one swap per PROMO_GATE_SWAP_MIN_GAP_MS (default 30 min) and
+     * PROMO_GATE_SWAP_MAX_PER_DAY (default 3) per rolling 24h. Returns the recent swap times when a
+     * swap is allowed, or null (over budget, or Redis unavailable: fail closed).
+     */
+    async readGateSwapBudget(mobile) {
+        const clientId = process.env.clientId || "unknown";
+        const minGapMs = positiveEnvNumber(process.env.PROMO_GATE_SWAP_MIN_GAP_MS, 30 * 60 * 1000);
+        const maxPerDay = positiveEnvNumber(process.env.PROMO_GATE_SWAP_MAX_PER_DAY, 3);
+        const now = Date.now();
+        let stored;
+        try {
+            stored = await _tg_core_utils_Redis_Redis_Client__WEBPACK_IMPORTED_MODULE_18__.RedisClient.getObject(gateSwapBudgetKey(clientId));
+        }
+        catch (error) {
+            this.warnGateSwapOnce(mobile, `Gate swap deferred: budget unreadable (Redis unavailable), client ${clientId}: ${error instanceof Error ? error.message : String(error)}`);
+            return null;
+        }
+        const recent = (Array.isArray(stored?.times) ? stored.times : [])
+            .filter((at) => typeof at === "number" && Number.isFinite(at) && now - at < GATE_SWAP_WINDOW_MS)
+            .sort((a, b) => a - b);
+        const lastSwapAt = recent.length > 0 ? recent[recent.length - 1] : null;
+        let reason = null;
+        if (lastSwapAt !== null && now - lastSwapAt < minGapMs) {
+            reason = `last gate swap ${Math.floor((now - lastSwapAt) / 60000)}m ago (min gap ${Math.floor(minGapMs / 60000)}m)`;
+        }
+        else if (recent.length >= maxPerDay) {
+            reason = `${recent.length}/${maxPerDay} gate swaps in 24h`;
+        }
+        if (reason) {
+            this.warnGateSwapOnce(mobile, `Gate swap deferred: budget ${reason}, client ${clientId}`);
+            return null;
+        }
+        return recent;
+    }
+    async recordGateSwap(mobile, recent) {
+        const clientId = process.env.clientId || "unknown";
+        try {
+            await _tg_core_utils_Redis_Redis_Client__WEBPACK_IMPORTED_MODULE_18__.RedisClient.set(gateSwapBudgetKey(clientId), { times: [...recent, Date.now()] }, GATE_SWAP_WINDOW_MS / 1000);
+        }
+        catch (error) {
+            logger.error(`[${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_17__.maskMobile)(mobile)}] Gate swap done but budget not saved (Redis), client ${clientId}`, (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, `Gate swap budget write failed for ${mobile}`, false));
+        }
+    }
     async recoverPromotionFromPlan(mobile, telegramManager, promoter, action, inboundSnapshot, daysLeft, lastMsgAgoMin, stopTimeoutMs) {
         logger.info(`[${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_17__.maskMobile)(mobile)}]: Promotion recovery requested by service health`, {
             status: action.status,
@@ -46546,7 +46609,26 @@ class HealthMonitor {
         if (!shouldReplaceStoppedPromotion) {
             return;
         }
-        if (inboundSnapshot.confidence === 'high' || inboundSnapshot.confidence === 'medium') {
+        // Ban-rate gate trip: recent sends are banned in channels. Inbound DMs keep arriving on a
+        // banned promote mobile, so inbound confidence says nothing about promotion health here.
+        const banRateGate = action.metadata?.banRateGate;
+        const banRateGateTripped = banRateGate?.tripped === true;
+        let gateSwapRecent = null;
+        if (banRateGateTripped) {
+            // Never let a gate swap remove the last loaded mobile: that would exit the process, PM2
+            // would restart it, and the next mobile would be swapped too. The engine keeps probing.
+            if (this.mobileManager.getActiveCount() <= 1) {
+                this.warnGateSwapOnce(mobile, `Gate swap skipped: last mobile (ban-rate gate ${banRateGate?.failed ?? '?'}/${banRateGate?.total ?? '?'})`);
+                return;
+            }
+            gateSwapRecent = await this.readGateSwapBudget(mobile);
+            if (!gateSwapRecent)
+                return;
+        }
+        if (banRateGateTripped && (inboundSnapshot.confidence === 'high' || inboundSnapshot.confidence === 'medium')) {
+            logger.warn(`[${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_17__.maskMobile)(mobile)}] Replacement allowed: ban-rate gate tripped (${banRateGate?.failed ?? '?'}/${banRateGate?.total ?? '?'}), ${inboundSnapshot.confidence} inbound confidence ignored`);
+        }
+        else if (inboundSnapshot.confidence === 'high' || inboundSnapshot.confidence === 'medium') {
             await this.notifySkipReplacement({
                 mobile,
                 reason: 'unhealthy',
@@ -46568,7 +46650,10 @@ class HealthMonitor {
         }, `Failed to send unhealthy promotion replacement notification for ${mobile}`);
         await (0,_telegram_check_tg_health__WEBPACK_IMPORTED_MODULE_12__.checktghealth)(telegramManager.client, mobile, true);
         const finalDaysLeft = Number(daysLeft) + Math.floor(parseInt(String(lastMsgAgoMin)) / 5);
-        await (0,_telegram_setup_new_mobile__WEBPACK_IMPORTED_MODULE_11__.setupNewMobile)(mobile, true, finalDaysLeft, false, `Promotion stopped, LastMessage: ${lastMsgAgoMin}m Ago`);
+        const proceeded = await (0,_telegram_setup_new_mobile__WEBPACK_IMPORTED_MODULE_11__.setupNewMobile)(mobile, true, finalDaysLeft, false, `Promotion stopped, LastMessage: ${lastMsgAgoMin}m Ago`);
+        if (gateSwapRecent && proceeded === true) {
+            await this.recordGateSwap(mobile, gateSwapRecent);
+        }
     }
     async recoverDatabaseFromPlan(action) {
         logger.warn("Promotion Mongo recovery requested by service health", {
@@ -47042,6 +47127,16 @@ class HealthMonitor {
 }
 HealthMonitor.SKIP_REPLACEMENT_WARN_DEBOUNCE_MS = 30 * 60 * 1000;
 HealthMonitor.MAX_SKIP_REPLACEMENT_WARN_ENTRIES = 500;
+// Ban-rate-gate swap budget per clientId (Redis, TTL 24h). Stops a fleet-wide gate trip from
+// swapping every mobile at once and draining the promote pool, across restarts too.
+const GATE_SWAP_WINDOW_MS = 24 * 60 * 60 * 1000;
+function gateSwapBudgetKey(clientId) {
+    return `promote:gate-swap:${clientId}:budget`;
+}
+function positiveEnvNumber(raw, fallback) {
+    const value = Number(raw);
+    return raw !== undefined && raw !== "" && Number.isFinite(value) && value > 0 ? value : fallback;
+}
 
 
 /***/ },
@@ -48768,8 +48863,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "ef1bc16b08dd79722d120fdb4ebcefb2898c21f6" : 0;
-    const builtAt =  true ? "2026-11-17T03:47:23.040Z" : 0;
+    const sha =  true ? "3737b7f90a645aad33c7057c2c0d8e7f0a103b91" : 0;
+    const builtAt =  true ? "2026-11-17T03:58:22.865Z" : 0;
     return { sha, builtAt };
 }
 
@@ -55599,6 +55694,8 @@ async function startNewUserProcess(error, mobile, force = false, context = 'runt
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   __resetSetupNewMobileForTests: () => (/* binding */ __resetSetupNewMobileForTests),
+/* harmony export */   __setSetupNewMobileServiceStartForTests: () => (/* binding */ __setSetupNewMobileServiceStartForTests),
+/* harmony export */   cancelSetupNewMobileRetries: () => (/* binding */ cancelSetupNewMobileRetries),
 /* harmony export */   setupNewMobile: () => (/* binding */ setupNewMobile)
 /* harmony export */ });
 /* harmony import */ var _accounts_mobile_manager__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../accounts/mobile-manager */ "./src/accounts/mobile-manager.ts");
@@ -55638,15 +55735,36 @@ const MIN_EXECUTION_INTERVAL = 5 * 60 * 1000; // 5 minutes
 const MIN_SERVICE_START_DELAY = 5 * 60 * 1000; // 5 minutes
 const DELETE_MIN_INTERVAL = 1 * 60 * 1000; // 1 minute
 const LIMITED_ACCOUNT_EXIT_DAYS = 3;
+const BOOT_GUARD_RETRY_JITTER_MS = 30 * 1000;
 let serviceStartTime = Date.now();
+// One deferred retry per mobile for requests that only failed the boot guard. Timers are unref'd,
+// so a stopping process drops them.
+const bootGuardRetryByMobile = new Map();
 function __resetSetupNewMobileForTests(nextServiceStartTime = Date.now()) {
     lastExecutionTimeByMobile.clear();
+    for (const timer of bootGuardRetryByMobile.values())
+        clearTimeout(timer);
+    bootGuardRetryByMobile.clear();
     serviceStartTime = nextServiceStartTime;
 }
-async function setupNewMobile(mobile, saveOld = true, daysLeft = 3, deleteOld = false, message = 'inactive') {
+/** Cancels pending boot-guard retries (shutdown). */
+function cancelSetupNewMobileRetries() {
+    for (const timer of bootGuardRetryByMobile.values())
+        clearTimeout(timer);
+    bootGuardRetryByMobile.clear();
+}
+function __setSetupNewMobileServiceStartForTests(nextServiceStartTime) {
+    serviceStartTime = nextServiceStartTime;
+}
+/** Returns true when the swap work ran (available date and/or delete), false when blocked or failed. */
+async function setupNewMobile(mobile, saveOld = true, daysLeft = 3, deleteOld = false, message = 'inactive', options = {}) {
     logger.info(`[SetupNewMobile] Request for mobile: ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_7__.maskMobile)(mobile)} | daysLeft: ${daysLeft} | message: ${message} | saveOld: ${saveOld} | deleteOld: ${deleteOld}`);
     const currentTime = Date.now();
     const validationResult = validateExecutionConditions(mobile, currentTime, deleteOld);
+    if (!validationResult.canExecute && validationResult.onlyBootGuard && options.deferOnBootGuard) {
+        deferUntilBootGuardExpires(mobile, currentTime, saveOld, daysLeft, deleteOld, message);
+        return false;
+    }
     if (!validationResult.canExecute) {
         logger.info('Setup conditions not met:', validationResult.reasons.join('; '));
         await sendSetupNewMobileNotification({
@@ -55658,7 +55776,7 @@ async function setupNewMobile(mobile, saveOld = true, daysLeft = 3, deleteOld = 
             details: validationResult.reasons,
             tags: ["promote-setup", "blocked"],
         }, `setupNewMobile.notification.blocked.${mobile}`);
-        return;
+        return false;
     }
     const promises = [];
     let operationSucceeded = false;
@@ -55692,9 +55810,30 @@ async function setupNewMobile(mobile, saveOld = true, daysLeft = 3, deleteOld = 
     if (operationSucceeded && (daysLeft > LIMITED_ACCOUNT_EXIT_DAYS || deleteOld)) {
         scheduleExit(mobile, message, daysLeft, saveOld, deleteOld);
     }
+    return operationSucceeded;
+}
+function deferUntilBootGuardExpires(mobile, currentTime, saveOld, daysLeft, deleteOld, message) {
+    if (bootGuardRetryByMobile.has(mobile)) {
+        logger.info(`[SetupNewMobile] Deferred: ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_7__.maskMobile)(mobile)} already has a boot-guard retry scheduled; ignoring duplicate (${message})`);
+        return;
+    }
+    const guardExpiresAt = serviceStartTime + MIN_SERVICE_START_DELAY;
+    const delayMs = Math.max(0, guardExpiresAt - currentTime) + 1000 + Math.floor(Math.random() * BOOT_GUARD_RETRY_JITTER_MS);
+    logger.info(`[SetupNewMobile] Deferred: ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_7__.maskMobile)(mobile)} arrived ${(0,_tg_core_utils_readbleTimeDifference__WEBPACK_IMPORTED_MODULE_4__.getReadableTimeDifference)(currentTime, serviceStartTime)} after boot; retrying once in ${Math.round(delayMs / 1000)}s (${message})`);
+    const timer = scheduleSetupNewMobileTask(async () => {
+        bootGuardRetryByMobile.delete(mobile);
+        if (!_accounts_mobile_manager__WEBPACK_IMPORTED_MODULE_0__.MobileManager.getInstance().getActiveMobiles().includes(mobile)) {
+            logger.info(`[SetupNewMobile] Boot-guard retry dropped: ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_7__.maskMobile)(mobile)} is no longer loaded (${message})`);
+            return;
+        }
+        logger.info(`[SetupNewMobile] Boot-guard retry firing for ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_7__.maskMobile)(mobile)} (${message})`);
+        await setupNewMobile(mobile, saveOld, daysLeft, deleteOld, message);
+    }, delayMs, `setupNewMobile.bootGuardRetry.${mobile}`);
+    bootGuardRetryByMobile.set(mobile, timer);
 }
 function validateExecutionConditions(mobile, currentTime, deleteOld) {
     const reasons = [];
+    let bootGuardFailed = false;
     const lastExecutionTime = lastExecutionTimeByMobile.get(mobile) || 0;
     if (deleteOld) {
         if (lastExecutionTime >= currentTime - DELETE_MIN_INTERVAL) {
@@ -55706,10 +55845,11 @@ function validateExecutionConditions(mobile, currentTime, deleteOld) {
             reasons.push(`lastExecutionTime not older than ${MIN_EXECUTION_INTERVAL / 60000} min, LastExecuted: ${(0,_tg_core_utils_readbleTimeDifference__WEBPACK_IMPORTED_MODULE_4__.getReadableTimeDifference)(currentTime, lastExecutionTime)}`);
         }
         if (serviceStartTime >= currentTime - MIN_SERVICE_START_DELAY) {
+            bootGuardFailed = true;
             reasons.push(`serviceStartTime not older than ${MIN_SERVICE_START_DELAY / 60000} min, serviceStarted: ${(0,_tg_core_utils_readbleTimeDifference__WEBPACK_IMPORTED_MODULE_4__.getReadableTimeDifference)(currentTime, serviceStartTime)}`);
         }
     }
-    return { canExecute: reasons.length === 0, reasons };
+    return { canExecute: reasons.length === 0, reasons, onlyBootGuard: bootGuardFailed && reasons.length === 1 };
 }
 async function updateAvailableDate(mobile, currentTime, daysLeft) {
     try {
@@ -57651,7 +57791,7 @@ class TelegramManager {
                             if (this.promoterInstance.daysLeft > 3 && (this.lastResetTime < Date.now() - 30 * 60 * 1000)) {
                                 this.lastResetTime = Date.now();
                                 try {
-                                    await (0,_setup_new_mobile__WEBPACK_IMPORTED_MODULE_37__.setupNewMobile)(this.clientDetails.mobile, true, this.promoterInstance.daysLeft, false, `Limited for ${this.promoterInstance.daysLeft} Days`);
+                                    await (0,_setup_new_mobile__WEBPACK_IMPORTED_MODULE_37__.setupNewMobile)(this.clientDetails.mobile, true, this.promoterInstance.daysLeft, false, `Limited for ${this.promoterInstance.daysLeft} Days`, { deferOnBootGuard: true });
                                 }
                                 catch (error) {
                                     (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_8__.parseError)(error, "Error Handling Message Event");
