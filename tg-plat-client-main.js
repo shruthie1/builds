@@ -10629,6 +10629,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   PROMOTION_MESSAGE_STRATEGIES: () => (/* reexport safe */ _channel_intelligence__WEBPACK_IMPORTED_MODULE_1__.PROMOTION_MESSAGE_STRATEGIES),
 /* harmony export */   PROMOTION_VERIFICATION_TTL_SECONDS: () => (/* reexport safe */ _redis__WEBPACK_IMPORTED_MODULE_7__.PROMOTION_VERIFICATION_TTL_SECONDS),
 /* harmony export */   PROMO_LOG_DEBUG: () => (/* reexport safe */ _logging__WEBPACK_IMPORTED_MODULE_3__.PROMO_LOG_DEBUG),
+/* harmony export */   PROMO_PICKER_APP_MODE_KEYS: () => (/* reexport safe */ _selection__WEBPACK_IMPORTED_MODULE_9__.PROMO_PICKER_APP_MODE_KEYS),
 /* harmony export */   PercentileEngine: () => (/* reexport safe */ _channel_intelligence__WEBPACK_IMPORTED_MODULE_1__.PercentileEngine),
 /* harmony export */   PromoLogger: () => (/* reexport safe */ _logging__WEBPACK_IMPORTED_MODULE_3__.PromoLogger),
 /* harmony export */   PromotionAccountContext: () => (/* reexport safe */ _runtime__WEBPACK_IMPORTED_MODULE_8__.PromotionAccountContext),
@@ -10648,6 +10649,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   TEMP_BLOCK_TTL_SECONDS: () => (/* reexport safe */ _redis__WEBPACK_IMPORTED_MODULE_7__.TEMP_BLOCK_TTL_SECONDS),
 /* harmony export */   UNPROVEN_PER_HOUR_WHEN_RESTRICTED: () => (/* reexport safe */ _redis__WEBPACK_IMPORTED_MODULE_7__.UNPROVEN_PER_HOUR_WHEN_RESTRICTED),
 /* harmony export */   V2_ANCHOR_MS: () => (/* reexport safe */ _selection__WEBPACK_IMPORTED_MODULE_9__.V2_ANCHOR_MS),
+/* harmony export */   V2_DEAD_MIN_ATTEMPTED: () => (/* reexport safe */ _selection__WEBPACK_IMPORTED_MODULE_9__.V2_DEAD_MIN_ATTEMPTED),
 /* harmony export */   V2_DEFAULT_MU: () => (/* reexport safe */ _selection__WEBPACK_IMPORTED_MODULE_9__.V2_DEFAULT_MU),
 /* harmony export */   V2_FAST_DELETE_MS: () => (/* reexport safe */ _selection__WEBPACK_IMPORTED_MODULE_9__.V2_FAST_DELETE_MS),
 /* harmony export */   V2_HALF_LIFE_MS: () => (/* reexport safe */ _selection__WEBPACK_IMPORTED_MODULE_9__.V2_HALF_LIFE_MS),
@@ -10692,6 +10694,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   hasDeletionRateEvidence: () => (/* reexport safe */ _pool__WEBPACK_IMPORTED_MODULE_6__.hasDeletionRateEvidence),
 /* harmony export */   hasFailureRateEvidence: () => (/* reexport safe */ _pool__WEBPACK_IMPORTED_MODULE_6__.hasFailureRateEvidence),
 /* harmony export */   isChannelIntelligence: () => (/* reexport safe */ _channel_intelligence__WEBPACK_IMPORTED_MODULE_1__.isChannelIntelligence),
+/* harmony export */   isLifetimeDeadChannel: () => (/* reexport safe */ _selection__WEBPACK_IMPORTED_MODULE_9__.isLifetimeDeadChannel),
 /* harmony export */   isMessageSource: () => (/* reexport safe */ _pool__WEBPACK_IMPORTED_MODULE_6__.isMessageSource),
 /* harmony export */   isPoolEntry: () => (/* reexport safe */ _pool__WEBPACK_IMPORTED_MODULE_6__.isPoolEntry),
 /* harmony export */   isPoolMessageIndex: () => (/* reexport safe */ _pool__WEBPACK_IMPORTED_MODULE_6__.isPoolMessageIndex),
@@ -10711,6 +10714,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   readPickerMu: () => (/* reexport safe */ _selection__WEBPACK_IMPORTED_MODULE_9__.readPickerMu),
 /* harmony export */   readPickerScoreTimeoutMs: () => (/* reexport safe */ _selection__WEBPACK_IMPORTED_MODULE_9__.readPickerScoreTimeoutMs),
 /* harmony export */   readPromotionFeatureFlags: () => (/* reexport safe */ _config__WEBPACK_IMPORTED_MODULE_2__.readPromotionFeatureFlags),
+/* harmony export */   resetPickerModeWarningsForTests: () => (/* reexport safe */ _selection__WEBPACK_IMPORTED_MODULE_9__.resetPickerModeWarningsForTests),
 /* harmony export */   resolveAccountDailyCap: () => (/* reexport safe */ _pool__WEBPACK_IMPORTED_MODULE_6__.resolveAccountDailyCap),
 /* harmony export */   scoreCandidates: () => (/* reexport safe */ _selection__WEBPACK_IMPORTED_MODULE_9__.scoreCandidates),
 /* harmony export */   selectPromotionChannels: () => (/* reexport safe */ _selection__WEBPACK_IMPORTED_MODULE_9__.selectPromotionChannels),
@@ -12478,7 +12482,7 @@ class PromotionFlowRunner {
             const batchTarget = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_10__.safeBatchTarget)(this.options.batchTarget, batchPolicy.limit);
             let selectedChannels;
             let selectionExploreDenied = 0;
-            const pickerMode = (0,_selection_picker__WEBPACK_IMPORTED_MODULE_2__.readPickerMode)();
+            const pickerMode = (0,_selection_picker__WEBPACK_IMPORTED_MODULE_2__.readPickerMode)(process.env, this.options.pickerApp ?? null);
             const pickerMu = (0,_selection_picker__WEBPACK_IMPORTED_MODULE_2__.readPickerMu)();
             const pickNowMs = Date.now();
             this.pickAnnotations = new Map();
@@ -12558,13 +12562,39 @@ class PromotionFlowRunner {
                     this.log('warn', `Promotion per-mobile block lookup failed; pausing cycle safely; error=${this.normalizeError(error)}`);
                     return;
                 }
-                const selection = (0,_selection__WEBPACK_IMPORTED_MODULE_1__.selectPromotionChannels)({
-                    channels,
+                const selectFrom = (candidates) => (0,_selection__WEBPACK_IMPORTED_MODULE_1__.selectPromotionChannels)({
+                    channels: candidates,
                     intelligenceDocs,
                     batchTarget,
                     blockedChannelIds,
                     ...(pickerMode === 'v2' ? { rankScore: (doc) => (0,_selection_picker__WEBPACK_IMPORTED_MODULE_2__.v2ChannelScore)(doc, pickNowMs, pickerMu) } : {}),
                 });
+                let selection;
+                if (pickerMode === 'v2') {
+                    // v2 only: lifetime-dead channels (>= 125 attempts, 0 DMs) leave the list. Shadow measurement
+                    // below still scores them (candidates come from `channels`). Fail-safe: when nothing sendable
+                    // would remain, keep them and warn.
+                    const deadIds = new Set();
+                    for (const doc of intelligenceDocs) {
+                        const id = (0,_selection_picker__WEBPACK_IMPORTED_MODULE_2__.isLifetimeDeadChannel)(doc) ? (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_4__.normalizeChannelId)(doc.channelId) : null;
+                        if (id)
+                            deadIds.add(id);
+                    }
+                    const live = channels.filter((channel) => !deadIds.has((0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_4__.normalizeChannelId)(channel.channelId) ?? ''));
+                    const dead = channels.length - live.length;
+                    selection = selectFrom(live);
+                    const eligible = selection.proven.length + selection.untested.length;
+                    if (dead > 0 && eligible === 0) {
+                        selection = selectFrom(channels);
+                        this.log('warn', `Promotion v2 dead-channel skip; skipped=0; dead=${dead}; eligible=0; fail-safe: no live channel left, dead channels kept`);
+                    }
+                    else if (dead > 0) {
+                        this.log('info', `Promotion v2 dead-channel skip; skipped=${dead}; dead=${dead}; eligible=${eligible}`);
+                    }
+                }
+                else {
+                    selection = selectFrom(channels);
+                }
                 const selectionDiagnostics = this.describeSelection(selection, intelligenceDocs);
                 const exploreDenied = await this.explorationDenied(selection.selected, false);
                 selectionExploreDenied = exploreDenied.size;
@@ -15704,6 +15734,35 @@ class BasePromotionEngine {
         return account.intelligence.batchGet(channelIds);
     }
     /**
+     * The runner's ranked-selection read (adapter.getIntelligenceDocs). An app whose loadChannelsForRunner
+     * warms intelligenceDocCache over the same candidates opts in via runnerIntelligenceFromCycleCache:
+     * then warmed docs come from the cache and only the ids not warmed this cycle are read (full docs,
+     * since selection needs them). Otherwise a fresh batchGet, as before.
+     */
+    async getSelectionIntelligenceDocsForRunner(channelIds) {
+        const cache = this.intelligenceDocCache;
+        if (!this.runnerIntelligenceFromCycleCache() || !cache)
+            return this.getIntelligenceDocsForRunner(channelIds);
+        const out = [];
+        const missing = [];
+        for (const raw of channelIds) {
+            const id = this.normalizeChannelId(raw);
+            if (!id)
+                continue;
+            if (cache.has(id)) {
+                const doc = cache.get(id);
+                if (doc)
+                    out.push(doc);
+            }
+            else {
+                missing.push(id);
+            }
+        }
+        if (missing.length > 0)
+            out.push(...(await this.getIntelligenceDocsForRunner(missing)));
+        return out;
+    }
+    /**
      * Picker shadow measurement: reuse the docs warmIntelligenceCache loaded this cycle; read only the
      * missing ones, with a projection that leaves out messagePool. Never a second full-doc batch.
      */
@@ -15869,6 +15928,18 @@ class BasePromotionEngine {
      */
     getChannelSelectionMode() {
         return 'ranked';
+    }
+    /** Which app this engine runs in: picks TGAUT_/PROMOTE_PROMO_PICKER_MODE. Each app overrides it. */
+    getPromoPickerApp() {
+        return null;
+    }
+    /**
+     * true: the runner's selection read reuses this cycle's intelligenceDocCache (see
+     * getSelectionIntelligenceDocsForRunner). Only for an app whose loadChannelsForRunner warms the
+     * cache right before the runner selects; default false keeps a fresh batchGet.
+     */
+    runnerIntelligenceFromCycleCache() {
+        return false;
     }
     // Protected hooks with default no-op base impl that subclasses MAY override.
     onConstructorComplete() { }
@@ -16183,7 +16254,7 @@ class BasePromotionEngine {
             getSpamStatus: () => this.getSpamStatus(),
             loadChannels: () => this.loadChannelsForRunner(),
             getChannel: (channelId) => this.getChannelForRunner(channelId),
-            getIntelligenceDocs: (channelIds) => this.getIntelligenceDocsForRunner(channelIds),
+            getIntelligenceDocs: (channelIds) => this.getSelectionIntelligenceDocsForRunner(channelIds),
             getScoringDocs: (channelIds) => this.getScoringDocsForRunner(channelIds),
             getIntelligenceDoc: (channelId) => this.getIntelligenceDocForRunner(channelId),
             shouldContinue: async (context) => {
@@ -16248,6 +16319,7 @@ class BasePromotionEngine {
             scoringEnabled: extras.runnerOptions.scoringEnabled,
             attributionEnabled,
             channelSelectionMode: this.getChannelSelectionMode(),
+            pickerApp: this.getPromoPickerApp(),
             batchTarget: this.MAX_CHANNELS_CACHE,
             messageCheckDelayMs: this.MESSAGE_CHECK_DELAY,
             // Dedicated follow-up base delay (default 1hr, env PROMO_FOLLOWUP_DELAY_MS), decoupled from
@@ -19500,8 +19572,10 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   PICKER_SCORE_TIMEOUT_DEFAULT_MS: () => (/* reexport safe */ _picker__WEBPACK_IMPORTED_MODULE_1__.PICKER_SCORE_TIMEOUT_DEFAULT_MS),
 /* harmony export */   PICK_MODE_CODES: () => (/* reexport safe */ _picker__WEBPACK_IMPORTED_MODULE_1__.PICK_MODE_CODES),
+/* harmony export */   PROMO_PICKER_APP_MODE_KEYS: () => (/* reexport safe */ _picker__WEBPACK_IMPORTED_MODULE_1__.PROMO_PICKER_APP_MODE_KEYS),
 /* harmony export */   SWITCHBACK_SALT: () => (/* reexport safe */ _picker__WEBPACK_IMPORTED_MODULE_1__.SWITCHBACK_SALT),
 /* harmony export */   V2_ANCHOR_MS: () => (/* reexport safe */ _picker__WEBPACK_IMPORTED_MODULE_1__.V2_ANCHOR_MS),
+/* harmony export */   V2_DEAD_MIN_ATTEMPTED: () => (/* reexport safe */ _picker__WEBPACK_IMPORTED_MODULE_1__.V2_DEAD_MIN_ATTEMPTED),
 /* harmony export */   V2_DEFAULT_MU: () => (/* reexport safe */ _picker__WEBPACK_IMPORTED_MODULE_1__.V2_DEFAULT_MU),
 /* harmony export */   V2_FAST_DELETE_MS: () => (/* reexport safe */ _picker__WEBPACK_IMPORTED_MODULE_1__.V2_FAST_DELETE_MS),
 /* harmony export */   V2_HALF_LIFE_MS: () => (/* reexport safe */ _picker__WEBPACK_IMPORTED_MODULE_1__.V2_HALF_LIFE_MS),
@@ -19519,6 +19593,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   explainChannelScore: () => (/* reexport safe */ _picker__WEBPACK_IMPORTED_MODULE_1__.explainChannelScore),
 /* harmony export */   flagOn: () => (/* reexport safe */ _picker__WEBPACK_IMPORTED_MODULE_1__.flagOn),
 /* harmony export */   fnv1a32: () => (/* reexport safe */ _picker__WEBPACK_IMPORTED_MODULE_1__.fnv1a32),
+/* harmony export */   isLifetimeDeadChannel: () => (/* reexport safe */ _picker__WEBPACK_IMPORTED_MODULE_1__.isLifetimeDeadChannel),
 /* harmony export */   istDayOf: () => (/* reexport safe */ _picker__WEBPACK_IMPORTED_MODULE_1__.istDayOf),
 /* harmony export */   legacyChannelScore: () => (/* reexport safe */ _picker__WEBPACK_IMPORTED_MODULE_1__.legacyChannelScore),
 /* harmony export */   normalizeRing: () => (/* reexport safe */ _picker__WEBPACK_IMPORTED_MODULE_1__.normalizeRing),
@@ -19526,6 +19601,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   readPickerMode: () => (/* reexport safe */ _picker__WEBPACK_IMPORTED_MODULE_1__.readPickerMode),
 /* harmony export */   readPickerMu: () => (/* reexport safe */ _picker__WEBPACK_IMPORTED_MODULE_1__.readPickerMu),
 /* harmony export */   readPickerScoreTimeoutMs: () => (/* reexport safe */ _picker__WEBPACK_IMPORTED_MODULE_1__.readPickerScoreTimeoutMs),
+/* harmony export */   resetPickerModeWarningsForTests: () => (/* reexport safe */ _picker__WEBPACK_IMPORTED_MODULE_1__.resetPickerModeWarningsForTests),
 /* harmony export */   scoreCandidates: () => (/* reexport safe */ _picker__WEBPACK_IMPORTED_MODULE_1__.scoreCandidates),
 /* harmony export */   selectPromotionChannels: () => (/* reexport safe */ _channel_selection__WEBPACK_IMPORTED_MODULE_0__.selectPromotionChannels),
 /* harmony export */   shouldSample: () => (/* reexport safe */ _picker__WEBPACK_IMPORTED_MODULE_1__.shouldSample),
@@ -19552,25 +19628,28 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   PICKER_SCORE_TIMEOUT_DEFAULT_MS: () => (/* binding */ PICKER_SCORE_TIMEOUT_DEFAULT_MS),
 /* harmony export */   PICK_MODE_CODES: () => (/* binding */ PICK_MODE_CODES),
+/* harmony export */   PROMO_PICKER_APP_MODE_KEYS: () => (/* binding */ PROMO_PICKER_APP_MODE_KEYS),
 /* harmony export */   SWITCHBACK_SALT: () => (/* binding */ SWITCHBACK_SALT),
-/* harmony export */   V2_ANCHOR_MS: () => (/* reexport safe */ _tg_core_utils_experiment_arm__WEBPACK_IMPORTED_MODULE_2__.V2_ANCHOR_MS),
+/* harmony export */   V2_ANCHOR_MS: () => (/* reexport safe */ _tg_core_utils_experiment_arm__WEBPACK_IMPORTED_MODULE_3__.V2_ANCHOR_MS),
+/* harmony export */   V2_DEAD_MIN_ATTEMPTED: () => (/* reexport safe */ _tg_core_utils_experiment_arm__WEBPACK_IMPORTED_MODULE_3__.V2_DEAD_MIN_ATTEMPTED),
 /* harmony export */   V2_DEFAULT_MU: () => (/* binding */ V2_DEFAULT_MU),
 /* harmony export */   V2_FAST_DELETE_MS: () => (/* binding */ V2_FAST_DELETE_MS),
-/* harmony export */   V2_HALF_LIFE_MS: () => (/* reexport safe */ _tg_core_utils_experiment_arm__WEBPACK_IMPORTED_MODULE_2__.V2_HALF_LIFE_MS),
+/* harmony export */   V2_HALF_LIFE_MS: () => (/* reexport safe */ _tg_core_utils_experiment_arm__WEBPACK_IMPORTED_MODULE_3__.V2_HALF_LIFE_MS),
 /* harmony export */   V2_PRIOR_DELIVERIES: () => (/* binding */ V2_PRIOR_DELIVERIES),
 /* harmony export */   V2_RECENT_MIN_RESOLVED: () => (/* binding */ V2_RECENT_MIN_RESOLVED),
 /* harmony export */   V2_RECENT_PENALTY_ABOVE: () => (/* binding */ V2_RECENT_PENALTY_ABOVE),
 /* harmony export */   V2_RECENT_RING_SIZE: () => (/* binding */ V2_RECENT_RING_SIZE),
 /* harmony export */   V2_SCORE_VERSION: () => (/* binding */ V2_SCORE_VERSION),
-/* harmony export */   anchoredWeight: () => (/* reexport safe */ _tg_core_utils_experiment_arm__WEBPACK_IMPORTED_MODULE_2__.anchoredWeight),
+/* harmony export */   anchoredWeight: () => (/* reexport safe */ _tg_core_utils_experiment_arm__WEBPACK_IMPORTED_MODULE_3__.anchoredWeight),
 /* harmony export */   annotatePicks: () => (/* binding */ annotatePicks),
 /* harmony export */   arm: () => (/* binding */ arm),
 /* harmony export */   classifyChannelState: () => (/* binding */ classifyChannelState),
 /* harmony export */   computeV2sf: () => (/* binding */ computeV2sf),
-/* harmony export */   decayAnchored: () => (/* reexport safe */ _tg_core_utils_experiment_arm__WEBPACK_IMPORTED_MODULE_2__.decayAnchored),
+/* harmony export */   decayAnchored: () => (/* reexport safe */ _tg_core_utils_experiment_arm__WEBPACK_IMPORTED_MODULE_3__.decayAnchored),
 /* harmony export */   explainChannelScore: () => (/* binding */ explainChannelScore),
 /* harmony export */   flagOn: () => (/* binding */ flagOn),
-/* harmony export */   fnv1a32: () => (/* reexport safe */ _tg_core_utils_experiment_arm__WEBPACK_IMPORTED_MODULE_2__.fnv1a32),
+/* harmony export */   fnv1a32: () => (/* reexport safe */ _tg_core_utils_experiment_arm__WEBPACK_IMPORTED_MODULE_3__.fnv1a32),
+/* harmony export */   isLifetimeDeadChannel: () => (/* binding */ isLifetimeDeadChannel),
 /* harmony export */   istDayOf: () => (/* binding */ istDayOf),
 /* harmony export */   legacyChannelScore: () => (/* binding */ legacyChannelScore),
 /* harmony export */   normalizeRing: () => (/* binding */ normalizeRing),
@@ -19578,6 +19657,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   readPickerMode: () => (/* binding */ readPickerMode),
 /* harmony export */   readPickerMu: () => (/* binding */ readPickerMu),
 /* harmony export */   readPickerScoreTimeoutMs: () => (/* binding */ readPickerScoreTimeoutMs),
+/* harmony export */   resetPickerModeWarningsForTests: () => (/* binding */ resetPickerModeWarningsForTests),
 /* harmony export */   scoreCandidates: () => (/* binding */ scoreCandidates),
 /* harmony export */   shouldSample: () => (/* binding */ shouldSample),
 /* harmony export */   summarizePickBatch: () => (/* binding */ summarizePickBatch),
@@ -19586,7 +19666,9 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ });
 /* harmony import */ var _utils_channel_id__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../utils/channel-id */ "../../packages/tg-channel-state/src/channel-message-promotions/utils/channel-id.ts");
 /* harmony import */ var _utils_guards__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../../utils/guards */ "../../packages/tg-channel-state/src/utils/guards.ts");
-/* harmony import */ var _tg_core_utils_experiment_arm__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! @tg/core/utils/experiment-arm */ "../../packages/tg-core/src/utils/experiment-arm.ts");
+/* harmony import */ var _logging_promo_logger__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../logging/promo-logger */ "../../packages/tg-channel-state/src/channel-message-promotions/logging/promo-logger.ts");
+/* harmony import */ var _tg_core_utils_experiment_arm__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! @tg/core/utils/experiment-arm */ "../../packages/tg-core/src/utils/experiment-arm.ts");
+
 
 
 
@@ -19594,7 +19676,8 @@ __webpack_require__.r(__webpack_exports__);
 
 /** Stored on promotion_send.pick_mode. */
 const PICK_MODE_CODES = Object.freeze({ legacy: 'l', shadow: 's', v2: 'v' });
-const V2_SCORE_VERSION = 1;
+/** 2 (2026-11-17): a lifetime-dead channel (isLifetimeDeadChannel) scores 0. 1: plain v2sf. */
+const V2_SCORE_VERSION = 2;
 const V2_PRIOR_DELIVERIES = 20;
 /** Fleet DMs per delivered, decayed, measured 2026-11-01..15: 0.1115 / 0.1155 / 0.1412. */
 const V2_DEFAULT_MU = 0.12;
@@ -19626,10 +19709,10 @@ function v2CountersOf(doc, nowMs) {
     const v2 = (0,_utils_guards__WEBPACK_IMPORTED_MODULE_1__.isRecord)(doc?.v2) ? doc.v2 : {};
     const ring = normalizeRing(v2.recent);
     return {
-        dl: (0,_tg_core_utils_experiment_arm__WEBPACK_IMPORTED_MODULE_2__.decayAnchored)(v2.dl, nowMs),
-        del: (0,_tg_core_utils_experiment_arm__WEBPACK_IMPORTED_MODULE_2__.decayAnchored)(v2.del, nowMs),
-        fl: (0,_tg_core_utils_experiment_arm__WEBPACK_IMPORTED_MODULE_2__.decayAnchored)(v2.fl, nowMs),
-        dm: (0,_tg_core_utils_experiment_arm__WEBPACK_IMPORTED_MODULE_2__.decayAnchored)(v2.dm, nowMs),
+        dl: (0,_tg_core_utils_experiment_arm__WEBPACK_IMPORTED_MODULE_3__.decayAnchored)(v2.dl, nowMs),
+        del: (0,_tg_core_utils_experiment_arm__WEBPACK_IMPORTED_MODULE_3__.decayAnchored)(v2.del, nowMs),
+        fl: (0,_tg_core_utils_experiment_arm__WEBPACK_IMPORTED_MODULE_3__.decayAnchored)(v2.fl, nowMs),
+        dm: (0,_tg_core_utils_experiment_arm__WEBPACK_IMPORTED_MODULE_3__.decayAnchored)(v2.dm, nowMs),
         recentResolved: ring.filter((c) => c !== 'g').length,
         recentDeleted: ring.filter((c) => c === 'd' || c === 'f').length,
     };
@@ -19650,8 +19733,27 @@ function legacyChannelScore(doc) {
     const safetyQuality = ((survived + 1) / (resolved + 2)) / (1 + finiteNonNegative(doc.safety?.consecutiveErrors));
     return conversionQuality * safetyQuality * safetyQuality;
 }
+/**
+ * Lifetime dead: >= V2_DEAD_MIN_ATTEMPTED attempts and 0 credited DMs (the 'd' state). Decayed v2
+ * counters forget that volume, so without this rule a dead channel with few recent deliveries
+ * scores above an empty channel (measured 2026-11-17: 559 of 806 low-volume dead channels).
+ */
+function isLifetimeDeadChannel(doc) {
+    if (!doc)
+        return false;
+    return finiteNonNegative(doc.outcomes?.attempted) >= _tg_core_utils_experiment_arm__WEBPACK_IMPORTED_MODULE_3__.V2_DEAD_MIN_ATTEMPTED && finiteNonNegative(doc.DMs?.credited) <= 0;
+}
+/**
+ * Score version 2: the v2sf formula, or 0 for a lifetime-dead channel. Every v2 score goes through
+ * here (v2ChannelScore, scoreCandidates, explainChannelScore), so shadow pick_score_v2 / pick_rank_v2
+ * mirror what real v2 would rank. score_version 2 on promotion_send separates these rows from v1
+ * (plain v2sf). components.score keeps the raw formula.
+ */
+function v2ScoreOf(doc, components) {
+    return isLifetimeDeadChannel(doc) ? 0 : components.score;
+}
 function v2ChannelScore(doc, nowMs, mu = V2_DEFAULT_MU) {
-    return computeV2sf(v2CountersOf(doc, nowMs), mu).score;
+    return v2ScoreOf(doc, computeV2sf(v2CountersOf(doc, nowMs), mu));
 }
 function classifyChannelState(doc, mu = V2_DEFAULT_MU) {
     if (!doc)
@@ -19670,7 +19772,7 @@ function classifyChannelState(doc, mu = V2_DEFAULT_MU) {
     if (attempted < 30)
         return 'e';
     if (credited <= 0)
-        return attempted >= _tg_core_utils_experiment_arm__WEBPACK_IMPORTED_MODULE_2__.V2_DEAD_MIN_ATTEMPTED ? 'd' : 'w';
+        return isLifetimeDeadChannel(doc) ? 'd' : 'w';
     return credited / attempted >= 0.25 * mu ? 'p' : 'w';
 }
 // ── switchback arm ───────────────────────────────────────────────────────────────────────────
@@ -19684,17 +19786,48 @@ function arm(clientId, istDay, salt = SWITCHBACK_SALT) {
     const day = typeof istDay === 'string' ? istDay.trim() : '';
     if (!id || !/^\d{4}-\d{2}-\d{2}$/.test(day))
         return null;
-    return (0,_tg_core_utils_experiment_arm__WEBPACK_IMPORTED_MODULE_2__.fnv1a32)(`${salt}:${id}:${day}`) % 10000 < 5000 ? 'v' : 'c';
+    return (0,_tg_core_utils_experiment_arm__WEBPACK_IMPORTED_MODULE_3__.fnv1a32)(`${salt}:${id}:${day}`) % 10000 < 5000 ? 'v' : 'c';
 }
 /** IST calendar day (YYYY-MM-DD) of an instant. */
 function istDayOf(nowMs) {
     return new Date(nowMs + 5.5 * 3600000).toISOString().slice(0, 10);
 }
-// ── flags ────────────────────────────────────────────────────────────────────────────────────
-/** PROMO_PICKER_MODE: legacy | shadow | v2. Anything else (or unset) = shadow. Read per cycle. */
-function readPickerMode(env = process.env) {
-    const raw = (env.PROMO_PICKER_MODE ?? '').trim().toLowerCase();
-    return raw === 'legacy' || raw === 'v2' ? raw : 'shadow';
+/**
+ * Per-app picker keys. Both apps load the same Mongo configuration into env, so a per-app key is
+ * the only way to switch one app alone.
+ */
+const PROMO_PICKER_APP_MODE_KEYS = Object.freeze({
+    'tg-aut': 'TGAUT_PROMO_PICKER_MODE',
+    promote: 'PROMOTE_PROMO_PICKER_MODE',
+});
+function parsePickerMode(value) {
+    const raw = (value ?? '').trim().toLowerCase();
+    return raw === 'legacy' || raw === 'shadow' || raw === 'v2' ? raw : null;
+}
+const pickerLog = new _logging_promo_logger__WEBPACK_IMPORTED_MODULE_2__.PromoLogger('picker');
+/** App keys already warned about in this process (read per cycle, so warn once, not every cycle). */
+const warnedInvalidAppKeys = new Set();
+function resetPickerModeWarningsForTests() {
+    warnedInvalidAppKeys.clear();
+}
+/**
+ * Picker mode: legacy | shadow | v2. Read per cycle. The app key (TGAUT_PROMO_PICKER_MODE or
+ * PROMOTE_PROMO_PICKER_MODE) wins when it holds a valid value; else PROMO_PICKER_MODE; else shadow.
+ * A non-empty invalid app value falls back the same way and warns once per process per key.
+ */
+function readPickerMode(env = process.env, app = null, options = {}) {
+    const appKey = app ? PROMO_PICKER_APP_MODE_KEYS[app] : undefined;
+    const appValue = appKey ? env[appKey] : undefined;
+    const appMode = parsePickerMode(appValue);
+    if (appKey && !appMode && (appValue ?? '').trim() !== '' && !warnedInvalidAppKeys.has(appKey)) {
+        warnedInvalidAppKeys.add(appKey);
+        const message = `${appKey}=${JSON.stringify(appValue)} is not legacy|shadow|v2; using PROMO_PICKER_MODE or shadow`;
+        if (options.warn)
+            options.warn(message);
+        else
+            pickerLog.warn('invalid-app-picker-mode', { key: appKey, value: appValue });
+    }
+    return appMode ?? parsePickerMode(env.PROMO_PICKER_MODE) ?? 'shadow';
 }
 /** PROMO_PICKER_V2_MU overrides the fleet prior; invalid values fall back to V2_DEFAULT_MU. */
 function readPickerMu(env = process.env) {
@@ -19732,7 +19865,7 @@ function scoreCandidates(channelIds, docs, options) {
             channelId,
             state: classifyChannelState(doc, mu),
             scoreLegacy: doc ? legacyChannelScore(doc) : null,
-            scoreV2: components.score,
+            scoreV2: v2ScoreOf(doc, components),
             rankV2: 0,
             components,
             counters,
@@ -19845,7 +19978,7 @@ function explainChannelScore(doc, options = {}) {
         components,
         state: classifyChannelState(doc, mu),
         scoreLegacy: doc ? legacyChannelScore(doc) : null,
-        scoreV2: components.score,
+        scoreV2: v2ScoreOf(doc, components),
     };
 }
 function fmt(n) {
@@ -20794,6 +20927,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   PROMOTION_MESSAGE_STRATEGIES: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.PROMOTION_MESSAGE_STRATEGIES),
 /* harmony export */   PROMOTION_VERIFICATION_TTL_SECONDS: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.PROMOTION_VERIFICATION_TTL_SECONDS),
 /* harmony export */   PROMO_LOG_DEBUG: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.PROMO_LOG_DEBUG),
+/* harmony export */   PROMO_PICKER_APP_MODE_KEYS: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.PROMO_PICKER_APP_MODE_KEYS),
 /* harmony export */   PercentileEngine: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.PercentileEngine),
 /* harmony export */   PromoLogger: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.PromoLogger),
 /* harmony export */   PromotionAccountContext: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.PromotionAccountContext),
@@ -20813,6 +20947,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   TEMP_BLOCK_TTL_SECONDS: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.TEMP_BLOCK_TTL_SECONDS),
 /* harmony export */   UNPROVEN_PER_HOUR_WHEN_RESTRICTED: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.UNPROVEN_PER_HOUR_WHEN_RESTRICTED),
 /* harmony export */   V2_ANCHOR_MS: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.V2_ANCHOR_MS),
+/* harmony export */   V2_DEAD_MIN_ATTEMPTED: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.V2_DEAD_MIN_ATTEMPTED),
 /* harmony export */   V2_DEFAULT_MU: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.V2_DEFAULT_MU),
 /* harmony export */   V2_FAST_DELETE_MS: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.V2_FAST_DELETE_MS),
 /* harmony export */   V2_HALF_LIFE_MS: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.V2_HALF_LIFE_MS),
@@ -20880,6 +21015,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   hasUsableParticipantsCount: () => (/* reexport safe */ _channel_state__WEBPACK_IMPORTED_MODULE_6__.hasUsableParticipantsCount),
 /* harmony export */   hydrateChannelDocument: () => (/* reexport safe */ _channel_state_hydrate_channel_document__WEBPACK_IMPORTED_MODULE_7__.hydrateChannelDocument),
 /* harmony export */   isChannelIntelligence: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.isChannelIntelligence),
+/* harmony export */   isLifetimeDeadChannel: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.isLifetimeDeadChannel),
 /* harmony export */   isLimitReached: () => (/* reexport safe */ _channel_message_promotions_promotion_message_helpers__WEBPACK_IMPORTED_MODULE_5__.isLimitReached),
 /* harmony export */   isMessageSource: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.isMessageSource),
 /* harmony export */   isPaidUserLimitReached: () => (/* reexport safe */ _channel_message_promotions_promotion_message_helpers__WEBPACK_IMPORTED_MODULE_5__.isPaidUserLimitReached),
@@ -20908,6 +21044,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   readPickerMu: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.readPickerMu),
 /* harmony export */   readPickerScoreTimeoutMs: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.readPickerScoreTimeoutMs),
 /* harmony export */   readPromotionFeatureFlags: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.readPromotionFeatureFlags),
+/* harmony export */   resetPickerModeWarningsForTests: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.resetPickerModeWarningsForTests),
 /* harmony export */   resetPromoteRestartStateForTests: () => (/* reexport safe */ _channel_message_promotions_promotion_engine_BasePromotionEngine__WEBPACK_IMPORTED_MODULE_1__.resetPromoteRestartStateForTests),
 /* harmony export */   resolveAccountDailyCap: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.resolveAccountDailyCap),
 /* harmony export */   resolveChannelHydrationNeed: () => (/* reexport safe */ _channel_state__WEBPACK_IMPORTED_MODULE_6__.resolveChannelHydrationNeed),
@@ -60524,8 +60661,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "83b9e3f9a4e85c5467239ae7403b22e9536be2a9" : 0;
-    const builtAt =  true ? "2026-11-17T05:02:06.287Z" : 0;
+    const sha =  true ? "d7d603bc0225baf665f93d6e4dba27f58f390221" : 0;
+    const builtAt =  true ? "2026-11-17T05:35:57.396Z" : 0;
     return { sha, builtAt };
 }
 
@@ -109410,6 +109547,10 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_20__.Ba
             (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, "Error fetching dialogs", false);
             return [];
         }
+    }
+    /** TGAUT_PROMO_PICKER_MODE switches the picker for tg-aut alone. */
+    getPromoPickerApp() {
+        return 'tg-aut';
     }
     async finalizeChannelInfo(channelInfo) {
         let normalized = await this.normalizePromotionChannelSnapshot(channelInfo);
