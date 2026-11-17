@@ -39190,8 +39190,12 @@ __webpack_require__.r(__webpack_exports__);
 const MIN = 60000;
 const HOUR = 60 * MIN;
 const DAY = 24 * HOUR;
-/** D2: episode max age. */
-const PARK_MAX_AGE_MS = { promote: 72 * HOUR, 'tg-aut': 7 * DAY };
+/**
+ * D2: episode max age. tg-aut 2 d (owner 2026-11-17, was 7 d): an old main with an open episode is skipped as a CMS
+ * swap buffer, so a 7 d episode kept spare mains out of the swap pool. CommonTgService parked-swap-episode.ts keeps
+ * its own copy (TGAUT_PARK_MAX_AGE_MS): change both.
+ */
+const PARK_MAX_AGE_MS = { promote: 72 * HOUR, 'tg-aut': 2 * DAY };
 /** §6.1 scheduling. */
 const SCHEDULER_TICK_MS = 60000;
 const SCHEDULER_TICK_JITTER_MS = 15000;
@@ -41967,7 +41971,7 @@ function lastInboundAtMs(messages) {
 }
 /**
  * tg-aut window (design §6.3): inbound at or after `parkedAt − preSwapMs` (swappedAt − 48 h) counts for the whole
- * episode (its age is capped by expiresAt, 7 d). Returned as a window length for `isWithinWindow`. Pure.
+ * episode (its age is capped by expiresAt, tg-aut 2 d). Returned as a window length for `isWithinWindow`. Pure.
  */
 function windowSinceParkedMs(parkedAtMs, nowMs, preSwapMs) {
     return Math.max(0, nowMs - (parkedAtMs - preSwapMs));
@@ -48764,8 +48768,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "7d11f3252e245f9a3b162b71fcc7e64ff0f975a2" : 0;
-    const builtAt =  true ? "2026-11-16T04:32:22.410Z" : 0;
+    const sha =  true ? "ef1bc16b08dd79722d120fdb4ebcefb2898c21f6" : 0;
+    const builtAt =  true ? "2026-11-17T03:47:23.040Z" : 0;
     return { sha, builtAt };
 }
 
