@@ -49168,8 +49168,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "d7d603bc0225baf665f93d6e4dba27f58f390221" : 0;
-    const builtAt =  true ? "2026-11-17T05:35:58.318Z" : 0;
+    const sha =  true ? "99b4628027d87a75487a338c0f2ef3f5e0ef1e5d" : 0;
+    const builtAt =  true ? "2026-11-17T06:05:56.143Z" : 0;
     return { sha, builtAt };
 }
 
@@ -56056,11 +56056,15 @@ let serviceStartTime = Date.now();
 // One deferred retry per mobile for requests that only failed the boot guard. Timers are unref'd,
 // so a stopping process drops them.
 const bootGuardRetryByMobile = new Map();
+// Mobiles whose exit (removeClient, 5 s after the swap) is scheduled but not done. getActiveMobiles() still lists
+// them, so the keepLastMobile guard subtracts them (two limited swaps inside that window must not both run).
+const pendingExitMobiles = new Set();
 function __resetSetupNewMobileForTests(nextServiceStartTime = Date.now()) {
     lastExecutionTimeByMobile.clear();
     for (const timer of bootGuardRetryByMobile.values())
         clearTimeout(timer);
     bootGuardRetryByMobile.clear();
+    pendingExitMobiles.clear();
     serviceStartTime = nextServiceStartTime;
 }
 /** Cancels pending boot-guard retries (shutdown). */
@@ -56076,9 +56080,16 @@ function __setSetupNewMobileServiceStartForTests(nextServiceStartTime) {
 async function setupNewMobile(mobile, saveOld = true, daysLeft = 3, deleteOld = false, message = 'inactive', options = {}) {
     logger.info(`[SetupNewMobile] Request for mobile: ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_7__.maskMobile)(mobile)} | daysLeft: ${daysLeft} | message: ${message} | saveOld: ${saveOld} | deleteOld: ${deleteOld}`);
     const currentTime = Date.now();
+    if (options.keepLastMobile) {
+        const remaining = _accounts_mobile_manager__WEBPACK_IMPORTED_MODULE_0__.MobileManager.getInstance().getActiveMobiles().filter((m) => !pendingExitMobiles.has(m));
+        if (remaining.includes(mobile) && remaining.length <= 1) {
+            logger.warn(`[SetupNewMobile] Skipped: ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_7__.maskMobile)(mobile)} is the last loaded mobile (${pendingExitMobiles.size} exit(s) pending); keeping it (${message})`);
+            return false;
+        }
+    }
     const validationResult = validateExecutionConditions(mobile, currentTime, deleteOld);
     if (!validationResult.canExecute && validationResult.onlyBootGuard && options.deferOnBootGuard) {
-        deferUntilBootGuardExpires(mobile, currentTime, saveOld, daysLeft, deleteOld, message);
+        deferUntilBootGuardExpires(mobile, currentTime, saveOld, daysLeft, deleteOld, message, options.keepLastMobile === true);
         return false;
     }
     if (!validationResult.canExecute) {
@@ -56128,7 +56139,7 @@ async function setupNewMobile(mobile, saveOld = true, daysLeft = 3, deleteOld = 
     }
     return operationSucceeded;
 }
-function deferUntilBootGuardExpires(mobile, currentTime, saveOld, daysLeft, deleteOld, message) {
+function deferUntilBootGuardExpires(mobile, currentTime, saveOld, daysLeft, deleteOld, message, keepLastMobile) {
     if (bootGuardRetryByMobile.has(mobile)) {
         logger.info(`[SetupNewMobile] Deferred: ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_7__.maskMobile)(mobile)} already has a boot-guard retry scheduled; ignoring duplicate (${message})`);
         return;
@@ -56143,7 +56154,7 @@ function deferUntilBootGuardExpires(mobile, currentTime, saveOld, daysLeft, dele
             return;
         }
         logger.info(`[SetupNewMobile] Boot-guard retry firing for ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_7__.maskMobile)(mobile)} (${message})`);
-        await setupNewMobile(mobile, saveOld, daysLeft, deleteOld, message);
+        await setupNewMobile(mobile, saveOld, daysLeft, deleteOld, message, { keepLastMobile });
     }, delayMs, `setupNewMobile.bootGuardRetry.${mobile}`);
     bootGuardRetryByMobile.set(mobile, timer);
 }
@@ -56197,6 +56208,7 @@ async function handleDeleteOperation(mobile, message) {
     }
 }
 function scheduleExit(mobile, message, daysLeft, saveOld, deleteOld) {
+    pendingExitMobiles.add(mobile);
     scheduleSetupNewMobileTask(async () => {
         logger.info(`Exiting process for mobile: ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_7__.maskMobile)(mobile)}`);
         try {
@@ -56214,6 +56226,9 @@ function scheduleExit(mobile, message, daysLeft, saveOld, deleteOld) {
         }
         catch (err) {
             (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(err, `setupNewMobile.scheduleExit.${mobile}`);
+        }
+        finally {
+            pendingExitMobiles.delete(mobile);
         }
         // process.exit(1); // optional
     }, 5000, `setupNewMobile.scheduleExitTask.${mobile}`);
@@ -58107,7 +58122,7 @@ class TelegramManager {
                             if (this.promoterInstance.daysLeft > 3 && (this.lastResetTime < Date.now() - 30 * 60 * 1000)) {
                                 this.lastResetTime = Date.now();
                                 try {
-                                    await (0,_setup_new_mobile__WEBPACK_IMPORTED_MODULE_37__.setupNewMobile)(this.clientDetails.mobile, true, this.promoterInstance.daysLeft, false, `Limited for ${this.promoterInstance.daysLeft} Days`, { deferOnBootGuard: true });
+                                    await (0,_setup_new_mobile__WEBPACK_IMPORTED_MODULE_37__.setupNewMobile)(this.clientDetails.mobile, true, this.promoterInstance.daysLeft, false, `Limited for ${this.promoterInstance.daysLeft} Days`, { deferOnBootGuard: true, keepLastMobile: true });
                                 }
                                 catch (error) {
                                     (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_8__.parseError)(error, "Error Handling Message Event");
