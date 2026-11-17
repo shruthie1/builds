@@ -46889,7 +46889,9 @@ class HealthMonitor {
         }, `Failed to send unhealthy promotion replacement notification for ${mobile}`);
         await (0,_telegram_check_tg_health__WEBPACK_IMPORTED_MODULE_12__.checktghealth)(telegramManager.client, mobile, true);
         const finalDaysLeft = Number(daysLeft) + Math.floor(parseInt(String(lastMsgAgoMin)) / 5);
-        const proceeded = await (0,_telegram_setup_new_mobile__WEBPACK_IMPORTED_MODULE_11__.setupNewMobile)(mobile, true, finalDaysLeft, false, `Promotion stopped, LastMessage: ${lastMsgAgoMin}m Ago`);
+        // keepLastMobile: the getActiveCount() check above cannot see a swap whose exit is still pending (5 s); setupNewMobile
+        // counts those, so a limited swap on another mobile followed by this swap never leaves the process with 0 mobiles.
+        const proceeded = await (0,_telegram_setup_new_mobile__WEBPACK_IMPORTED_MODULE_11__.setupNewMobile)(mobile, true, finalDaysLeft, false, `Promotion stopped, LastMessage: ${lastMsgAgoMin}m Ago`, { keepLastMobile: true });
         if (gateSwapRecent && proceeded === true) {
             await this.recordGateSwap(mobile, gateSwapRecent);
         }
@@ -49168,8 +49170,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "99b4628027d87a75487a338c0f2ef3f5e0ef1e5d" : 0;
-    const builtAt =  true ? "2026-11-17T06:05:56.143Z" : 0;
+    const sha =  true ? "f07b83773c3bc7fa8a2c88ac3df64ea5d5ebc3e6" : 0;
+    const builtAt =  true ? "2026-11-17T06:44:37.456Z" : 0;
     return { sha, builtAt };
 }
 
