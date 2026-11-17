@@ -10847,6 +10847,288 @@ class PromoLogger {
 
 /***/ },
 
+/***/ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/cycle-metrics.ts"
+/*!****************************************************************************************************************!*\
+  !*** ../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/cycle-metrics.ts ***!
+  \****************************************************************************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   CHANNEL_COOLDOWN_MS: () => (/* binding */ CHANNEL_COOLDOWN_MS),
+/* harmony export */   FOLLOW_UP_MAX_LATE_MS: () => (/* binding */ FOLLOW_UP_MAX_LATE_MS),
+/* harmony export */   PROMO_SWEEP_INTERVAL_MS: () => (/* binding */ PROMO_SWEEP_INTERVAL_MS),
+/* harmony export */   PROMO_SWEEP_MIN_INTERVAL_MS: () => (/* binding */ PROMO_SWEEP_MIN_INTERVAL_MS),
+/* harmony export */   PromoSendWindow: () => (/* binding */ PromoSendWindow),
+/* harmony export */   PromoSweep: () => (/* binding */ PromoSweep),
+/* harmony export */   PromoVerifyCloses: () => (/* binding */ PromoVerifyCloses),
+/* harmony export */   SKIP_KEYS: () => (/* binding */ SKIP_KEYS),
+/* harmony export */   VERIFY_MAX_AGE_MS: () => (/* binding */ VERIFY_MAX_AGE_MS),
+/* harmony export */   classifyLoadedPool: () => (/* binding */ classifyLoadedPool),
+/* harmony export */   decideQuietReason: () => (/* binding */ decideQuietReason),
+/* harmony export */   formatCycleEndFields: () => (/* binding */ formatCycleEndFields),
+/* harmony export */   formatPromoSweep: () => (/* binding */ formatPromoSweep),
+/* harmony export */   queueItemUntil: () => (/* binding */ queueItemUntil),
+/* harmony export */   sweepQueueItems: () => (/* binding */ sweepQueueItems)
+/* harmony export */ });
+/* harmony import */ var _policy__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../../policy */ "../../packages/tg-channel-state/src/channel-message-promotions/policy/index.ts");
+
+const MIN = 60000;
+/** A verify item past this age would close as `verify_unknown` under P4. */
+const VERIFY_MAX_AGE_MS = 10 * MIN;
+/** A follow-up this late past due would expire under P2 (per app). */
+const FOLLOW_UP_MAX_LATE_MS = Object.freeze({ 'tg-aut': 30 * MIN, promote: 90 * MIN });
+/** Proposed channel cooldown per app; a queue copy older than this holds its channel out past cooldown. */
+const CHANNEL_COOLDOWN_MS = Object.freeze({ 'tg-aut': 6 * 60 * MIN, promote: 3 * 60 * MIN });
+const PROMO_SWEEP_INTERVAL_MS = 10 * MIN;
+const PROMO_SWEEP_MIN_INTERVAL_MS = 1000;
+const SEND_WINDOW_MS = 60 * MIN;
+const SEND_WINDOW_CAP = 2000;
+/** Unknown app: the stricter tg-aut values (measurement only). */
+function appOf(app) {
+    return app === 'promote' ? 'promote' : 'tg-aut';
+}
+function isFollowUpItem(item) {
+    return item.workType === 'followUp';
+}
+function itemTimestamp(item) {
+    return Number.isFinite(item.timestamp) && item.timestamp > 0 ? item.timestamp : null;
+}
+/** The `until` an item would carry under P2/P4; null when its timestamp is unusable. */
+function queueItemUntil(item, app) {
+    const ts = itemTimestamp(item);
+    if (ts === null)
+        return null;
+    return ts + (isFollowUpItem(item) ? FOLLOW_UP_MAX_LATE_MS[appOf(app)] : VERIFY_MAX_AGE_MS);
+}
+/** Pure count over a read-only list of queue items. */
+function sweepQueueItems(items, nowMs, app) {
+    const result = { droppedVerify: 0, droppedFu: 0, expiredCooldown: 0, openFu: 0, verifyOpen: 0, legacyFu: 0 };
+    const cooldownMs = CHANNEL_COOLDOWN_MS[appOf(app)];
+    const pastCooldown = new Set();
+    for (const item of items) {
+        const followUp = isFollowUpItem(item);
+        if (followUp) {
+            result.openFu += 1;
+            if (!('sentAt' in item))
+                result.legacyFu += 1;
+        }
+        else {
+            result.verifyOpen += 1;
+        }
+        const until = queueItemUntil(item, app);
+        if (until !== null && until <= nowMs) {
+            if (followUp)
+                result.droppedFu += 1;
+            else
+                result.droppedVerify += 1;
+        }
+        const ts = itemTimestamp(item);
+        if (ts !== null && nowMs - ts > cooldownMs)
+            pastCooldown.add(item.channelId);
+    }
+    result.expiredCooldown = pastCooldown.size;
+    return result;
+}
+/**
+ * Verify items closed (exists or deleted) by the queue checker, counted at close time. An item closes
+ * once and leaves the queue, so a runner restart that restores still-open items never recounts them.
+ * Totals live per runner instance; each log line reports the delta since its own previous line.
+ */
+class PromoVerifyCloses {
+    constructor() {
+        this.closed = 0;
+        this.closedLate = 0;
+        this.marks = new Map();
+    }
+    note(sentAtMs, nowMs) {
+        this.closed += 1;
+        if (Number.isFinite(sentAtMs) && sentAtMs > 0 && nowMs - sentAtMs > VERIFY_MAX_AGE_MS)
+            this.closedLate += 1;
+    }
+    /** Closes since the previous call with the same mark. */
+    takeDelta(mark) {
+        const last = this.marks.get(mark) ?? { closed: 0, closedLate: 0 };
+        this.marks.set(mark, { closed: this.closed, closedLate: this.closedLate });
+        return { closed: this.closed - last.closed, closedAfter10m: this.closedLate - last.closedLate };
+    }
+}
+function formatPromoSweep(mobile, r, closes) {
+    return [
+        `[${mobile}] promo sweep`,
+        'mode=log_only',
+        `dropped_verify=${r.droppedVerify}`,
+        `dropped_fu=${r.droppedFu}`,
+        `expired_cooldown=${r.expiredCooldown}`,
+        `open_fu=${r.openFu}`,
+        `verify_open=${r.verifyOpen}`,
+        `legacy_fu=${r.legacyFu}`,
+        `verify_closed=${closes.closed}`,
+        `verify_closed_after_10m=${closes.closedAfter10m}`,
+    ].join(' | ');
+}
+/** The sweep timer (start() to stop()), unref'd. `run` never throws into the timer. */
+class PromoSweep {
+    constructor(run, intervalMs) {
+        this.timer = null;
+        this.run = run;
+        const value = typeof intervalMs === 'number' && Number.isFinite(intervalMs) ? Math.floor(intervalMs) : PROMO_SWEEP_INTERVAL_MS;
+        this.intervalMs = Math.max(PROMO_SWEEP_MIN_INTERVAL_MS, value);
+    }
+    start() {
+        this.stop();
+        this.timer = setInterval(() => {
+            try {
+                this.run();
+            }
+            catch { /* measurement only */ }
+        }, this.intervalMs);
+        this.timer.unref?.();
+    }
+    stop() {
+        if (this.timer) {
+            clearInterval(this.timer);
+            this.timer = null;
+        }
+    }
+}
+/**
+ * Main and follow-up send times over the last hour; bounded by age and size. In memory per runner
+ * instance: `sends_1h` (and the runner's `fu_sent` counter) start again at 0 on every runner restart.
+ */
+class PromoSendWindow {
+    constructor() {
+        this.main = [];
+        this.followUp = [];
+    }
+    note(isFollowUp, nowMs) {
+        const list = isFollowUp ? this.followUp : this.main;
+        list.push(nowMs);
+        if (list.length > SEND_WINDOW_CAP)
+            list.splice(0, list.length - SEND_WINDOW_CAP);
+    }
+    counts(nowMs) {
+        this.prune(nowMs);
+        return { main: this.main.length, fu: this.followUp.length };
+    }
+    prune(nowMs) {
+        for (const list of [this.main, this.followUp]) {
+            let drop = 0;
+            while (drop < list.length && nowMs - list[drop] > SEND_WINDOW_MS)
+                drop += 1;
+            if (drop > 0)
+                list.splice(0, drop);
+        }
+    }
+}
+const SKIP_KEYS = ['banned', 'blocked', 'chanblock', 'cooldown', 'restricted_mobile', 'restricted_channel', 'dead'];
+/** Per-mobile exclusions. `restricted_channel` (broadcast/private) is a channel property, so channel-side. */
+const MOBILE_SIDE = new Set(['chanblock', 'restricted_mobile']);
+const CHANNEL_SIDE = new Set(['banned', 'blocked', 'cooldown', 'restricted_channel', 'dead', 'health']);
+/** Sendability reasons that describe the channel itself, not this mobile's rights in it. */
+const CHANNEL_RESTRICTION_REASONS = new Set(['broadcast', 'private']);
+/**
+ * Each loaded channel gets its first exclusion reason (3.10: counted over the whole loaded pool,
+ * before any drop). Pure: it runs the same eligibility function the send path runs, with no I/O.
+ */
+function classifyLoadedPool(input) {
+    const skips = {
+        banned: 0, blocked: 0, chanblock: 0, cooldown: 0, restricted_mobile: 0, restricted_channel: 0, dead: 0, health: 0, own: 0,
+    };
+    let eligible = 0;
+    for (const channel of input.channels) {
+        const key = classifyChannel(channel, input);
+        if (key)
+            skips[key] += 1;
+        else
+            eligible += 1;
+    }
+    let channelSide = 0;
+    let mobileSide = 0;
+    for (const [key, count] of Object.entries(skips)) {
+        if (MOBILE_SIDE.has(key))
+            mobileSide += count;
+        else if (CHANNEL_SIDE.has(key))
+            channelSide += count;
+    }
+    return { pool: input.channels.length, eligible, skips, channelSide, mobileSide };
+}
+function classifyChannel(channel, input) {
+    const id = channel.channelId;
+    if (input.isOwn(channel))
+        return 'own';
+    if (input.chanblocked(id))
+        return 'chanblock';
+    if (input.inCooldown(id))
+        return 'cooldown';
+    if (input.safetyBlocked(id))
+        return 'blocked';
+    if (input.isDead(id))
+        return 'dead';
+    const result = (0,_policy__WEBPACK_IMPORTED_MODULE_0__.evaluatePromotionChannelEligibility)({
+        channel: input.healthChannel(channel),
+        scoringEnabled: false,
+        safetyStatus: null,
+        percentiles: null,
+        recentlyQueued: false,
+    });
+    if (result.eligible)
+        return null;
+    const reason = result.reason ?? '';
+    if (reason === 'banned')
+        return 'banned';
+    if (reason.startsWith('health_score_below_threshold') || reason.startsWith('Recent failure'))
+        return 'health';
+    return CHANNEL_RESTRICTION_REASONS.has(reason) ? 'restricted_channel' : 'restricted_mobile';
+}
+/**
+ * One quiet reason per cycle (3.10). `none` only when a main send happened; `unknown` when nothing
+ * sent and no reason matched. `no_eligible_*` needs a classification with full intelligence.
+ */
+function decideQuietReason(q) {
+    if (q.mainSent > 0)
+        return 'none';
+    if (q.budgetExhausted)
+        return 'budget';
+    if (q.hourlyCapWait)
+        return 'hourly_cap';
+    if (q.banGateTripped)
+        return 'ban_gate';
+    const intelComplete = q.eligibleSource === 'intel' || q.eligibleSource === 'cache';
+    if (intelComplete && q.pool && q.pool.eligible === 0 && q.pool.pool > 0) {
+        const total = q.pool.channelSide + q.pool.mobileSide;
+        return total > 0 && q.pool.mobileSide / total > 0.5 ? 'no_eligible_mobile' : 'no_eligible_channel';
+    }
+    if (q.exploreDenied)
+        return 'explore_budget';
+    return 'unknown';
+}
+/** The 3.12 fields appended to the existing cycle-end line. */
+function formatCycleEndFields(m) {
+    const s = m.pool?.skips;
+    return [
+        `sent=${m.mainSent}`,
+        `fu_sent=${m.fuSent}`,
+        `eligible=${m.pool ? `${m.pool.eligible}/${m.pool.pool}` : 'n/a'}`,
+        `eligible_src=${m.eligibleSource}`,
+        `skip{${SKIP_KEYS.join(',')}}=${s ? SKIP_KEYS.map((key) => s[key]).join(',') : 'n/a'}`,
+        `skip_other{health,own}=${s ? `${s.health},${s.own}` : 'n/a'}`,
+        `skip_side=${m.pool ? `channel:${m.pool.channelSide},mobile:${m.pool.mobileSide}` : 'n/a'}`,
+        `open_fu=${m.sweep.openFu}`,
+        `verify_open=${m.sweep.verifyOpen}`,
+        `verify_open_over_10m=${m.sweep.droppedVerify}`,
+        `verify_closed=${m.verifyCloses.closed}`,
+        `verify_closed_after_10m=${m.verifyCloses.closedAfter10m}`,
+        `legacy_fu=${m.sweep.legacyFu}`,
+        `sends_1h=main:${m.sends1h.main},fu:${m.sends1h.fu}`,
+        `quiet=${m.quiet}`,
+    ];
+}
+
+
+/***/ },
+
 /***/ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/follow-up.ts"
 /*!************************************************************************************************************!*\
   !*** ../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/follow-up.ts ***!
@@ -12217,6 +12499,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _flow_runner_send_budget__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! ./flow-runner/send-budget */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/send-budget.ts");
 /* harmony import */ var _flow_runner_formatting__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! ./flow-runner/formatting */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/formatting.ts");
 /* harmony import */ var _tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! @tg/core/utils/dc-ip-family */ "../../packages/tg-core/src/utils/dc-ip-family.ts");
+/* harmony import */ var _flow_runner_cycle_metrics__WEBPACK_IMPORTED_MODULE_17__ = __webpack_require__(/*! ./flow-runner/cycle-metrics */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/cycle-metrics.ts");
 
 
 
@@ -12233,6 +12516,7 @@ function raceTimeout(work, ms) {
     const timeout = new Promise((resolve) => { timer = setTimeout(() => resolve(SCORE_TIMEOUT), ms); });
     return Promise.race([work, timeout]).finally(() => clearTimeout(timer));
 }
+
 
 
 
@@ -12279,6 +12563,30 @@ class PromotionFlowRunner {
             catch {
                 this.pickAnnotations = new Map();
             }
+        };
+        /** P0 measurement (instance fields: the prototype seam list is pinned). Logs only, never writes state. */
+        // fu_sent and sends_1h live in this runner instance: both start again at 0 on every runner restart.
+        this.sendWindow = new _flow_runner_cycle_metrics__WEBPACK_IMPORTED_MODULE_17__.PromoSendWindow();
+        this.fuSentSinceCycleEnd = 0;
+        this.verifyCloses = new _flow_runner_cycle_metrics__WEBPACK_IMPORTED_MODULE_17__.PromoVerifyCloses();
+        /** A main-path hourly-cap wait was declared during this cycle (follow-up waits do not count). */
+        this.cycleWaitDeclared = false;
+        /** Read-only copies of the queued items; [] for a queue without list(). */
+        this.queueItems = () => {
+            try {
+                const queue = this.messageQueue;
+                return typeof queue.list === 'function' ? queue.list() : [];
+            }
+            catch {
+                return [];
+            }
+        };
+        /** One log-only sweep: counts queue items past their would-be `until`. Drops nothing. */
+        this.runSweepOnce = (nowMs = Date.now()) => {
+            const result = (0,_flow_runner_cycle_metrics__WEBPACK_IMPORTED_MODULE_17__.sweepQueueItems)(this.queueItems(), nowMs, this.options.pickerApp ?? null);
+            const alert = result.droppedVerify > 0 || result.droppedFu > 0;
+            this.log(alert ? 'warn' : 'info', (0,_flow_runner_cycle_metrics__WEBPACK_IMPORTED_MODULE_17__.formatPromoSweep)((0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_16__.maskMobile)(this.options.account.mobile), result, this.verifyCloses.takeDelta('sweep')));
+            return result;
         };
         this.queueCheckInterval = null;
         this.queueCheckPromise = null;
@@ -12353,6 +12661,10 @@ class PromotionFlowRunner {
                 queueSize: this.messageQueue.size,
             }));
         }, safeOptions.heartbeatIntervalMs);
+        this.sweep = new _flow_runner_cycle_metrics__WEBPACK_IMPORTED_MODULE_17__.PromoSweep(() => {
+            if (this.running)
+                this.runSweepOnce();
+        }, safeOptions.sweepIntervalMs);
     }
     getQueueSize() {
         return this.messageQueue.size;
@@ -12362,9 +12674,11 @@ class PromotionFlowRunner {
      * the supervisor's stuck check and service health read it as rest. Only extends; the runner's own
      * sleep may clear it, and the caller re-declares on every wait chunk.
      */
-    declareSleepUntil(untilMs) {
+    declareSleepUntil(untilMs, kind) {
         if (!Number.isFinite(untilMs))
             return;
+        if (kind === 'main')
+            this.cycleWaitDeclared = true;
         this.health.sleepUntil = Math.max(this.health.sleepUntil ?? 0, untilMs);
     }
     getHealth() {
@@ -12386,6 +12700,7 @@ class PromotionFlowRunner {
         this.running = false;
         this.stopQueueChecker();
         this.heartbeat.stop();
+        this.sweep.stop();
         for (const timeout of this.followUpTimers.values()) {
             clearTimeout(timeout);
         }
@@ -12405,6 +12720,7 @@ class PromotionFlowRunner {
         this.health.stoppedAt = null;
         this.startQueueChecker();
         this.heartbeat.start();
+        this.sweep.start();
         this.log('info', `Promotion runner started; batchTarget=${(0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_10__.safeBatchTarget)(this.options.batchTarget, Number.MAX_SAFE_INTEGER)} queueSize=${this.messageQueue.size}`);
         try {
             while (this.running) {
@@ -12446,6 +12762,7 @@ class PromotionFlowRunner {
     async runOnce() {
         await this.restoreQueuedMessages();
         this.health.lastCycleStartedAt = Date.now();
+        this.cycleWaitDeclared = false;
         this.log('debug', `Promotion cycle start; queueSize=${this.messageQueue.size}`);
         try {
             await this.checkQueuedMessages();
@@ -12461,6 +12778,33 @@ class PromotionFlowRunner {
             }
             // Our own channels are never promotion targets (same strictness as a restricted channel).
             await this.ownChannels.ready?.().catch(() => undefined);
+            const loadedChannels = channels;
+            let poolClass = null;
+            let eligibleSource = 'intel';
+            // P0: every loaded channel's first exclusion reason, before any drop (pure, no reads). Never fails the cycle.
+            const classifyPool = (blocked, docs, deadIds) => {
+                try {
+                    const docById = new Map();
+                    for (const doc of docs) {
+                        const id = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_4__.normalizeChannelId)(doc.channelId);
+                        if (id)
+                            docById.set(id, doc);
+                    }
+                    const docOf = (channelId) => docById.get((0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_4__.normalizeChannelId)(channelId) ?? '') ?? null;
+                    poolClass = (0,_flow_runner_cycle_metrics__WEBPACK_IMPORTED_MODULE_17__.classifyLoadedPool)({
+                        channels: loadedChannels,
+                        isOwn: (channel) => this.isOwnChannel(channel),
+                        chanblocked: (channelId) => blocked.has(channelId),
+                        inCooldown: (channelId) => this.messageQueue.isQueued(channelId) || this.followUpTimers.has(channelId),
+                        isDead: (channelId) => deadIds.has((0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_4__.normalizeChannelId)(channelId) ?? ''),
+                        safetyBlocked: (channelId) => docOf(channelId)?.safety.status === 'blocked',
+                        healthChannel: (channel) => (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_10__.mergePromotionHealthSignals)(channel, docOf(channel.channelId)),
+                    });
+                }
+                catch {
+                    poolClass = null;
+                }
+            };
             const ownExcluded = channels.filter((channel) => this.isOwnChannel(channel));
             if (ownExcluded.length > 0) {
                 channels = channels.filter((channel) => !this.isOwnChannel(channel));
@@ -12498,6 +12842,23 @@ class PromotionFlowRunner {
                     this.log('warn', `Promotion per-mobile block lookup failed; pausing cycle safely; error=${this.normalizeError(error)}`);
                     return;
                 }
+                // source_order loads no intel for selection. Reuse the engine's per-cycle cache (no read); without it,
+                // say so on the line (eligible_src) so safety/health exclusions are not read as absent.
+                let cachedDocs = [];
+                try {
+                    const peek = this.adapter.peekCachedIntelligenceDocs?.(channels.map((channel) => channel.channelId)) ?? null;
+                    if (peek && Array.isArray(peek.docs)) {
+                        cachedDocs = peek.docs.filter(_channel_intelligence_channel_intelligence_schema__WEBPACK_IMPORTED_MODULE_0__.isChannelIntelligence);
+                        eligibleSource = peek.missing > 0 ? 'cache_partial' : 'cache';
+                    }
+                    else {
+                        eligibleSource = 'no_intel';
+                    }
+                }
+                catch {
+                    eligibleSource = 'no_intel';
+                }
+                classifyPool(blockedChannelIds, cachedDocs, new Set());
                 const unblocked = channels.filter((channel) => !blockedChannelIds.has(channel.channelId));
                 const exploreDenied = await this.explorationDenied(unblocked, false);
                 selectionExploreDenied = exploreDenied.size;
@@ -12570,6 +12931,7 @@ class PromotionFlowRunner {
                     ...(pickerMode === 'v2' ? { rankScore: (doc) => (0,_selection_picker__WEBPACK_IMPORTED_MODULE_2__.v2ChannelScore)(doc, pickNowMs, pickerMu) } : {}),
                 });
                 let selection;
+                let excludedDeadIds = new Set();
                 if (pickerMode === 'v2') {
                     // v2 only: lifetime-dead channels (>= 125 attempts, 0 DMs) leave the list. Shadow measurement
                     // below still scores them (candidates come from `channels`). Fail-safe: when nothing sendable
@@ -12589,12 +12951,14 @@ class PromotionFlowRunner {
                         this.log('warn', `Promotion v2 dead-channel skip; skipped=0; dead=${dead}; eligible=0; fail-safe: no live channel left, dead channels kept`);
                     }
                     else if (dead > 0) {
+                        excludedDeadIds = deadIds;
                         this.log('info', `Promotion v2 dead-channel skip; skipped=${dead}; dead=${dead}; eligible=${eligible}`);
                     }
                 }
                 else {
                     selection = selectFrom(channels);
                 }
+                classifyPool(blockedChannelIds, intelligenceDocs, excludedDeadIds);
                 const selectionDiagnostics = this.describeSelection(selection, intelligenceDocs);
                 const exploreDenied = await this.explorationDenied(selection.selected, false);
                 selectionExploreDenied = exploreDenied.size;
@@ -12688,6 +13052,43 @@ class PromotionFlowRunner {
                 }
             }
             promoLog.summary(summaryFields);
+            // P0 measurement fields (3.12): in-memory reads only, never a write; a failure drops the fields, not the line.
+            let measurementFields = [];
+            try {
+                const nowMs = Date.now();
+                const app = this.options.pickerApp ?? null;
+                const items = this.queueItems();
+                const fuSent = this.fuSentSinceCycleEnd;
+                this.fuSentSinceCycleEnd = 0;
+                let banGateTripped = false;
+                try {
+                    banGateTripped = this.adapter.isBanRateGateTripped?.() === true;
+                }
+                catch {
+                    banGateTripped = false;
+                }
+                measurementFields = (0,_flow_runner_cycle_metrics__WEBPACK_IMPORTED_MODULE_17__.formatCycleEndFields)({
+                    mainSent: cycleTally.sent,
+                    fuSent,
+                    pool: poolClass,
+                    eligibleSource,
+                    sweep: (0,_flow_runner_cycle_metrics__WEBPACK_IMPORTED_MODULE_17__.sweepQueueItems)(items, nowMs, app),
+                    verifyCloses: this.verifyCloses.takeDelta('cycle'),
+                    sends1h: this.sendWindow.counts(nowMs),
+                    quiet: (0,_flow_runner_cycle_metrics__WEBPACK_IMPORTED_MODULE_17__.decideQuietReason)({
+                        mainSent: cycleTally.sent,
+                        budgetExhausted: cycleTally.budget > 0 || (!!budgetSnapshot && budgetSnapshot.remaining <= 0),
+                        hourlyCapWait: this.cycleWaitDeclared,
+                        banGateTripped,
+                        exploreDenied: exploreSkipped > 0 || selectionExploreDenied > 0,
+                        pool: poolClass,
+                        eligibleSource,
+                    }),
+                });
+            }
+            catch {
+                measurementFields = [];
+            }
             // Per-mobile cycle-end line (no new Redis reads: reuses this cycle's budget snapshot + stats). The
             // timed `promo heartbeat` (flow-runner/heartbeat.ts) covers the hours inside a long paced cycle.
             this.log('info', [
@@ -12696,6 +13097,7 @@ class PromotionFlowRunner {
                 `capCount=${budgetSnapshot ? budgetSnapshot.count : 'n/a'}/cap=${budgetSnapshot ? budgetSnapshot.cap : 'n/a'}`,
                 `daysLeft=${stats.daysLeft}`,
                 `queueSize=${this.messageQueue.size}`,
+                ...measurementFields,
             ].join(' | '));
             // Remember if this cycle produced no sends purely because the daily send cap was hit — the
             // health monitor uses this to avoid restarting a healthy-but-capped engine.
@@ -12811,6 +13213,9 @@ class PromotionFlowRunner {
             const result = await this.trySendPromotion(planningChannel, candidate, isFollowUp);
             await this.settleDailySendBudget(result, dailySendBudget);
             if (result.sent) {
+                this.sendWindow.note(isFollowUp, Date.now());
+                if (isFollowUp)
+                    this.fuSentSinceCycleEnd += 1;
                 await this.recordSuccess(planningChannel, candidate, result, isFollowUp, percentiles, (0,_tg_core_utils_spam_limit__WEBPACK_IMPORTED_MODULE_6__.isSpamLimited)(stats.daysLeft));
                 return 'sent';
             }
@@ -12909,11 +13314,13 @@ class PromotionFlowRunner {
                     await this.recordExploreSurvival(message);
                     await this.recordPoolOutcome(message, 'survived');
                     await this.scheduleFollowUp(message);
+                    this.verifyCloses.note(message.timestamp, Date.now());
                     completed.add(entry);
                 }
                 else if (result.status === 'deleted') {
                     const deletionPolicy = (0,_policy__WEBPACK_IMPORTED_MODULE_5__.evaluateDeletionPolicy)(message.messageIndex, message.availableMessageCount);
                     await this.recordDeletion(message, deletionPolicy, result.reason ?? 'message_missing');
+                    this.verifyCloses.note(message.timestamp, Date.now());
                     completed.add(entry);
                 }
                 else {
@@ -13338,6 +13745,10 @@ class PromotionMessageQueue {
         }
         this.restored = true;
     }
+    /** Read-only copies of the queued items (measurement: cycle-end counts and the log-only sweep). */
+    list() {
+        return this.items.map((item) => ({ ...item }));
+    }
     isQueued(channelId) {
         const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_1__.normalizeChannelId)(channelId);
         if (!safeChannelId)
@@ -13384,6 +13795,11 @@ class PromotionMessageQueue {
             && (item.workType ?? 'verify') === (message.workType ?? 'verify'));
     }
 }
+/**
+ * Rebuilds the item from a fixed field list: any other field is dropped. P2 adds `sentAt` (and
+ * `dueAt`) and must add them here, or they are lost on every enqueue and restore, and the P0
+ * `legacy_fu` count stays equal to `open_fu`.
+ */
 function normalizeQueuedMessage(message) {
     if (!(0,_utils_guards__WEBPACK_IMPORTED_MODULE_3__.isRecord)(message))
         return null;
@@ -16252,6 +16668,28 @@ class BasePromotionEngine {
                 daysLeft: this.getDaysLeft(),
             }),
             getSpamStatus: () => this.getSpamStatus(),
+            isBanRateGateTripped: () => this.banRateGate?.tripped === true,
+            // Reporting only: reads the cache loadChannelsForRunner warmed this cycle; never reads or writes.
+            peekCachedIntelligenceDocs: (channelIds) => {
+                const cache = this.intelligenceDocCache;
+                if (!cache)
+                    return null;
+                const docs = [];
+                let missing = 0;
+                for (const raw of channelIds) {
+                    const id = this.normalizeChannelId(raw);
+                    if (!id)
+                        continue;
+                    if (!cache.has(id)) {
+                        missing += 1;
+                        continue;
+                    }
+                    const doc = cache.get(id);
+                    if (doc)
+                        docs.push(doc);
+                }
+                return { docs, missing };
+            },
             loadChannels: () => this.loadChannelsForRunner(),
             getChannel: (channelId) => this.getChannelForRunner(channelId),
             getIntelligenceDocs: (channelIds) => this.getSelectionIntelligenceDocsForRunner(channelIds),
@@ -60661,8 +61099,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "d7d603bc0225baf665f93d6e4dba27f58f390221" : 0;
-    const builtAt =  true ? "2026-11-17T05:35:57.396Z" : 0;
+    const sha =  true ? "6751271666059ec991020bbd16bd8da580802913" : 0;
+    const builtAt =  true ? "2026-11-17T19:07:46.558Z" : 0;
     return { sha, builtAt };
 }
 
@@ -108426,7 +108864,7 @@ class HourlySendCap {
                     ? Math.max(MIN_WAIT_MS, Math.min(MAX_WAIT_CHUNK_MS, untilFree + MIN_WAIT_MS))
                     : YIELD_WAIT_MS;
                 // Declared rest: the supervisor and service health must not read a capped runner as dead.
-                this.deps.onWait?.(now + Math.max(untilFree, waitMs));
+                this.deps.onWait?.(now + Math.max(untilFree, waitMs), kind);
                 if (waitedMs === 0) {
                     this.deps.log('info', count >= cap
                         ? `[${acct}] PROMO hourly cap reached; waiting | ${kind} | count ${count}/${cap} | stage ${stage} | next slot in ${Math.round(untilFree / 1000)}s`
@@ -108577,7 +109015,7 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_20__.Ba
             sleep: (ms) => this.interruptibleSleep(ms),
             isActive: () => this.promotionActive,
             log: (level, message) => logger[level === 'info' ? 'log' : level](message),
-            onWait: (untilMs) => this.promotionRunner?.declareSleepUntil(untilMs),
+            onWait: (untilMs, kind) => this.promotionRunner?.declareSleepUntil(untilMs, kind),
         });
         this.defaultAvailableMsgs = _default_messages__WEBPACK_IMPORTED_MODULE_3__.defaultMessages;
         // the bulk live write (bulkUpsertLiveChannels) already persisted the live dialog facts; re-read the stored doc instead.
