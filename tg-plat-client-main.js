@@ -46402,8 +46402,12 @@ __webpack_require__.r(__webpack_exports__);
 const MIN = 60000;
 const HOUR = 60 * MIN;
 const DAY = 24 * HOUR;
-/** D2: episode max age. */
-const PARK_MAX_AGE_MS = { promote: 72 * HOUR, 'tg-aut': 7 * DAY };
+/**
+ * D2: episode max age. tg-aut 2 d (owner 2026-11-17, was 7 d): an old main with an open episode is skipped as a CMS
+ * swap buffer, so a 7 d episode kept spare mains out of the swap pool. CommonTgService parked-swap-episode.ts keeps
+ * its own copy (TGAUT_PARK_MAX_AGE_MS): change both.
+ */
+const PARK_MAX_AGE_MS = { promote: 72 * HOUR, 'tg-aut': 2 * DAY };
 /** §6.1 scheduling. */
 const SCHEDULER_TICK_MS = 60000;
 const SCHEDULER_TICK_JITTER_MS = 15000;
@@ -49204,7 +49208,7 @@ function lastInboundAtMs(messages) {
 }
 /**
  * tg-aut window (design §6.3): inbound at or after `parkedAt − preSwapMs` (swappedAt − 48 h) counts for the whole
- * episode (its age is capped by expiresAt, 7 d). Returned as a window length for `isWithinWindow`. Pure.
+ * episode (its age is capped by expiresAt, tg-aut 2 d). Returned as a window length for `isWithinWindow`. Pure.
  */
 function windowSinceParkedMs(parkedAtMs, nowMs, preSwapMs) {
     return Math.max(0, nowMs - (parkedAtMs - preSwapMs));
@@ -58729,7 +58733,7 @@ function createTgAutParkedAdapter(deps, gate) {
         /** Boot fallback (§7.2): one episode for the old main of the latest swap, keyed like CMS's. */
         async discoverEpisodes(now, opts) {
             const nowMs = now.getTime();
-            // P5: parkedControl tuning (D2 default 7 d); new episodes only, an open one keeps its expiresAt.
+            // P5: parkedControl tuning (D2 default 2 d); new episodes only, an open one keeps its expiresAt.
             const maxAgeMs = opts?.maxAgeMs ?? TGAUT_PARK_MAX_AGE_MS;
             const repos = requireRepos(deps);
             const swap = await repos.parkedAccounts.readClientSwap(clientId);
@@ -60418,8 +60422,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "7d11f3252e245f9a3b162b71fcc7e64ff0f975a2" : 0;
-    const builtAt =  true ? "2026-11-16T04:32:09.710Z" : 0;
+    const sha =  true ? "ef1bc16b08dd79722d120fdb4ebcefb2898c21f6" : 0;
+    const builtAt =  true ? "2026-11-17T03:47:24.719Z" : 0;
     return { sha, builtAt };
 }
 
@@ -89288,8 +89292,8 @@ __webpack_require__.r(__webpack_exports__);
  *
  * Nothing connects unless parkedControl `global` AND `tg-aut` are enabled (absent = disabled) and the tg-aut doc's
  * optional `clientIds` includes this client (canary), AND the live-build gate is open (adapters/parked.ts).
- * Window: chats with activity since parkedAt − 48 h (the swap anchor), per episode; episodes expire 7 d after the
- * swap (D2). Copy: the same 3 templates as promote (D1). Connect cap: PARKED_CONNECTS_PER_DAY, default 4.
+ * Window: chats with activity since parkedAt − 48 h (the swap anchor), per episode; episodes expire 2 d after the
+ * swap (D2; 7 d before 2026-11-17). Copy: the same 3 templates as promote (D1). Connect cap: PARKED_CONNECTS_PER_DAY, default 4.
  */
 const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_10__.Logger("tg-aut-parked");
 /** Process start (ms), for the P4 review S2 check "this process booted after the swap". */
@@ -89317,7 +89321,7 @@ function tgAutParkedLimits() {
 }
 /**
  * P5 review: the effective expiry of a tg-aut episode = min(stored expiresAt, parkedAt + effective maxAge). CMS opens
- * tg-aut episodes with a fixed 7 d expiresAt, so without this a lowered `maxAgeHours` would not reach them. Lowering
+ * tg-aut episodes with a fixed expiresAt (7 d before 2026-11-17, 2 d after), so without this a lowered `maxAgeHours` would not reach them. Lowering
  * maxAgeHours ends open episodes at their next claim (terminal `age_expired`); raising it never extends one.
  */
 function tgAutExpiresAtMs(ep, maxAgeMs) {
