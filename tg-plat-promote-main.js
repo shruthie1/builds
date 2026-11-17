@@ -33598,17 +33598,23 @@ function normalizePromoteStatsData(data) {
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   PERSONA_ASSIGNMENT_PROJECTION: () => (/* binding */ PERSONA_ASSIGNMENT_PROJECTION),
+/* harmony export */   PROMOTE_HARSH_REST_MS: () => (/* binding */ PROMOTE_HARSH_REST_MS),
 /* harmony export */   PROMOTE_RUNTIME_MIN_AGE_DAYS: () => (/* binding */ PROMOTE_RUNTIME_MIN_AGE_DAYS),
 /* harmony export */   PromoteRepository: () => (/* binding */ PromoteRepository),
+/* harmony export */   SELECTION_READ_DEADLINE_MS: () => (/* binding */ SELECTION_READ_DEADLINE_MS),
+/* harmony export */   canonicalPromoteMobile: () => (/* binding */ canonicalPromoteMobile),
 /* harmony export */   emptyPromoteAvailability: () => (/* binding */ emptyPromoteAvailability),
 /* harmony export */   getPromoteRuntimeEligibilityFilter: () => (/* binding */ getPromoteRuntimeEligibilityFilter),
-/* harmony export */   personaAssignmentFilter: () => (/* binding */ personaAssignmentFilter)
+/* harmony export */   personaAssignmentFilter: () => (/* binding */ personaAssignmentFilter),
+/* harmony export */   promoteSpamSkipReason: () => (/* binding */ promoteSpamSkipReason)
 /* harmony export */ });
 /* harmony import */ var _tg_persona_persona_timestamps__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/persona/persona-timestamps */ "../../packages/tg-persona/src/persona-timestamps.ts");
 /* harmony import */ var _base_repository__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../base-repository */ "../../packages/tg-db/src/base-repository.ts");
 /* harmony import */ var _account_role_events_repository__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./account-role-events.repository */ "../../packages/tg-db/src/collections/account-role-events.repository.ts");
 /* harmony import */ var _promote_stats_normalize__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ./promote-stats.normalize */ "../../packages/tg-db/src/collections/promote-stats.normalize.ts");
 /* harmony import */ var _tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! @tg/core/utils/dc-ip-family */ "../../packages/tg-core/src/utils/dc-ip-family.ts");
+/* harmony import */ var _account_facet_common__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ./account-facet-common */ "../../packages/tg-db/src/collections/account-facet-common.ts");
+
 
 
 
@@ -33628,6 +33634,36 @@ const getPromoteRuntimeEligibilityFilter = () => ({
     channels: { $gte: PROMOTE_RUNTIME_CHANNEL_FLOOR },
     warmupPhase: PROMOTE_RUNTIME_PHASE,
 });
+/**
+ * Boot-selection spam skip (owner 2026-11-17; RCA: harsh promote mobiles sent 59% banned). Fields and rest length
+ * follow the CMS buffer gate buildSpamEligibleFilter (buffer-client.schema.ts: 30-day harsh rest = CMS
+ * HARSH_RECHECK_AFTER_MS, harsh without a time stays eligible, limitedUntil in the future blocks), with ONE deliberate
+ * difference: the rest counts from accountHealth.verdictAt (the latest re-check), falling back to spamCheckedAt.
+ * accountHealth.spamCheckedAt only moves on a status CHANGE (account-health.repository.ts), so it holds the FIRST
+ * harsh date; a harsh verdict re-confirmed on day 25 must still block on day 31.
+ * Parked episodes are NOT skipped (2026-11-17 data: parked promote mobiles ban at 1.6%, the healthiest group).
+ */
+const PROMOTE_HARSH_REST_MS = 30 * 24 * 60 * 60 * 1000;
+const SELECTION_READ_MAX_TIME_MS = 3000;
+/** Client-side deadline of the selection read (a stalled socket cannot hold the boot); a little above maxTimeMS. */
+const SELECTION_READ_DEADLINE_MS = 3500;
+/** Digits only: accountHealth `_id` is the mobile without '+'. */
+const canonicalPromoteMobile = (mobile) => String(mobile ?? '').replace(/\D/g, '');
+const timeMs = (value) => {
+    if (value === null || value === undefined || value === '')
+        return null;
+    const ms = value instanceof Date ? value.getTime() : Date.parse(String(value));
+    return Number.isFinite(ms) ? ms : null;
+};
+/** Why a promote candidate must not be selected (harsh before limited), or null. */
+function promoteSpamSkipReason(verdict, now) {
+    const nowMs = now.getTime();
+    const checkedMs = timeMs(verdict?.verdictAt) ?? timeMs(verdict?.spamCheckedAt);
+    if (verdict?.spamStatus === 'harsh' && checkedMs !== null && checkedMs > nowMs - PROMOTE_HARSH_REST_MS)
+        return 'harsh';
+    const untilMs = timeMs(verdict?.limitedUntil);
+    return untilMs !== null && untilMs > nowMs ? 'limited' : null;
+}
 /**
  * Filter for "accounts of this client that already hold a persona assignment". Shared by the
  * promoteClients read below and by the apps' bufferClients read (step 4 of the dbservice removal),
@@ -33860,6 +33896,29 @@ class PromoteRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_1__.Ba
                 .sort({ availableDate: 1, lastUsed: 1, createdAt: 1, channels: -1 })
                 .toArray();
         });
+    }
+    /**
+     * Boot-selection health of promote candidates (PROMO_SKIP_SPAM_STATUS, mobile-manager.ts): the accountHealth
+     * SpamBot verdict per mobile (`_id` = canonical mobile; every promote verdict is mirrored there). Keys are
+     * canonical digits. Null on a read error or after SELECTION_READ_DEADLINE_MS (caller keeps the old selection).
+     */
+    async readPromoteSelectionHealth(mobiles) {
+        const canon = [...new Set(mobiles.map(canonicalPromoteMobile).filter(Boolean))];
+        if (canon.length === 0)
+            return { health: {} };
+        const forms = canon.flatMap((m) => [m, `+${m}`]);
+        const rows = await this.guard('readPromoteSelectionHealth', null, () => (0,_account_facet_common__WEBPACK_IMPORTED_MODULE_5__.withFacetDeadline)(this.connection.collection('accountHealth')
+            .find({ _id: { $in: forms } }, { projection: { spamStatus: 1, spamCheckedAt: 1, verdictAt: 1, limitedUntil: 1 }, maxTimeMS: SELECTION_READ_MAX_TIME_MS })
+            .toArray(), SELECTION_READ_DEADLINE_MS, 'readPromoteSelectionHealth'));
+        if (!rows)
+            return null;
+        const health = {};
+        for (const row of rows) {
+            const key = canonicalPromoteMobile(String(row._id));
+            if (key)
+                health[key] = { spamStatus: row.spamStatus ?? null, spamCheckedAt: row.spamCheckedAt ?? null, verdictAt: row.verdictAt ?? null, limitedUntil: row.limitedUntil ?? null };
+        }
+        return { health };
     }
     async getTotalAvailablePromoteClients() {
         return this.guard('getTotalAvailablePromoteClients', emptyPromoteAvailability(), async () => {
@@ -35270,6 +35329,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   PARKED_CHATS_REACH_INDEX: () => (/* reexport safe */ _collections_parked_chats_repository__WEBPACK_IMPORTED_MODULE_13__.PARKED_CHATS_REACH_INDEX),
 /* harmony export */   PARKED_EPISODE_GC_MS: () => (/* reexport safe */ _collections_parked_accounts_repository__WEBPACK_IMPORTED_MODULE_12__.PARKED_EPISODE_GC_MS),
 /* harmony export */   PERSONA_ASSIGNMENT_PROJECTION: () => (/* reexport safe */ _collections_promote_repository__WEBPACK_IMPORTED_MODULE_7__.PERSONA_ASSIGNMENT_PROJECTION),
+/* harmony export */   PROMOTE_HARSH_REST_MS: () => (/* reexport safe */ _collections_promote_repository__WEBPACK_IMPORTED_MODULE_7__.PROMOTE_HARSH_REST_MS),
 /* harmony export */   PROMOTE_RUNTIME_MIN_AGE_DAYS: () => (/* reexport safe */ _collections_promote_repository__WEBPACK_IMPORTED_MODULE_7__.PROMOTE_RUNTIME_MIN_AGE_DAYS),
 /* harmony export */   ParkedAccountsRepository: () => (/* reexport safe */ _collections_parked_accounts_repository__WEBPACK_IMPORTED_MODULE_12__.ParkedAccountsRepository),
 /* harmony export */   ParkedChatsRepository: () => (/* reexport safe */ _collections_parked_chats_repository__WEBPACK_IMPORTED_MODULE_13__.ParkedChatsRepository),
@@ -35280,6 +35340,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   REPLY_FAILURES_TTL_SECONDS: () => (/* reexport safe */ _collections_reply_failures_repository__WEBPACK_IMPORTED_MODULE_10__.REPLY_FAILURES_TTL_SECONDS),
 /* harmony export */   ReplyFailuresRepository: () => (/* reexport safe */ _collections_reply_failures_repository__WEBPACK_IMPORTED_MODULE_10__.ReplyFailuresRepository),
 /* harmony export */   RepositoryContainer: () => (/* reexport safe */ _repositories__WEBPACK_IMPORTED_MODULE_18__.RepositoryContainer),
+/* harmony export */   SELECTION_READ_DEADLINE_MS: () => (/* reexport safe */ _collections_promote_repository__WEBPACK_IMPORTED_MODULE_7__.SELECTION_READ_DEADLINE_MS),
 /* harmony export */   StatsRepository: () => (/* reexport safe */ _collections_stats_repository__WEBPACK_IMPORTED_MODULE_9__.StatsRepository),
 /* harmony export */   USER_DATA_DEFAULTS: () => (/* reexport safe */ _collections_user_data_repository__WEBPACK_IMPORTED_MODULE_3__.USER_DATA_DEFAULTS),
 /* harmony export */   UserDataRepository: () => (/* reexport safe */ _collections_user_data_repository__WEBPACK_IMPORTED_MODULE_3__.UserDataRepository),
@@ -35290,6 +35351,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildAccountHealthWrite: () => (/* reexport safe */ _collections_account_health_repository__WEBPACK_IMPORTED_MODULE_16__.buildAccountHealthWrite),
 /* harmony export */   buildAccountRoleEvent: () => (/* reexport safe */ _collections_account_role_events_repository__WEBPACK_IMPORTED_MODULE_15__.buildAccountRoleEvent),
 /* harmony export */   buildLiveChannelUpsert: () => (/* reexport safe */ _collections_channels_repository__WEBPACK_IMPORTED_MODULE_6__.buildLiveChannelUpsert),
+/* harmony export */   canonicalPromoteMobile: () => (/* reexport safe */ _collections_promote_repository__WEBPACK_IMPORTED_MODULE_7__.canonicalPromoteMobile),
 /* harmony export */   classifyRoleEventReason: () => (/* reexport safe */ _collections_account_role_events_repository__WEBPACK_IMPORTED_MODULE_15__.classifyRoleEventReason),
 /* harmony export */   createChannelsStore: () => (/* reexport safe */ _collections_channels_repository__WEBPACK_IMPORTED_MODULE_6__.createChannelsStore),
 /* harmony export */   createRepositories: () => (/* reexport safe */ _repositories__WEBPACK_IMPORTED_MODULE_18__.createRepositories),
@@ -35305,6 +35367,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   normalizeRoleEventMobile: () => (/* reexport safe */ _collections_account_role_events_repository__WEBPACK_IMPORTED_MODULE_15__.normalizeRoleEventMobile),
 /* harmony export */   parkedChatId: () => (/* reexport safe */ _collections_parked_chats_repository__WEBPACK_IMPORTED_MODULE_13__.parkedChatId),
 /* harmony export */   personaAssignmentFilter: () => (/* reexport safe */ _collections_promote_repository__WEBPACK_IMPORTED_MODULE_7__.personaAssignmentFilter),
+/* harmony export */   promoteSpamSkipReason: () => (/* reexport safe */ _collections_promote_repository__WEBPACK_IMPORTED_MODULE_7__.promoteSpamSkipReason),
 /* harmony export */   readDatabaseSize: () => (/* reexport safe */ _database_info__WEBPACK_IMPORTED_MODULE_17__.readDatabaseSize),
 /* harmony export */   recordDailyAnalytics: () => (/* reexport safe */ _collections_daily_stats_repository__WEBPACK_IMPORTED_MODULE_5__.recordDailyAnalytics),
 /* harmony export */   sanitizeAvailableMsgs: () => (/* reexport safe */ _collections_channels_repository__WEBPACK_IMPORTED_MODULE_6__.sanitizeAvailableMsgs),
@@ -47188,16 +47251,18 @@ function positiveEnvNumber(raw, fallback) {
 
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
-/* harmony export */   MobileManager: () => (/* binding */ MobileManager)
+/* harmony export */   MobileManager: () => (/* binding */ MobileManager),
+/* harmony export */   promoteSkipSpamStatusEnabled: () => (/* binding */ promoteSkipSpamStatusEnabled)
 /* harmony export */ });
 /* harmony import */ var _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/core/utils/TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
 /* harmony import */ var _data_user_data_crud__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../data/user-data-crud */ "./src/data/user-data-crud.ts");
 /* harmony import */ var _data_db__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../data/db */ "./src/data/db.ts");
-/* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
-/* harmony import */ var _telegram_client_access__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../telegram/client-access */ "./src/telegram/client-access.ts");
-/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
-/* harmony import */ var _tg_dialogs__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! @tg/dialogs */ "../../packages/tg-dialogs/src/index.ts");
-/* harmony import */ var _tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! @tg/core/utils/dc-ip-family */ "../../packages/tg-core/src/utils/dc-ip-family.ts");
+/* harmony import */ var _tg_db_collections_promote_repository__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! @tg/db/collections/promote.repository */ "../../packages/tg-db/src/collections/promote.repository.ts");
+/* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
+/* harmony import */ var _telegram_client_access__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ../telegram/client-access */ "./src/telegram/client-access.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _tg_dialogs__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! @tg/dialogs */ "../../packages/tg-dialogs/src/index.ts");
+/* harmony import */ var _tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! @tg/core/utils/dc-ip-family */ "../../packages/tg-core/src/utils/dc-ip-family.ts");
 
 
 
@@ -47206,7 +47271,19 @@ __webpack_require__.r(__webpack_exports__);
 
 
 
-const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_5__.Logger("mobile-manager");
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_6__.Logger("mobile-manager");
+/** Kill switch, read per call: on unless PROMO_SKIP_SPAM_STATUS is 0 / false / no / off (old selection). */
+function promoteSkipSpamStatusEnabled(env = process.env) {
+    const raw = String(env.PROMO_SKIP_SPAM_STATUS ?? '').trim().toLowerCase();
+    return !(raw === '0' || raw === 'false' || raw === 'no' || raw === 'off');
+}
+function describeSkip(reason, verdict) {
+    const day = (v) => (v ? new Date(v).toISOString().slice(0, 16).replace('T', ' ') + ' UTC' : '?');
+    if (reason === 'harsh')
+        return `SpamBot harsh (last verdict ${day(verdict?.verdictAt ?? verdict?.spamCheckedAt)}, rests 30 days)`;
+    return `SpamBot limited until ${day(verdict?.limitedUntil)}`;
+}
 async function notifyPreviousSuccessMessages(messages, managerCount) {
     const notification = {
         title: "Past successes",
@@ -47221,10 +47298,10 @@ async function notifyPreviousSuccessMessages(messages, managerCount) {
         const sent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_0__.BotConfig.getInstance().sendMessage(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_0__.ChannelCategory.PROM_LOGS2, notification, {
             linkPreviewOptions: { isDisabled: true },
         });
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.logUnsentNotification)(sent, "Previous success notification returned false", "MobileManager.previousSuccessNotification");
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.logUnsentNotification)(sent, "Previous success notification returned false", "MobileManager.previousSuccessNotification");
     }
     catch (error) {
-        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "MobileManager.previousSuccessNotification", false);
+        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, "MobileManager.previousSuccessNotification", false);
     }
 }
 /**
@@ -47326,7 +47403,7 @@ class MobileManager {
             this.clientsMap.set(mobile, details);
         }
         else {
-            logger.warn(`⚠️ Attempted to update details for non-existent mobile: ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_7__.maskMobile)(mobile)}`);
+            logger.warn(`⚠️ Attempted to update details for non-existent mobile: ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_8__.maskMobile)(mobile)}`);
         }
     }
     isActive() {
@@ -47338,7 +47415,7 @@ class MobileManager {
     markInboundActivity(mobile) {
         const details = this.clientsMap.get(mobile);
         if (!details) {
-            logger.debug(`Skipping inbound activity mark for unknown mobile: ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_7__.maskMobile)(mobile)}`);
+            logger.debug(`Skipping inbound activity mark for unknown mobile: ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_8__.maskMobile)(mobile)}`);
             return;
         }
         const updatedDetails = {
@@ -47379,14 +47456,14 @@ class MobileManager {
             for (const [mobile, details] of this.clientsMap.entries()) {
                 if (!details || !mobile) {
                     this.clientsMap.delete(mobile);
-                    logger.info(`🗑️ Removed invalid client entry: ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_7__.maskMobile)(mobile)}`);
+                    logger.info(`🗑️ Removed invalid client entry: ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_8__.maskMobile)(mobile)}`);
                 }
             }
             // Clean up telegram managers map
             for (const [mobile, manager] of this.telegramManagers.entries()) {
                 if (!manager || !mobile) {
                     this.telegramManagers.delete(mobile);
-                    logger.info(`🗑️ Removed invalid manager entry: ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_7__.maskMobile)(mobile)}`);
+                    logger.info(`🗑️ Removed invalid manager entry: ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_8__.maskMobile)(mobile)}`);
                 }
             }
             // Force garbage collection on maps
@@ -47396,7 +47473,7 @@ class MobileManager {
             logger.info(`✅ Memory optimization completed. Active clients: ${this.clientsMap.size}, Managers: ${this.telegramManagers.size}`);
         }
         catch (error) {
-            logger.warn("⚠️ Error during memory optimization:", (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "Memory optimization failed"));
+            logger.warn("⚠️ Error during memory optimization:", (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, "Memory optimization failed"));
         }
     }
     // Core Operations
@@ -47406,14 +47483,14 @@ class MobileManager {
             await this.clearAllClients();
         }
         catch (error) {
-            logger.warn("⚠️ Warning during client cleanup:", (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "Failed to clear existing clients"));
+            logger.warn("⚠️ Warning during client cleanup:", (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, "Failed to clear existing clients"));
         }
         let selectedMobiles = [];
         try {
             selectedMobiles = await this.selectRandomMobiles();
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "Failed to select mobiles");
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, "Failed to select mobiles");
             throw new Error("Unable to select any mobiles for initialization");
         }
         if (selectedMobiles.length === 0) {
@@ -47427,7 +47504,7 @@ class MobileManager {
             failedMobiles = result.failed;
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "Failed to create client instances");
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, "Failed to create client instances");
             throw new Error("Unable to create any client instances");
         }
         if (successfulMobiles === 0) {
@@ -47437,7 +47514,7 @@ class MobileManager {
         this.isInitialized = true;
         if (failedMobiles > 0) {
             logger.warn(`⚠️ Mobile Manager initialized with warnings: ${successfulMobiles} successful, ${failedMobiles} failed`);
-            logger.info(`✅ Active mobiles: ${this.getActiveMobiles().map((m) => (0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_7__.maskMobile)(m)).join(', ')}`);
+            logger.info(`✅ Active mobiles: ${this.getActiveMobiles().map((m) => (0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_8__.maskMobile)(m)).join(', ')}`);
         }
         else {
             logger.info(`✅ Mobile Manager initialized successfully with ${this.clientsMap.size} mobiles:`, this.getActiveMobiles());
@@ -47456,7 +47533,7 @@ class MobileManager {
             logger.info(`✅ Refresh completed. Active mobiles: ${this.getActiveCount()}`);
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "Error during mobile refresh");
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, "Error during mobile refresh");
         }
     }
     async removeClient(mobile) {
@@ -47469,22 +47546,92 @@ class MobileManager {
             }
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, `Error removing client ${mobile}`);
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, `Error removing client ${mobile}`);
         }
         finally {
             this.telegramManagers.delete(mobile);
             this.clientsMap.delete(mobile);
-            logger.info(`🗑️ Removed client: ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_7__.maskMobile)(mobile)}`);
+            logger.info(`🗑️ Removed client: ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_8__.maskMobile)(mobile)}`);
         }
     }
     // Private Helper Methods
     async selectRandomMobiles() {
-        const availableMobiles = await (0,_data_db__WEBPACK_IMPORTED_MODULE_2__.getRepositories)()?.promote.getAvailablePromoteMobile({}, process.env.clientId);
-        if (!availableMobiles || availableMobiles.length === 0) {
+        const fetchedMobiles = await (0,_data_db__WEBPACK_IMPORTED_MODULE_2__.getRepositories)()?.promote.getAvailablePromoteMobile({}, process.env.clientId);
+        if (!fetchedMobiles || fetchedMobiles.length === 0) {
             logger.warn("⚠️ No available mobiles found meeting criteria");
             return [];
         }
-        const rankedCandidates = availableMobiles
+        const target = this.config.targetMobileCount;
+        const gate = promoteSkipSpamStatusEnabled()
+            ? await this.skipSpamCandidates(fetchedMobiles)
+            : { clean: fetchedMobiles, limited: [] };
+        let rankedCandidates = this.rankCandidates(gate.clean);
+        if (rankedCandidates.length < target && gate.limited.length > 0) {
+            // Top-up (review LOW): fill the free slots with limited candidates, best ranked first. Never harsh.
+            const extra = this.rankCandidates(gate.limited).slice(0, target - rankedCandidates.length);
+            if (extra.length > 0) {
+                logger.warn(`⚠️ PROMO_SKIP_SPAM_STATUS top-up: ${rankedCandidates.length} clean of target ${target}; adding ${extra.length} limited candidate(s) (never harsh): ${extra.map((c) => (0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_8__.maskMobile)(c.mobile)).join(', ')}`);
+                rankedCandidates = [...rankedCandidates, ...extra];
+            }
+        }
+        if (rankedCandidates.length === 0) {
+            logger.warn("⚠️ No valid promote mobiles remained after ranking and validation");
+            return [];
+        }
+        const selectedCandidates = rankedCandidates.slice(0, this.config.targetMobileCount);
+        const selectedMobiles = selectedCandidates.map(candidate => candidate.mobile);
+        logger.info(`📱 Selected ${selectedMobiles.length} mobiles from ${rankedCandidates.length} ranked candidates`, {
+            targetMobileCount: this.config.targetMobileCount,
+            selected: selectedCandidates.map((candidate) => ({
+                mobile: candidate.mobile,
+                availableDate: candidate.availableDate,
+                daysUntilAvailable: candidate.daysUntilAvailable,
+                neverUsed: candidate.neverUsed,
+                lastUsedMs: candidate.lastUsedMs || null,
+                channels: candidate.channels,
+            })),
+        });
+        return selectedMobiles;
+    }
+    /**
+     * PROMO_SKIP_SPAM_STATUS (default on): split candidates into clean and limited; drop harsh (latest harsh verdict
+     * < 30 days old) and log every skip (promoteSpamSkipReason). The caller tops up with limited when clean is below
+     * the target, never with harsh. Parked mobiles are not skipped. An unreadable or timed-out health read, or a pool
+     * that is ALL harsh, keeps the old unfiltered selection (warned), so the gate can never fail the boot.
+     */
+    async skipSpamCandidates(candidates) {
+        const now = new Date(Date.now());
+        const mobiles = candidates.map((c) => (typeof c.mobile === 'string' ? c.mobile.trim() : '')).filter(Boolean);
+        const read = await (0,_data_db__WEBPACK_IMPORTED_MODULE_2__.getRepositories)()?.promote.readPromoteSelectionHealth(mobiles);
+        if (!read) {
+            logger.warn(`⚠️ PROMO_SKIP_SPAM_STATUS: spam status unreadable; selecting from all ${candidates.length} candidate(s) without the skip`);
+            return { clean: candidates, limited: [] };
+        }
+        const clean = [];
+        const limited = [];
+        for (const candidate of candidates) {
+            const key = (0,_tg_db_collections_promote_repository__WEBPACK_IMPORTED_MODULE_3__.canonicalPromoteMobile)(candidate.mobile);
+            const reason = key ? (0,_tg_db_collections_promote_repository__WEBPACK_IMPORTED_MODULE_3__.promoteSpamSkipReason)(read.health[key], now) : null;
+            if (reason === null) {
+                clean.push(candidate);
+                continue;
+            }
+            logger.warn(`Skipping promote mobile ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_8__.maskMobile)(String(candidate.mobile))}: ${describeSkip(reason, read.health[key])}`);
+            if (reason === 'limited')
+                limited.push(candidate);
+        }
+        if (clean.length < candidates.length)
+            logger.info(`PROMO_SKIP_SPAM_STATUS: ${clean.length} clean, ${limited.length} limited, ${candidates.length - clean.length - limited.length} harsh of ${candidates.length} candidate(s)`);
+        if (clean.length === 0 && limited.length === 0) {
+            // Round-2 review LOW: an empty selection fails the boot (restart loop). Keep promoting with the old selection.
+            logger.warn(`⚠️ PROMO_SKIP_SPAM_STATUS: all ${candidates.length} candidate(s) are SpamBot harsh; falling back to the old unfiltered selection`);
+            return { clean: candidates, limited: [] };
+        }
+        return { clean, limited };
+    }
+    /** Valid candidates in selection order (soonest available, never used, oldest lastUsed, most channels, oldest). */
+    rankCandidates(candidates) {
+        return candidates
             .map((candidate) => this.rankPromoteMobileCandidate(candidate))
             .filter((candidate) => candidate !== null)
             .sort((a, b) => {
@@ -47505,24 +47652,6 @@ class MobileManager {
             }
             return a.mobile.localeCompare(b.mobile);
         });
-        if (rankedCandidates.length === 0) {
-            logger.warn("⚠️ No valid promote mobiles remained after ranking and validation");
-            return [];
-        }
-        const selectedCandidates = rankedCandidates.slice(0, this.config.targetMobileCount);
-        const selectedMobiles = selectedCandidates.map(candidate => candidate.mobile);
-        logger.info(`📱 Selected ${selectedMobiles.length} mobiles from ${rankedCandidates.length} ranked candidates`, {
-            targetMobileCount: this.config.targetMobileCount,
-            selected: selectedCandidates.map((candidate) => ({
-                mobile: candidate.mobile,
-                availableDate: candidate.availableDate,
-                daysUntilAvailable: candidate.daysUntilAvailable,
-                neverUsed: candidate.neverUsed,
-                lastUsedMs: candidate.lastUsedMs || null,
-                channels: candidate.channels,
-            })),
-        });
-        return selectedMobiles;
     }
     rankPromoteMobileCandidate(candidate) {
         const mobile = typeof candidate.mobile === 'string' ? candidate.mobile.trim() : '';
@@ -47533,7 +47662,7 @@ class MobileManager {
         const availableDate = typeof candidate.availableDate === 'string' ? candidate.availableDate.trim() : '';
         const availableAtMs = availableDate ? Date.parse(`${availableDate}T00:00:00.000Z`) : NaN;
         if (!Number.isFinite(availableAtMs)) {
-            logger.warn(`Skipping promote mobile ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_7__.maskMobile)(mobile)}: invalid availableDate`, { availableDate });
+            logger.warn(`Skipping promote mobile ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_8__.maskMobile)(mobile)}: invalid availableDate`, { availableDate });
             return null;
         }
         const channels = typeof candidate.channels === 'number' ? candidate.channels : 0;
@@ -47580,18 +47709,18 @@ class MobileManager {
                     };
                     this.clientsMap.set(mobile, clientDetails);
                     successful++;
-                    logger.info(`✅ Created client instance for ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_7__.maskMobile)(mobile)}`, {
+                    logger.info(`✅ Created client instance for ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_8__.maskMobile)(mobile)}`, {
                         sessionSource: clientDetails.session ? 'promoteClients' : 'oldestSessionFallback',
                     });
                 }
                 catch (error) {
                     failed++;
-                    logger.warn(`⚠️ Failed to create client instance for ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_7__.maskMobile)(mobile)}:`, (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, `Client creation failed for ${mobile} at new MobileClient`));
+                    logger.warn(`⚠️ Failed to create client instance for ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_8__.maskMobile)(mobile)}:`, (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, `Client creation failed for ${mobile} at new MobileClient`));
                 }
             }
         }
         catch (error) {
-            logger.error("❌ Database error during client creation:", (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "Database error"));
+            logger.error("❌ Database error during client creation:", (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, "Database error"));
             throw error;
         }
         return { successful, failed };
@@ -47663,10 +47792,10 @@ class MobileManager {
             for (const [mobile, telegramManager] of this.telegramManagers) {
                 try {
                     await telegramManager.destroy();
-                    logger.info(`🗑️ Destroyed manager for: ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_7__.maskMobile)(mobile)}`);
+                    logger.info(`🗑️ Destroyed manager for: ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_8__.maskMobile)(mobile)}`);
                 }
                 catch (error) {
-                    logger.warn(`⚠️ Error destroying manager for ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_7__.maskMobile)(mobile)}:`, (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "Manager destruction failed"));
+                    logger.warn(`⚠️ Error destroying manager for ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_8__.maskMobile)(mobile)}:`, (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, "Manager destruction failed"));
                 }
             }
             this.telegramManagers.clear();
@@ -47678,7 +47807,7 @@ class MobileManager {
             logger.info("🧹 Cleared all existing clients and managers");
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "Error clearing clients");
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, "Error clearing clients");
         }
     }
     /**
@@ -47712,10 +47841,10 @@ class MobileManager {
                         if (manager) {
                             await manager.destroy();
                         }
-                        logger.info(`🗑️ Cleaned up orphaned manager for: ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_7__.maskMobile)(mobile)}`);
+                        logger.info(`🗑️ Cleaned up orphaned manager for: ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_8__.maskMobile)(mobile)}`);
                     }
                     catch (error) {
-                        logger.warn(`⚠️ Failed to cleanup orphaned manager for ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_7__.maskMobile)(mobile)}:`, (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "Cleanup failed"));
+                        logger.warn(`⚠️ Failed to cleanup orphaned manager for ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_8__.maskMobile)(mobile)}:`, (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, "Cleanup failed"));
                     }
                     finally {
                         this.telegramManagers.delete(mobile);
@@ -47723,7 +47852,7 @@ class MobileManager {
                 }
             }
             // Also check TelegramManager static instances for orphans
-            const staticInstances = _telegram_client_access__WEBPACK_IMPORTED_MODULE_4__["default"].getAllInstances();
+            const staticInstances = _telegram_client_access__WEBPACK_IMPORTED_MODULE_5__["default"].getAllInstances();
             const staticOrphans = [];
             for (const instance of staticInstances) {
                 const mobile = instance.clientDetails?.mobile;
@@ -47735,14 +47864,14 @@ class MobileManager {
                 logger.info(`🧹 Found ${staticOrphans.length} orphaned managers in TelegramManager static map, cleaning up...`);
                 for (const mobile of staticOrphans) {
                     try {
-                        const instance = _telegram_client_access__WEBPACK_IMPORTED_MODULE_4__["default"].getInstance(mobile);
+                        const instance = _telegram_client_access__WEBPACK_IMPORTED_MODULE_5__["default"].getInstance(mobile);
                         if (instance && !instance.isDestroyed) {
                             await instance.destroy();
-                            logger.info(`🗑️ Cleaned up static orphaned manager for: ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_7__.maskMobile)(mobile)}`);
+                            logger.info(`🗑️ Cleaned up static orphaned manager for: ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_8__.maskMobile)(mobile)}`);
                         }
                     }
                     catch (error) {
-                        logger.warn(`⚠️ Failed to cleanup static orphaned manager for ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_7__.maskMobile)(mobile)}:`, (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "Cleanup failed"));
+                        logger.warn(`⚠️ Failed to cleanup static orphaned manager for ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_8__.maskMobile)(mobile)}:`, (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, "Cleanup failed"));
                     }
                 }
             }
@@ -47751,10 +47880,10 @@ class MobileManager {
                 logger.info(`⚠️ Found ${clientsWithoutManagers.length} clients without managers:`, clientsWithoutManagers);
                 logger.info("💡 These will be handled by TelegramService during health checks");
             }
-            logger.info(`✅ Synchronization complete. Active: ${activeMobiles.length}, MobileManager: ${this.telegramManagers.size}, TelegramManager.static: ${_telegram_client_access__WEBPACK_IMPORTED_MODULE_4__["default"].getInstanceCount()}, DialogManager: ${_tg_dialogs__WEBPACK_IMPORTED_MODULE_6__.DialogManager.getInstanceCount()}`);
+            logger.info(`✅ Synchronization complete. Active: ${activeMobiles.length}, MobileManager: ${this.telegramManagers.size}, TelegramManager.static: ${_telegram_client_access__WEBPACK_IMPORTED_MODULE_5__["default"].getInstanceCount()}, DialogManager: ${_tg_dialogs__WEBPACK_IMPORTED_MODULE_7__.DialogManager.getInstanceCount()}`);
         }
         catch (error) {
-            logger.warn("⚠️ Warning during manager synchronization:", (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_3__.parseError)(error, "Synchronization failed"));
+            logger.warn("⚠️ Warning during manager synchronization:", (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, "Synchronization failed"));
         }
     }
 }
@@ -48902,8 +49031,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "ef85060964d2383a27e57d3aaae1ed9235b92e1e" : 0;
-    const builtAt =  true ? "2026-11-17T05:01:42.688Z" : 0;
+    const sha =  true ? "83b9e3f9a4e85c5467239ae7403b22e9536be2a9" : 0;
+    const builtAt =  true ? "2026-11-17T05:02:02.568Z" : 0;
     return { sha, builtAt };
 }
 
