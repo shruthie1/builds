@@ -5833,6 +5833,103 @@ __webpack_require__.r(__webpack_exports__);
 
 /***/ },
 
+/***/ "../../packages/tg-channel-state/src/channel-message-promotions/config/promo-flags-v3.ts"
+/*!***********************************************************************************************!*\
+  !*** ../../packages/tg-channel-state/src/channel-message-promotions/config/promo-flags-v3.ts ***!
+  \***********************************************************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   PROMO_FLAGS_DEFAULTS: () => (/* binding */ PROMO_FLAGS_DEFAULTS),
+/* harmony export */   isFollowUpV3: () => (/* binding */ isFollowUpV3),
+/* harmony export */   parsePromoFlags: () => (/* binding */ parsePromoFlags),
+/* harmony export */   promoFlagsAppFor: () => (/* binding */ promoFlagsAppFor),
+/* harmony export */   promoFlagsKey: () => (/* binding */ promoFlagsKey),
+/* harmony export */   readFlagHash: () => (/* binding */ readFlagHash),
+/* harmony export */   readPromoFlagsV3: () => (/* binding */ readPromoFlagsV3),
+/* harmony export */   resetPromoFlagsV3ForTests: () => (/* binding */ resetPromoFlagsV3ForTests)
+/* harmony export */ });
+const PROMO_FLAGS_DEFAULTS = Object.freeze({ fu: 'off' });
+const FAIL_LOG_EVERY_MS = 10 * 60 * 1000;
+const HGETALL_SCRIPT = "return redis.call('HGETALL', KEYS[1])";
+function promoFlagsKey(app) {
+    return `promote:flags:v3:${app}`;
+}
+/** Runner pickerApp ('tg-aut' | 'promote') -> flag hash app name. Unknown app reads no flags (defaults). */
+function promoFlagsAppFor(pickerApp) {
+    if (pickerApp === 'tg-aut')
+        return 'tgaut';
+    if (pickerApp === 'promote')
+        return 'promote';
+    return null;
+}
+/** `fu=on` and `fu=loop` both enable P2+P3 (loop's main-loop folding is P8, not built here). */
+function isFollowUpV3(flags) {
+    return flags?.fu === 'on' || flags?.fu === 'loop';
+}
+function parsePromoFlags(hash) {
+    const raw = typeof hash?.fu === 'string' ? hash.fu.trim().toLowerCase() : '';
+    const fu = raw === 'on' || raw === 'loop' ? raw : 'off';
+    return { fu };
+}
+/** HGETALL with feature detection. Returns null when the client supports neither hgetall nor eval. Throws on a Redis error. */
+async function readFlagHash(redis, key) {
+    if (typeof redis.hgetall === 'function') {
+        const value = await redis.hgetall(key);
+        return value && typeof value === 'object' ? value : {};
+    }
+    if (typeof redis.eval === 'function') {
+        const flat = await redis.eval(HGETALL_SCRIPT, 1, key);
+        const out = {};
+        if (Array.isArray(flat)) {
+            for (let index = 0; index + 1 < flat.length; index += 2)
+                out[String(flat[index])] = String(flat[index + 1]);
+        }
+        return out;
+    }
+    return null;
+}
+/** Last value read per key, per process (doc 6: a read failure keeps it). */
+const readerStates = new Map();
+async function readPromoFlagsV3(redis, app, log = () => undefined, nowMs = Date.now()) {
+    const key = promoFlagsKey(app);
+    let state = readerStates.get(key);
+    if (!state) {
+        state = { last: null, lastFailLogAt: 0, unsupportedLogged: false };
+        readerStates.set(key, state);
+    }
+    if (!redis)
+        return { ...PROMO_FLAGS_DEFAULTS };
+    try {
+        const hash = await readFlagHash(redis, key);
+        if (hash === null) {
+            if (!state.unsupportedLogged) {
+                state.unsupportedLogged = true;
+                log('warn', `promo flags | key=${key} | reason=no_hgetall_no_eval | defaults`);
+            }
+            return { ...PROMO_FLAGS_DEFAULTS };
+        }
+        const flags = parsePromoFlags(hash);
+        state.last = flags;
+        return flags;
+    }
+    catch (error) {
+        if (nowMs - state.lastFailLogAt >= FAIL_LOG_EVERY_MS) {
+            state.lastFailLogAt = nowMs;
+            log('warn', `promo flags | key=${key} | reason=read_failed | keep=${state.last ? 'last' : 'default'} | error=${error instanceof Error ? error.message : String(error)}`);
+        }
+        return state.last ? { ...state.last } : { ...PROMO_FLAGS_DEFAULTS };
+    }
+}
+/** Tests only: forget the per-process last values. */
+function resetPromoFlagsV3ForTests() {
+    readerStates.clear();
+}
+
+
+/***/ },
+
 /***/ "../../packages/tg-channel-state/src/channel-message-promotions/index.ts"
 /*!*******************************************************************************!*\
   !*** ../../packages/tg-channel-state/src/channel-message-promotions/index.ts ***!
@@ -6368,14 +6465,40 @@ function formatCycleEndFields(m) {
 
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   FOLLOW_UP_V3_MAX_OPEN: () => (/* binding */ FOLLOW_UP_V3_MAX_OPEN),
 /* harmony export */   runFollowUp: () => (/* binding */ runFollowUp),
 /* harmony export */   scheduleFollowUp: () => (/* binding */ scheduleFollowUp)
 /* harmony export */ });
 /* harmony import */ var _policy__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../../policy */ "../../packages/tg-channel-state/src/channel-message-promotions/policy/index.ts");
 /* harmony import */ var _normalize__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./normalize */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/normalize.ts");
+/* harmony import */ var _promotion_message_queue__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../promotion-message-queue */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/promotion-message-queue.ts");
 // PromotionFlowRunner: follow-up scheduling and execution.
 
 
+
+/** Flow v3 (P2 fix 7, doc 3.5): at most 40 open follow-ups per mobile. */
+const FOLLOW_UP_V3_MAX_OPEN = 40;
+function queuedFollowUps(host) {
+    const queue = host.messageQueue;
+    const items = typeof queue.list === 'function' ? queue.list() : [];
+    return items.filter((item) => item.workType === 'followUp');
+}
+/**
+ * Flow v3: the open follow-ups a new one on this channel replaces. The timer's own item, plus any
+ * queued follow-up for the channel without a timer (restored at startup; review L5), so a channel
+ * has at most 1 open follow-up.
+ */
+function followUpsToReplace(host, channelId) {
+    const byKey = new Map();
+    const timerWork = host.followUpTimerWork.get(channelId);
+    if (timerWork)
+        byKey.set((0,_promotion_message_queue__WEBPACK_IMPORTED_MODULE_2__.queueItemKey)(timerWork), timerWork);
+    for (const item of queuedFollowUps(host)) {
+        if (item.channelId === channelId && !byKey.has((0,_promotion_message_queue__WEBPACK_IMPORTED_MODULE_2__.queueItemKey)(item)))
+            byKey.set((0,_promotion_message_queue__WEBPACK_IMPORTED_MODULE_2__.queueItemKey)(item), item);
+    }
+    return [...byKey.values()];
+}
 async function scheduleFollowUp(host, message) {
     if (host.shouldAbortStartedRunnerWork()) {
         host.log('debug', `Follow-up not scheduled because runner stopped; channelId=${message.channelId} messageId=${message.messageId}`);
@@ -6390,13 +6513,24 @@ async function scheduleFollowUp(host, message) {
         return;
     }
     const existing = host.followUpTimers.get(message.channelId);
-    const activeFollowUpCount = existing ? Math.max(0, host.followUpTimers.size - 1) : host.followUpTimers.size;
+    const v3 = host.isFollowUpV3();
+    const replacedWork = v3 ? followUpsToReplace(host, message.channelId) : [];
+    const replacedKeys = new Set(replacedWork.map((item) => (0,_promotion_message_queue__WEBPACK_IMPORTED_MODULE_2__.queueItemKey)(item)));
+    // Flow v3 (P2 fix 7): open follow-ups per mobile are the queued followUp items, at most 40.
+    const activeFollowUpCount = v3
+        ? queuedFollowUps(host).filter((item) => !replacedKeys.has((0,_promotion_message_queue__WEBPACK_IMPORTED_MODULE_2__.queueItemKey)(item))).length
+        : existing ? Math.max(0, host.followUpTimers.size - 1) : host.followUpTimers.size;
+    const maxFollowUpCount = v3
+        ? Math.min(FOLLOW_UP_V3_MAX_OPEN, host.options.maxFollowUpCount !== undefined ? (0,_normalize__WEBPACK_IMPORTED_MODULE_1__.safeNonNegativeInt)(host.options.maxFollowUpCount) : FOLLOW_UP_V3_MAX_OPEN)
+        : undefined;
     const followUpPolicy = (0,_policy__WEBPACK_IMPORTED_MODULE_0__.evaluateFollowUpScheduling)({
         isFollowUp: message.isFollowUp,
         daysLeft: stats.daysLeft,
         channelAvailable: true,
         activeFollowUpCount,
-        ...(host.options.maxFollowUpCount !== undefined ? { maxFollowUpCount: (0,_normalize__WEBPACK_IMPORTED_MODULE_1__.safeNonNegativeInt)(host.options.maxFollowUpCount) } : {}),
+        ...(maxFollowUpCount !== undefined
+            ? { maxFollowUpCount }
+            : host.options.maxFollowUpCount !== undefined ? { maxFollowUpCount: (0,_normalize__WEBPACK_IMPORTED_MODULE_1__.safeNonNegativeInt)(host.options.maxFollowUpCount) } : {}),
     });
     if (!followUpPolicy.shouldSchedule) {
         host.log('debug', `Follow-up not scheduled; channelId=${message.channelId} messageId=${message.messageId} reason=${followUpPolicy.reason ?? 'policy'}`);
@@ -6405,11 +6539,34 @@ async function scheduleFollowUp(host, message) {
     const delayMs = (0,_policy__WEBPACK_IMPORTED_MODULE_0__.calculateFollowUpDelay)((0,_normalize__WEBPACK_IMPORTED_MODULE_1__.safeDelayMs)(host.options.followUpDelayMs, 15 * 60000), (0,_normalize__WEBPACK_IMPORTED_MODULE_1__.safeDelayMs)(host.options.followUpJitterMs, 30000));
     if (existing)
         clearTimeout(existing);
-    const followUpWork = {
-        ...message,
-        timestamp: Date.now() + delayMs,
-        workType: 'followUp',
-    };
+    const dueAt = Date.now() + delayMs;
+    const followUpWork = v3
+        ? {
+            ...message,
+            // Flow v3: sentAt is the parent's send time (never rewritten); dueAt is separate; timestamp = dueAt for readiness.
+            sentAt: message.sentAt ?? message.timestamp,
+            dueAt,
+            timestamp: dueAt,
+            workType: 'followUp',
+        }
+        : {
+            ...message,
+            timestamp: dueAt,
+            workType: 'followUp',
+        };
+    for (const replaced of replacedWork) {
+        if ((0,_promotion_message_queue__WEBPACK_IMPORTED_MODULE_2__.queueItemKey)(replaced) === (0,_promotion_message_queue__WEBPACK_IMPORTED_MODULE_2__.queueItemKey)(followUpWork))
+            continue;
+        // P2 fix 3 (N5), review L5: a replaced follow-up's durable item leaves by key, so the channel
+        // keeps 1 open follow-up and does not stay queued.
+        host.log('info', `promo follow-up drop | ${(0,_promotion_message_queue__WEBPACK_IMPORTED_MODULE_2__.queueItemKey)(replaced)} | reason=replaced | by=${(0,_promotion_message_queue__WEBPACK_IMPORTED_MODULE_2__.queueItemKey)(followUpWork)}`);
+        try {
+            await host.removeQueuedMessage(replaced);
+        }
+        catch (error) {
+            host.log('warn', `Follow-up replaced item cleanup failed; channelId=${replaced.channelId} messageId=${replaced.messageId} error=${host.normalizeError(error)}`);
+        }
+    }
     try {
         await host.messageQueue.enqueueDurable(followUpWork);
     }
@@ -6423,7 +6580,25 @@ async function scheduleFollowUp(host, message) {
             return;
         }
         void (async () => {
+            let slot = null;
+            let sent = false;
             try {
+                if (v3 && host.isFollowUpV3()) {
+                    const nowMs = Date.now();
+                    // Expiry is decided before the claim (P2 fix 5): a late follow-up never takes a claim.
+                    if (nowMs > dueAt + host.followUpMaxLateMs()) {
+                        host.log('info', `promo follow-up drop | ${(0,_promotion_message_queue__WEBPACK_IMPORTED_MODULE_2__.queueItemKey)(followUpWork)} | reason=expired | late_min=${Math.round((nowMs - dueAt) / 60000)}`);
+                        await host.removeQueuedMessage(followUpWork);
+                        return;
+                    }
+                    // Shared pacer with the queue path: none within 5 min of the last follow-up. The slot is taken
+                    // before the claim await (review L1). Paced: the item stays queued for the queue path.
+                    slot = host.reserveFollowUpSlot(nowMs);
+                    if (!slot) {
+                        host.log('debug', `promo follow-up paced | ${(0,_promotion_message_queue__WEBPACK_IMPORTED_MODULE_2__.queueItemKey)(followUpWork)} | path=timer`);
+                        return;
+                    }
+                }
                 const claimed = await host.claimFollowUpExecution(followUpWork);
                 if (claimed === null)
                     return;
@@ -6431,39 +6606,49 @@ async function scheduleFollowUp(host, message) {
                     await host.removeQueuedMessage(followUpWork);
                     return;
                 }
-                await host.runFollowUp(followUpWork);
+                sent = await host.runFollowUp(followUpWork);
                 await host.removeQueuedMessage(followUpWork);
             }
             catch (error) {
                 host.log('error', `Follow-up durable cleanup failed; retaining work for restart recovery; channelId=${message.channelId} messageId=${message.messageId} error=${host.normalizeError(error)}`);
             }
             finally {
-                host.followUpTimers.delete(message.channelId);
+                if (slot && !sent)
+                    host.releaseFollowUpSlot(slot);
+                if (!v3 || host.followUpTimers.get(message.channelId) === timeout) {
+                    host.followUpTimers.delete(message.channelId);
+                    host.followUpTimerWork.delete(message.channelId);
+                }
             }
         })();
     }, delayMs);
     timeout.unref?.();
     host.followUpTimers.set(message.channelId, timeout);
+    if (v3)
+        host.followUpTimerWork.set(message.channelId, followUpWork);
+    else
+        host.followUpTimerWork.delete(message.channelId);
     host.log('info', `Follow-up scheduled; channelId=${message.channelId} messageId=${message.messageId} delayMs=${delayMs} activeFollowUps=${host.followUpTimers.size} replacedExisting=${!!existing}`);
     host.health.totalFollowUpsScheduled += 1;
     host.health.lastFollowUpScheduledAt = Date.now();
     void host.callHook('onFollowUpScheduled', () => host.adapter.onFollowUpScheduled?.(message, delayMs));
 }
+/** Returns true only when the follow-up post was sent (flow v3 gives the pacer slot back otherwise). */
 async function runFollowUp(host, message) {
     host.health.lastFollowUpStartedAt = Date.now();
     try {
         host.log('debug', `Follow-up execution start; channelId=${message.channelId} messageId=${message.messageId}`);
         if (host.shouldAbortStartedRunnerWork()) {
             host.log('debug', `Skipping follow-up for ${message.channelId}: runner stopped`);
-            return;
+            return false;
         }
         if (!(0,_normalize__WEBPACK_IMPORTED_MODULE_1__.isExactTrue)(await host.adapter.isActive())) {
             host.log('debug', `Skipping follow-up for ${message.channelId}: adapter inactive`);
-            return;
+            return false;
         }
         if (host.adapter.shouldContinue && !(0,_normalize__WEBPACK_IMPORTED_MODULE_1__.isExactTrue)(await host.adapter.shouldContinue({ followUp: message }))) {
             host.log('debug', `Skipping follow-up for ${message.channelId}: shouldContinue returned false`);
-            return;
+            return false;
         }
         let stats;
         try {
@@ -6471,7 +6656,7 @@ async function runFollowUp(host, message) {
         }
         catch (error) {
             host.log('warn', `Follow-up execution stats load failed; skipping follow-up; channelId=${message.channelId} messageId=${message.messageId} error=${host.normalizeError(error)}`);
-            return;
+            return false;
         }
         const followUpPolicy = (0,_policy__WEBPACK_IMPORTED_MODULE_0__.evaluateFollowUpScheduling)({
             isFollowUp: message.isFollowUp,
@@ -6480,17 +6665,18 @@ async function runFollowUp(host, message) {
         });
         if (!followUpPolicy.shouldSchedule) {
             host.log('debug', `Skipping follow-up for ${message.channelId}: ${followUpPolicy.reason ?? 'policy'}`);
-            return;
+            return false;
         }
         const channel = await host.adapter.getChannel(message.channelId);
         if (!channel) {
             host.log('debug', `Skipping follow-up for ${message.channelId}: channel unavailable`);
-            return;
+            return false;
         }
-        await host.processChannel(channel, true);
+        return (await host.processChannel(channel, true)) === 'sent';
     }
     catch (error) {
         host.log('error', `Follow-up failed for ${message.channelId}: ${host.normalizeError(error)}`);
+        return false;
     }
     finally {
         host.health.lastFollowUpFinishedAt = Date.now();
@@ -6752,7 +6938,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   normalizeAvailableMessageIds: () => (/* binding */ normalizeAvailableMessageIds),
 /* harmony export */   normalizeChannel: () => (/* binding */ normalizeChannel),
 /* harmony export */   normalizeChannels: () => (/* binding */ normalizeChannels),
-/* harmony export */   normalizeDaysLeft: () => (/* reexport safe */ _tg_core_utils_spam_limit__WEBPACK_IMPORTED_MODULE_5__.normalizeDaysLeft),
+/* harmony export */   normalizeDaysLeft: () => (/* reexport safe */ _tg_core_utils_spam_limit__WEBPACK_IMPORTED_MODULE_6__.normalizeDaysLeft),
 /* harmony export */   normalizeMessageCheckResult: () => (/* binding */ normalizeMessageCheckResult),
 /* harmony export */   normalizeMessageSource: () => (/* binding */ normalizeMessageSource),
 /* harmony export */   normalizeMessageStrategy: () => (/* binding */ normalizeMessageStrategy),
@@ -6779,10 +6965,12 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _channel_intelligence_channel_intelligence_types__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../../channel-intelligence/channel-intelligence.types */ "../../packages/tg-channel-state/src/channel-message-promotions/channel-intelligence/channel-intelligence.types.ts");
 /* harmony import */ var _pool__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../../pool */ "../../packages/tg-channel-state/src/channel-message-promotions/pool/index.ts");
 /* harmony import */ var _pool_pool_types__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../../pool/pool-types */ "../../packages/tg-channel-state/src/channel-message-promotions/pool/pool-types.ts");
-/* harmony import */ var _utils_channel_id__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../../utils/channel-id */ "../../packages/tg-channel-state/src/channel-message-promotions/utils/channel-id.ts");
-/* harmony import */ var _utils_guards__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../../../utils/guards */ "../../packages/tg-channel-state/src/utils/guards.ts");
-/* harmony import */ var _tg_core_utils_spam_limit__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! @tg/core/utils/spam-limit */ "../../packages/tg-core/src/utils/spam-limit.ts");
+/* harmony import */ var _promotion_message_queue__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../promotion-message-queue */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/promotion-message-queue.ts");
+/* harmony import */ var _utils_channel_id__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../../utils/channel-id */ "../../packages/tg-channel-state/src/channel-message-promotions/utils/channel-id.ts");
+/* harmony import */ var _utils_guards__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ../../../utils/guards */ "../../packages/tg-channel-state/src/utils/guards.ts");
+/* harmony import */ var _tg_core_utils_spam_limit__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! @tg/core/utils/spam-limit */ "../../packages/tg-core/src/utils/spam-limit.ts");
 // PromotionFlowRunner: pure normalisers and guards for adapter/hook results.
+
 
 
 
@@ -6811,12 +6999,12 @@ function safeIntervalMs(value, fallback) {
     return Math.max(1000, delayMs);
 }
 function normalizeStats(value) {
-    const stats = (0,_utils_guards__WEBPACK_IMPORTED_MODULE_4__.isRecord)(value) ? value : {};
+    const stats = (0,_utils_guards__WEBPACK_IMPORTED_MODULE_5__.isRecord)(value) ? value : {};
     return {
         successCount: safeNonNegativeInt(asNumber(stats['successCount'])),
         failedCount: safeNonNegativeInt(asNumber(stats['failedCount'])),
         failStreak: safeNonNegativeInt(asNumber(stats['failStreak'])),
-        daysLeft: (0,_tg_core_utils_spam_limit__WEBPACK_IMPORTED_MODULE_5__.normalizeDaysLeft)(asNumber(stats['daysLeft'])),
+        daysLeft: (0,_tg_core_utils_spam_limit__WEBPACK_IMPORTED_MODULE_6__.normalizeDaysLeft)(asNumber(stats['daysLeft'])),
     };
 }
 /**
@@ -6828,7 +7016,7 @@ function normalizeStats(value) {
  */
 
 function normalizeMessageCheckResult(value) {
-    if (!(0,_utils_guards__WEBPACK_IMPORTED_MODULE_4__.isRecord)(value) || !(value['status'] === 'exists'
+    if (!(0,_utils_guards__WEBPACK_IMPORTED_MODULE_5__.isRecord)(value) || !(value['status'] === 'exists'
         || value['status'] === 'deleted'
         || value['status'] === 'unknown')) {
         return { status: 'unknown' };
@@ -6860,7 +7048,7 @@ function normalizeMessageText(value) {
     return normalized.length > 0 ? normalized : undefined;
 }
 function normalizeSendResult(value, candidate) {
-    if (!(0,_utils_guards__WEBPACK_IMPORTED_MODULE_4__.isRecord)(value)) {
+    if (!(0,_utils_guards__WEBPACK_IMPORTED_MODULE_5__.isRecord)(value)) {
         return {
             sent: false,
             messageIndex: candidate.randomIndex,
@@ -6904,9 +7092,9 @@ function normalizeChannels(value) {
     return channels;
 }
 function normalizeChannel(value) {
-    if (!(0,_utils_guards__WEBPACK_IMPORTED_MODULE_4__.isRecord)(value))
+    if (!(0,_utils_guards__WEBPACK_IMPORTED_MODULE_5__.isRecord)(value))
         return null;
-    const channelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_3__.normalizeChannelId)(value['channelId']);
+    const channelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_4__.normalizeChannelId)(value['channelId']);
     if (!channelId)
         return null;
     return {
@@ -6932,21 +7120,25 @@ function normalizeAvailableMessageIds(value) {
         .map((item) => (typeof item === 'string' ? item.trim() : ''))
         .filter((item) => item.length > 0);
 }
-function normalizeReadyMessages(value) {
+/**
+ * `keepWorkIdentity` (flow v3, `fu` on): use the queue's one normalizer, which keeps `workType`,
+ * `sentAt` and `dueAt`. Off: today's normalizer, which drops them (P2 fix 8: the flag gates it).
+ */
+function normalizeReadyMessages(value, keepWorkIdentity = false) {
     if (!Array.isArray(value))
         return [];
     const messages = [];
     for (const item of value) {
-        const message = normalizeReadyMessage(item);
+        const message = keepWorkIdentity ? (0,_promotion_message_queue__WEBPACK_IMPORTED_MODULE_3__.normalizeQueuedMessage)(item) : normalizeReadyMessage(item);
         if (message)
             messages.push({ message, original: item });
     }
     return messages;
 }
 function normalizeReadyMessage(value) {
-    if (!(0,_utils_guards__WEBPACK_IMPORTED_MODULE_4__.isRecord)(value))
+    if (!(0,_utils_guards__WEBPACK_IMPORTED_MODULE_5__.isRecord)(value))
         return null;
-    const channelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_3__.normalizeChannelId)(value['channelId']);
+    const channelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_4__.normalizeChannelId)(value['channelId']);
     const messageId = asNumber(value['messageId']);
     if (!channelId || !isValidMessageId(messageId))
         return null;
@@ -7012,10 +7204,10 @@ function normalizePoolMode(value) {
         : null;
 }
 function asRunnerOptions(value) {
-    return (0,_utils_guards__WEBPACK_IMPORTED_MODULE_4__.isRecord)(value) ? value : {};
+    return (0,_utils_guards__WEBPACK_IMPORTED_MODULE_5__.isRecord)(value) ? value : {};
 }
 function isAdapterLike(value) {
-    return (0,_utils_guards__WEBPACK_IMPORTED_MODULE_4__.isRecord)(value)
+    return (0,_utils_guards__WEBPACK_IMPORTED_MODULE_5__.isRecord)(value)
         && typeof value['isActive'] === 'function'
         && typeof value['getStats'] === 'function'
         && typeof value['loadChannels'] === 'function'
@@ -7026,8 +7218,8 @@ function isAdapterLike(value) {
         && typeof value['checkMessage'] === 'function';
 }
 function isAccountLike(value) {
-    return (0,_utils_guards__WEBPACK_IMPORTED_MODULE_4__.isRecord)(value)
-        && (0,_utils_guards__WEBPACK_IMPORTED_MODULE_4__.isRecord)(value['intelligence'])
+    return (0,_utils_guards__WEBPACK_IMPORTED_MODULE_5__.isRecord)(value)
+        && (0,_utils_guards__WEBPACK_IMPORTED_MODULE_5__.isRecord)(value['intelligence'])
         && typeof value['recordSuccess'] === 'function'
         && typeof value['recordDeletion'] === 'function'
         && typeof value['recordFailure'] === 'function'
@@ -7089,7 +7281,7 @@ function shouldRecordExploreFromCandidate(candidate, isFollowUp) {
     return resolveCandidatePoolMode(candidate, isFollowUp) === 'explore';
 }
 function isMessageQueueLike(value) {
-    return (0,_utils_guards__WEBPACK_IMPORTED_MODULE_4__.isRecord)(value)
+    return (0,_utils_guards__WEBPACK_IMPORTED_MODULE_5__.isRecord)(value)
         && typeof value['size'] === 'number'
         && typeof value['enqueue'] === 'function'
         && typeof value['isQueued'] === 'function'
@@ -7223,10 +7415,13 @@ async function recordSuccess(host, channel, candidate, result, isFollowUp, perce
     await host.recordSeedProbeIfLearning(channel, candidate, result, isFollowUp);
     if ((0,_normalize__WEBPACK_IMPORTED_MODULE_5__.isValidMessageId)(result.messageId)) {
         const poolMode = (0,_normalize__WEBPACK_IMPORTED_MODULE_5__.resolveCandidatePoolMode)(candidate, isFollowUp);
+        const sentAt = Date.now();
         const queuedMessage = {
             channelId: channel.channelId,
             messageId: result.messageId,
-            timestamp: Date.now(),
+            timestamp: sentAt,
+            // Flow v3: the post's send time, set once here and never rewritten.
+            ...(host.isFollowUpV3() ? { sentAt } : {}),
             messageIndex: result.messageIndex,
             strategy,
             isFollowUp,
@@ -7349,7 +7544,8 @@ function resolveCandidateStrategy(candidate) {
 async function recordDeletion(host, message, deletionPolicy, reason = 'message_missing') {
     const strategy = message.strategy || deletionPolicy.strategy || 'legacy';
     // Survival is measured once (check time - send time) and used by the row, the ring and the log.
-    const survivalMs = (0,_normalize__WEBPACK_IMPORTED_MODULE_5__.safeElapsedMs)(message.timestamp);
+    // Flow v3 (P3, N1): from `sentAt`, never a re-armed `timestamp`. `fu` off strips `sentAt`, so today's value stays.
+    const survivalMs = (0,_normalize__WEBPACK_IMPORTED_MODULE_5__.safeElapsedMs)(message.sentAt ?? message.timestamp);
     // A delivered message that the channel later removed. The send itself was already recorded as
     // 'delivered'; this is a SECOND row describing the outcome after the fact, which is exactly the
     // history Mongo cannot answer (its messagePool counters are overwritten in place).
@@ -7702,6 +7898,10 @@ __webpack_require__.r(__webpack_exports__);
 
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   FOLLOW_UP_MAX_LATE_MS_PROMOTE: () => (/* binding */ FOLLOW_UP_MAX_LATE_MS_PROMOTE),
+/* harmony export */   FOLLOW_UP_MAX_LATE_MS_TGAUT: () => (/* binding */ FOLLOW_UP_MAX_LATE_MS_TGAUT),
+/* harmony export */   FOLLOW_UP_V3_GAP_MS: () => (/* binding */ FOLLOW_UP_V3_GAP_MS),
+/* harmony export */   PROMO_FLAGS_QUEUE_REFRESH_MS: () => (/* binding */ PROMO_FLAGS_QUEUE_REFRESH_MS),
 /* harmony export */   PromotionFlowRunner: () => (/* binding */ PromotionFlowRunner)
 /* harmony export */ });
 /* harmony import */ var _channel_intelligence_channel_intelligence_schema__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../channel-intelligence/channel-intelligence-schema */ "../../packages/tg-channel-state/src/channel-message-promotions/channel-intelligence/channel-intelligence-schema.ts");
@@ -7713,15 +7913,16 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _tg_core_utils_spam_limit__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! @tg/core/utils/spam-limit */ "../../packages/tg-core/src/utils/spam-limit.ts");
 /* harmony import */ var _tg_core_utils_own_channels__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! @tg/core/utils/own-channels */ "../../packages/tg-core/src/utils/own-channels.ts");
 /* harmony import */ var _promotion_message_queue__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ./promotion-message-queue */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/promotion-message-queue.ts");
-/* harmony import */ var _logging_promo_logger__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ../logging/promo-logger */ "../../packages/tg-channel-state/src/channel-message-promotions/logging/promo-logger.ts");
-/* harmony import */ var _flow_runner_normalize__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ./flow-runner/normalize */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/normalize.ts");
-/* harmony import */ var _flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ./flow-runner/outcome-recording */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/outcome-recording.ts");
-/* harmony import */ var _flow_runner_follow_up__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! ./flow-runner/follow-up */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/follow-up.ts");
-/* harmony import */ var _flow_runner_heartbeat__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! ./flow-runner/heartbeat */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/heartbeat.ts");
-/* harmony import */ var _flow_runner_send_budget__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! ./flow-runner/send-budget */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/send-budget.ts");
-/* harmony import */ var _flow_runner_formatting__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! ./flow-runner/formatting */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/formatting.ts");
-/* harmony import */ var _tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! @tg/core/utils/dc-ip-family */ "../../packages/tg-core/src/utils/dc-ip-family.ts");
-/* harmony import */ var _flow_runner_cycle_metrics__WEBPACK_IMPORTED_MODULE_17__ = __webpack_require__(/*! ./flow-runner/cycle-metrics */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/cycle-metrics.ts");
+/* harmony import */ var _config_promo_flags_v3__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ../config/promo-flags-v3 */ "../../packages/tg-channel-state/src/channel-message-promotions/config/promo-flags-v3.ts");
+/* harmony import */ var _logging_promo_logger__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ../logging/promo-logger */ "../../packages/tg-channel-state/src/channel-message-promotions/logging/promo-logger.ts");
+/* harmony import */ var _flow_runner_normalize__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ./flow-runner/normalize */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/normalize.ts");
+/* harmony import */ var _flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! ./flow-runner/outcome-recording */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/outcome-recording.ts");
+/* harmony import */ var _flow_runner_follow_up__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! ./flow-runner/follow-up */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/follow-up.ts");
+/* harmony import */ var _flow_runner_heartbeat__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! ./flow-runner/heartbeat */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/heartbeat.ts");
+/* harmony import */ var _flow_runner_send_budget__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! ./flow-runner/send-budget */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/send-budget.ts");
+/* harmony import */ var _flow_runner_formatting__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! ./flow-runner/formatting */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/formatting.ts");
+/* harmony import */ var _tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_17__ = __webpack_require__(/*! @tg/core/utils/dc-ip-family */ "../../packages/tg-core/src/utils/dc-ip-family.ts");
+/* harmony import */ var _flow_runner_cycle_metrics__WEBPACK_IMPORTED_MODULE_18__ = __webpack_require__(/*! ./flow-runner/cycle-metrics */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/cycle-metrics.ts");
 
 
 
@@ -7748,16 +7949,35 @@ function raceTimeout(work, ms) {
 
 
 
-const poolLog = new _logging_promo_logger__WEBPACK_IMPORTED_MODULE_9__.PromoLogger('pool');
-const promoLog = new _logging_promo_logger__WEBPACK_IMPORTED_MODULE_9__.PromoLogger('promo');
+
+const poolLog = new _logging_promo_logger__WEBPACK_IMPORTED_MODULE_10__.PromoLogger('pool');
+const promoLog = new _logging_promo_logger__WEBPACK_IMPORTED_MODULE_10__.PromoLogger('promo');
 const defaultSleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const FAILED_CHANNEL_RETRY_MIN_MS = 5000;
 const FAILED_CHANNEL_RETRY_MAX_MS = 10000;
+/** Flow v3 (owner decision 1, doc 3.5): a follow-up is dropped this long past due. */
+const FOLLOW_UP_MAX_LATE_MS_TGAUT = 30 * 60 * 1000;
+const FOLLOW_UP_MAX_LATE_MS_PROMOTE = 90 * 60 * 1000;
+/** Flow v3 interim pacer (P2 fix 5, until P8): at least this gap between follow-ups from either path. */
+const FOLLOW_UP_V3_GAP_MS = 5 * 60 * 1000;
+/** Flow v3 (review M2): the queue checker re-reads the flag hash at most this often. */
+const PROMO_FLAGS_QUEUE_REFRESH_MS = 60 * 1000;
+/** Flow v3 (review L7): at most one marker_error warn per runner per this window. */
+const MARKER_ERROR_LOG_EVERY_MS = 60 * 1000;
 /** The instance as the flow-runner/* modules see it (same object; private members by name). */
 const hostOf = (runner) => runner;
 class PromotionFlowRunner {
     constructor(adapter, options) {
         this.followUpTimers = new Map();
+        /** Flow v3: the durable item each follow-up timer owns, so a replaced timer's item leaves by key. */
+        this.followUpTimerWork = new Map();
+        /** Flow v3 flags, read at each cycle start (doc 6) and by the queue checker at most once per 60 s. */
+        this.promoFlags = { ..._config_promo_flags_v3__WEBPACK_IMPORTED_MODULE_9__.PROMO_FLAGS_DEFAULTS };
+        this.promoFlagsPrimed = false;
+        this.promoFlagsReadAt = Number.NEGATIVE_INFINITY;
+        this.lastFollowUpAt = 0;
+        this.markerErrorLogAt = Number.NEGATIVE_INFINITY;
+        this.markerErrorSuppressed = 0;
         /** Instance field, not a prototype method: flow-runner-seams pins the prototype method list. */
         this.isOwnChannel = (channel) => this.ownChannels.isOwnChannel(channel.channelId, channel.username ?? null);
         /** This cycle's pick annotations by channelId (shadow/v2 measurement; empty in legacy). */
@@ -7788,9 +8008,9 @@ class PromotionFlowRunner {
         };
         /** P0 measurement (instance fields: the prototype seam list is pinned). Logs only, never writes state. */
         // fu_sent and sends_1h live in this runner instance: both start again at 0 on every runner restart.
-        this.sendWindow = new _flow_runner_cycle_metrics__WEBPACK_IMPORTED_MODULE_17__.PromoSendWindow();
+        this.sendWindow = new _flow_runner_cycle_metrics__WEBPACK_IMPORTED_MODULE_18__.PromoSendWindow();
         this.fuSentSinceCycleEnd = 0;
-        this.verifyCloses = new _flow_runner_cycle_metrics__WEBPACK_IMPORTED_MODULE_17__.PromoVerifyCloses();
+        this.verifyCloses = new _flow_runner_cycle_metrics__WEBPACK_IMPORTED_MODULE_18__.PromoVerifyCloses();
         /** A main-path hourly-cap wait was declared during this cycle (follow-up waits do not count). */
         this.cycleWaitDeclared = false;
         /** Read-only copies of the queued items; [] for a queue without list(). */
@@ -7805,9 +8025,9 @@ class PromotionFlowRunner {
         };
         /** One log-only sweep: counts queue items past their would-be `until`. Drops nothing. */
         this.runSweepOnce = (nowMs = Date.now()) => {
-            const result = (0,_flow_runner_cycle_metrics__WEBPACK_IMPORTED_MODULE_17__.sweepQueueItems)(this.queueItems(), nowMs, this.options.pickerApp ?? null);
+            const result = (0,_flow_runner_cycle_metrics__WEBPACK_IMPORTED_MODULE_18__.sweepQueueItems)(this.queueItems(), nowMs, this.options.pickerApp ?? null);
             const alert = result.droppedVerify > 0 || result.droppedFu > 0;
-            this.log(alert ? 'warn' : 'info', (0,_flow_runner_cycle_metrics__WEBPACK_IMPORTED_MODULE_17__.formatPromoSweep)((0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_16__.maskMobile)(this.options.account.mobile), result, this.verifyCloses.takeDelta('sweep')));
+            this.log(alert ? 'warn' : 'info', (0,_flow_runner_cycle_metrics__WEBPACK_IMPORTED_MODULE_18__.formatPromoSweep)((0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_17__.maskMobile)(this.options.account.mobile), result, this.verifyCloses.takeDelta('sweep')));
             return result;
         };
         this.queueCheckInterval = null;
@@ -7846,20 +8066,20 @@ class PromotionFlowRunner {
             totalDurabilityFailures: 0,
             consecutiveCycleFailures: 0,
         };
-        if (!(0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_10__.isAdapterLike)(adapter)) {
+        if (!(0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_11__.isAdapterLike)(adapter)) {
             throw new Error('PromotionFlowRunner adapter is required');
         }
-        const safeOptions = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_10__.asRunnerOptions)(options);
-        if (!(0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_10__.isAccountLike)(safeOptions.account)) {
+        const safeOptions = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_11__.asRunnerOptions)(options);
+        if (!(0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_11__.isAccountLike)(safeOptions.account)) {
             throw new Error('PromotionFlowRunner account context is required');
         }
         this.adapter = adapter;
         this.options = safeOptions;
         this.ownChannels = safeOptions.ownChannels ?? _tg_core_utils_own_channels__WEBPACK_IMPORTED_MODULE_7__.OwnChannelRegistry.getInstance();
-        this.messageQueue = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_10__.isMessageQueueLike)(safeOptions.messageQueue)
+        this.messageQueue = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_11__.isMessageQueueLike)(safeOptions.messageQueue)
             ? safeOptions.messageQueue
             : new _promotion_message_queue__WEBPACK_IMPORTED_MODULE_8__.PromotionMessageQueue(safeOptions.maxQueueSize ?? 500);
-        this.heartbeat = new _flow_runner_heartbeat__WEBPACK_IMPORTED_MODULE_13__.PromoHeartbeat(async (sends) => {
+        this.heartbeat = new _flow_runner_heartbeat__WEBPACK_IMPORTED_MODULE_14__.PromoHeartbeat(async (sends) => {
             if (!this.running)
                 return;
             // Same reads as the cycle-end line: stats + the daily cap snapshot (one Redis read per interval).
@@ -7872,18 +8092,18 @@ class PromotionFlowRunner {
             catch {
                 spamStatus = null;
             }
-            this.log('info', (0,_flow_runner_heartbeat__WEBPACK_IMPORTED_MODULE_13__.formatPromoHeartbeat)({
-                mobile: (0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_16__.maskMobile)(this.options.account.mobile),
+            this.log('info', (0,_flow_runner_heartbeat__WEBPACK_IMPORTED_MODULE_14__.formatPromoHeartbeat)({
+                mobile: (0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_17__.maskMobile)(this.options.account.mobile),
                 intervalMs: this.heartbeat.intervalMs,
                 sends,
                 capCount: budget ? budget.count : null,
                 cap: budget ? budget.cap : null,
                 daysLeft: stats.daysLeft,
-                health: (0,_flow_runner_heartbeat__WEBPACK_IMPORTED_MODULE_13__.promoHealthTier)(stats.daysLeft, spamStatus),
+                health: (0,_flow_runner_heartbeat__WEBPACK_IMPORTED_MODULE_14__.promoHealthTier)(stats.daysLeft, spamStatus),
                 queueSize: this.messageQueue.size,
             }));
         }, safeOptions.heartbeatIntervalMs);
-        this.sweep = new _flow_runner_cycle_metrics__WEBPACK_IMPORTED_MODULE_17__.PromoSweep(() => {
+        this.sweep = new _flow_runner_cycle_metrics__WEBPACK_IMPORTED_MODULE_18__.PromoSweep(() => {
             if (this.running)
                 this.runSweepOnce();
         }, safeOptions.sweepIntervalMs);
@@ -7927,6 +8147,7 @@ class PromotionFlowRunner {
             clearTimeout(timeout);
         }
         this.followUpTimers.clear();
+        this.followUpTimerWork.clear();
         this.health.stoppedAt = Date.now();
         this.status = 'stopped';
         this.log('info', 'Promotion runner stopped; cleared queued follow-up timers');
@@ -7934,6 +8155,9 @@ class PromotionFlowRunner {
     async start() {
         if (this.running)
             return;
+        // Flags first: restore applies the v3 age and legacy rules only under `fu` on. Counts as the first cycle's read.
+        await this.refreshPromoFlags();
+        this.promoFlagsPrimed = true;
         await this.restoreQueuedMessages();
         this.running = true;
         this.startedByStart = true;
@@ -7943,19 +8167,19 @@ class PromotionFlowRunner {
         this.startQueueChecker();
         this.heartbeat.start();
         this.sweep.start();
-        this.log('info', `Promotion runner started; batchTarget=${(0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_10__.safeBatchTarget)(this.options.batchTarget, Number.MAX_SAFE_INTEGER)} queueSize=${this.messageQueue.size}`);
+        this.log('info', `Promotion runner started; batchTarget=${(0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_11__.safeBatchTarget)(this.options.batchTarget, Number.MAX_SAFE_INTEGER)} queueSize=${this.messageQueue.size}`);
         try {
             while (this.running) {
                 let active = false;
                 try {
-                    active = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_10__.isExactTrue)(await this.adapter.isActive());
+                    active = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_11__.isExactTrue)(await this.adapter.isActive());
                 }
                 catch (error) {
                     const normalizedError = this.normalizeError(error);
                     this.recordCycleFailure(normalizedError);
                     this.log('error', `Promotion active-state check failed; keeping runner alive error=${normalizedError}`);
                     if (this.running)
-                        await this.sleep((0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_10__.safeDelayMs)(this.options.channelLoopDelayMs, 5000));
+                        await this.sleep((0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_11__.safeDelayMs)(this.options.channelLoopDelayMs, 5000));
                     continue;
                 }
                 if (!active)
@@ -7973,7 +8197,7 @@ class PromotionFlowRunner {
                     this.log('error', `Promotion cycle failed: ${normalizedError}`);
                 }
                 if (this.running)
-                    await this.sleep((0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_10__.safeDelayMs)(this.options.channelLoopDelayMs, 5000));
+                    await this.sleep((0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_11__.safeDelayMs)(this.options.channelLoopDelayMs, 5000));
             }
         }
         finally {
@@ -7982,6 +8206,10 @@ class PromotionFlowRunner {
         }
     }
     async runOnce() {
+        if (this.promoFlagsPrimed)
+            this.promoFlagsPrimed = false;
+        else
+            await this.refreshPromoFlagsBetweenPasses();
         await this.restoreQueuedMessages();
         this.health.lastCycleStartedAt = Date.now();
         this.cycleWaitDeclared = false;
@@ -7990,7 +8218,7 @@ class PromotionFlowRunner {
             await this.checkQueuedMessages();
             let channels = [];
             try {
-                channels = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_10__.normalizeChannels)(await this.adapter.loadChannels());
+                channels = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_11__.normalizeChannels)(await this.adapter.loadChannels());
             }
             catch (error) {
                 const normalizedError = this.normalizeError(error);
@@ -8013,14 +8241,14 @@ class PromotionFlowRunner {
                             docById.set(id, doc);
                     }
                     const docOf = (channelId) => docById.get((0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_4__.normalizeChannelId)(channelId) ?? '') ?? null;
-                    poolClass = (0,_flow_runner_cycle_metrics__WEBPACK_IMPORTED_MODULE_17__.classifyLoadedPool)({
+                    poolClass = (0,_flow_runner_cycle_metrics__WEBPACK_IMPORTED_MODULE_18__.classifyLoadedPool)({
                         channels: loadedChannels,
                         isOwn: (channel) => this.isOwnChannel(channel),
                         chanblocked: (channelId) => blocked.has(channelId),
                         inCooldown: (channelId) => this.messageQueue.isQueued(channelId) || this.followUpTimers.has(channelId),
                         isDead: (channelId) => deadIds.has((0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_4__.normalizeChannelId)(channelId) ?? ''),
                         safetyBlocked: (channelId) => docOf(channelId)?.safety.status === 'blocked',
-                        healthChannel: (channel) => (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_10__.mergePromotionHealthSignals)(channel, docOf(channel.channelId)),
+                        healthChannel: (channel) => (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_11__.mergePromotionHealthSignals)(channel, docOf(channel.channelId)),
                     });
                 }
                 catch {
@@ -8045,7 +8273,7 @@ class PromotionFlowRunner {
                 failStreak: stats.failStreak,
                 includeJitter: true,
             });
-            const batchTarget = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_10__.safeBatchTarget)(this.options.batchTarget, batchPolicy.limit);
+            const batchTarget = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_11__.safeBatchTarget)(this.options.batchTarget, batchPolicy.limit);
             let selectedChannels;
             let selectionExploreDenied = 0;
             const pickerMode = (0,_selection_picker__WEBPACK_IMPORTED_MODULE_2__.readPickerMode)(process.env, this.options.pickerApp ?? null);
@@ -8289,15 +8517,15 @@ class PromotionFlowRunner {
                 catch {
                     banGateTripped = false;
                 }
-                measurementFields = (0,_flow_runner_cycle_metrics__WEBPACK_IMPORTED_MODULE_17__.formatCycleEndFields)({
+                measurementFields = (0,_flow_runner_cycle_metrics__WEBPACK_IMPORTED_MODULE_18__.formatCycleEndFields)({
                     mainSent: cycleTally.sent,
                     fuSent,
                     pool: poolClass,
                     eligibleSource,
-                    sweep: (0,_flow_runner_cycle_metrics__WEBPACK_IMPORTED_MODULE_17__.sweepQueueItems)(items, nowMs, app),
+                    sweep: (0,_flow_runner_cycle_metrics__WEBPACK_IMPORTED_MODULE_18__.sweepQueueItems)(items, nowMs, app),
                     verifyCloses: this.verifyCloses.takeDelta('cycle'),
                     sends1h: this.sendWindow.counts(nowMs),
-                    quiet: (0,_flow_runner_cycle_metrics__WEBPACK_IMPORTED_MODULE_17__.decideQuietReason)({
+                    quiet: (0,_flow_runner_cycle_metrics__WEBPACK_IMPORTED_MODULE_18__.decideQuietReason)({
                         mainSent: cycleTally.sent,
                         budgetExhausted: cycleTally.budget > 0 || (!!budgetSnapshot && budgetSnapshot.remaining <= 0),
                         hourlyCapWait: this.cycleWaitDeclared,
@@ -8314,7 +8542,7 @@ class PromotionFlowRunner {
             // Per-mobile cycle-end line (no new Redis reads: reuses this cycle's budget snapshot + stats). The
             // timed `promo heartbeat` (flow-runner/heartbeat.ts) covers the hours inside a long paced cycle.
             this.log('info', [
-                `[${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_16__.maskMobile)(this.options.account.mobile)}] promo cycle end`,
+                `[${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_17__.maskMobile)(this.options.account.mobile)}] promo cycle end`,
                 `sends(cycle)=${cycleTally.sent}`,
                 `capCount=${budgetSnapshot ? budgetSnapshot.count : 'n/a'}/cap=${budgetSnapshot ? budgetSnapshot.cap : 'n/a'}`,
                 `daysLeft=${stats.daysLeft}`,
@@ -8335,7 +8563,7 @@ class PromotionFlowRunner {
         }
     }
     async processChannel(rawChannel, isFollowUp, refreshBeforePlanning = false) {
-        let channel = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_10__.normalizeChannel)(rawChannel);
+        let channel = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_11__.normalizeChannel)(rawChannel);
         if (!channel) {
             this.log('warn', `Promotion channel attempt skipped; malformed channel=${this.safeJson(rawChannel)}`);
             return 'skipped';
@@ -8347,7 +8575,7 @@ class PromotionFlowRunner {
         }
         if (refreshBeforePlanning) {
             try {
-                const refreshed = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_10__.normalizeChannel)(await this.adapter.getChannel(channel.channelId));
+                const refreshed = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_11__.normalizeChannel)(await this.adapter.getChannel(channel.channelId));
                 if (!refreshed) {
                     this.log('debug', `Promotion channel attempt skipped after final state reload; ${this.formatChannel(channel)}`);
                     return 'skipped';
@@ -8371,13 +8599,13 @@ class PromotionFlowRunner {
         catch (error) {
             this.log('warn', `Promotion intelligence doc load failed; using cold-start strategy; ${this.formatChannel(channel)} error=${this.normalizeError(error)}`);
         }
-        const mergedChannel = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_10__.mergePromotionHealthSignals)(channel, doc);
+        const mergedChannel = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_11__.mergePromotionHealthSignals)(channel, doc);
         const planningChannel = mergedChannel;
         const eligible = await this.evaluateEligibility(planningChannel, doc, percentiles, isFollowUp);
         if (!eligible)
             return 'skipped';
         const stats = await this.getStatsOrDefault('message planning');
-        const availableMessageIds = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_10__.normalizeAvailableMessageIds)(planningChannel.availableMsgs);
+        const availableMessageIds = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_11__.normalizeAvailableMessageIds)(planningChannel.availableMsgs);
         const messagePolicyInput = {
             isFollowUp,
             ...(planningChannel.freeformDeletedCount !== undefined
@@ -8480,13 +8708,18 @@ class PromotionFlowRunner {
         }
     }
     async checkQueuedMessagesOnce() {
+        // Review M2: a flag rollback reaches a long cycle within about a minute. Read only here, at the
+        // start of a pass, so the mode never changes inside one.
+        if (Date.now() - this.promoFlagsReadAt >= PROMO_FLAGS_QUEUE_REFRESH_MS)
+            await this.refreshPromoFlags();
         this.health.lastQueueCheckStartedAt = Date.now();
         try {
             const now = Date.now();
-            const checkDelay = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_10__.safeDelayMs)(this.options.messageCheckDelayMs, 15000);
+            const v3 = this.isFollowUpV3();
+            const checkDelay = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_11__.safeDelayMs)(this.options.messageCheckDelayMs, 15000);
             let ready = [];
             try {
-                ready = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_10__.normalizeReadyMessages)(this.messageQueue.readyForCheck(now, checkDelay));
+                ready = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_11__.normalizeReadyMessages)(this.messageQueue.readyForCheck(now, checkDelay), v3);
             }
             catch (error) {
                 this.log('warn', `Promotion queue ready check failed; skipping queue pass error=${this.normalizeError(error)}`);
@@ -8500,6 +8733,11 @@ class PromotionFlowRunner {
                     break;
                 }
                 const { message } = entry;
+                if (v3 && message.workType === 'followUp') {
+                    if (await this.handleQueuedFollowUpV3(message) === 'done')
+                        completed.add(entry);
+                    continue;
+                }
                 if (message.workType === 'followUp') {
                     if (this.followUpTimers.has(message.channelId))
                         continue;
@@ -8516,7 +8754,7 @@ class PromotionFlowRunner {
                 }
                 let result;
                 try {
-                    result = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_10__.normalizeMessageCheckResult)(await this.adapter.checkMessage(message));
+                    result = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_11__.normalizeMessageCheckResult)(await this.adapter.checkMessage(message));
                 }
                 catch (error) {
                     this.log('warn', [
@@ -8528,8 +8766,14 @@ class PromotionFlowRunner {
                     ].join('; '));
                     continue;
                 }
+                if (v3 && (result.status === 'exists' || result.status === 'deleted')) {
+                    // P3: the one survival writer, once per verify key.
+                    if (await this.recordVerifiedOutcome(message, result) === 'done')
+                        completed.add(entry);
+                    continue;
+                }
                 if (result.status === 'exists') {
-                    const existingMessage = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_10__.withMessageCheckText)(message, result);
+                    const existingMessage = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_11__.withMessageCheckText)(message, result);
                     this.log('debug', `Promotion message exists; channelId=${message.channelId} messageId=${message.messageId} isFollowUp=${message.isFollowUp}`);
                     await this.callHook('onMessageExisting', () => this.adapter.onMessageExisting?.(existingMessage));
                     await this.recordAccountSurvival(message);
@@ -8567,9 +8811,200 @@ class PromotionFlowRunner {
             this.health.lastQueueCheckFinishedAt = Date.now();
         }
     }
+    /**
+     * Flow v3 (P2 fix 5): a queued follow-up under `fu` on. Never reaches checkMessage and never writes
+     * survival. Expiry before the claim; shared 5 min pacer with the timer path.
+     */
+    async handleQueuedFollowUpV3(message) {
+        const key = (0,_promotion_message_queue__WEBPACK_IMPORTED_MODULE_8__.queueItemKey)(message);
+        if (message.dueAt === undefined || message.sentAt === undefined) {
+            this.log('info', `promo follow-up drop | ${key} | reason=legacy_no_dueAt`);
+            return 'done';
+        }
+        if (this.followUpTimers.has(message.channelId))
+            return 'keep';
+        const nowMs = Date.now();
+        if (nowMs > message.dueAt + this.followUpMaxLateMs()) {
+            this.log('info', `promo follow-up drop | ${key} | reason=expired | late_min=${Math.round((nowMs - message.dueAt) / 60000)}`);
+            return 'done';
+        }
+        if (nowMs < message.dueAt)
+            return 'keep';
+        // Review L1: the slot is taken before the claim await, and given back when nothing is sent.
+        const slot = this.reserveFollowUpSlot(nowMs);
+        if (!slot)
+            return 'keep';
+        let sent = false;
+        try {
+            const claimed = await this.claimFollowUpExecution(message);
+            if (claimed === null)
+                return 'keep';
+            if (!claimed)
+                return 'done';
+            sent = await this.runFollowUp(message);
+            return 'done';
+        }
+        finally {
+            if (!sent)
+                this.releaseFollowUpSlot(slot);
+        }
+    }
+    /**
+     * Flow v3 P3: the only writer of survival, explore, pool, onMessageExisting and deletion records,
+     * for a verify item. A Redis SET NX marker per verify key makes it once across restarts; on a marker
+     * error nothing is recorded and the item stays for the next check (a missed record beats a double one).
+     * A follow-up is scheduled only from here, after a first survival.
+     */
+    async recordVerifiedOutcome(message, result) {
+        const key = (0,_promotion_message_queue__WEBPACK_IMPORTED_MODULE_8__.queueItemKey)(message);
+        let first = true;
+        try {
+            const queue = this.messageQueue;
+            if (typeof queue.markRecorded === 'function')
+                first = await queue.markRecorded(message);
+        }
+        catch (error) {
+            // Review L7: during a Redis outage every verify item fails on every pass; one warn per 60 s.
+            const nowMs = Date.now();
+            if (nowMs - this.markerErrorLogAt >= MARKER_ERROR_LOG_EVERY_MS) {
+                this.log('warn', `promo record skipped | ${key} | reason=marker_error | suppressed=${this.markerErrorSuppressed} | error=${this.normalizeError(error)}`);
+                this.markerErrorLogAt = nowMs;
+                this.markerErrorSuppressed = 0;
+            }
+            else {
+                this.markerErrorSuppressed += 1;
+            }
+            return 'keep';
+        }
+        if (!first) {
+            this.log('info', `promo record skipped | ${key} | reason=already_recorded`);
+            return 'done';
+        }
+        const sentAt = message.sentAt ?? message.timestamp;
+        if (result.status === 'exists') {
+            const existingMessage = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_11__.withMessageCheckText)(message, result);
+            this.log('debug', `Promotion message exists; channelId=${message.channelId} messageId=${message.messageId} isFollowUp=${message.isFollowUp}`);
+            await this.callHook('onMessageExisting', () => this.adapter.onMessageExisting?.(existingMessage));
+            await this.recordAccountSurvival(message);
+            await this.recordExploreSurvival(message);
+            await this.recordPoolOutcome(message, 'survived');
+            await this.scheduleFollowUp(message);
+            this.verifyCloses.note(sentAt, Date.now());
+            return 'done';
+        }
+        const deletionPolicy = (0,_policy__WEBPACK_IMPORTED_MODULE_5__.evaluateDeletionPolicy)(message.messageIndex, message.availableMessageCount);
+        await this.recordDeletion(message, deletionPolicy, result.reason ?? 'message_missing');
+        this.verifyCloses.note(sentAt, Date.now());
+        return 'done';
+    }
+    /** Flow v3: `fu` is on or loop (loop's main-loop folding is P8; here it behaves as on). */
+    isFollowUpV3() {
+        return (0,_config_promo_flags_v3__WEBPACK_IMPORTED_MODULE_9__.isFollowUpV3)(this.promoFlags);
+    }
+    followUpMaxLateMs() {
+        return this.options.pickerApp === 'tg-aut' ? FOLLOW_UP_MAX_LATE_MS_TGAUT : FOLLOW_UP_MAX_LATE_MS_PROMOTE;
+    }
+    /** Review L1: check and take the 5 min slot in one step (no await between), so racing paths cannot both pass. */
+    reserveFollowUpSlot(nowMs) {
+        if (nowMs - this.lastFollowUpAt < FOLLOW_UP_V3_GAP_MS)
+            return null;
+        const slot = { at: nowMs, previous: this.lastFollowUpAt };
+        this.lastFollowUpAt = nowMs;
+        return slot;
+    }
+    /** Give a slot back when its claim failed or no follow-up was sent; a later reservation is kept. */
+    releaseFollowUpSlot(slot) {
+        if (this.lastFollowUpAt === slot.at)
+            this.lastFollowUpAt = slot.previous;
+    }
+    /**
+     * One flag read per cycle start: `account.readPromoFlags(app)` does one HGETALL of
+     * `promote:flags:v3:<app>` (fallbacks and keep-last-on-failure live there). No reader or no app:
+     * defaults (`fu` off). Applies the queue mode and, on an off -> on flip, drops in-memory follow-ups
+     * without `dueAt` (P2 fix 9).
+     */
+    async refreshPromoFlags() {
+        this.promoFlagsReadAt = Date.now();
+        const app = (0,_config_promo_flags_v3__WEBPACK_IMPORTED_MODULE_9__.promoFlagsAppFor)(this.options.pickerApp ?? null);
+        const reader = this.options.account.readPromoFlags;
+        let next = this.promoFlags;
+        if (app && typeof reader === 'function') {
+            try {
+                const read = await reader.call(this.options.account, app);
+                next = (0,_config_promo_flags_v3__WEBPACK_IMPORTED_MODULE_9__.parsePromoFlags)(read && typeof read.fu === 'string' ? { fu: read.fu } : null);
+            }
+            catch (error) {
+                this.log('warn', `promo flags | read failed; keeping fu=${this.promoFlags.fu} | error=${this.normalizeError(error)}`);
+            }
+        }
+        else {
+            next = { ..._config_promo_flags_v3__WEBPACK_IMPORTED_MODULE_9__.PROMO_FLAGS_DEFAULTS };
+        }
+        const wasOn = this.isFollowUpV3();
+        const prevFu = this.promoFlags.fu;
+        this.promoFlags = next;
+        const nowOn = this.isFollowUpV3();
+        this.applyQueueV3Mode();
+        if (prevFu !== next.fu)
+            this.log('info', `promo flags | fu=${next.fu} | was=${prevFu}`);
+        if (nowOn && !wasOn)
+            await this.dropFollowUpsWithoutDueAt();
+    }
+    /**
+     * Cycle-start flag read that never lands inside a queue pass (v2 review). A running pass can block
+     * in checkMessage for minutes, so it never waits: with a pass running it skips and keeps the last
+     * value (the pass checker reads at the start of each pass). Otherwise it holds the pass slot while
+     * it reads, so no pass starts until the new mode is applied.
+     */
+    async refreshPromoFlagsBetweenPasses() {
+        if (this.queueCheckPromise) {
+            this.log('debug', `promo flags | cycle-start read skipped: queue pass running | keep fu=${this.promoFlags.fu}`);
+            return;
+        }
+        const refresh = this.refreshPromoFlags();
+        this.queueCheckPromise = refresh;
+        try {
+            await refresh;
+        }
+        finally {
+            if (this.queueCheckPromise === refresh)
+                this.queueCheckPromise = null;
+        }
+    }
+    applyQueueV3Mode() {
+        const queue = this.messageQueue;
+        if (typeof queue.setFollowUpV3 !== 'function')
+            return;
+        queue.setFollowUpV3(this.isFollowUpV3()
+            ? { maxLateMs: this.followUpMaxLateMs(), log: (level, message) => this.log(level, message) }
+            : null);
+    }
+    async dropFollowUpsWithoutDueAt() {
+        // Timers armed under `fu` off own items without dueAt: clear them so no follow-up runs without one.
+        for (const [channelId, timeout] of [...this.followUpTimers.entries()]) {
+            if (this.followUpTimerWork.has(channelId))
+                continue;
+            clearTimeout(timeout);
+            this.followUpTimers.delete(channelId);
+        }
+        const queue = this.messageQueue;
+        if (typeof queue.takeFollowUpsWithoutDueAt !== 'function')
+            return;
+        const dropped = queue.takeFollowUpsWithoutDueAt();
+        for (const item of dropped) {
+            this.log('info', `promo follow-up drop | ${(0,_promotion_message_queue__WEBPACK_IMPORTED_MODULE_8__.queueItemKey)(item)} | reason=legacy_no_dueAt`);
+            try {
+                await this.removeQueuedMessage(item);
+            }
+            catch (error) {
+                this.log('warn', `promo follow-up drop | ${(0,_promotion_message_queue__WEBPACK_IMPORTED_MODULE_8__.queueItemKey)(item)} | payload delete failed | error=${this.normalizeError(error)}`);
+            }
+        }
+        this.log('info', `promo fu flip | dropped_no_dueAt=${dropped.length}`);
+    }
     startQueueChecker() {
         this.stopQueueChecker();
-        const intervalMs = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_10__.safeIntervalMs)(this.options.messageCheckIntervalMs ?? this.options.messageCheckDelayMs, 15000);
+        const intervalMs = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_11__.safeIntervalMs)(this.options.messageCheckIntervalMs ?? this.options.messageCheckDelayMs, 15000);
         this.queueCheckInterval = setInterval(() => {
             if (!this.running)
                 return;
@@ -8633,7 +9068,7 @@ class PromotionFlowRunner {
         catch (error) {
             this.log('warn', `Promotion adapter recent-queue check failed; continuing without adapter queue signal; ${this.formatChannel(channel)} error=${this.normalizeError(error)}`);
         }
-        const healthChannel = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_10__.mergePromotionHealthSignals)(channel, doc);
+        const healthChannel = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_11__.mergePromotionHealthSignals)(channel, doc);
         const result = (0,_policy__WEBPACK_IMPORTED_MODULE_5__.evaluatePromotionChannelEligibility)({
             channel: healthChannel,
             scoringEnabled: this.options.scoringEnabled && !!percentiles,
@@ -8649,7 +9084,7 @@ class PromotionFlowRunner {
     }
     async trySendPromotion(channel, candidate, isFollowUp) {
         try {
-            return (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_10__.normalizeSendResult)(await this.adapter.sendPromotion({ channel, candidate, isFollowUp }), candidate);
+            return (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_11__.normalizeSendResult)(await this.adapter.sendPromotion({ channel, candidate, isFollowUp }), candidate);
         }
         catch (error) {
             const errorMessage = this.normalizeError(error);
@@ -8686,25 +9121,25 @@ class PromotionFlowRunner {
      * deliberately no `if (analytics)` here — see the note in packages/tg-analytics/src/analytics.ts.
      */
     recordSendAnalytics(channel, candidate, result, outcome, channelIdOverride, messageText, extra) {
-        return (0,_flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_11__.recordSendAnalytics)(hostOf(this), channel, candidate, result, outcome, channelIdOverride, messageText, extra);
+        return (0,_flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_12__.recordSendAnalytics)(hostOf(this), channel, candidate, result, outcome, channelIdOverride, messageText, extra);
     }
     recordSuccess(channel, candidate, result, isFollowUp, percentiles, aggressive) {
-        return (0,_flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_11__.recordSuccess)(hostOf(this), channel, candidate, result, isFollowUp, percentiles, aggressive);
+        return (0,_flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_12__.recordSuccess)(hostOf(this), channel, candidate, result, isFollowUp, percentiles, aggressive);
     }
     recordFailure(channel, candidate, result, isFollowUp, percentiles, aggressive) {
-        return (0,_flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_11__.recordFailure)(hostOf(this), channel, candidate, result, isFollowUp, percentiles, aggressive);
+        return (0,_flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_12__.recordFailure)(hostOf(this), channel, candidate, result, isFollowUp, percentiles, aggressive);
     }
     resolveCandidateStrategy(candidate) {
-        return (0,_flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_11__.resolveCandidateStrategy)(candidate);
+        return (0,_flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_12__.resolveCandidateStrategy)(candidate);
     }
     recordDeletion(message, deletionPolicy, reason = 'message_missing') {
-        return (0,_flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_11__.recordDeletion)(hostOf(this), message, deletionPolicy, reason);
+        return (0,_flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_12__.recordDeletion)(hostOf(this), message, deletionPolicy, reason);
     }
     logHookSummary(event, channelId, strategy, isFollowUp, statuses) {
-        return (0,_flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_11__.logHookSummary)(hostOf(this), event, channelId, strategy, isFollowUp, statuses);
+        return (0,_flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_12__.logHookSummary)(hostOf(this), event, channelId, strategy, isFollowUp, statuses);
     }
     resolveQueuedPoolSource(result, isFollowUp) {
-        return (0,_flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_11__.resolveQueuedPoolSource)(result, isFollowUp);
+        return (0,_flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_12__.resolveQueuedPoolSource)(result, isFollowUp);
     }
     /**
      * Pool-fill lifecycle: bump this channel's seedProbeCounts[source] when a fresh (non-pool-reuse),
@@ -8714,19 +9149,19 @@ class PromotionFlowRunner {
      * account-wide counter (see ChannelIntelligenceService.incrementSeedProbe).
      */
     recordSeedProbeIfLearning(channel, candidate, result, isFollowUp) {
-        return (0,_flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_11__.recordSeedProbeIfLearning)(hostOf(this), channel, candidate, result, isFollowUp);
+        return (0,_flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_12__.recordSeedProbeIfLearning)(hostOf(this), channel, candidate, result, isFollowUp);
     }
     recordPoolOutcome(message, outcome) {
-        return (0,_flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_11__.recordPoolOutcome)(hostOf(this), message, outcome);
+        return (0,_flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_12__.recordPoolOutcome)(hostOf(this), message, outcome);
     }
     recordExploreFailure(channelId, candidate, result, isFollowUp) {
-        return (0,_flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_11__.recordExploreFailure)(hostOf(this), channelId, candidate, result, isFollowUp);
+        return (0,_flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_12__.recordExploreFailure)(hostOf(this), channelId, candidate, result, isFollowUp);
     }
     recordExploreSurvival(message) {
-        return (0,_flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_11__.recordExploreSurvival)(hostOf(this), message);
+        return (0,_flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_12__.recordExploreSurvival)(hostOf(this), message);
     }
     recordAccountSurvival(message) {
-        return (0,_flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_11__.recordAccountSurvival)(hostOf(this), message);
+        return (0,_flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_12__.recordAccountSurvival)(hostOf(this), message);
     }
     /**
      * Per-mobile ban/forbidden block recording (replaces the retired cross-account channel lock).
@@ -8735,16 +9170,16 @@ class PromotionFlowRunner {
      * write/send-forbidden, private, or invalid channels never accept this account — block permanently.
      */
     recordChannelBlockOnFailure(channel, result) {
-        return (0,_flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_11__.recordChannelBlockOnFailure)(hostOf(this), channel, result);
+        return (0,_flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_12__.recordChannelBlockOnFailure)(hostOf(this), channel, result);
     }
     scheduleFollowUp(message) {
-        return (0,_flow_runner_follow_up__WEBPACK_IMPORTED_MODULE_12__.scheduleFollowUp)(hostOf(this), message);
+        return (0,_flow_runner_follow_up__WEBPACK_IMPORTED_MODULE_13__.scheduleFollowUp)(hostOf(this), message);
     }
     runFollowUp(message) {
-        return (0,_flow_runner_follow_up__WEBPACK_IMPORTED_MODULE_12__.runFollowUp)(hostOf(this), message);
+        return (0,_flow_runner_follow_up__WEBPACK_IMPORTED_MODULE_13__.runFollowUp)(hostOf(this), message);
     }
     async sleep(ms) {
-        const delayMs = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_10__.safeDelayMs)(ms, 0);
+        const delayMs = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_11__.safeDelayMs)(ms, 0);
         // Declare the deliberate sleep so the supervisor watchdog doesn't mistake a long post-send rest
         // (12-20 min) for a hung runner.
         this.health.sleepUntil = Date.now() + delayMs;
@@ -8777,22 +9212,22 @@ class PromotionFlowRunner {
     }
     async sleepAfterChannel(outcome) {
         if (outcome !== 'sent') {
-            const delayMs = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_10__.randomIntInclusive)(FAILED_CHANNEL_RETRY_MIN_MS, FAILED_CHANNEL_RETRY_MAX_MS);
+            const delayMs = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_11__.randomIntInclusive)(FAILED_CHANNEL_RETRY_MIN_MS, FAILED_CHANNEL_RETRY_MAX_MS);
             this.log('debug', `Promotion retry delay ${delayMs}ms (${outcome})`);
             await this.sleep(delayMs);
             return;
         }
         if (!this.options.scoringEnabled) {
-            await this.sleep((0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_10__.safeDelayMs)(this.options.channelLoopDelayMs, 5000));
+            await this.sleep((0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_11__.safeDelayMs)(this.options.channelLoopDelayMs, 5000));
             return;
         }
         let stats;
         try {
-            stats = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_10__.normalizeStats)(await this.adapter.getStats());
+            stats = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_11__.normalizeStats)(await this.adapter.getStats());
         }
         catch (error) {
             this.log('warn', `Promotion delay stats load failed; using configured channel loop delay error=${this.normalizeError(error)}`);
-            await this.sleep((0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_10__.safeDelayMs)(this.options.channelLoopDelayMs, 5000));
+            await this.sleep((0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_11__.safeDelayMs)(this.options.channelLoopDelayMs, 5000));
             return;
         }
         // Session delete rate feeds the healthy-conservative scaling: deletions / (deletions + sends).
@@ -8811,11 +9246,11 @@ class PromotionFlowRunner {
     }
     async getStatsOrDefault(context) {
         try {
-            return (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_10__.normalizeStats)(await this.adapter.getStats());
+            return (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_11__.normalizeStats)(await this.adapter.getStats());
         }
         catch (error) {
             this.log('warn', `Promotion stats load failed during ${context}; using safe zero counters error=${this.normalizeError(error)}`);
-            return (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_10__.normalizeStats)(null);
+            return (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_11__.normalizeStats)(null);
         }
     }
     async loadPercentiles(channel) {
@@ -8830,16 +9265,16 @@ class PromotionFlowRunner {
         }
     }
     shouldProcessNextChannel(channel) {
-        return (0,_flow_runner_send_budget__WEBPACK_IMPORTED_MODULE_14__.shouldProcessNextChannel)(hostOf(this), channel);
+        return (0,_flow_runner_send_budget__WEBPACK_IMPORTED_MODULE_15__.shouldProcessNextChannel)(hostOf(this), channel);
     }
     readDailySendBudget(channel, daysLeft) {
-        return (0,_flow_runner_send_budget__WEBPACK_IMPORTED_MODULE_14__.readDailySendBudget)(hostOf(this), channel, daysLeft);
+        return (0,_flow_runner_send_budget__WEBPACK_IMPORTED_MODULE_15__.readDailySendBudget)(hostOf(this), channel, daysLeft);
     }
     reserveDailySendBudget(channel, daysLeft, isFollowUp) {
-        return (0,_flow_runner_send_budget__WEBPACK_IMPORTED_MODULE_14__.reserveDailySendBudget)(hostOf(this), channel, daysLeft, isFollowUp);
+        return (0,_flow_runner_send_budget__WEBPACK_IMPORTED_MODULE_15__.reserveDailySendBudget)(hostOf(this), channel, daysLeft, isFollowUp);
     }
     settleDailySendBudget(result, reservation) {
-        return (0,_flow_runner_send_budget__WEBPACK_IMPORTED_MODULE_14__.settleDailySendBudget)(hostOf(this), result, reservation);
+        return (0,_flow_runner_send_budget__WEBPACK_IMPORTED_MODULE_15__.settleDailySendBudget)(hostOf(this), result, reservation);
     }
     log(level, message) {
         try {
@@ -8858,40 +9293,40 @@ class PromotionFlowRunner {
         }
     }
     formatStats(stats) {
-        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_15__.formatStats)(stats);
+        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_16__.formatStats)(stats);
     }
     describeSelection(selection, intelligenceDocs) {
-        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_15__.describeSelection)(hostOf(this), selection, intelligenceDocs);
+        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_16__.describeSelection)(hostOf(this), selection, intelligenceDocs);
     }
     toChannelIdSet(channels) {
-        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_15__.toChannelIdSet)(channels);
+        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_16__.toChannelIdSet)(channels);
     }
     getSkippedSelectionReason(channel, intelligenceByChannel) {
-        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_15__.getSkippedSelectionReason)(channel, intelligenceByChannel);
+        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_16__.getSkippedSelectionReason)(channel, intelligenceByChannel);
     }
     summarizeSelectionChannels(channels, label) {
-        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_15__.summarizeSelectionChannels)(hostOf(this), channels, label);
+        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_16__.summarizeSelectionChannels)(hostOf(this), channels, label);
     }
     formatCounts(counts) {
-        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_15__.formatCounts)(counts);
+        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_16__.formatCounts)(counts);
     }
     formatChannel(channel) {
-        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_15__.formatChannel)(channel);
+        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_16__.formatChannel)(channel);
     }
     formatCompactChannel(channel) {
-        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_15__.formatCompactChannel)(channel);
+        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_16__.formatCompactChannel)(channel);
     }
     formatCandidate(candidate) {
-        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_15__.formatCandidate)(candidate);
+        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_16__.formatCandidate)(candidate);
     }
     compact(value) {
-        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_15__.compact)(value);
+        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_16__.compact)(value);
     }
     safeJson(value) {
-        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_15__.safeJson)(hostOf(this), value);
+        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_16__.safeJson)(hostOf(this), value);
     }
     normalizeError(error) {
-        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_15__.normalizeError)(error);
+        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_16__.normalizeError)(error);
     }
     recordCycleFailure(error) {
         this.health.totalCycleFailures += 1;
@@ -8917,7 +9352,10 @@ class PromotionFlowRunner {
 
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
-/* harmony export */   PromotionMessageQueue: () => (/* binding */ PromotionMessageQueue)
+/* harmony export */   PromotionMessageQueue: () => (/* binding */ PromotionMessageQueue),
+/* harmony export */   VERIFY_RESTORE_MAX_AGE_MS: () => (/* binding */ VERIFY_RESTORE_MAX_AGE_MS),
+/* harmony export */   normalizeQueuedMessage: () => (/* binding */ normalizeQueuedMessage),
+/* harmony export */   queueItemKey: () => (/* binding */ queueItemKey)
 /* harmony export */ });
 /* harmony import */ var _channel_intelligence_channel_intelligence_types__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../channel-intelligence/channel-intelligence.types */ "../../packages/tg-channel-state/src/channel-message-promotions/channel-intelligence/channel-intelligence.types.ts");
 /* harmony import */ var _utils_channel_id__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../utils/channel-id */ "../../packages/tg-channel-state/src/channel-message-promotions/utils/channel-id.ts");
@@ -8927,10 +9365,17 @@ __webpack_require__.r(__webpack_exports__);
 
 
 
+/** A verify item older than this (from `sentAt`, else `timestamp`) is dropped at restore (P2 fix 4). */
+const VERIFY_RESTORE_MAX_AGE_MS = 60 * 60 * 1000;
+/** Identity of a queue item: `<workType>:<channelId>:<messageId>` (the Redis `messageKey` format). */
+function queueItemKey(message) {
+    return `${message.workType === 'followUp' ? 'followUp' : 'verify'}:${message.channelId}:${message.messageId}`;
+}
 class PromotionMessageQueue {
     constructor(maxSize = 500, persistence = null) {
         this.items = [];
         this.restored = false;
+        this.v3 = null;
         this.maxSize = Number.isFinite(maxSize) && maxSize > 0 ? Math.floor(maxSize) : 500;
         this.persistence = persistence;
     }
@@ -8952,19 +9397,73 @@ class PromotionMessageQueue {
             await this.persistence.enqueue(normalized);
         this.enqueueNormalized(normalized);
     }
+    /**
+     * Flow v3 (P2): the runner sets this every cycle from the `fu` flag. Null keeps today's queue:
+     * identity removal, no restore age filter, no size-drop log.
+     */
+    setFollowUpV3(mode) {
+        this.v3 = mode;
+        this.persistence?.setFollowUpV3?.(mode !== null);
+    }
     /** Load pending work after process replacement. Safe to call repeatedly. */
     async restore() {
         if (this.restored)
             return;
         if (this.persistence) {
             const persisted = await this.persistence.load();
+            const v3 = this.v3;
+            const nowMs = v3?.now?.() ?? Date.now();
+            let droppedLegacy = 0;
+            let droppedExpired = 0;
+            let kept = 0;
             for (const message of persisted) {
                 const normalized = normalizeQueuedMessage(message);
-                if (normalized && !this.hasMessage(normalized))
-                    this.enqueueNormalized(normalized);
+                if (!normalized || this.hasMessage(normalized))
+                    continue;
+                if (v3) {
+                    const reason = restoreDropReason(normalized, nowMs, v3.maxLateMs);
+                    if (reason) {
+                        if (reason === 'expired')
+                            droppedExpired += 1;
+                        else
+                            droppedLegacy += 1;
+                        v3.log('info', `promo restore drop | ${queueItemKey(normalized)} | reason=${reason}`);
+                        try {
+                            await this.persistence.remove(normalized);
+                        }
+                        catch (error) {
+                            v3.log('warn', `promo restore drop | ${queueItemKey(normalized)} | payload delete failed | error=${error instanceof Error ? error.message : String(error)}`);
+                        }
+                        continue;
+                    }
+                    kept += 1;
+                }
+                this.enqueueNormalized(normalized);
             }
+            if (v3)
+                v3.log('info', `promo restore summary | dropped_legacy=${droppedLegacy} dropped_expired=${droppedExpired} kept=${kept}`);
         }
         this.restored = true;
+    }
+    /**
+     * Flow v3 (P2 fix 9): at the first `fu=on` cycle, follow-up items loaded under `fu=off` (no `dueAt`
+     * or `sentAt`) are dropped, as at restore. Returns the dropped items so the caller can delete
+     * their Redis payloads.
+     */
+    takeFollowUpsWithoutDueAt() {
+        const dropped = [];
+        for (let index = this.items.length - 1; index >= 0; index -= 1) {
+            const item = this.items[index];
+            if (item.workType === 'followUp' && (item.dueAt === undefined || item.sentAt === undefined)) {
+                dropped.push(item);
+                this.items.splice(index, 1);
+            }
+        }
+        return dropped.reverse();
+    }
+    /** Flow v3: does the in-memory queue hold this key (verify vs followUp distinct)? */
+    hasKey(message) {
+        return this.items.some((item) => queueItemKey(item) === queueItemKey(message));
     }
     /** Read-only copies of the queued items (measurement: cycle-end counts and the log-only sweep). */
     list() {
@@ -8982,7 +9481,11 @@ class PromotionMessageQueue {
         return this.items.filter((message) => safeNow - safeQueuedTimestamp(message.timestamp, safeNow) >= safeDelayMs);
     }
     remove(message) {
-        const index = this.items.indexOf(message);
+        // Flow v3 (P2 fix 2): by key, so a caller holding a normalized or spread copy still removes the
+        // item. Today's path keeps identity removal while `fu` is off.
+        const index = this.v3
+            ? this.items.findIndex((item) => queueItemKey(item) === queueItemKey(message))
+            : this.items.indexOf(message);
         if (index >= 0)
             this.items.splice(index, 1);
     }
@@ -9001,13 +9504,29 @@ class PromotionMessageQueue {
             return true;
         return this.persistence.claimExecution(message);
     }
+    /** Flow v3 (P3): true = first record for this verify key. No persistence: true (in-memory removal guards). */
+    async markRecorded(message) {
+        if (!this.persistence?.markRecorded)
+            return true;
+        return this.persistence.markRecorded(message);
+    }
     clear() {
         this.items.length = 0;
     }
     enqueueNormalized(message) {
+        if (this.v3) {
+            // Re-enqueue of an existing key replaces it (one item per key).
+            const existing = this.items.findIndex((item) => queueItemKey(item) === queueItemKey(message));
+            if (existing >= 0)
+                this.items.splice(existing, 1);
+        }
         this.items.push(message);
         if (this.items.length > this.maxSize) {
-            this.items.splice(0, this.items.length - this.maxSize);
+            const dropped = this.items.splice(0, this.items.length - this.maxSize);
+            if (this.v3) {
+                for (const item of dropped)
+                    this.v3.log('warn', `promo queue drop | ${queueItemKey(item)} | reason=size`);
+            }
         }
     }
     hasMessage(message) {
@@ -9016,10 +9535,23 @@ class PromotionMessageQueue {
             && (item.workType ?? 'verify') === (message.workType ?? 'verify'));
     }
 }
+function restoreDropReason(message, nowMs, maxLateMs) {
+    if (message.workType === 'followUp') {
+        // A followUp payload from today's build has no sentAt; re-arms rewrote its timestamp, so its age is unknown.
+        if (message.sentAt === undefined)
+            return 'legacy_no_sentAt';
+        if (message.dueAt === undefined)
+            return 'legacy_no_dueAt';
+        return nowMs > message.dueAt + maxLateMs ? 'expired' : null;
+    }
+    // Verify items are never re-armed: without sentAt, timestamp is the send time.
+    const sentAt = message.sentAt ?? message.timestamp;
+    return sentAt > 0 && nowMs > sentAt + VERIFY_RESTORE_MAX_AGE_MS ? 'expired' : null;
+}
 /**
- * Rebuilds the item from a fixed field list: any other field is dropped. P2 adds `sentAt` (and
- * `dueAt`) and must add them here, or they are lost on every enqueue and restore, and the P0
- * `legacy_fu` count stays equal to `open_fu`.
+ * The one normalizer for a queue item (memory, Redis parser, runner under `fu` on). Rebuilds the item
+ * from a fixed field list: any other field is dropped. Keeps `workType`, `sentAt` (send time, never
+ * rewritten) and `dueAt` (follow-up only).
  */
 function normalizeQueuedMessage(message) {
     if (!(0,_utils_guards__WEBPACK_IMPORTED_MODULE_3__.isRecord)(message))
@@ -9054,7 +9586,12 @@ function normalizeQueuedMessage(message) {
         ...(poolSource ? { poolSource } : {}),
         ...(poolMode ? { poolMode } : {}),
         ...(message['workType'] === 'followUp' ? { workType: 'followUp' } : {}),
+        ...(isPositiveTime(message['sentAt']) ? { sentAt: Math.floor(message['sentAt']) } : {}),
+        ...(isPositiveTime(message['dueAt']) ? { dueAt: Math.floor(message['dueAt']) } : {}),
     };
+}
+function isPositiveTime(value) {
+    return typeof value === 'number' && Number.isFinite(value) && value > 0;
 }
 function isValidMessageId(value) {
     return typeof value === 'number' && Number.isSafeInteger(value) && value > 0;
@@ -14338,8 +14875,14 @@ function getPipelineExecError(value) {
 
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   PROMOTION_FOLLOW_UP_CLAIM_MIN_TTL_SECONDS: () => (/* binding */ PROMOTION_FOLLOW_UP_CLAIM_MIN_TTL_SECONDS),
+/* harmony export */   PROMOTION_RECORDED_MARKER_TTL_SECONDS: () => (/* binding */ PROMOTION_RECORDED_MARKER_TTL_SECONDS),
+/* harmony export */   PROMOTION_V3_FOLLOW_UP_GRACE_MS: () => (/* binding */ PROMOTION_V3_FOLLOW_UP_GRACE_MS),
+/* harmony export */   PROMOTION_V3_INDEX_TTL_SECONDS: () => (/* binding */ PROMOTION_V3_INDEX_TTL_SECONDS),
+/* harmony export */   PROMOTION_V3_VERIFY_PAYLOAD_TTL_SECONDS: () => (/* binding */ PROMOTION_V3_VERIFY_PAYLOAD_TTL_SECONDS),
 /* harmony export */   PROMOTION_VERIFICATION_TTL_SECONDS: () => (/* binding */ PROMOTION_VERIFICATION_TTL_SECONDS),
-/* harmony export */   RedisPromotionVerificationQueue: () => (/* binding */ RedisPromotionVerificationQueue)
+/* harmony export */   RedisPromotionVerificationQueue: () => (/* binding */ RedisPromotionVerificationQueue),
+/* harmony export */   followUpClaimTtlSeconds: () => (/* binding */ followUpClaimTtlSeconds)
 /* harmony export */ });
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
 /* harmony import */ var _utils_guards__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../../utils/guards */ "../../packages/tg-channel-state/src/utils/guards.ts");
@@ -14349,8 +14892,32 @@ __webpack_require__.r(__webpack_exports__);
 
 const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_0__.Logger("tg-channel-state:verification-queue");
 const PROMOTION_VERIFICATION_TTL_SECONDS = 48 * 60 * 60;
+/** Flow v3 (P2 fix 6): verify payload 1 h, index 6 h, follow-up payload `dueAt + 2 h`, min 60 s. */
+const PROMOTION_V3_VERIFY_PAYLOAD_TTL_SECONDS = 60 * 60;
+const PROMOTION_V3_INDEX_TTL_SECONDS = 6 * 60 * 60;
+const PROMOTION_V3_FOLLOW_UP_GRACE_MS = 2 * 60 * 60 * 1000;
+const PROMOTION_V3_MIN_PAYLOAD_TTL_SECONDS = 60;
+/** Flow v3 (P3): the once-per-verify-key outcome marker. */
+const PROMOTION_RECORDED_MARKER_TTL_SECONDS = 72 * 60 * 60;
+/**
+ * Follow-up claim minimum, every flag mode (P2+P3 review M1): 7 d, not 48 h. With `fu` off the
+ * in-memory re-arm loop (B1) keeps re-arming a follow-up every hour for as long as the post survives;
+ * a 48 h claim let it send a 2nd follow-up at about +48.8 h. Intended difference from HEAD.
+ */
+const PROMOTION_FOLLOW_UP_CLAIM_MIN_TTL_SECONDS = 7 * 24 * 60 * 60;
+/**
+ * Claim TTL in every flag mode (review-2 N1, review M1): `max(7 d, dueAt + 2 h - now)`. It always
+ * outlives the follow-up payload and the old path's hourly re-arm loop for 7 d.
+ */
+function followUpClaimTtlSeconds(message, nowMs) {
+    const dueAt = message.dueAt;
+    if (typeof dueAt !== 'number' || !Number.isFinite(dueAt))
+        return PROMOTION_FOLLOW_UP_CLAIM_MIN_TTL_SECONDS;
+    return Math.max(PROMOTION_FOLLOW_UP_CLAIM_MIN_TTL_SECONDS, Math.ceil((dueAt + PROMOTION_V3_FOLLOW_UP_GRACE_MS - nowMs) / 1000));
+}
 class RedisPromotionVerificationQueue {
-    constructor(redis, mobile, maxSize = 500) {
+    constructor(redis, mobile, maxSize = 500, now = Date.now) {
+        this.v3 = false;
         if (!isRedisLike(redis))
             throw new Error('RedisPromotionVerificationQueue requires Redis get/set/del/lrange/eval');
         const safeMobile = (0,_redis_utils__WEBPACK_IMPORTED_MODULE_2__.normalizeKeyPart)(mobile);
@@ -14359,11 +14926,25 @@ class RedisPromotionVerificationQueue {
         this.redis = redis;
         this.mobile = safeMobile;
         this.maxSize = Number.isFinite(maxSize) && maxSize > 0 ? Math.floor(maxSize) : 500;
+        this.now = now;
+    }
+    /** Flow v3 (P2): set every cycle from the `fu` flag. Off keeps today's TTLs, index and load. */
+    setFollowUpV3(on) {
+        this.v3 = on === true;
     }
     async load() {
         const ids = await this.redis.lrange(this.indexKey(), 0, -1);
         const uniqueIds = [...new Set(ids.filter(isNonEmptyString))];
         const messages = [];
+        if (this.v3 && typeof this.redis.mget === 'function' && uniqueIds.length > 0) {
+            const raws = await this.redis.mget(...uniqueIds.map((id) => this.payloadKey(id)));
+            for (const raw of Array.isArray(raws) ? raws : []) {
+                const message = parseQueuedMessage(typeof raw === 'string' ? raw : null);
+                if (message)
+                    messages.push(message);
+            }
+            return messages;
+        }
         for (const id of uniqueIds) {
             const raw = await this.redis.get(this.payloadKey(id));
             const message = parseQueuedMessage(raw);
@@ -14378,6 +14959,12 @@ class RedisPromotionVerificationQueue {
             throw new Error('RedisPromotionVerificationQueue message identity is invalid');
         // Do not persist promotional text; verification obtains a fresh preview from Telegram.
         const { messageText: _messageText, ...durableMessage } = message;
+        if (this.v3) {
+            const v3Result = await this.redis.eval(ENQUEUE_V3_SCRIPT, 2, this.payloadKey(id), this.indexKey(), JSON.stringify(durableMessage), this.v3PayloadTtlSeconds(message), id, this.maxSize, PROMOTION_V3_INDEX_TTL_SECONDS);
+            if (!isRedisWriteSuccess(v3Result))
+                throw new Error('RedisPromotionVerificationQueue atomic enqueue failed');
+            return;
+        }
         const result = await this.redis.eval(ENQUEUE_SCRIPT, 2, this.payloadKey(id), this.indexKey(), JSON.stringify(durableMessage), PROMOTION_VERIFICATION_TTL_SECONDS, id, this.maxSize);
         if (!isRedisWriteSuccess(result))
             throw new Error('RedisPromotionVerificationQueue atomic enqueue failed');
@@ -14387,13 +14974,41 @@ class RedisPromotionVerificationQueue {
         if (!id)
             return;
         await this.redis.del(this.payloadKey(id));
+        if (!this.v3)
+            return;
+        // Never touches the claim. LREM keeps re-armed ids from crowding real verify ids out of the index.
+        if (typeof this.redis.lrem === 'function') {
+            await this.redis.lrem(this.indexKey(), 0, id);
+        }
+        else if (typeof this.redis.eval === 'function') {
+            await this.redis.eval(LREM_SCRIPT, 1, this.indexKey(), id);
+        }
+        // Neither: skip. Restore dedupes ids and the 6 h index TTL bounds the leftovers.
+    }
+    async markRecorded(message) {
+        const id = messageKey(message);
+        if (!id)
+            throw new Error('RedisPromotionVerificationQueue message identity is invalid');
+        const write = await this.redis.set(this.recordedKey(id), '1', 'EX', PROMOTION_RECORDED_MARKER_TTL_SECONDS, 'NX');
+        return isRedisWriteSuccess(write);
     }
     async claimExecution(message) {
         const id = messageKey(message);
         if (!id)
             throw new Error('RedisPromotionVerificationQueue message identity is invalid');
-        const write = await this.redis.set(this.executionKey(id), '1', 'EX', PROMOTION_VERIFICATION_TTL_SECONDS, 'NX');
+        const write = await this.redis.set(this.executionKey(id), '1', 'EX', followUpClaimTtlSeconds(message, this.now()), 'NX');
         return isRedisWriteSuccess(write);
+    }
+    v3PayloadTtlSeconds(message) {
+        if (message.workType === 'followUp' && typeof message.dueAt === 'number' && Number.isFinite(message.dueAt)) {
+            return Math.max(PROMOTION_V3_MIN_PAYLOAD_TTL_SECONDS, Math.ceil((message.dueAt + PROMOTION_V3_FOLLOW_UP_GRACE_MS - this.now()) / 1000));
+        }
+        if (message.workType === 'followUp')
+            return PROMOTION_VERIFICATION_TTL_SECONDS;
+        return PROMOTION_V3_VERIFY_PAYLOAD_TTL_SECONDS;
+    }
+    recordedKey(id) {
+        return `promote:verify:${this.mobile}:recorded:${id}`;
     }
     indexKey() {
         return `promote:verify:${this.mobile}:pending`;
@@ -14434,6 +15049,8 @@ function parseQueuedMessage(raw) {
             ...(typeof value.poolSource === 'string' ? { poolSource: value.poolSource } : {}),
             ...(value.poolMode === 'explore' || value.poolMode === 'reuse' ? { poolMode: value.poolMode } : {}),
             ...(value.workType === 'followUp' ? { workType: 'followUp' } : {}),
+            ...(isPositiveTime(value.sentAt) ? { sentAt: Math.floor(value.sentAt) } : {}),
+            ...(isPositiveTime(value.dueAt) ? { dueAt: Math.floor(value.dueAt) } : {}),
         };
     }
     catch (error) {
@@ -14448,6 +15065,19 @@ const ENQUEUE_SCRIPT = [
     "redis.call('EXPIRE', KEYS[2], ARGV[2])",
     'return 1',
 ].join('\n');
+// Flow v3: SET payload, drop any earlier copy of the id from the index, LPUSH, LTRIM, index TTL 6 h.
+const ENQUEUE_V3_SCRIPT = [
+    "redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[2])",
+    "redis.call('LREM', KEYS[2], 0, ARGV[3])",
+    "redis.call('LPUSH', KEYS[2], ARGV[3])",
+    "redis.call('LTRIM', KEYS[2], 0, tonumber(ARGV[4]) - 1)",
+    "redis.call('EXPIRE', KEYS[2], ARGV[5])",
+    'return 1',
+].join('\n');
+const LREM_SCRIPT = "return redis.call('LREM', KEYS[1], 0, ARGV[1])";
+function isPositiveTime(value) {
+    return typeof value === 'number' && Number.isFinite(value) && value > 0;
+}
 function isRedisLike(value) {
     return (0,_utils_guards__WEBPACK_IMPORTED_MODULE_1__.isRecord)(value)
         && typeof value.get === 'function'
@@ -14527,10 +15157,11 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _redis_redis_account_exploration__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ../redis/redis-account-exploration */ "../../packages/tg-channel-state/src/channel-message-promotions/redis/redis-account-exploration.ts");
 /* harmony import */ var _redis_redis_promotion_tracker__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ../redis/redis-promotion-tracker */ "../../packages/tg-channel-state/src/channel-message-promotions/redis/redis-promotion-tracker.ts");
 /* harmony import */ var _redis_redis_promotion_verification_queue__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ../redis/redis-promotion-verification-queue */ "../../packages/tg-channel-state/src/channel-message-promotions/redis/redis-promotion-verification-queue.ts");
-/* harmony import */ var _utils_channel_id__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ../utils/channel-id */ "../../packages/tg-channel-state/src/channel-message-promotions/utils/channel-id.ts");
-/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
-/* harmony import */ var _utils_guards__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! ../../utils/guards */ "../../packages/tg-channel-state/src/utils/guards.ts");
-/* harmony import */ var _tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! @tg/core/utils/dc-ip-family */ "../../packages/tg-core/src/utils/dc-ip-family.ts");
+/* harmony import */ var _config_promo_flags_v3__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ../config/promo-flags-v3 */ "../../packages/tg-channel-state/src/channel-message-promotions/config/promo-flags-v3.ts");
+/* harmony import */ var _utils_channel_id__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ../utils/channel-id */ "../../packages/tg-channel-state/src/channel-message-promotions/utils/channel-id.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _utils_guards__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! ../../utils/guards */ "../../packages/tg-channel-state/src/utils/guards.ts");
+/* harmony import */ var _tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! @tg/core/utils/dc-ip-family */ "../../packages/tg-core/src/utils/dc-ip-family.ts");
 
 
 
@@ -14545,7 +15176,8 @@ __webpack_require__.r(__webpack_exports__);
 
 
 
-const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_11__.Logger("tg-channel-state:promotion-runtime");
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_12__.Logger("tg-channel-state:promotion-runtime");
 class PromotionAccountContext {
     constructor(runtime, mobile, clientId) {
         this.runtime = runtime;
@@ -14556,7 +15188,7 @@ class PromotionAccountContext {
         return this.runtime.intelligence;
     }
     async recordSend(channelId) {
-        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_10__.normalizeChannelId)(channelId);
+        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_11__.normalizeChannelId)(channelId);
         if (this.runtime.tracker && safeChannelId) {
             await this.runtime.tracker.recordSend(safeChannelId, this.mobile, this.clientId);
         }
@@ -14573,7 +15205,7 @@ class PromotionAccountContext {
             await this.runtime.channelBlock.blockTemporary(this.mobile, channelId);
         }
         if (this.runtime.exploration) {
-            await this.runtime.exploration.recordBan(this.mobile, channelId).catch((error) => { logger.warn(`exploration.recordBan failed for ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_13__.maskMobile)(this.mobile)}/${channelId}`, error); });
+            await this.runtime.exploration.recordBan(this.mobile, channelId).catch((error) => { logger.warn(`exploration.recordBan failed for ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_14__.maskMobile)(this.mobile)}/${channelId}`, error); });
         }
     }
     /** Which of these channelIds are currently blocked for THIS mobile (pre-flight filter). */
@@ -14589,20 +15221,20 @@ class PromotionAccountContext {
     async explorationDeniedForMobile(channelIds, options = {}) {
         if (!this.runtime.exploration)
             return new Set();
-        return this.runtime.exploration.deniedChannels(this.mobile, channelIds, options).catch((error) => { logger.warn(`exploration.deniedChannels failed for ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_13__.maskMobile)(this.mobile)}; failing open`, error); return new Set(); });
+        return this.runtime.exploration.deniedChannels(this.mobile, channelIds, options).catch((error) => { logger.warn(`exploration.deniedChannels failed for ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_14__.maskMobile)(this.mobile)}; failing open`, error); return new Set(); });
     }
     async recordSuccess(channelId, isFollowup) {
-        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_10__.normalizeChannelId)(channelId);
+        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_11__.normalizeChannelId)(channelId);
         if (!safeChannelId)
             return;
         // Per-mobile delivery state first and fail-safe, so an intelligence write error below cannot
         // leave a delivered pair unproven or its ban strikes in place.
         if (this.runtime.channelBlock) {
             // A delivery ends this pair's ban history (no-op under the PROMOTION_BAN_LADDER=legacy rollback).
-            await this.runtime.channelBlock.clearStrikes(this.mobile, safeChannelId).catch((error) => { logger.warn(`channelBlock.clearStrikes failed for ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_13__.maskMobile)(this.mobile)}/${safeChannelId}`, error); });
+            await this.runtime.channelBlock.clearStrikes(this.mobile, safeChannelId).catch((error) => { logger.warn(`channelBlock.clearStrikes failed for ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_14__.maskMobile)(this.mobile)}/${safeChannelId}`, error); });
         }
         if (this.runtime.exploration) {
-            await this.runtime.exploration.recordDelivery(this.mobile, safeChannelId).catch((error) => { logger.warn(`exploration.recordDelivery failed for ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_13__.maskMobile)(this.mobile)}/${safeChannelId}`, error); });
+            await this.runtime.exploration.recordDelivery(this.mobile, safeChannelId).catch((error) => { logger.warn(`exploration.recordDelivery failed for ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_14__.maskMobile)(this.mobile)}/${safeChannelId}`, error); });
         }
         await this.runtime.intelligence.recordSuccess(safeChannelId, isFollowup);
         if (this.runtime.accountHealth) {
@@ -14610,7 +15242,7 @@ class PromotionAccountContext {
         }
     }
     async recordDeletion(channelId, survivalMs, isFollowup, reason = 'deleted') {
-        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_10__.normalizeChannelId)(channelId);
+        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_11__.normalizeChannelId)(channelId);
         if (!safeChannelId)
             return;
         await this.runtime.intelligence.recordDeletion(safeChannelId, survivalMs, isFollowup, reason);
@@ -14619,7 +15251,7 @@ class PromotionAccountContext {
         }
     }
     async recordFailure(channelId, errorType) {
-        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_10__.normalizeChannelId)(channelId);
+        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_11__.normalizeChannelId)(channelId);
         if (!safeChannelId)
             return;
         await this.runtime.intelligence.recordFailure(safeChannelId, errorType);
@@ -14632,7 +15264,7 @@ class PromotionAccountContext {
         }
     }
     async recordSurvival(channelId) {
-        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_10__.normalizeChannelId)(channelId);
+        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_11__.normalizeChannelId)(channelId);
         if (!safeChannelId)
             return;
         let failure;
@@ -14653,32 +15285,32 @@ class PromotionAccountContext {
             throw failure;
     }
     async ensurePoolEntry(channelId, entry) {
-        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_10__.normalizeChannelId)(channelId);
+        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_11__.normalizeChannelId)(channelId);
         if (!safeChannelId)
             return;
         await this.runtime.intelligence.ensureDoc(safeChannelId);
         await this.runtime.intelligence.insertPoolEntryIfAbsent(safeChannelId, entry);
     }
     async recordPoolEntrySent(channelId, entryKey, nowMs) {
-        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_10__.normalizeChannelId)(channelId);
+        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_11__.normalizeChannelId)(channelId);
         if (!safeChannelId)
             return false;
         return this.runtime.intelligence.recordPoolEntrySent(safeChannelId, entryKey, nowMs);
     }
     async recordPoolEntryOutcome(channelId, entryKey, outcome, nowMs) {
-        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_10__.normalizeChannelId)(channelId);
+        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_11__.normalizeChannelId)(channelId);
         if (!safeChannelId)
             return;
         await this.runtime.intelligence.recordPoolEntryOutcome(safeChannelId, entryKey, outcome, nowMs);
     }
     async recordSurvivingPoolEntry(channelId, entry, nowMs) {
-        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_10__.normalizeChannelId)(channelId);
+        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_11__.normalizeChannelId)(channelId);
         if (!safeChannelId)
             return false;
         return this.runtime.intelligence.recordSurvivingPoolEntry(safeChannelId, entry, nowMs);
     }
     async recordExploreOutcome(channelId, outcome) {
-        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_10__.normalizeChannelId)(channelId);
+        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_11__.normalizeChannelId)(channelId);
         if (!safeChannelId)
             return;
         await this.runtime.intelligence.recordExploreOutcome(safeChannelId, outcome);
@@ -14704,6 +15336,15 @@ class PromotionAccountContext {
             return;
         await this.runtime.accountCap.rollback(this.mobile, reservationId);
     }
+    /** Flow v3 flags: one HGETALL of `promote:flags:v3:<app>` (doc 6). No Redis: defaults (`fu` off). */
+    async readPromoFlags(app) {
+        return (0,_config_promo_flags_v3__WEBPACK_IMPORTED_MODULE_10__.readPromoFlagsV3)(this.runtime.verificationRedis, app, (level, message) => {
+            if (level === 'warn')
+                logger.warn(message);
+            else
+                logger.info(message);
+        });
+    }
     createVerificationQueue(maxSize) {
         return this.runtime.verificationRedis
             ? new _redis_redis_promotion_verification_queue__WEBPACK_IMPORTED_MODULE_9__.RedisPromotionVerificationQueue(this.runtime.verificationRedis, this.mobile, maxSize)
@@ -14716,7 +15357,7 @@ class PromotionAccountContext {
             return await this.runtime.accountHealth.getAccountHealth(this.mobile);
         }
         catch (error) {
-            logger.warn(`getAccountHealth failed for ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_13__.maskMobile)(this.mobile)}`, error);
+            logger.warn(`getAccountHealth failed for ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_14__.maskMobile)(this.mobile)}`, error);
             return null;
         }
     }
@@ -14849,7 +15490,7 @@ function normalizeIdentity(value) {
     return normalized.length > 0 ? normalized : null;
 }
 function isCollectionLike(value) {
-    return (0,_utils_guards__WEBPACK_IMPORTED_MODULE_12__.isRecord)(value)
+    return (0,_utils_guards__WEBPACK_IMPORTED_MODULE_13__.isRecord)(value)
         && typeof value['findOne'] === 'function'
         && typeof value['find'] === 'function'
         && typeof value['findOneAndUpdate'] === 'function'
@@ -14858,27 +15499,27 @@ function isCollectionLike(value) {
         && typeof value['aggregate'] === 'function';
 }
 function isAggregateableCollectionLike(value) {
-    return (0,_utils_guards__WEBPACK_IMPORTED_MODULE_12__.isRecord)(value) && typeof value['aggregate'] === 'function';
+    return (0,_utils_guards__WEBPACK_IMPORTED_MODULE_13__.isRecord)(value) && typeof value['aggregate'] === 'function';
 }
 function isPercentileRedisLike(value) {
-    return (0,_utils_guards__WEBPACK_IMPORTED_MODULE_12__.isRecord)(value)
+    return (0,_utils_guards__WEBPACK_IMPORTED_MODULE_13__.isRecord)(value)
         && typeof value['get'] === 'function'
         && typeof value['set'] === 'function';
 }
 function isLockRedisLike(value) {
-    return (0,_utils_guards__WEBPACK_IMPORTED_MODULE_12__.isRecord)(value)
+    return (0,_utils_guards__WEBPACK_IMPORTED_MODULE_13__.isRecord)(value)
         && typeof value['get'] === 'function'
         && typeof value['set'] === 'function'
         && typeof value['exists'] === 'function'
         && typeof value['del'] === 'function';
 }
 function isAccountCapRedisLike(value) {
-    return (0,_utils_guards__WEBPACK_IMPORTED_MODULE_12__.isRecord)(value)
+    return (0,_utils_guards__WEBPACK_IMPORTED_MODULE_13__.isRecord)(value)
         && typeof value['eval'] === 'function'
         && typeof value['zrem'] === 'function';
 }
 function isTrackerRedisLike(value) {
-    if (!(0,_utils_guards__WEBPACK_IMPORTED_MODULE_12__.isRecord)(value)
+    if (!(0,_utils_guards__WEBPACK_IMPORTED_MODULE_13__.isRecord)(value)
         || typeof value['get'] !== 'function'
         || typeof value['set'] !== 'function'
         || typeof value['lrange'] !== 'function'
@@ -14893,7 +15534,7 @@ function isTrackerRedisLike(value) {
     }
 }
 function isVerificationRedisLike(value) {
-    return (0,_utils_guards__WEBPACK_IMPORTED_MODULE_12__.isRecord)(value)
+    return (0,_utils_guards__WEBPACK_IMPORTED_MODULE_13__.isRecord)(value)
         && typeof value['get'] === 'function'
         && typeof value['set'] === 'function'
         && typeof value['del'] === 'function'
@@ -14901,7 +15542,7 @@ function isVerificationRedisLike(value) {
         && typeof value['eval'] === 'function';
 }
 function isTrackerPipelineLike(value) {
-    return (0,_utils_guards__WEBPACK_IMPORTED_MODULE_12__.isRecord)(value)
+    return (0,_utils_guards__WEBPACK_IMPORTED_MODULE_13__.isRecord)(value)
         && typeof value['lpush'] === 'function'
         && typeof value['ltrim'] === 'function'
         && typeof value['expire'] === 'function'
@@ -14909,7 +15550,7 @@ function isTrackerPipelineLike(value) {
         && typeof value['exec'] === 'function';
 }
 function asRecord(value) {
-    return (0,_utils_guards__WEBPACK_IMPORTED_MODULE_12__.isRecord)(value) ? value : {};
+    return (0,_utils_guards__WEBPACK_IMPORTED_MODULE_13__.isRecord)(value) ? value : {};
 }
 
 
@@ -49607,8 +50248,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "6751271666059ec991020bbd16bd8da580802913" : 0;
-    const builtAt =  true ? "2026-11-17T19:07:43.420Z" : 0;
+    const sha =  true ? "ecbb20cc23ac0aa860907641587e8fc9b2f5f1f6" : 0;
+    const builtAt =  true ? "2026-11-17T20:14:26.511Z" : 0;
     return { sha, builtAt };
 }
 
