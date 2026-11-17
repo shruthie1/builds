@@ -10616,7 +10616,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   readPromoFlagsV3: () => (/* binding */ readPromoFlagsV3),
 /* harmony export */   resetPromoFlagsV3ForTests: () => (/* binding */ resetPromoFlagsV3ForTests)
 /* harmony export */ });
-const PROMO_FLAGS_DEFAULTS = Object.freeze({ fu: 'off' });
+const PROMO_FLAGS_DEFAULTS = Object.freeze({ fu: 'off', vx: 'off' });
 const FAIL_LOG_EVERY_MS = 10 * 60 * 1000;
 const HGETALL_SCRIPT = "return redis.call('HGETALL', KEYS[1])";
 function promoFlagsKey(app) {
@@ -10637,7 +10637,9 @@ function isFollowUpV3(flags) {
 function parsePromoFlags(hash) {
     const raw = typeof hash?.fu === 'string' ? hash.fu.trim().toLowerCase() : '';
     const fu = raw === 'on' || raw === 'loop' ? raw : 'off';
-    return { fu };
+    const rawVx = typeof hash?.vx === 'string' ? hash.vx.trim().toLowerCase() : '';
+    const vx = rawVx === 'on' ? 'on' : 'off';
+    return { fu, vx };
 }
 /** HGETALL with feature detection. Returns null when the client supports neither hgetall nor eval. Throws on a Redis error. */
 async function readFlagHash(redis, key) {
@@ -10962,7 +10964,9 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   PromoSweep: () => (/* binding */ PromoSweep),
 /* harmony export */   PromoVerifyCloses: () => (/* binding */ PromoVerifyCloses),
 /* harmony export */   SKIP_KEYS: () => (/* binding */ SKIP_KEYS),
+/* harmony export */   VERIFY_ATTEMPT_GAP_MS: () => (/* binding */ VERIFY_ATTEMPT_GAP_MS),
 /* harmony export */   VERIFY_MAX_AGE_MS: () => (/* binding */ VERIFY_MAX_AGE_MS),
+/* harmony export */   VERIFY_MAX_ATTEMPTS: () => (/* binding */ VERIFY_MAX_ATTEMPTS),
 /* harmony export */   classifyLoadedPool: () => (/* binding */ classifyLoadedPool),
 /* harmony export */   decideQuietReason: () => (/* binding */ decideQuietReason),
 /* harmony export */   formatCycleEndFields: () => (/* binding */ formatCycleEndFields),
@@ -10973,8 +10977,11 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _policy__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../../policy */ "../../packages/tg-channel-state/src/channel-message-promotions/policy/index.ts");
 
 const MIN = 60000;
-/** A verify item past this age would close as `verify_unknown` under P4. */
+/** P4: with >= `VERIFY_MAX_ATTEMPTS` counted attempts, a verify item this old meets the `verify_unknown` rule. */
 const VERIFY_MAX_AGE_MS = 10 * MIN;
+/** P4: counted unknown/error checks (at least `VERIFY_ATTEMPT_GAP_MS` apart) for the `verify_unknown` rule. */
+const VERIFY_MAX_ATTEMPTS = 5;
+const VERIFY_ATTEMPT_GAP_MS = 30000;
 /** A follow-up this late past due would expire under P2 (per app). */
 const FOLLOW_UP_MAX_LATE_MS = Object.freeze({ 'tg-aut': 30 * MIN, promote: 90 * MIN });
 /** Proposed channel cooldown per app; a queue copy older than this holds its channel out past cooldown. */
@@ -11038,6 +11045,11 @@ class PromoVerifyCloses {
     constructor() {
         this.closed = 0;
         this.closedLate = 0;
+        this.unknown = 0;
+        this.unknownWould = 0;
+        this.dropSize = 0;
+        this.dropExpired = 0;
+        this.dropLegacy = 0;
         this.marks = new Map();
     }
     note(sentAtMs, nowMs) {
@@ -11045,11 +11057,37 @@ class PromoVerifyCloses {
         if (Number.isFinite(sentAtMs) && sentAtMs > 0 && nowMs - sentAtMs > VERIFY_MAX_AGE_MS)
             this.closedLate += 1;
     }
+    /** P4: one terminal `verify_unknown` close (not in `closed`: no survival, no deletion). */
+    noteUnknown() {
+        this.unknown += 1;
+    }
+    /** P4 (`vx=off`): one item met the close rule and was kept (once per item). */
+    noteUnknownWould() {
+        this.unknownWould += 1;
+    }
+    /** P4: one queue drop (size trim, expired, legacy). */
+    noteDrop(reason) {
+        if (reason === 'size')
+            this.dropSize += 1;
+        else if (reason === 'expired')
+            this.dropExpired += 1;
+        else
+            this.dropLegacy += 1;
+    }
     /** Closes since the previous call with the same mark. */
     takeDelta(mark) {
-        const last = this.marks.get(mark) ?? { closed: 0, closedLate: 0 };
-        this.marks.set(mark, { closed: this.closed, closedLate: this.closedLate });
-        return { closed: this.closed - last.closed, closedAfter10m: this.closedLate - last.closedLate };
+        const last = this.marks.get(mark) ?? { closed: 0, closedLate: 0, unknown: 0, unknownWould: 0, dropSize: 0, dropExpired: 0, dropLegacy: 0 };
+        this.marks.set(mark, {
+            closed: this.closed, closedLate: this.closedLate, unknown: this.unknown, unknownWould: this.unknownWould,
+            dropSize: this.dropSize, dropExpired: this.dropExpired, dropLegacy: this.dropLegacy,
+        });
+        return {
+            closed: this.closed - last.closed,
+            closedAfter10m: this.closedLate - last.closedLate,
+            unknown: this.unknown - last.unknown,
+            unknownWould: this.unknownWould - last.unknownWould,
+            dropped: { size: this.dropSize - last.dropSize, expired: this.dropExpired - last.dropExpired, legacy: this.dropLegacy - last.dropLegacy },
+        };
     }
 }
 function formatPromoSweep(mobile, r, closes) {
@@ -11218,6 +11256,9 @@ function formatCycleEndFields(m) {
         `verify_open_over_10m=${m.sweep.droppedVerify}`,
         `verify_closed=${m.verifyCloses.closed}`,
         `verify_closed_after_10m=${m.verifyCloses.closedAfter10m}`,
+        `verify_unknown=${m.verifyCloses.unknown ?? 0}`,
+        `verify_unknown_would=${m.verifyCloses.unknownWould ?? 0}`,
+        `dropped{size,expired,legacy}=${[m.verifyCloses.dropped?.size ?? 0, m.verifyCloses.dropped?.expired ?? 0, m.verifyCloses.dropped?.legacy ?? 0].join(',')}`,
         `legacy_fu=${m.sweep.legacyFu}`,
         `sends_1h=main:${m.sends1h.main},fu:${m.sends1h.fu}`,
         `quiet=${m.quiet}`,
@@ -12809,6 +12850,52 @@ class PromotionFlowRunner {
             this.log(alert ? 'warn' : 'info', (0,_flow_runner_cycle_metrics__WEBPACK_IMPORTED_MODULE_18__.formatPromoSweep)((0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_17__.maskMobile)(this.options.account.mobile), result, this.verifyCloses.takeDelta('sweep')));
             return result;
         };
+        /**
+         * Flow v3 P4. After an unknown or failed check (one counted attempt, at least 30 s after the last
+         * counted one), the rule is met when the item is >= 10 min past its send AND has >= 5 counted
+         * attempts. `vx=on`: close it as terminal `verify_unknown` (no survival, no deletion, logged once,
+         * counted). `vx=off`: keep it, and log and count `verify_unknown_would` once per item.
+         * With `fu=on`, a P3 marker error (kept for the next check) counts no attempt; it closes past 1 h, the
+         * v3 verify payload TTL, in either `vx` mode (review F7, F8). Attempts live in memory only: a restored
+         * item starts at 0 (F6). Instance field: the prototype seam list is pinned.
+         */
+        this.verifyUnknownClose = (original, message, last) => {
+            const nowMs = Date.now();
+            const queue = this.messageQueue;
+            const sentAt = message.sentAt ?? message.timestamp;
+            const ageMs = Number.isFinite(sentAt) && sentAt > 0 ? nowMs - sentAt : 0;
+            const key = (0,_promotion_message_queue__WEBPACK_IMPORTED_MODULE_8__.queueItemKey)(original);
+            if (last === 'marker_error') {
+                if (ageMs < _promotion_message_queue__WEBPACK_IMPORTED_MODULE_8__.VERIFY_RESTORE_MAX_AGE_MS)
+                    return false;
+                const attempts = typeof queue.checkAttempts === 'function' ? queue.checkAttempts(original) : 0;
+                this.log('info', `promo verify close | ${key} | reason=verify_unknown | attempts=${attempts} | age_s=${Math.round(ageMs / 1000)} | last=${last}`);
+                this.verifyCloses.noteUnknown();
+                return true;
+            }
+            const attempts = typeof queue.noteCheckAttempt === 'function'
+                ? queue.noteCheckAttempt(original, nowMs, _flow_runner_cycle_metrics__WEBPACK_IMPORTED_MODULE_18__.VERIFY_ATTEMPT_GAP_MS)
+                : 0;
+            if (ageMs < _flow_runner_cycle_metrics__WEBPACK_IMPORTED_MODULE_18__.VERIFY_MAX_AGE_MS || attempts < _flow_runner_cycle_metrics__WEBPACK_IMPORTED_MODULE_18__.VERIFY_MAX_ATTEMPTS)
+                return false;
+            const fields = `${key} | reason=verify_unknown | attempts=${attempts} | age_s=${Math.round(ageMs / 1000)} | last=${last}`;
+            if (this.promoFlags.vx !== 'on') {
+                const first = typeof queue.markWouldClose === 'function' ? queue.markWouldClose(original) : false;
+                if (first) {
+                    this.log('info', `promo verify would-close | ${fields}`);
+                    this.verifyCloses.noteUnknownWould();
+                }
+                return false;
+            }
+            this.log('info', `promo verify close | ${fields}`);
+            this.verifyCloses.noteUnknown();
+            return true;
+        };
+        /** Flow v3 P4: the queue logs its size drops through the runner and every drop is counted. */
+        this.queueDropReporter = {
+            log: (level, message) => this.log(level, message),
+            count: (reason) => this.verifyCloses.noteDrop(reason),
+        };
         this.queueCheckInterval = null;
         this.queueCheckPromise = null;
         this.queueRestorePromise = null;
@@ -12858,6 +12945,8 @@ class PromotionFlowRunner {
         this.messageQueue = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_11__.isMessageQueueLike)(safeOptions.messageQueue)
             ? safeOptions.messageQueue
             : new _promotion_message_queue__WEBPACK_IMPORTED_MODULE_8__.PromotionMessageQueue(safeOptions.maxQueueSize ?? 500);
+        this.messageQueue
+            .setDropReporter?.(this.queueDropReporter);
         this.heartbeat = new _flow_runner_heartbeat__WEBPACK_IMPORTED_MODULE_14__.PromoHeartbeat(async (sends) => {
             if (!this.running)
                 return;
@@ -13506,6 +13595,8 @@ class PromotionFlowRunner {
             }
             this.log('debug', `Promotion queue check; queueSize=${this.messageQueue.size} ready=${ready.length} checkDelayMs=${checkDelay}`);
             const completed = new Set();
+            // P4: closed as verify_unknown; leaves memory even when the Redis delete fails (P0 review LOW 3).
+            const closedUnknown = new Set();
             for (const entry of ready) {
                 if (this.shouldAbortStartedRunnerWork()) {
                     this.log('debug', 'Promotion queue check interrupted because runner stopped');
@@ -13543,12 +13634,20 @@ class PromotionFlowRunner {
                         `isFollowUp=${message.isFollowUp}`,
                         `error=${this.normalizeError(error)}`,
                     ].join('; '));
+                    if (this.verifyUnknownClose(entry.original, message, 'error')) {
+                        completed.add(entry);
+                        closedUnknown.add(entry);
+                    }
                     continue;
                 }
                 if (v3 && (result.status === 'exists' || result.status === 'deleted')) {
-                    // P3: the one survival writer, once per verify key.
+                    // P3: the one survival writer, once per verify key. 'keep' = marker error.
                     if (await this.recordVerifiedOutcome(message, result) === 'done')
                         completed.add(entry);
+                    else if (this.verifyUnknownClose(entry.original, message, 'marker_error')) {
+                        completed.add(entry);
+                        closedUnknown.add(entry);
+                    }
                     continue;
                 }
                 if (result.status === 'exists') {
@@ -13570,6 +13669,10 @@ class PromotionFlowRunner {
                 }
                 else {
                     this.log('debug', `Message check unknown for ${message.channelId}/${message.messageId}; retaining for retry`);
+                    if (this.verifyUnknownClose(entry.original, message, 'unknown')) {
+                        completed.add(entry);
+                        closedUnknown.add(entry);
+                    }
                 }
             }
             for (const entry of completed) {
@@ -13578,6 +13681,13 @@ class PromotionFlowRunner {
                 }
                 catch (error) {
                     const { message } = entry;
+                    if (closedUnknown.has(entry)) {
+                        // Terminal: drop the in-memory copy so it is never re-checked or counted again. The payload
+                        // keeps its TTL; a restore before then re-checks it once more.
+                        this.messageQueue.remove(entry.original);
+                        this.log('warn', `promo verify close | ${(0,_promotion_message_queue__WEBPACK_IMPORTED_MODULE_8__.queueItemKey)(entry.original)} | payload delete failed | error=${this.normalizeError(error)}`);
+                        continue;
+                    }
                     this.log('warn', `Promotion queue remove failed; channelId=${message.channelId} messageId=${message.messageId} error=${this.normalizeError(error)}`);
                 }
             }
@@ -13598,6 +13708,7 @@ class PromotionFlowRunner {
         const key = (0,_promotion_message_queue__WEBPACK_IMPORTED_MODULE_8__.queueItemKey)(message);
         if (message.dueAt === undefined || message.sentAt === undefined) {
             this.log('info', `promo follow-up drop | ${key} | reason=legacy_no_dueAt`);
+            this.verifyCloses.noteDrop('legacy_no_dueAt');
             return 'done';
         }
         if (this.followUpTimers.has(message.channelId))
@@ -13605,6 +13716,7 @@ class PromotionFlowRunner {
         const nowMs = Date.now();
         if (nowMs > message.dueAt + this.followUpMaxLateMs()) {
             this.log('info', `promo follow-up drop | ${key} | reason=expired | late_min=${Math.round((nowMs - message.dueAt) / 60000)}`);
+            this.verifyCloses.noteDrop('expired');
             return 'done';
         }
         if (nowMs < message.dueAt)
@@ -13710,10 +13822,13 @@ class PromotionFlowRunner {
         if (app && typeof reader === 'function') {
             try {
                 const read = await reader.call(this.options.account, app);
-                next = (0,_config_promo_flags_v3__WEBPACK_IMPORTED_MODULE_9__.parsePromoFlags)(read && typeof read.fu === 'string' ? { fu: read.fu } : null);
+                next = (0,_config_promo_flags_v3__WEBPACK_IMPORTED_MODULE_9__.parsePromoFlags)(read ? {
+                    ...(typeof read.fu === 'string' ? { fu: read.fu } : {}),
+                    ...(typeof read.vx === 'string' ? { vx: read.vx } : {}),
+                } : null);
             }
             catch (error) {
-                this.log('warn', `promo flags | read failed; keeping fu=${this.promoFlags.fu} | error=${this.normalizeError(error)}`);
+                this.log('warn', `promo flags | read failed; keeping fu=${this.promoFlags.fu} vx=${this.promoFlags.vx} | error=${this.normalizeError(error)}`);
             }
         }
         else {
@@ -13721,11 +13836,14 @@ class PromotionFlowRunner {
         }
         const wasOn = this.isFollowUpV3();
         const prevFu = this.promoFlags.fu;
+        const prevVx = this.promoFlags.vx;
         this.promoFlags = next;
         const nowOn = this.isFollowUpV3();
         this.applyQueueV3Mode();
         if (prevFu !== next.fu)
             this.log('info', `promo flags | fu=${next.fu} | was=${prevFu}`);
+        if (prevVx !== next.vx)
+            this.log('info', `promo flags | vx=${next.vx} | was=${prevVx}`);
         if (nowOn && !wasOn)
             await this.dropFollowUpsWithoutDueAt();
     }
@@ -13772,6 +13890,7 @@ class PromotionFlowRunner {
         const dropped = queue.takeFollowUpsWithoutDueAt();
         for (const item of dropped) {
             this.log('info', `promo follow-up drop | ${(0,_promotion_message_queue__WEBPACK_IMPORTED_MODULE_8__.queueItemKey)(item)} | reason=legacy_no_dueAt`);
+            this.verifyCloses.noteDrop('legacy_no_dueAt');
             try {
                 await this.removeQueuedMessage(item);
             }
@@ -14156,6 +14275,9 @@ class PromotionMessageQueue {
         this.items = [];
         this.restored = false;
         this.v3 = null;
+        this.dropReporter = null;
+        /** Flow v3 P4: check attempts per live item, in memory only (never persisted, never in list()). */
+        this.attempts = new WeakMap();
         this.maxSize = Number.isFinite(maxSize) && maxSize > 0 ? Math.floor(maxSize) : 500;
         this.persistence = persistence;
     }
@@ -14185,6 +14307,47 @@ class PromotionMessageQueue {
         this.v3 = mode;
         this.persistence?.setFollowUpV3?.(mode !== null);
     }
+    /** Flow v3 P4: the runner sets this once; it logs the size drop line and counts every drop. */
+    setDropReporter(reporter) {
+        this.dropReporter = reporter;
+    }
+    /**
+     * Flow v3 P4: count one check attempt on the queued item (the live object, else the same key).
+     * Checks closer than `minGapMs` to the last counted one count once. Returns the attempt count.
+     */
+    noteCheckAttempt(message, nowMs, minGapMs) {
+        const target = this.liveItem(message);
+        const entry = this.attempts.get(target);
+        if (!entry || entry.count === 0) {
+            this.attempts.set(target, { count: 1, lastAt: nowMs, would: entry?.would ?? false });
+            return 1;
+        }
+        if (nowMs - entry.lastAt >= minGapMs) {
+            entry.count += 1;
+            entry.lastAt = nowMs;
+        }
+        return entry.count;
+    }
+    /** Flow v3 P4: counted attempts so far (0 for an item never counted, e.g. just restored). */
+    checkAttempts(message) {
+        return this.attempts.get(this.liveItem(message))?.count ?? 0;
+    }
+    /** Flow v3 P4 (`vx=off`): true the first time the item meets the close rule, false after. */
+    markWouldClose(message) {
+        const target = this.liveItem(message);
+        const entry = this.attempts.get(target) ?? { count: 0, lastAt: 0, would: false };
+        if (entry.would)
+            return false;
+        entry.would = true;
+        this.attempts.set(target, entry);
+        return true;
+    }
+    /** The queued object for this item (the same object, else the same key), or the given copy. */
+    liveItem(message) {
+        if (this.items.includes(message))
+            return message;
+        return this.items.find((candidate) => queueItemKey(candidate) === queueItemKey(message)) ?? message;
+    }
     /** Load pending work after process replacement. Safe to call repeatedly. */
     async restore() {
         if (this.restored)
@@ -14208,6 +14371,7 @@ class PromotionMessageQueue {
                         else
                             droppedLegacy += 1;
                         v3.log('info', `promo restore drop | ${queueItemKey(normalized)} | reason=${reason}`);
+                        this.dropReporter?.count(reason);
                         try {
                             await this.persistence.remove(normalized);
                         }
@@ -14303,9 +14467,11 @@ class PromotionMessageQueue {
         this.items.push(message);
         if (this.items.length > this.maxSize) {
             const dropped = this.items.splice(0, this.items.length - this.maxSize);
-            if (this.v3) {
-                for (const item of dropped)
-                    this.v3.log('warn', `promo queue drop | ${queueItemKey(item)} | reason=size`);
+            // Flow v3 P4: logged and counted in every flag mode (before P4 only under `fu` on, and never counted).
+            const log = this.dropReporter?.log ?? this.v3?.log;
+            for (const item of dropped) {
+                log?.('warn', `promo queue drop | ${queueItemKey(item)} | reason=size`);
+                this.dropReporter?.count('size');
             }
         }
     }
@@ -16397,6 +16563,8 @@ function banRateGateTrips(outcomes) {
 }
 /** Shared post-send liveness window used by both tg-aut and promote-clients. */
 const PROMOTION_MESSAGE_CHECK_DELAY_MS = 30000;
+/** Flow v3 P4: age cap for the sent-text map (the success hook takes it right after the send). */
+const SENT_PROMO_TEXT_MAX_AGE_MS = 60 * 60 * 1000;
 const intelligenceLog = new _logging_promo_logger__WEBPACK_IMPORTED_MODULE_22__.PromoLogger("intelligence");
 class BasePromotionEngine {
     constructor(client, dialogManager, clientId, mobile) {
@@ -16434,6 +16602,7 @@ class BasePromotionEngine {
          * channelId -> text of the promo just sent, for the success hook's promo-log quote (the runner result only
          * carries the id and a normalised text). Taken on read; bounded in case a hook never fires.
          */
+        /** Sent text per channel until the success hook takes it. Size 200 and (flow v3 P4) 1 h age cap. */
         this.sentPromoTexts = new Map();
         this.stats = {
             successCount: 0,
@@ -17312,8 +17481,21 @@ class BasePromotionEngine {
     // =================================================================
     //  SEND / CHECK
     // =================================================================
+    /** Flow v3 P4: drop texts older than 1 h (insertion order = send order), one log line per prune. */
+    pruneSentPromoTexts() {
+        const cutoff = Date.now() - SENT_PROMO_TEXT_MAX_AGE_MS;
+        let pruned = 0;
+        for (const [channelId, entry] of this.sentPromoTexts) {
+            if (entry.at >= cutoff)
+                break;
+            this.sentPromoTexts.delete(channelId);
+            pruned += 1;
+        }
+        if (pruned > 0)
+            this.logRunnerMessage('debug', `[${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_24__.maskMobile)(this.mobile)}] sent promo text drop | pruned=${pruned} | reason=age`);
+    }
     takeSentPromoText(channelId) {
-        const text = this.sentPromoTexts.get(channelId) ?? '';
+        const text = this.sentPromoTexts.get(channelId)?.text ?? '';
         this.sentPromoTexts.delete(channelId);
         return text;
     }
@@ -17341,10 +17523,13 @@ class BasePromotionEngine {
                 ...(materialized.aiMsg ? { maintainFormatting: true, skipObfuscation: true } : {}),
             });
             if (sendResult.message) {
+                this.pruneSentPromoTexts();
                 this.sentPromoTexts.delete(request.channel.channelId);
-                this.sentPromoTexts.set(request.channel.channelId, sendResult.message.message || materialized.messageContent || '');
-                if (this.sentPromoTexts.size > 200)
+                this.sentPromoTexts.set(request.channel.channelId, { text: sendResult.message.message || materialized.messageContent || '', at: Date.now() });
+                if (this.sentPromoTexts.size > 200) {
                     this.sentPromoTexts.delete(this.sentPromoTexts.keys().next().value);
+                    this.logRunnerMessage('debug', `[${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_24__.maskMobile)(this.mobile)}] sent promo text drop | pruned=1 | reason=size`);
+                }
             }
             if (!sendResult.message) {
                 this.onSendEmptyResult(request, materialized.randomIndex, sendResult.checkableByChannelId);
@@ -61741,8 +61926,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "ecbb20cc23ac0aa860907641587e8fc9b2f5f1f6" : 0;
-    const builtAt =  true ? "2026-11-17T20:14:24.417Z" : 0;
+    const sha =  true ? "714291ca80a8690738dc92201935c6ea338b8e3d" : 0;
+    const builtAt =  true ? "2026-11-17T20:54:55.617Z" : 0;
     return { sha, builtAt };
 }
 
