@@ -60422,8 +60422,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "ef1bc16b08dd79722d120fdb4ebcefb2898c21f6" : 0;
-    const builtAt =  true ? "2026-11-17T03:47:24.719Z" : 0;
+    const sha =  true ? "ce428e3dd9270920f887dd5504f428b1a7aad1df" : 0;
+    const builtAt =  true ? "2026-11-17T04:46:42.048Z" : 0;
     return { sha, builtAt };
 }
 
@@ -103077,8 +103077,11 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   askAnswerable: () => (/* binding */ askAnswerable),
 /* harmony export */   classifyAgainstServed: () => (/* binding */ classifyAgainstServed),
 /* harmony export */   confirmsAsk: () => (/* binding */ confirmsAsk),
+/* harmony export */   copiedReference: () => (/* binding */ copiedReference),
 /* harmony export */   dedupeReference: () => (/* binding */ dedupeReference),
 /* harmony export */   differentFormatSamePayment: () => (/* binding */ differentFormatSamePayment),
+/* harmony export */   factsPrintedDay: () => (/* binding */ factsPrintedDay),
+/* harmony export */   factsPrintedMinute: () => (/* binding */ factsPrintedMinute),
 /* harmony export */   findConfirmedAsk: () => (/* binding */ findConfirmedAsk),
 /* harmony export */   fraudAskAnswerable: () => (/* binding */ fraudAskAnswerable),
 /* harmony export */   fraudDeadlinePassed: () => (/* binding */ fraudDeadlinePassed),
@@ -103095,8 +103098,11 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   normalizeUtr: () => (/* binding */ normalizeUtr),
 /* harmony export */   otherPayee: () => (/* binding */ otherPayee),
 /* harmony export */   pictureDistance: () => (/* binding */ pictureDistance),
+/* harmony export */   printedMinuteOf: () => (/* binding */ printedMinuteOf),
 /* harmony export */   referenceCutOf: () => (/* binding */ referenceCutOf),
 /* harmony export */   referenceFormat: () => (/* binding */ referenceFormat),
+/* harmony export */   rowPrintedDay: () => (/* binding */ rowPrintedDay),
+/* harmony export */   rowPrintedMinute: () => (/* binding */ rowPrintedMinute),
 /* harmony export */   sameAmount: () => (/* binding */ sameAmount),
 /* harmony export */   samePayee: () => (/* binding */ samePayee),
 /* harmony export */   sameUpiId: () => (/* binding */ sameUpiId),
@@ -103129,7 +103135,7 @@ const FRAUD_GRACE_MS = 15 * MINUTE_MS;
 /** An open request can be answered for this long (also after the block). */
 const ASK_ANSWER_WINDOW_MS = 24 * 60 * MINUTE_MS;
 /** old_time reasons only a real reference answers (confirmsAsk). FAKE_STREAK / CHAT_PROVEN_FAKE: chat-fakes.ts holds. */
-const NEEDS_REAL_REFERENCE_REASONS = new Set(['IMPOSSIBLE_REFERENCE', 'NO_UTR_NO_TIME_SAME_AMOUNT', 'FAKE_STREAK', 'CHAT_PROVEN_FAKE', 'NO_UTR_VELOCITY', 'MODEL_DOUBT', 'COPY_ACROSS_PERSONAS', 'STATUS_UNKNOWN', 'SAME_MINUTE_OTHER_AMOUNT', 'PRINTED_BEFORE_CALL_NO_UTR']);
+const NEEDS_REAL_REFERENCE_REASONS = new Set(['IMPOSSIBLE_REFERENCE', 'NO_UTR_NO_TIME_SAME_AMOUNT', 'FAKE_STREAK', 'CHAT_PROVEN_FAKE', 'NO_UTR_VELOCITY', 'MODEL_DOUBT', 'COPY_ACROSS_PERSONAS', 'STATUS_UNKNOWN', 'SAME_MINUTE_OTHER_AMOUNT', 'PRINTED_BEFORE_CALL_NO_UTR', 'COPIED_REFERENCE']);
 /** Uppercase, separators removed. Null for masked ("XXXX", "****"), too short, or no digits at all. */
 function normalizeUtr(raw) {
     if (typeof raw !== 'string')
@@ -103197,6 +103203,95 @@ function utrOneDigitOff(a, b) {
         if (a[i] !== b[i])
             diff++;
     return diff === 1;
+}
+/**
+ * A reference made from another one by editing it (owner 2026-11-17; shruthi1 ****6056: ₹50 on …8725 credited, then the
+ * same receipt as ₹150 on …8726 and ₹350 on …8727; sowmya1 ****2702: ₹100, then ₹100 on the same UTR with two middle
+ * digits changed): two real references of the same length, not equal, whose numbers are at most 9 apart, or with the same
+ * last 4 characters and at most 2 characters different. Two genuine payments' references move in their low digits by far
+ * more than 9 (the bank counter runs between them) and do not keep their last 4 while the middle changes.
+ */
+function copiedReference(a, b) {
+    if (!isRealReference(a) || !isRealReference(b) || typeof a !== 'string' || typeof b !== 'string')
+        return false;
+    if (a === b || a.length !== b.length)
+        return false;
+    if (/^\d+$/.test(a) && /^\d+$/.test(b)) {
+        const gap = BigInt(a) - BigInt(b);
+        if (gap <= 9n && gap >= -9n)
+            return true;
+    }
+    if (a.slice(-4) !== b.slice(-4))
+        return false;
+    let diff = 0;
+    for (let i = 0; i < a.length && diff < 3; i++)
+        if (a[i] !== b[i])
+            diff++;
+    return diff <= 2;
+}
+const IST_OFFSET_MS = 330 * MINUTE_MS;
+const DAY_MS = 24 * 60 * MINUTE_MS;
+/**
+ * The printed minute as read: the vision time ("YYYY-MM-DDTHH:MM[:SS]", IST wall clock) as an epoch minute, before the
+ * time check's AM/PM / date corrections (payment-time.ts), so one receipt read twice keeps one minute even when the
+ * correction moved one reading by 12 h (shruthi1 ****6056: three receipts printed "12:32", one shifted to 00:32).
+ * null for 00:00:00, the model's placeholder for a date with no clock (gemini.ts "Date without time"): no minute.
+ * undefined when absent or not in that form.
+ */
+function printedMinuteOf(raw) {
+    if (typeof raw !== 'string')
+        return undefined;
+    const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?$/.exec(raw.trim());
+    if (!m)
+        return undefined;
+    const [y, mo, d, h, mi, sec] = m.slice(1).map((v) => (v === undefined ? 0 : Number(v)));
+    if (h === 0 && mi === 0 && sec === 0)
+        return null;
+    const ms = Date.UTC(y, mo - 1, d, h, mi) - IST_OFFSET_MS;
+    return Number.isFinite(ms) ? Math.floor(ms / MINUTE_MS) : undefined;
+}
+/** A time at exactly 00:00:00 IST: the date-only placeholder on rows and facts that carry no raw minute. */
+function datePlaceholderMinute(ms) {
+    return (ms + IST_OFFSET_MS) % DAY_MS === 0 ? null : Math.floor(ms / MINUTE_MS);
+}
+/**
+ * This screenshot's printed minute for the same-minute rule: printedMinute, else timeMs; none when the time check read no
+ * time (timeMs null, as rows store printedMin only with a known time) or the receipt is date-only.
+ */
+function factsPrintedMinute(f) {
+    if (f.timeMs === null || !Number.isFinite(f.timeMs))
+        return null;
+    return f.printedMinute !== undefined ? f.printedMinute : datePlaceholderMinute(f.timeMs);
+}
+/** A stored row's printed minute (time.printedMin, else its judged time for rows stored before it; date-only: none). */
+function rowPrintedMinute(row) {
+    if (row.time?.state !== 'known')
+        return null;
+    if (row.time.printedMin !== undefined)
+        return row.time.printedMin;
+    return typeof row.time.epochMs === 'number' ? datePlaceholderMinute(row.time.epochMs) : null;
+}
+/**
+ * The IST date of a date-only receipt (the model's 00:00:00 placeholder), for the same-minute rule's date-only pairs
+ * (owner 2026-11-17: two date-only receipts of one chat on the same printed date with other amounts are still asked);
+ * null for a receipt with a real printed minute, a relative time ("2 min ago") or no time. A date-only receipt never
+ * matches a real printed minute, and a real minute never matches a date-only one.
+ */
+function printedDay(ms, printedMin, relative) {
+    if (relative)
+        return null;
+    const dateOnly = printedMin === null || (printedMin === undefined && (ms + IST_OFFSET_MS) % DAY_MS === 0);
+    return dateOnly ? Math.floor((ms + IST_OFFSET_MS) / DAY_MS) : null;
+}
+function factsPrintedDay(f) {
+    if (f.timeMs === null || !Number.isFinite(f.timeMs))
+        return null;
+    return printedDay(f.timeMs, f.printedMinute, f.timeRelative);
+}
+function rowPrintedDay(row) {
+    if (row.time?.state !== 'known' || typeof row.time.epochMs !== 'number')
+        return null;
+    return printedDay(row.time.epochMs, row.time.printedMin, row.time.relative);
 }
 /**
  * The reference the re-send rules (rule 8 and rule 4 in classifyAgainstServed, the gate's minute lookup) compare: a
@@ -103730,6 +103825,13 @@ function rawAmount(details) {
     const n = Number(details.amount);
     return Number.isFinite(n) ? n : 0;
 }
+/** The printed minute as read (decide.ts printedMinuteOf); relative text has none; absent when the raw time is not readable. */
+function printedMinuteFact(ref) {
+    if (ref.timeRelative)
+        return { printedMinute: null };
+    const minute = (0,_decide__WEBPACK_IMPORTED_MODULE_0__.printedMinuteOf)(typeof ref.details.time === 'string' ? ref.details.time : null);
+    return minute === undefined ? {} : { printedMinute: minute };
+}
 function gateFacts(ref) {
     const fp = (0,_fingerprint__WEBPACK_IMPORTED_MODULE_6__.imageFingerprint)(ref.photo);
     return {
@@ -103741,6 +103843,7 @@ function gateFacts(ref) {
         sha256: fp.sha256,
         dHash: fp.dHash,
         timeMs: ref.paymentMs !== null && Number.isFinite(ref.paymentMs) ? ref.paymentMs : null,
+        ...printedMinuteFact(ref),
         ...(ref.arrivalMs !== undefined ? { arrivalMs: ref.arrivalMs } : {}),
         payeeUpiId: ref.details.payeeUpiId ?? null,
         payeeName: ref.details.payeeName || null,
@@ -104376,7 +104479,9 @@ class ProofGate {
             ...(extra.payeeUpiId ? { payeeUpiId: extra.payeeUpiId } : {}),
             ...(extra.payeeName ? { payeeName: extra.payeeName } : {}),
             amount: facts.amount,
-            time: facts.timeMs !== null ? { state: 'known', epochMs: facts.timeMs, ...(facts.timeRelative ? { relative: true } : {}) } : { state: 'unknown' },
+            time: facts.timeMs !== null
+                ? { state: 'known', epochMs: facts.timeMs, ...(facts.timeRelative ? { relative: true } : {}), ...(facts.printedMinute !== undefined ? { printedMin: facts.printedMinute } : {}) }
+                : { state: 'unknown' },
             // Outcome lives in `ask` / `servedAt`; `decision` is the schema's required field (ACCEPT = not rejected here).
             decision: 'ACCEPT', reasons: [], mode: 'enforce', provider: 'tg-aut', source: 'local',
             imageSha256: facts.sha256, ...(facts.dHash ? { imageHash: facts.dHash } : {}),
@@ -104471,6 +104576,7 @@ function proofGateFrom(getRepositories) {
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   COPIED_REFERENCE: () => (/* binding */ COPIED_REFERENCE),
 /* harmony export */   COPY_ACROSS_PERSONAS: () => (/* binding */ COPY_ACROSS_PERSONAS),
 /* harmony export */   NO_HOLDS: () => (/* binding */ NO_HOLDS),
 /* harmony export */   NO_UTR_NO_TIME_SAME_AMOUNT: () => (/* binding */ NO_UTR_NO_TIME_SAME_AMOUNT),
@@ -104478,6 +104584,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   PRINTED_BEFORE_CALL_NO_UTR: () => (/* binding */ PRINTED_BEFORE_CALL_NO_UTR),
 /* harmony export */   SAME_MINUTE_OTHER_AMOUNT: () => (/* binding */ SAME_MINUTE_OTHER_AMOUNT),
 /* harmony export */   clockLagVouch: () => (/* binding */ clockLagVouch),
+/* harmony export */   copiedReferenceRow: () => (/* binding */ copiedReferenceRow),
 /* harmony export */   historyVerdict: () => (/* binding */ historyVerdict),
 /* harmony export */   noUtrVelocityHold: () => (/* binding */ noUtrVelocityHold),
 /* harmony export */   sameMinuteOtherAmount: () => (/* binding */ sameMinuteOtherAmount)
@@ -104489,8 +104596,8 @@ __webpack_require__.r(__webpack_exports__);
  * What this user's history says about one payment screenshot: ONE pure decision over ONE read batch (gate.ts check()).
  * Order (rewrite 2026-11-14, docs/PAYMENT-SCREENSHOT-FLOW.md section 0): the same payment credited before, or held by the gate in
  * ANOTHER chat (classifyAgainstServed), then the re-send rule resend.ts, the very same held file, an open ask this
- * screenshot answers, an open ask only a real reference answers, then the post-rules holds (chat fakes, R1, same
- * minute other amount, R2, re-send ask) for outcome.ts to raise after the credit rules accepted, and the clock-lag fact
+ * screenshot answers, an open ask only a real reference answers, then the post-rules holds (copied reference, chat fakes,
+ * R1, same minute other amount, R2, re-send ask) for outcome.ts to raise after the credit rules accepted, and the clock-lag fact
  * that lets a leniency accept credit (clockLagVouch).
  */
 
@@ -104510,6 +104617,8 @@ const NO_UTR_NO_TIME_SAME_AMOUNT = 'NO_UTR_NO_TIME_SAME_AMOUNT';
 const COPY_LOOKBACK_MS = 7 * 24 * 60 * 60000;
 /** Same printed minute, other amount (owner 2026-11-15, ramya2: a credited ₹50 receipt edited to ₹150). */
 const SAME_MINUTE_OTHER_AMOUNT = 'SAME_MINUTE_OTHER_AMOUNT';
+/** A reference edited from one this chat already showed (decide.ts copiedReference; owner 2026-11-17). */
+const COPIED_REFERENCE = 'COPIED_REFERENCE';
 const SAME_MINUTE_LOOKBACK_MS = 48 * 60 * 60000;
 /**
  * Owner option D (2026-11-15): a receipt the credit rules accepted only by their leniency (printed before our last call,
@@ -104517,7 +104626,7 @@ const SAME_MINUTE_LOOKBACK_MS = 48 * 60 * 60000;
  */
 const PRINTED_BEFORE_CALL_NO_UTR = 'PRINTED_BEFORE_CALL_NO_UTR';
 const CLOCK_LAG_MATCH_MS = 5 * 60000;
-const NO_HOLDS = { chatFake: null, noUtrVelocity: false, copy: null, resendAsk: null, sameMinute: null, lagVouch: null };
+const NO_HOLDS = { chatFake: null, noUtrVelocity: false, copy: null, resendAsk: null, sameMinute: null, copiedRef: null, lagVouch: null };
 function ms(v) {
     return v instanceof Date ? v.getTime() : typeof v === 'string' || typeof v === 'number' ? new Date(v).getTime() : NaN;
 }
@@ -104560,30 +104669,47 @@ function copiedAcrossPersonas(f, credited, nowMs) {
 /**
  * Same printed minute, other amount (owner 2026-11-15; ramya2 7890818814: ₹50 credited printed 12:01, then the same
  * receipt edited to ₹150 and credited). An earlier row of this chat (any persona) credited before this screenshot arrived,
- * within 48 h, with a known printed time in the same minute and a different amount: the details-page ask. A screenshot
- * showing a real UTR other than that row's is a second payment's page (sneha2 ****9036: ₹315 misread, then the ₹35 page
- * with its own UTR) and is not asked.
+ * within 48 h, printed in the same minute with a different amount: the details-page ask, whatever the UTRs (owner
+ * 2026-11-17: shruthi1 ****6056 edited the UTR with the amount, …8725 ₹50 then …8726 ₹150 and …8727 ₹350, all printed
+ * 12:32; the old "a different real UTR is a second payment" exemption let both through). Minutes are compared AS PRINTED
+ * (factsPrintedMinute / rowPrintedMinute), before the AM/PM correction that moved the ₹50 to 00:32; a date-only receipt
+ * (00:00:00 placeholder) has no minute and never matches. A genuine second payment's details page answers the ask.
  */
 function sameMinuteOtherAmount(f, credited, nowMs) {
-    if (f.timeMs === null || !(f.amount > 0))
+    const minute = (0,_decide__WEBPACK_IMPORTED_MODULE_0__.factsPrintedMinute)(f);
+    // A date-only receipt (no minute) is matched by its printed date against other date-only rows only.
+    const day = minute === null ? (0,_decide__WEBPACK_IMPORTED_MODULE_0__.factsPrintedDay)(f) : null;
+    if ((minute === null && day === null) || !(f.amount > 0))
         return null;
     const at = f.arrivalMs ?? nowMs;
-    const minute = Math.floor(f.timeMs / 60000);
-    const ownRef = (0,_decide__WEBPACK_IMPORTED_MODULE_0__.isRealReference)(f.utr) ? f.utr : null;
     for (const r of credited) {
         if (r.chatId !== f.chatId || isSelf(f, r))
             continue;
         const served = ms(r.servedAt);
         if (!Number.isFinite(served) || served >= at || at - served > SAME_MINUTE_LOOKBACK_MS)
             continue;
-        const printed = rowTimeMs(r);
-        if (printed === null || Math.floor(printed / 60000) !== minute)
+        if (minute !== null ? (0,_decide__WEBPACK_IMPORTED_MODULE_0__.rowPrintedMinute)(r) !== minute : (0,_decide__WEBPACK_IMPORTED_MODULE_0__.rowPrintedDay)(r) !== day)
             continue;
         if (typeof r.amount !== 'number' || (0,_decide__WEBPACK_IMPORTED_MODULE_0__.sameAmount)(r.amount, f.amount))
             continue;
-        if (ownRef && ownRef !== (0,_decide__WEBPACK_IMPORTED_MODULE_0__.normalizeUtr)(r.utr || r.servedUtr || null))
-            continue;
         return r;
+    }
+    return null;
+}
+/**
+ * Copied reference (owner 2026-11-17): this screenshot's real reference was edited from one an earlier screenshot of this
+ * chat showed (decide.ts copiedReference), any persona, credited or not (`recent`, the chat's last 20 rows in the 7-day
+ * TTL). The details-page ask; never lifted by answering it: a page whose reference is again an edit of this chat's is held
+ * again, a genuine page with an unrelated real reference is credited.
+ */
+function copiedReferenceRow(f, recent) {
+    if (!(0,_decide__WEBPACK_IMPORTED_MODULE_0__.isRealReference)(f.utr))
+        return null;
+    for (const r of recent) {
+        if (r.chatId !== f.chatId || isSelf(f, r))
+            continue;
+        if ((0,_decide__WEBPACK_IMPORTED_MODULE_0__.copiedReference)(f.utr, (0,_decide__WEBPACK_IMPORTED_MODULE_0__.normalizeUtr)(r.utr || r.servedUtr || null)))
+            return r;
     }
     return null;
 }
@@ -104681,6 +104807,8 @@ function historyVerdict(f, rows, nowMs, ownName) {
         // A real reference answering the re-send ask: credited (review 2026-11-15, it was asked again forever).
         resendAsk: resend.kind === 'ask' && !(answered.has(NO_UTR_NO_TIME_SAME_AMOUNT) && (0,_decide__WEBPACK_IMPORTED_MODULE_0__.isRealReference)(f.utr)) ? resend.step : null,
         sameMinute: answered.has(SAME_MINUTE_OTHER_AMOUNT) ? null : sameMinuteOtherAmount(f, creditedRows, nowMs),
+        // Not lifted by an answer (a forged answer edits the reference once more).
+        copiedRef: copiedReferenceRow(f, recent),
         lagVouch: clockLagVouch(f, creditedRows, nowMs),
     };
     if (asked)
@@ -104852,6 +104980,7 @@ const OPS_SUMMARY = {
     CHAT_PROVEN_FAKE: 'CHAT_PROVEN_FAKE: no UTR, and this chat sent a proven fake before; the details page decides.',
     [_history__WEBPACK_IMPORTED_MODULE_1__.NO_UTR_VELOCITY]: 'NO_UTR_VELOCITY: no UTR, and this chat\'s no-UTR credits in 24 h reach ₹600; the details page decides.',
     [_history__WEBPACK_IMPORTED_MODULE_1__.SAME_MINUTE_OTHER_AMOUNT]: 'SAME_MINUTE_OTHER_AMOUNT: a payment printed in the same minute with another amount was credited on this chat in 48 h; the details page decides.',
+    [_history__WEBPACK_IMPORTED_MODULE_1__.COPIED_REFERENCE]: 'COPIED_REFERENCE: the UTR is an edit of one this chat already sent (at most 9 apart, or the same last 4 with 1-2 digits changed); the details page decides.',
     [_history__WEBPACK_IMPORTED_MODULE_1__.COPY_ACROSS_PERSONAS]: 'COPY_ACROSS_PERSONAS: the same amount, printed within 2 min, was credited on another persona of this chat; the details page decides.',
     [_history__WEBPACK_IMPORTED_MODULE_1__.NO_UTR_NO_TIME_SAME_AMOUNT]: 'Same amount credited in the last 48 h; nothing shows this is a new payment.',
     DETAILS_PAGE_AWAITED: 'Screenshot shows no real transaction reference; the details page is still awaited.',
@@ -104872,6 +105001,7 @@ const HOLD_WORDING = {
     [_history__WEBPACK_IMPORTED_MODULE_1__.NO_UTR_VELOCITY]: 'again',
     [STATUS_UNKNOWN]: 'copy',
     [_history__WEBPACK_IMPORTED_MODULE_1__.SAME_MINUTE_OTHER_AMOUNT]: 'copy',
+    [_history__WEBPACK_IMPORTED_MODULE_1__.COPIED_REFERENCE]: 'copy',
     [_history__WEBPACK_IMPORTED_MODULE_1__.COPY_ACROSS_PERSONAS]: 'copy',
     [_history__WEBPACK_IMPORTED_MODULE_1__.PRINTED_BEFORE_CALL_NO_UTR]: 'copy',
 };
@@ -104911,6 +105041,11 @@ function decideGate(e) {
     // Holds after the rules accepted: fake is not proven for THIS screenshot; the details page decides.
     if ((0,_decide__WEBPACK_IMPORTED_MODULE_0__.isImpossibleReference)(e.facts.utr))
         return holdAsk('IMPOSSIBLE_REFERENCE');
+    // Copied reference (owner 2026-11-17): the UTR is an edit of one this chat sent before. Not proven fake on its own
+    // (owner: ask when unproven); the details page, which only an unrelated real reference answers. Also covers the credit
+    // rules' "never-credited UTR" excuse for an old printed time (screenshot/helpers.ts): that accept lands here.
+    if (e.holds.copiedRef)
+        return holdAsk(_history__WEBPACK_IMPORTED_MODULE_1__.COPIED_REFERENCE);
     if (e.holds.chatFake)
         return holdAsk(e.holds.chatFake);
     // Status unknown (option (a)): a real reference is the evidence the status cannot give; without one, the details
