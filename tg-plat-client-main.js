@@ -10945,7 +10945,7 @@ async function runFollowUp(host, message) {
             host.log('debug', `Skipping follow-up for ${message.channelId}: adapter inactive`);
             return;
         }
-        if (host.adapter.shouldContinue && !(0,_normalize__WEBPACK_IMPORTED_MODULE_1__.isExactTrue)(await host.adapter.shouldContinue())) {
+        if (host.adapter.shouldContinue && !(0,_normalize__WEBPACK_IMPORTED_MODULE_1__.isExactTrue)(await host.adapter.shouldContinue({ followUp: message }))) {
             host.log('debug', `Skipping follow-up for ${message.channelId}: shouldContinue returned false`);
             return;
         }
@@ -12352,6 +12352,16 @@ class PromotionFlowRunner {
     }
     getQueueSize() {
         return this.messageQueue.size;
+    }
+    /**
+     * Declare a deliberate wait that happens outside the runner's own sleep (tg-aut hourly send cap), so
+     * the supervisor's stuck check and service health read it as rest. Only extends; the runner's own
+     * sleep may clear it, and the caller re-declares on every wait chunk.
+     */
+    declareSleepUntil(untilMs) {
+        if (!Number.isFinite(untilMs))
+            return;
+        this.health.sleepUntil = Math.max(this.health.sleepUntil ?? 0, untilMs);
     }
     getHealth() {
         return {
@@ -16176,10 +16186,10 @@ class BasePromotionEngine {
             getIntelligenceDocs: (channelIds) => this.getIntelligenceDocsForRunner(channelIds),
             getScoringDocs: (channelIds) => this.getScoringDocsForRunner(channelIds),
             getIntelligenceDoc: (channelId) => this.getIntelligenceDocForRunner(channelId),
-            shouldContinue: async () => {
+            shouldContinue: async (context) => {
                 if (!(await this.banRateGateAllows()))
                     return false;
-                return this.adapterShouldContinue();
+                return this.adapterShouldContinue(context);
             },
             sendPromotion: (request) => this.sendPromotionFromRunner(request),
             checkMessage: (message) => this.checkMessageFromRunner(message),
@@ -18231,6 +18241,14 @@ const RESERVE_SCRIPT = [
     "redis.call('PEXPIRE', key, ttlMs)",
     "return {1, count + 1}",
 ].join('\n');
+// Read-only: sends of one account newer than ARGV[1] (ms) and the oldest such score. Does not trim the set.
+const RECENT_SCRIPT = [
+    "local key = KEYS[1]",
+    "local cutoff = '(' .. ARGV[1]",
+    "local count = redis.call('ZCOUNT', key, cutoff, '+inf')",
+    "local oldest = redis.call('ZRANGEBYSCORE', key, cutoff, '+inf', 'WITHSCORES', 'LIMIT', 0, 1)",
+    "return {count, oldest[2] or '-1'}",
+].join('\n');
 class RedisAccountSendCap {
     constructor(redis) {
         if (!isRedisLike(redis)) {
@@ -18285,6 +18303,21 @@ class RedisAccountSendCap {
             return;
         await this.redis.zrem(keyForAccount(safeAccount), safeReservationId);
         capLog.debug('rollback', { acct: safeAccount });
+    }
+    /** Reservations (attempted sends) of this account in the last `windowMs`; read-only. Used by the tg-aut hourly cap. */
+    async recentSends(account, windowMs) {
+        const safeAccount = requireAccount(account);
+        const cutoff = Date.now() - Math.max(0, Math.trunc(windowMs));
+        const raw = await this.redis.eval?.(RECENT_SCRIPT, 1, keyForAccount(safeAccount), cutoff);
+        if (!Array.isArray(raw) || raw.length < 2) {
+            throw new Error(`RedisAccountSendCap returned invalid recent payload: ${String(raw)}`);
+        }
+        const count = normalizeInteger(raw[0]);
+        const oldest = normalizeInteger(raw[1]);
+        if (count === null || oldest === null) {
+            throw new Error(`RedisAccountSendCap returned invalid recent payload: ${String(raw)}`);
+        }
+        return { count, oldestAt: oldest >= 0 ? oldest : null };
     }
     async readCount(account) {
         const raw = await this.redis.eval?.(COUNT_SCRIPT, 1, keyForAccount(account), Date.now(), _pool_account_cap__WEBPACK_IMPORTED_MODULE_0__.ACCOUNT_SEND_WINDOW_MS);
@@ -18967,6 +19000,12 @@ class PromotionAccountContext {
         if (!this.runtime.accountCap)
             return null;
         return this.runtime.accountCap.reserve(this.mobile, daysLeft, await this.resolveAccountHealth());
+    }
+    /** Attempted sends of this mobile in the last `windowMs` (tg-aut hourly cap); null without a send counter. */
+    async getRecentSendWindow(windowMs) {
+        if (!this.runtime.accountCap)
+            return null;
+        return this.runtime.accountCap.recentSends(this.mobile, windowMs);
     }
     async rollbackDailySendBudget(reservationId) {
         if (!this.runtime.accountCap)
@@ -60422,8 +60461,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "ce428e3dd9270920f887dd5504f428b1a7aad1df" : 0;
-    const builtAt =  true ? "2026-11-17T04:46:42.048Z" : 0;
+    const sha =  true ? "ef85060964d2383a27e57d3aaae1ed9235b92e1e" : 0;
+    const builtAt =  true ? "2026-11-17T05:01:45.453Z" : 0;
     return { sha, builtAt };
 }
 
@@ -108021,6 +108060,219 @@ const defaultMessages = [
 
 /***/ },
 
+/***/ "./src/promotion/hourly-send-cap.ts"
+/*!******************************************!*\
+  !*** ./src/promotion/hourly-send-cap.ts ***!
+  \******************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   DEFAULT_MAX_PER_HOUR: () => (/* binding */ DEFAULT_MAX_PER_HOUR),
+/* harmony export */   DEFAULT_RAMP_DAY1: () => (/* binding */ DEFAULT_RAMP_DAY1),
+/* harmony export */   DEFAULT_RAMP_DAY2: () => (/* binding */ DEFAULT_RAMP_DAY2),
+/* harmony export */   FOLLOW_UP_MAX_LATE_MS: () => (/* binding */ FOLLOW_UP_MAX_LATE_MS),
+/* harmony export */   HOURLY_WINDOW_MS: () => (/* binding */ HOURLY_WINDOW_MS),
+/* harmony export */   HourlySendCap: () => (/* binding */ HourlySendCap),
+/* harmony export */   readHourlyCapConfig: () => (/* binding */ readHourlyCapConfig),
+/* harmony export */   resolveHourlyCap: () => (/* binding */ resolveHourlyCap)
+/* harmony export */ });
+/* harmony import */ var _tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/core/utils/dc-ip-family */ "../../packages/tg-core/src/utils/dc-ip-family.ts");
+/**
+ * tg-aut only: per-account cap on promotion sends in any rolling 60 minutes, with a slower ramp for a
+ * new main's first 2 days. promote-clients does not use this (its engine never builds one).
+ *
+ * Why (read-only RCA 2026-11-17, analytics promotion_send, tg-aut accounts):
+ *  - Established accounts (>= 4 days of sends): a day with more than 25 sends in some rolling hour was
+ *    followed by a limited day 13/63 times (20.6%), vs 2/98 (2.0%) at 25 or fewer.
+ *  - A new main's first 2 days: 16/25 (64%) limited next day above 26/h, 2/29 (6.9%) at 26 or fewer.
+ *    There is no data below 15/h, so the ramp is 18 then 22: the lowest bands with clean outcomes.
+ *  - Cost at 25/h + ramp 18/22 over 11-03..11-16: about 6.8% of tg-aut sends (314/day of 4,652/day).
+ *
+ * Count source: the Redis ZSET that already holds this mobile's send reservations for the 24h daily
+ * cap (RedisAccountSendCap). Every attempted main send and follow-up reserves there just before it
+ * goes out, so the last 60 minutes of that set is the hourly count. No second counter.
+ *
+ * At the cap the caller WAITS (main sends and follow-ups both pass through shouldContinue); a freed
+ * slot goes to the main send first, and a follow-up more than 30 min past due (~90 min after its
+ * parent) is skipped. The wait is declared as runner rest (sleepUntil) so it never looks stuck. Modes (TGAUT_PROMO_HOURLY_CAP): on = wait, record = log only,
+ * off = old behaviour (no Redis read).
+ */
+
+const HOURLY_WINDOW_MS = 60 * 60 * 1000;
+const DEFAULT_MAX_PER_HOUR = 25;
+const DEFAULT_RAMP_DAY1 = 18;
+const DEFAULT_RAMP_DAY2 = 22;
+const DAY_MS = 24 * 60 * 60 * 1000;
+/** A follow-up later than this past its due time (due = parent + ~60 min) is skipped instead of sent. */
+const FOLLOW_UP_MAX_LATE_MS = 30 * 60 * 1000;
+/**
+ * A pass whose reservation is not in Redis yet still holds its slot, so two callers cannot both take
+ * the last one. Released when the send starts (its reservation exists then), when the main loop asks
+ * again (its previous pass is finished), or after this long (a follow-up that never sent).
+ */
+const PASS_HOLD_MS = 20000;
+/** A follow-up that yields a free slot to a waiting main send re-checks after this. */
+const YIELD_WAIT_MS = 5000;
+/** Longest single sleep before the window is read again. */
+const MAX_WAIT_CHUNK_MS = 60000;
+const MIN_WAIT_MS = 1000;
+const MAIN_SINCE_TTL_MS = 30 * 60 * 1000;
+const MAIN_SINCE_UNKNOWN_TTL_MS = 2 * 60 * 1000;
+const READ_FAIL_LOG_EVERY_MS = 10 * 60 * 1000;
+function readPositiveInt(env, name, fallback) {
+    const raw = (env[name] ?? '').trim();
+    if (!raw)
+        return fallback;
+    const value = Number(raw);
+    return Number.isInteger(value) && value > 0 ? value : fallback;
+}
+function readHourlyCapConfig(env = process.env) {
+    const rawMode = (env.TGAUT_PROMO_HOURLY_CAP ?? '').trim().toLowerCase();
+    const mode = rawMode === 'off' || rawMode === 'record' ? rawMode : 'on';
+    return {
+        mode,
+        maxPerHour: readPositiveInt(env, 'TGAUT_PROMO_MAX_PER_HOUR', DEFAULT_MAX_PER_HOUR),
+        rampDay1: readPositiveInt(env, 'TGAUT_PROMO_RAMP_DAY1', DEFAULT_RAMP_DAY1),
+        rampDay2: readPositiveInt(env, 'TGAUT_PROMO_RAMP_DAY2', DEFAULT_RAMP_DAY2),
+    };
+}
+/** Day 1 = first 24h since became_main, day 2 = 24-48h, then the flat cap. A ramp never exceeds the flat cap. */
+function resolveHourlyCap(config, mainSinceMs, nowMs) {
+    if (mainSinceMs !== null && Number.isFinite(mainSinceMs) && mainSinceMs <= nowMs) {
+        const age = nowMs - mainSinceMs;
+        if (age < DAY_MS)
+            return { cap: Math.min(config.rampDay1, config.maxPerHour), stage: 'day1' };
+        if (age < 2 * DAY_MS)
+            return { cap: Math.min(config.rampDay2, config.maxPerHour), stage: 'day2' };
+    }
+    return { cap: config.maxPerHour, stage: 'flat' };
+}
+class HourlySendCap {
+    constructor(deps) {
+        /** Main-loop callers currently waiting at the cap; a freed slot goes to them before any follow-up. */
+        this.mainWaiting = 0;
+        this.holds = [];
+        this.mainSince = null;
+        this.lastReadFailLogAt = 0;
+        this.deps = deps;
+        this.now = deps.now ?? Date.now;
+    }
+    /**
+     * Resolves true when a promotion send may go now. False when promotion stopped while waiting, or a
+     * follow-up would go out more than FOLLOW_UP_MAX_LATE_MS after it was due (skipped, with a log).
+     * Counts only Redis reservations: the check and the go happen in one synchronous step after the
+     * read, and main sends win a freed slot over follow-ups.
+     */
+    async awaitSlot(request = {}) {
+        const config = readHourlyCapConfig(this.deps.env ?? process.env);
+        if (config.mode === 'off')
+            return true;
+        const isFollowUp = typeof request.followUpDueAt === 'number' && Number.isFinite(request.followUpDueAt);
+        const kind = isFollowUp ? 'follow-up' : 'main';
+        const acct = (0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_0__.maskMobile)(this.deps.mobile);
+        let waitedMs = 0;
+        let countedAsMainWaiter = false;
+        // The main loop is single-threaded: asking again means its previous pass sent or skipped.
+        if (!isFollowUp)
+            this.holds = this.holds.filter((h) => h.kind !== 'main');
+        try {
+            for (;;) {
+                if (!this.deps.isActive())
+                    return false;
+                const now = this.now();
+                const { cap, stage } = resolveHourlyCap(config, await this.readMainSince(now), now);
+                let window;
+                try {
+                    window = await this.deps.readWindow(HOURLY_WINDOW_MS);
+                }
+                catch (error) {
+                    this.logReadFailure(now, error);
+                    return true;
+                }
+                if (!window) {
+                    this.logReadFailure(now, 'no send counter');
+                    return true;
+                }
+                this.holds = this.holds.filter((h) => now - h.at < PASS_HOLD_MS);
+                const count = window.count + this.holds.length;
+                const yieldToMain = isFollowUp && this.mainWaiting > 0;
+                if (count < cap && !yieldToMain) {
+                    this.holds.push({ kind, at: now });
+                    if (waitedMs > 0) {
+                        this.deps.log('info', `[${acct}] PROMO hourly cap released | ${kind} | count ${count}/${cap} | stage ${stage} | waited ${Math.round(waitedMs / 1000)}s`);
+                    }
+                    return true;
+                }
+                if (config.mode === 'record') {
+                    if (count >= cap)
+                        this.deps.log('info', `[${acct}] PROMO hourly cap would wait (record mode) | ${kind} | count ${count}/${cap} | stage ${stage}`);
+                    return true;
+                }
+                if (isFollowUp && now - request.followUpDueAt > FOLLOW_UP_MAX_LATE_MS) {
+                    this.deps.log('info', `[${acct}] PROMO hourly cap: follow-up skipped, ${Math.round((now - request.followUpDueAt) / 60000)} min past due | count ${count}/${cap} | stage ${stage}`);
+                    return false;
+                }
+                if (!isFollowUp && !countedAsMainWaiter) {
+                    countedAsMainWaiter = true;
+                    this.mainWaiting += 1;
+                }
+                const untilWindow = window.oldestAt !== null ? window.oldestAt + HOURLY_WINDOW_MS - now : Number.POSITIVE_INFINITY;
+                const untilHold = this.holds.length ? this.holds[0].at + PASS_HOLD_MS - now : Number.POSITIVE_INFINITY;
+                const soonest = Math.min(untilWindow, untilHold);
+                const untilFree = count >= cap ? Math.max(0, Number.isFinite(soonest) ? soonest : MAX_WAIT_CHUNK_MS) : 0;
+                const waitMs = count >= cap
+                    ? Math.max(MIN_WAIT_MS, Math.min(MAX_WAIT_CHUNK_MS, untilFree + MIN_WAIT_MS))
+                    : YIELD_WAIT_MS;
+                // Declared rest: the supervisor and service health must not read a capped runner as dead.
+                this.deps.onWait?.(now + Math.max(untilFree, waitMs));
+                if (waitedMs === 0) {
+                    this.deps.log('info', count >= cap
+                        ? `[${acct}] PROMO hourly cap reached; waiting | ${kind} | count ${count}/${cap} | stage ${stage} | next slot in ${Math.round(untilFree / 1000)}s`
+                        : `[${acct}] PROMO hourly cap: follow-up yields the free slot to the main send | count ${count}/${cap}`);
+                }
+                await this.deps.sleep(waitMs);
+                waitedMs += waitMs;
+            }
+        }
+        finally {
+            if (countedAsMainWaiter)
+                this.mainWaiting -= 1;
+        }
+    }
+    /** A send is starting: its reservation is in Redis now, so drop the oldest hold of that kind. */
+    releaseHold(kind) {
+        const index = this.holds.findIndex((h) => h.kind === kind);
+        if (index >= 0)
+            this.holds.splice(index, 1);
+    }
+    async readMainSince(now) {
+        if (this.mainSince && now - this.mainSince.readAt < this.mainSince.ttlMs)
+            return this.mainSince.value;
+        let value = null;
+        try {
+            const raw = await this.deps.readMainSince();
+            value = typeof raw === 'number' && Number.isFinite(raw) ? raw : null;
+        }
+        catch (error) {
+            this.deps.log('warn', `[${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_0__.maskMobile)(this.deps.mobile)}] PROMO hourly cap: became_main unknown (${error instanceof Error ? error.message : String(error)}); treating as not a new main`);
+        }
+        // A found event is stable; "none" (also what a failed repository read returns) is re-read soon.
+        this.mainSince = { value, readAt: now, ttlMs: value === null ? MAIN_SINCE_UNKNOWN_TTL_MS : MAIN_SINCE_TTL_MS };
+        return value;
+    }
+    logReadFailure(now, error) {
+        if (now - this.lastReadFailLogAt < READ_FAIL_LOG_EVERY_MS)
+            return;
+        this.lastReadFailLogAt = now;
+        this.deps.log('warn', `[${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_0__.maskMobile)(this.deps.mobile)}] PROMO hourly cap: send window unavailable; not limiting: ${error instanceof Error ? error.message : String(error)}`);
+    }
+}
+
+
+/***/ },
+
 /***/ "./src/promotion/index.ts"
 /*!********************************!*\
   !*** ./src/promotion/index.ts ***!
@@ -108071,6 +108323,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _telegram_spam_state__WEBPACK_IMPORTED_MODULE_19__ = __webpack_require__(/*! ../telegram/spam-state */ "./src/telegram/spam-state.ts");
 /* harmony import */ var _tg_channel_state__WEBPACK_IMPORTED_MODULE_20__ = __webpack_require__(/*! @tg/channel-state */ "../../packages/tg-channel-state/src/index.ts");
 /* harmony import */ var _tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_21__ = __webpack_require__(/*! @tg/core/utils/dc-ip-family */ "../../packages/tg-core/src/utils/dc-ip-family.ts");
+/* harmony import */ var _hourly_send_cap__WEBPACK_IMPORTED_MODULE_22__ = __webpack_require__(/*! ./hourly-send-cap */ "./src/promotion/hourly-send-cap.ts");
+
 
 
 
@@ -108105,6 +108359,26 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_20__.Ba
         this.lastSelectionDiagnostics = null;
         this.lastPromotionSentDiagnostics = null;
         this.lastPromotionFailureDiagnostics = null;
+        /** tg-aut only: promotion sends per rolling hour (main sends and follow-ups). See hourly-send-cap.ts. */
+        this.hourlySendCap = new _hourly_send_cap__WEBPACK_IMPORTED_MODULE_22__.HourlySendCap({
+            mobile: this.mobile,
+            readWindow: async (windowMs) => {
+                const account = this.promotionContext ?? this.refreshPromotionContext();
+                return account.getRecentSendWindow(windowMs);
+            },
+            readMainSince: async () => {
+                const repos = (0,_data_db__WEBPACK_IMPORTED_MODULE_1__.getRepositories)();
+                if (!repos?.accountRoleEvents)
+                    return null;
+                const [latest] = await repos.accountRoleEvents.listForMobile(this.mobile, { limit: 1, events: ['became_main'] });
+                const at = latest?.at instanceof Date ? latest.at.getTime() : NaN;
+                return Number.isFinite(at) ? at : null;
+            },
+            sleep: (ms) => this.interruptibleSleep(ms),
+            isActive: () => this.promotionActive,
+            log: (level, message) => logger[level === 'info' ? 'log' : level](message),
+            onWait: (untilMs) => this.promotionRunner?.declareSleepUntil(untilMs),
+        });
         this.defaultAvailableMsgs = _default_messages__WEBPACK_IMPORTED_MODULE_3__.defaultMessages;
         // the bulk live write (bulkUpsertLiveChannels) already persisted the live dialog facts; re-read the stored doc instead.
         this.mergeCallerLiveFacts = false;
@@ -108195,7 +108469,19 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_20__.Ba
             followUp: () => (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_20__.generateFollowupMsg)(),
         };
     }
-    adapterShouldContinue() {
+    async adapterShouldContinue(context) {
+        if (!(await this.shouldContinueHelperPromotion()))
+            return false;
+        // Waits at the hourly cap (main sends first); a follow-up far past due is skipped.
+        const startedAt = Date.now();
+        const followUpDueAt = context?.followUp?.timestamp;
+        if (!(await this.hourlySendCap.awaitSlot(typeof followUpDueAt === 'number' ? { followUpDueAt } : {})))
+            return false;
+        if (Date.now() - startedAt < 1000)
+            return true;
+        // After a real wait, the state may have changed: re-check the ban-rate gate and the paid-user stop.
+        if (!(await this.banRateGateAllows()))
+            return false;
         return this.shouldContinueHelperPromotion();
     }
     onCheckMissing(messageItem, status) {
@@ -108537,6 +108823,7 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_20__.Ba
     //  SEND-PATH LOG HOOKS (rich)
     // =================================================================
     onSendAttempt(request) {
+        this.hourlySendCap.releaseHold(request.isFollowUp ? 'follow-up' : 'main');
         logger.debug(`[${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_21__.maskMobile)(this.mobile)}] Helper send attempt | ${request.channel.channelId} | ${this.formatUsername(request.channel.username)} | ${request.candidate.kind}:${request.candidate.randomIndex} | followUp ${request.isFollowUp}`);
     }
     onSendCandidateEmpty(request, randomIndex) {
