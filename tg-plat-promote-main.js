@@ -6176,7 +6176,7 @@ async function runFollowUp(host, message) {
             host.log('debug', `Skipping follow-up for ${message.channelId}: adapter inactive`);
             return;
         }
-        if (host.adapter.shouldContinue && !(0,_normalize__WEBPACK_IMPORTED_MODULE_1__.isExactTrue)(await host.adapter.shouldContinue())) {
+        if (host.adapter.shouldContinue && !(0,_normalize__WEBPACK_IMPORTED_MODULE_1__.isExactTrue)(await host.adapter.shouldContinue({ followUp: message }))) {
             host.log('debug', `Skipping follow-up for ${message.channelId}: shouldContinue returned false`);
             return;
         }
@@ -7575,6 +7575,16 @@ class PromotionFlowRunner {
     }
     getQueueSize() {
         return this.messageQueue.size;
+    }
+    /**
+     * Declare a deliberate wait that happens outside the runner's own sleep (tg-aut hourly send cap), so
+     * the supervisor's stuck check and service health read it as rest. Only extends; the runner's own
+     * sleep may clear it, and the caller re-declares on every wait chunk.
+     */
+    declareSleepUntil(untilMs) {
+        if (!Number.isFinite(untilMs))
+            return;
+        this.health.sleepUntil = Math.max(this.health.sleepUntil ?? 0, untilMs);
     }
     getHealth() {
         return {
@@ -11377,10 +11387,10 @@ class BasePromotionEngine {
             getIntelligenceDocs: (channelIds) => this.getIntelligenceDocsForRunner(channelIds),
             getScoringDocs: (channelIds) => this.getScoringDocsForRunner(channelIds),
             getIntelligenceDoc: (channelId) => this.getIntelligenceDocForRunner(channelId),
-            shouldContinue: async () => {
+            shouldContinue: async (context) => {
                 if (!(await this.banRateGateAllows()))
                     return false;
-                return this.adapterShouldContinue();
+                return this.adapterShouldContinue(context);
             },
             sendPromotion: (request) => this.sendPromotionFromRunner(request),
             checkMessage: (message) => this.checkMessageFromRunner(message),
@@ -13419,6 +13429,14 @@ const RESERVE_SCRIPT = [
     "redis.call('PEXPIRE', key, ttlMs)",
     "return {1, count + 1}",
 ].join('\n');
+// Read-only: sends of one account newer than ARGV[1] (ms) and the oldest such score. Does not trim the set.
+const RECENT_SCRIPT = [
+    "local key = KEYS[1]",
+    "local cutoff = '(' .. ARGV[1]",
+    "local count = redis.call('ZCOUNT', key, cutoff, '+inf')",
+    "local oldest = redis.call('ZRANGEBYSCORE', key, cutoff, '+inf', 'WITHSCORES', 'LIMIT', 0, 1)",
+    "return {count, oldest[2] or '-1'}",
+].join('\n');
 class RedisAccountSendCap {
     constructor(redis) {
         if (!isRedisLike(redis)) {
@@ -13473,6 +13491,21 @@ class RedisAccountSendCap {
             return;
         await this.redis.zrem(keyForAccount(safeAccount), safeReservationId);
         capLog.debug('rollback', { acct: safeAccount });
+    }
+    /** Reservations (attempted sends) of this account in the last `windowMs`; read-only. Used by the tg-aut hourly cap. */
+    async recentSends(account, windowMs) {
+        const safeAccount = requireAccount(account);
+        const cutoff = Date.now() - Math.max(0, Math.trunc(windowMs));
+        const raw = await this.redis.eval?.(RECENT_SCRIPT, 1, keyForAccount(safeAccount), cutoff);
+        if (!Array.isArray(raw) || raw.length < 2) {
+            throw new Error(`RedisAccountSendCap returned invalid recent payload: ${String(raw)}`);
+        }
+        const count = normalizeInteger(raw[0]);
+        const oldest = normalizeInteger(raw[1]);
+        if (count === null || oldest === null) {
+            throw new Error(`RedisAccountSendCap returned invalid recent payload: ${String(raw)}`);
+        }
+        return { count, oldestAt: oldest >= 0 ? oldest : null };
     }
     async readCount(account) {
         const raw = await this.redis.eval?.(COUNT_SCRIPT, 1, keyForAccount(account), Date.now(), _pool_account_cap__WEBPACK_IMPORTED_MODULE_0__.ACCOUNT_SEND_WINDOW_MS);
@@ -14150,6 +14183,12 @@ class PromotionAccountContext {
         if (!this.runtime.accountCap)
             return null;
         return this.runtime.accountCap.reserve(this.mobile, daysLeft, await this.resolveAccountHealth());
+    }
+    /** Attempted sends of this mobile in the last `windowMs` (tg-aut hourly cap); null without a send counter. */
+    async getRecentSendWindow(windowMs) {
+        if (!this.runtime.accountCap)
+            return null;
+        return this.runtime.accountCap.recentSends(this.mobile, windowMs);
     }
     async rollbackDailySendBudget(reservationId) {
         if (!this.runtime.accountCap)
@@ -48863,8 +48902,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "ce428e3dd9270920f887dd5504f428b1a7aad1df" : 0;
-    const builtAt =  true ? "2026-11-17T04:46:43.898Z" : 0;
+    const sha =  true ? "ef85060964d2383a27e57d3aaae1ed9235b92e1e" : 0;
+    const builtAt =  true ? "2026-11-17T05:01:42.688Z" : 0;
     return { sha, builtAt };
 }
 
