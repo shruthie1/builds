@@ -49506,9 +49506,18 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   MobileManager: () => (/* binding */ MobileManager),
 /* harmony export */   OVERLAP_STAMP_WINDOW_MS: () => (/* binding */ OVERLAP_STAMP_WINDOW_MS),
 /* harmony export */   PREVIOUS_BOOT_WINDOW_MS: () => (/* binding */ PREVIOUS_BOOT_WINDOW_MS),
+/* harmony export */   PROMOTE_REFILL_FLAG_FIELD: () => (/* binding */ PROMOTE_REFILL_FLAG_FIELD),
+/* harmony export */   PROMOTE_REFILL_FLAG_KEY: () => (/* binding */ PROMOTE_REFILL_FLAG_KEY),
+/* harmony export */   REFILL_DELAY_MS: () => (/* binding */ REFILL_DELAY_MS),
+/* harmony export */   REFILL_MAX_PER_IST_DAY: () => (/* binding */ REFILL_MAX_PER_IST_DAY),
+/* harmony export */   __resetRefillForTests: () => (/* binding */ __resetRefillForTests),
 /* harmony export */   keptHandoffDeps: () => (/* binding */ keptHandoffDeps),
+/* harmony export */   parsePromoteRefillFlag: () => (/* binding */ parsePromoteRefillFlag),
 /* harmony export */   promoteKeepPreviousMaxDays: () => (/* binding */ promoteKeepPreviousMaxDays),
-/* harmony export */   promoteSkipSpamStatusEnabled: () => (/* binding */ promoteSkipSpamStatusEnabled)
+/* harmony export */   promoteRefillBudgetKey: () => (/* binding */ promoteRefillBudgetKey),
+/* harmony export */   promoteSkipSpamStatusEnabled: () => (/* binding */ promoteSkipSpamStatusEnabled),
+/* harmony export */   readPromoteRefillFlag: () => (/* binding */ readPromoteRefillFlag),
+/* harmony export */   refillDeps: () => (/* binding */ refillDeps)
 /* harmony export */ });
 /* harmony import */ var _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/core/utils/TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
 /* harmony import */ var _data_user_data_crud__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../data/user-data-crud */ "./src/data/user-data-crud.ts");
@@ -49522,6 +49531,10 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _tg_core_account_lease_lease__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! @tg/core/account-lease/lease */ "../../packages/tg-core/src/account-lease/lease.ts");
 /* harmony import */ var node_os__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! node:os */ "node:os");
 /* harmony import */ var node_os__WEBPACK_IMPORTED_MODULE_10___default = /*#__PURE__*/__webpack_require__.n(node_os__WEBPACK_IMPORTED_MODULE_10__);
+/* harmony import */ var _tg_core_utils_timers__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! @tg/core/utils/timers */ "../../packages/tg-core/src/utils/timers.ts");
+/* harmony import */ var _refill_connector__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! ./refill-connector */ "./src/accounts/refill-connector.ts");
+
+
 
 
 
@@ -49619,6 +49632,113 @@ const keptHandoffDeps = {
 };
 const DEFAULT_KEEP_PREVIOUS_MAX_DAYS = 3;
 /**
+ * Mid-run slot refill (owner GO 2026-11-18). A mobile removed mid-run (removeClient after init: SpamBot limited > 3 d
+ * swap, permanent error, health swap, restart route) is replaced REFILL_DELAY_MS later by one mobile picked with the
+ * boot rules, at most REFILL_MAX_PER_IST_DAY per process per IST day. Off unless the Redis hash
+ * PROMOTE_REFILL_FLAG_KEY has field `refill` = on, or a clientId list naming this client (read at fire time; a read
+ * failure keeps the last value, as the flow v3 flags do).
+ */
+const REFILL_DELAY_MS = 10 * 60 * 1000;
+const REFILL_MAX_PER_IST_DAY = 2;
+const PROMOTE_REFILL_FLAG_KEY = 'promote:flags:v3:promote';
+const PROMOTE_REFILL_FLAG_FIELD = 'refill';
+const REFILL_FLAG_FAIL_LOG_EVERY_MS = 10 * 60 * 1000;
+const IST_OFFSET_MS = 330 * 60 * 1000;
+/** Seams for the refill (tests replace them). */
+const refillDeps = {
+    schedule: (fn, ms) => {
+        (0,_tg_core_utils_timers__WEBPACK_IMPORTED_MODULE_11__.scheduleUnrefTimeout)(() => { fn().catch((error) => (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, 'MobileManager.refill', false)); }, ms);
+    },
+    /** Raw `refill` field of the flag hash (null when missing). Throws on a Redis error. */
+    readFlag: async () => {
+        const { RedisClient } = await Promise.resolve(/*! import() */).then(__webpack_require__.bind(__webpack_require__, /*! @tg/core/utils/Redis/Redis.Client */ "../../packages/tg-core/src/utils/Redis/Redis.Client.ts"));
+        return RedisClient.getClient().hget(PROMOTE_REFILL_FLAG_KEY, PROMOTE_REFILL_FLAG_FIELD);
+    },
+    /** Refill budget (JSON) by key; null when missing. Throws on a Redis error. */
+    budgetGet: async (key) => {
+        const { RedisClient } = await Promise.resolve(/*! import() */).then(__webpack_require__.bind(__webpack_require__, /*! @tg/core/utils/Redis/Redis.Client */ "../../packages/tg-core/src/utils/Redis/Redis.Client.ts"));
+        return RedisClient.getObject(key);
+    },
+    budgetSet: async (key, value, ttlSec) => {
+        const { RedisClient } = await Promise.resolve(/*! import() */).then(__webpack_require__.bind(__webpack_require__, /*! @tg/core/utils/Redis/Redis.Client */ "../../packages/tg-core/src/utils/Redis/Redis.Client.ts"));
+        await RedisClient.set(key, value, ttlSec);
+    },
+    /** Connects a mobile already in clientsMap through the boot path (TelegramService.connectMobile, via refill-connector). */
+    connect: async (mobile) => {
+        const connect = (0,_refill_connector__WEBPACK_IMPORTED_MODULE_12__.getRefillConnector)();
+        if (!connect)
+            throw new Error('refill connector not registered (TelegramService not constructed)');
+        return connect(mobile);
+    },
+};
+const refillFlagState = { last: null, lastFailLogAt: 0 };
+/**
+ * `refill` field value for this process: `on` = every client; a comma-separated clientId list = only those clients
+ * (entries trimmed and lowercased, matched against this process's clientId; an empty entry matches nothing).
+ * `off`, unset, no non-empty entry, an entry that is not a clientId token, or `on`/`off` inside a list = off.
+ */
+function parsePromoteRefillFlag(raw, clientId) {
+    if (typeof raw !== 'string')
+        return 'off';
+    const value = raw.trim().toLowerCase();
+    if (value === 'on')
+        return 'on';
+    if (value === '' || value === 'off')
+        return 'off';
+    // An empty entry ("a,,b", a trailing comma) matches nothing; the other entries still count.
+    const entries = value.split(',').map((e) => e.trim()).filter((e) => e !== '');
+    if (entries.length === 0 || entries.some((e) => !/^[a-z0-9_-]+$/.test(e) || e === 'on' || e === 'off'))
+        return 'off';
+    const self = String(clientId ?? '').trim().toLowerCase();
+    return self !== '' && entries.includes(self) ? 'on' : 'off';
+}
+/** `refill` flag for this process (parsePromoteRefillFlag). A read failure keeps the last value, else off. */
+async function readPromoteRefillFlag() {
+    try {
+        const raw = await refillDeps.readFlag();
+        const value = parsePromoteRefillFlag(raw, process.env.clientId);
+        const shown = typeof raw === 'string' ? raw : '(unset)';
+        if (refillFlagState.lastRaw === undefined || refillFlagState.lastRaw !== shown) {
+            refillFlagState.lastRaw = shown;
+            logger.info(`refill flag: value=${shown} → ${value} for ${process.env.clientId ?? '(no clientId)'}`);
+        }
+        refillFlagState.last = value;
+        return value;
+    }
+    catch (error) {
+        const now = Date.now();
+        if (now - refillFlagState.lastFailLogAt >= REFILL_FLAG_FAIL_LOG_EVERY_MS) {
+            refillFlagState.lastFailLogAt = now;
+            logger.warn(`promo flags | key=${PROMOTE_REFILL_FLAG_KEY} | field=${PROMOTE_REFILL_FLAG_FIELD} | reason=read_failed | keep=${refillFlagState.last ?? 'default'} | error=${error instanceof Error ? error.message : String(error)}`);
+        }
+        return refillFlagState.last ?? 'off';
+    }
+}
+function __resetRefillForTests() {
+    refillFlagState.last = null;
+    refillFlagState.lastFailLogAt = 0;
+    refillFlagState.lastRaw = undefined;
+}
+/** Per client per IST day refill budget (count + mobiles removed today), Redis. */
+function promoteRefillBudgetKey(clientId, day) {
+    return `promote:refill:${clientId}:${day}`;
+}
+function normalizeRefillBudget(raw) {
+    const obj = raw && typeof raw === 'object' ? raw : {};
+    const count = typeof obj.count === 'number' && Number.isFinite(obj.count) && obj.count > 0 ? Math.floor(obj.count) : 0;
+    const removed = Array.isArray(obj.removed) ? obj.removed.filter((m) => typeof m === 'string' && m.length > 0) : [];
+    return { count, removed };
+}
+/** Seconds to the next IST midnight plus 6 h: the day key outlives its day, then expires. */
+function refillBudgetTtlSec(nowMs) {
+    const istNow = nowMs + IST_OFFSET_MS;
+    const nextIstMidnight = (Math.floor(istNow / DAY_MS) + 1) * DAY_MS;
+    return Math.ceil((nextIstMidnight - istNow) / 1000) + 6 * 3600;
+}
+function istDay(ms) {
+    return new Date(ms + IST_OFFSET_MS).toISOString().slice(0, 10);
+}
+/**
  * PROMO_KEEP_PREVIOUS_MAX_DAYS (default 3): a kept mobile's current continuous run (promoteClients.runStartedAt)
  * must be shorter than this, so restarts still rotate long-running mobiles. 0 = never keep. Junk = 3.
  */
@@ -49653,6 +49773,10 @@ class MobileManager {
         this.clientsMap = new Map();
         this.telegramManagers = new Map();
         this.isInitialized = false;
+        /** Refill bookkeeping: the refill mobile being connected (its failure removal starts no refill), one refill at a time. */
+        this.refillConnecting = new Set();
+        this.refillChain = Promise.resolve();
+        this.refillStopped = false;
         this.config = config ?? {
             targetMobileCount: resolveTargetMobileCount(),
             minChannels: 180,
@@ -49662,6 +49786,7 @@ class MobileManager {
         // }, 10* 60 * 1000); // Every 10 minutes
     }
     async cleanup() {
+        this.refillStopped = true;
         // if (this.prevMsgsInterval) {
         //   clearInterval(this.prevMsgsInterval);
         //   this.prevMsgsInterval = null;
@@ -49857,7 +49982,164 @@ class MobileManager {
             this.telegramManagers.delete(mobile);
             this.clientsMap.delete(mobile);
             logger.info(`🗑️ Removed client: ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_8__.maskMobile)(mobile)}`);
+            this.scheduleRefill(mobile);
         }
+    }
+    /** Mid-run removal: one refill attempt REFILL_DELAY_MS later (the flag is read when it fires). */
+    scheduleRefill(removed) {
+        if (!this.isInitialized || this.refillStopped)
+            return;
+        // F1: a refill mobile that fails to connect is removed without starting another refill (the cap still bounds it).
+        if (this.refillConnecting.has(removed))
+            return;
+        const removedAt = Date.now();
+        refillDeps.schedule(() => {
+            this.refillChain = this.refillChain.then(() => this.runRefill(removed, removedAt)).catch((error) => {
+                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, 'MobileManager.refill', false);
+            });
+            return this.refillChain;
+        }, REFILL_DELAY_MS);
+    }
+    async runRefill(removed, removedAt) {
+        const skip = (reason, extra = '') => logger.info(`refill_skipped | removed=${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_8__.maskMobile)(removed)} | reason=${reason}${extra ? ` | ${extra}` : ''}`);
+        if (this.refillStopped || !this.isInitialized)
+            return skip('stopped');
+        if ((await readPromoteRefillFlag()) !== 'on')
+            return skip('flag_off');
+        const now = Date.now();
+        if (now - removedAt < REFILL_DELAY_MS)
+            return skip('too_early');
+        // F2: count and removed-today live in Redis, one key per client per IST day, so a restart cannot reset them.
+        const clientId = process.env.clientId || 'unknown';
+        const day = istDay(now);
+        const key = promoteRefillBudgetKey(clientId, day);
+        const ttlSec = refillBudgetTtlSec(now);
+        let budget;
+        try {
+            budget = normalizeRefillBudget(await refillDeps.budgetGet(key));
+        }
+        catch (error) {
+            return skip('budget_unavailable', `key=${key} error=${error instanceof Error ? error.message : String(error)}`);
+        }
+        const saveBudget = async () => {
+            try {
+                await refillDeps.budgetSet(key, budget, ttlSec);
+                return true;
+            }
+            catch (error) {
+                logger.warn(`refill budget write failed | key=${key} | error=${error instanceof Error ? error.message : String(error)}`);
+                return false;
+            }
+        };
+        if (!budget.removed.includes(removed)) {
+            budget.removed.push(removed);
+            if (!(await saveBudget()))
+                return skip('budget_unavailable', `key=${key} write failed`);
+        }
+        const target = this.config.targetMobileCount;
+        if (this.clientsMap.size >= target)
+            return skip('full', `active=${this.clientsMap.size} target=${target}`);
+        if (budget.count >= REFILL_MAX_PER_IST_DAY)
+            return skip('daily_cap', `ist_day=${day} refills=${budget.count}`);
+        const removedToday = new Set(budget.removed);
+        const fetched = await (0,_data_db__WEBPACK_IMPORTED_MODULE_2__.getRepositories)()?.promote.getAvailablePromoteMobile({}, process.env.clientId);
+        const candidates = (fetched ?? []).filter((c) => {
+            const m = typeof c.mobile === 'string' ? c.mobile.trim() : '';
+            return m && !this.clientsMap.has(m) && !removedToday.has(m);
+        });
+        if (candidates.length === 0)
+            return skip('no_candidates');
+        // Boot ranking, but strict (F8): no unfiltered pick on an unreadable health read, no all-harsh fallback.
+        // Limited only when no clean candidate is left. PROMO_SKIP_SPAM_STATUS=off (the gate's kill switch) still means no gate.
+        let gate;
+        if (promoteSkipSpamStatusEnabled()) {
+            const strict = await this.skipSpamCandidates(candidates, { strict: true });
+            if (!strict)
+                return skip('health_unavailable');
+            gate = strict;
+        }
+        else {
+            gate = { clean: candidates, limited: [] };
+        }
+        if (gate.clean.length === 0 && gate.limited.length === 0)
+            return skip('no_clean', `candidates=${candidates.length} all harsh`);
+        const ordered = [
+            ...this.rankCandidates(gate.clean).map((c) => ({ c, source: 'clean' })),
+            ...this.rankCandidates(gate.limited).map((c) => ({ c, source: 'limited_topup' })),
+        ];
+        if (ordered.length === 0)
+            return skip('no_candidates', 'none valid after ranking');
+        const store = (0,_data_db__WEBPACK_IMPORTED_MODULE_2__.getRepositories)()?.accountLeases;
+        if (!store || typeof store.liveHolder !== 'function')
+            return skip('lease_store_unavailable');
+        let picked = null;
+        let leased = 0;
+        for (const entry of ordered) {
+            let holder;
+            try {
+                holder = await store.liveHolder(entry.c.mobile);
+            }
+            catch (error) {
+                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, `refill lease read failed for ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_8__.maskMobile)(entry.c.mobile)}`, false);
+                logger.warn(`refill: ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_8__.maskMobile)(entry.c.mobile)} skipped, lease unreadable (fail closed)`);
+                leased++;
+                continue;
+            }
+            if (holder && !this.holderIsGone(holder.owner)) {
+                logger.info(`refill: ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_8__.maskMobile)(entry.c.mobile)} skipped, lease held by a live process (${holder.owner ?? '?'})`);
+                leased++;
+                continue;
+            }
+            picked = entry;
+            break;
+        }
+        if (!picked)
+            return skip('all_leased', `candidates=${ordered.length} leased_or_unreadable=${leased}`);
+        const mobile = picked.c.mobile;
+        // The cap unit is spent before connecting; a failed write means no refill (the cap must hold across restarts).
+        budget.count += 1;
+        if (!(await saveBudget()))
+            return skip('budget_unavailable', `key=${key} write failed`);
+        logger.info(`refill_picked | removed=${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_8__.maskMobile)(removed)} | mobile=${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_8__.maskMobile)(mobile)} | source=${picked.source} | ranked=${ordered.length} | refills_today=${budget.count}/${REFILL_MAX_PER_IST_DAY}`);
+        if (picked.source === 'limited_topup') {
+            logger.warn(`⚠️ PROMO_SKIP_SPAM_STATUS top-up (refill): no clean candidate left; using limited ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_8__.maskMobile)(mobile)} (never harsh)`);
+        }
+        await this.stampRunStarts([mobile], [], new Map(), now);
+        const created = await this.createClientInstances([mobile]);
+        if (created.successful === 0)
+            return skip('create_failed', `mobile=${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_8__.maskMobile)(mobile)}`);
+        let connected = false;
+        this.refillConnecting.add(mobile);
+        try {
+            connected = await refillDeps.connect(mobile);
+        }
+        catch (error) {
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, `refill connect failed for ${mobile}`, false);
+        }
+        try {
+            if (!connected) {
+                // F1: no zombie slot. It would block later refills as `full` and count toward keepLastMobile.
+                if (this.clientsMap.has(mobile))
+                    await this.removeClient(mobile);
+                logger.warn(`refill_connect_failed | mobile=${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_8__.maskMobile)(mobile)} | removed=${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_8__.maskMobile)(removed)} | removed_from_slots | no new refill`);
+            }
+        }
+        finally {
+            this.refillConnecting.delete(mobile);
+        }
+        // Keep the next boot's previous-boot window (PREVIOUS_BOOT_WINDOW_MS of the newest lastUsed) covering the
+        // survivors: connectMobile stamped the refill mobile's lastUsed (also on failure), so restamp the others alike.
+        // F3: read after the connect, so a mobile removed during it is not restamped.
+        const stamp = new Date(Date.now());
+        const survivors = this.getActiveMobiles().filter((m) => m !== mobile);
+        await Promise.all(survivors.map(async (m) => {
+            try {
+                await (0,_data_db__WEBPACK_IMPORTED_MODULE_2__.getRepositories)()?.promote.updatePromoteClient({ mobile: m }, { lastUsed: stamp });
+            }
+            catch (error) {
+                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, `refill lastUsed restamp failed for ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_8__.maskMobile)(m)}`, false);
+            }
+        }));
     }
     // Private Helper Methods
     async selectRandomMobiles() {
@@ -50089,16 +50371,13 @@ class MobileManager {
             }
         }));
     }
-    /**
-     * PROMO_SKIP_SPAM_STATUS (default on): split candidates into clean and limited; drop harsh (latest harsh verdict
-     * < 30 days old) and log every skip (promoteSpamSkipReason). The caller tops up with limited when clean is below
-     * the target, never with harsh. Parked mobiles are not skipped. An unreadable or timed-out health read, or a pool
-     * that is ALL harsh, keeps the old unfiltered selection (warned), so the gate can never fail the boot.
-     */
-    async skipSpamCandidates(candidates) {
+    /** `strict` (mid-run refill): null on an unreadable read, and no all-harsh fallback (clean and limited both empty). */
+    async skipSpamCandidates(candidates, opts = {}) {
         const now = new Date(Date.now());
         const mobiles = candidates.map((c) => (typeof c.mobile === 'string' ? c.mobile.trim() : '')).filter(Boolean);
         const read = await (0,_data_db__WEBPACK_IMPORTED_MODULE_2__.getRepositories)()?.promote.readPromoteSelectionHealth(mobiles);
+        if (!read && opts.strict)
+            return null;
         if (!read) {
             logger.warn(`⚠️ PROMO_SKIP_SPAM_STATUS: spam status unreadable; selecting from all ${candidates.length} candidate(s) without the skip`);
             return { clean: candidates, limited: [], free: new Set() };
@@ -50121,7 +50400,7 @@ class MobileManager {
         }
         if (clean.length < candidates.length)
             logger.info(`PROMO_SKIP_SPAM_STATUS: ${clean.length} clean, ${limited.length} limited, ${candidates.length - clean.length - limited.length} harsh of ${candidates.length} candidate(s)`);
-        if (clean.length === 0 && limited.length === 0) {
+        if (clean.length === 0 && limited.length === 0 && !opts.strict) {
             // Round-2 review LOW: an empty selection fails the boot (restart loop). Keep promoting with the old selection.
             logger.warn(`⚠️ PROMO_SKIP_SPAM_STATUS: all ${candidates.length} candidate(s) are SpamBot harsh; falling back to the old unfiltered selection`);
             return { clean: candidates, limited: [], free: new Set() };
@@ -50174,7 +50453,7 @@ class MobileManager {
         const createdAtMs = candidate.createdAt ? new Date(candidate.createdAt).getTime() : Number.MAX_SAFE_INTEGER;
         const lastUsedMs = candidate.lastUsed ? new Date(candidate.lastUsed).getTime() : 0;
         const now = Date.now();
-        const daysUntilAvailable = Math.max(0, Math.floor((availableAtMs - now) / (24 * 60 * 60 * 1000)));
+        const daysUntilAvailable = Math.max(0, Math.ceil((availableAtMs - now) / (24 * 60 * 60 * 1000)));
         return {
             mobile,
             keepInUse: keep.has(mobile),
@@ -50955,6 +51234,28 @@ PromoteParkedResponder.instance = null;
 
 /***/ },
 
+/***/ "./src/accounts/refill-connector.ts"
+/*!******************************************!*\
+  !*** ./src/accounts/refill-connector.ts ***!
+  \******************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   getRefillConnector: () => (/* binding */ getRefillConnector),
+/* harmony export */   registerRefillConnector: () => (/* binding */ registerRefillConnector)
+/* harmony export */ });
+let connector = null;
+function registerRefillConnector(fn) {
+    connector = fn;
+}
+function getRefillConnector() {
+    return connector;
+}
+
+
+/***/ },
+
 /***/ "./src/accounts/route-state-store.ts"
 /*!*******************************************!*\
   !*** ./src/accounts/route-state-store.ts ***!
@@ -51537,8 +51838,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "210e0c24fdecd66fde8366b3029f8f03b5863858" : 0;
-    const builtAt =  true ? "2026-11-18T07:47:33.651Z" : 0;
+    const sha =  true ? "bf432b82b7a2bc02d1afc39622994ae2018e5ab0" : 0;
+    const builtAt =  true ? "2026-11-18T08:20:59.811Z" : 0;
     return { sha, builtAt };
 }
 
@@ -60949,10 +61250,11 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _permanent_failure__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./permanent-failure */ "./src/telegram/permanent-failure.ts");
 /* harmony import */ var _shared_sleep__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../shared/sleep */ "./src/shared/sleep.ts");
 /* harmony import */ var _accounts_mobile_manager__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../accounts/mobile-manager */ "./src/accounts/mobile-manager.ts");
-/* harmony import */ var _data_db__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ../data/db */ "./src/data/db.ts");
-/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
-/* harmony import */ var _tg_core_utils_timers__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! @tg/core/utils/timers */ "../../packages/tg-core/src/utils/timers.ts");
-/* harmony import */ var _tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! @tg/core/utils/dc-ip-family */ "../../packages/tg-core/src/utils/dc-ip-family.ts");
+/* harmony import */ var _accounts_refill_connector__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ../accounts/refill-connector */ "./src/accounts/refill-connector.ts");
+/* harmony import */ var _data_db__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ../data/db */ "./src/data/db.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _tg_core_utils_timers__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! @tg/core/utils/timers */ "../../packages/tg-core/src/utils/timers.ts");
+/* harmony import */ var _tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! @tg/core/utils/dc-ip-family */ "../../packages/tg-core/src/utils/dc-ip-family.ts");
 
 
 
@@ -60962,15 +61264,17 @@ __webpack_require__.r(__webpack_exports__);
 
 
 
-const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_6__.Logger("Telegram.service");
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_7__.Logger("Telegram.service");
 function scheduleTelegramServiceTask(callback, delayMs, context) {
-    return (0,_tg_core_utils_timers__WEBPACK_IMPORTED_MODULE_7__.scheduleUnrefTimeout)(() => callback().catch((error) => {
+    return (0,_tg_core_utils_timers__WEBPACK_IMPORTED_MODULE_8__.scheduleUnrefTimeout)(() => callback().catch((error) => {
         (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_0__.parseError)(error, context);
     }), delayMs);
 }
 class TelegramService {
     constructor() {
         this.mobileManager = _accounts_mobile_manager__WEBPACK_IMPORTED_MODULE_4__.MobileManager.getInstance();
+        (0,_accounts_refill_connector__WEBPACK_IMPORTED_MODULE_5__.registerRefillConnector)((mobile) => this.connectMobile(mobile));
     }
     static getInstance() {
         if (!TelegramService.instance) {
@@ -60984,7 +61288,7 @@ class TelegramService {
     getLastMessageTime(mobile) {
         const tgManager = this.mobileManager.getTelegramManager(mobile);
         if (!tgManager?.promoterInstance) {
-            logger.warn(`No promotion engine found for mobile: ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_8__.maskMobile)(mobile)}`);
+            logger.warn(`No promotion engine found for mobile: ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_9__.maskMobile)(mobile)}`);
             return 0;
         }
         return tgManager.promoterInstance.getLastMsgTime();
@@ -61004,7 +61308,7 @@ class TelegramService {
     getDaysLeft(mobile) {
         const tgManager = this.mobileManager.getTelegramManager(mobile);
         if (!tgManager?.promoterInstance) {
-            logger.warn(`No promotion engine found for mobile: ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_8__.maskMobile)(mobile)}`);
+            logger.warn(`No promotion engine found for mobile: ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_9__.maskMobile)(mobile)}`);
             return 0;
         }
         return tgManager.promoterInstance.daysLeft;
@@ -61012,7 +61316,7 @@ class TelegramService {
     startPromotion(mobile) {
         const tgManager = this.mobileManager.getTelegramManager(mobile);
         if (!tgManager?.promoterInstance) {
-            logger.warn(`No promotion engine found for mobile: ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_8__.maskMobile)(mobile)}`);
+            logger.warn(`No promotion engine found for mobile: ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_9__.maskMobile)(mobile)}`);
             return Promise.resolve();
         }
         return tgManager.promoterInstance.startPromotion();
@@ -61070,41 +61374,50 @@ class TelegramService {
         let successCount = 0;
         let failureCount = 0;
         for (const mobile of mobiles) {
-            const clientDetails = this.mobileManager.getClientDetails(mobile);
-            if (clientDetails) {
-                try {
-                    const telegramManager = await this.createClient(clientDetails, false, true);
-                    await (0,_data_db__WEBPACK_IMPORTED_MODULE_5__.getRepositories)()?.promote.updatePromoteClient({ mobile }, { lastUsed: new Date() });
-                    if (telegramManager && telegramManager.promoterInstance) {
-                        await (0,_shared_sleep__WEBPACK_IMPORTED_MODULE_3__.sleep)(27000);
-                        await telegramManager.promoterInstance.startPromotion();
-                        successCount++;
-                        logger.info(`✅ Successfully connected ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_8__.maskMobile)(mobile)} (${successCount}/${mobiles.length})`);
-                    }
-                    else {
-                        failureCount++;
-                        logger.error(`❌ Failed to create telegram manager for ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_8__.maskMobile)(mobile)} (${failureCount} failures)`);
-                    }
-                }
-                catch (error) {
-                    failureCount++;
-                    const errorDetails = (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_0__.parseError)(error, `Error creating client for ${mobile}`);
-                    logger.error(`❌ Connection failed for ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_8__.maskMobile)(mobile)} (${failureCount} failures)`);
-                    if (await (0,_permanent_failure__WEBPACK_IMPORTED_MODULE_2__.handlePermanentTelegramFailure)(error, mobile, false, 'TelegramService.connectAllClients')) {
-                        logger.info(`💥 Critical error detected for ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_8__.maskMobile)(mobile)}, marking as inactive`);
-                        await (0,_data_db__WEBPACK_IMPORTED_MODULE_5__.getRepositories)()?.promote.updatePromoteClient({ mobile }, { lastUsed: new Date(), status: "inactive", message: errorDetails.message });
-                        await this.mobileManager.removeClient(mobile);
-                    }
-                }
+            if (await this.connectMobile(mobile)) {
+                successCount++;
+                logger.info(`✅ Successfully connected ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_9__.maskMobile)(mobile)} (${successCount}/${mobiles.length})`);
             }
             else {
                 failureCount++;
-                logger.error(`❌ No client details found for ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_8__.maskMobile)(mobile)} (${failureCount} failures)`);
+                logger.error(`❌ Connection failed for ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_9__.maskMobile)(mobile)} (${failureCount} failures)`);
             }
         }
         logger.info(`✅ Connection completed! Success: ${successCount}, Failures: ${failureCount}`);
         if (successCount === 0) {
             throw new Error("Failed to connect any clients");
+        }
+    }
+    /**
+     * Connects one mobile already in MobileManager: createClient with handlers (SpamBot events included), lastUsed
+     * stamp, the 27 s settle, startPromotion. A permanent failure marks it inactive and removes it. Used by boot
+     * (connectClients) and the mid-run refill. True when promotion started.
+     */
+    async connectMobile(mobile) {
+        const clientDetails = this.mobileManager.getClientDetails(mobile);
+        if (!clientDetails) {
+            logger.error(`❌ No client details found for ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_9__.maskMobile)(mobile)}`);
+            return false;
+        }
+        try {
+            const telegramManager = await this.createClient(clientDetails, false, true);
+            await (0,_data_db__WEBPACK_IMPORTED_MODULE_6__.getRepositories)()?.promote.updatePromoteClient({ mobile }, { lastUsed: new Date() });
+            if (telegramManager && telegramManager.promoterInstance) {
+                await (0,_shared_sleep__WEBPACK_IMPORTED_MODULE_3__.sleep)(27000);
+                await telegramManager.promoterInstance.startPromotion();
+                return true;
+            }
+            logger.error(`❌ Failed to create telegram manager for ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_9__.maskMobile)(mobile)}`);
+            return false;
+        }
+        catch (error) {
+            const errorDetails = (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_0__.parseError)(error, `Error creating client for ${mobile}`);
+            if (await (0,_permanent_failure__WEBPACK_IMPORTED_MODULE_2__.handlePermanentTelegramFailure)(error, mobile, false, 'TelegramService.connectAllClients')) {
+                logger.info(`💥 Critical error detected for ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_9__.maskMobile)(mobile)}, marking as inactive`);
+                await (0,_data_db__WEBPACK_IMPORTED_MODULE_6__.getRepositories)()?.promote.updatePromoteClient({ mobile }, { lastUsed: new Date(), status: "inactive", message: errorDetails.message });
+                await this.mobileManager.removeClient(mobile);
+            }
+            return false;
         }
     }
     getTgManagers() {
@@ -61118,14 +61431,14 @@ class TelegramService {
         try {
             if (tgManager) {
                 if (tgManager.isDestroyed) {
-                    logger.warn(`tg manager is destroyed: ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_8__.maskMobile)(mobile)}`);
+                    logger.warn(`tg manager is destroyed: ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_9__.maskMobile)(mobile)}`);
                     this.mobileManager.removeTelegramManager(mobile);
                     return undefined;
                 }
                 return tgManager;
             }
             else {
-                logger.info(`tg manager is undefined: ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_8__.maskMobile)(mobile)}`);
+                logger.info(`tg manager is undefined: ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_9__.maskMobile)(mobile)}`);
                 return undefined;
             }
         }
@@ -61146,7 +61459,7 @@ class TelegramService {
             const tgManager = this.mobileManager.getTelegramManager(mobile);
             if (tgManager) {
                 await tgManager.destroy();
-                logger.info(`Disconnected and disposed old client for ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_8__.maskMobile)(mobile)}.`);
+                logger.info(`Disconnected and disposed old client for ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_9__.maskMobile)(mobile)}.`);
             }
             return true;
         }
@@ -61163,10 +61476,10 @@ class TelegramService {
             const tgManager = this.mobileManager.getTelegramManager(mobile);
             if (tgManager) {
                 await tgManager.destroy(); // Ensure this cleans up all resources
-                logger.info(`Client ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_8__.maskMobile)(mobile)} destroyed.`);
+                logger.info(`Client ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_9__.maskMobile)(mobile)} destroyed.`);
             }
             else {
-                logger.info(`Client ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_8__.maskMobile)(mobile)} not found.`);
+                logger.info(`Client ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_9__.maskMobile)(mobile)} not found.`);
             }
             logger.info("Disconnected : ", mobile);
             return true;
@@ -61217,11 +61530,11 @@ class TelegramService {
         // Check if instance already exists in TelegramManager's static map
         const existingInstance = _client_access__WEBPACK_IMPORTED_MODULE_1__["default"].getInstance(clientDetails.mobile);
         if (existingInstance && !existingInstance.isDestroyed && existingInstance.client?.connected) {
-            logger.info(`TelegramManager instance already exists for: ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_8__.maskMobile)(clientDetails.mobile)}`);
+            logger.info(`TelegramManager instance already exists for: ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_9__.maskMobile)(clientDetails.mobile)}`);
             return existingInstance;
         }
         if (existingInstance) {
-            logger.warn(`Stale TelegramManager instance exists for ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_8__.maskMobile)(clientDetails.mobile)}; recreating client`);
+            logger.warn(`Stale TelegramManager instance exists for ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_9__.maskMobile)(clientDetails.mobile)}; recreating client`);
             try {
                 if (!existingInstance.isDestroyed) {
                     await existingInstance.destroy();
@@ -61258,7 +61571,7 @@ class TelegramService {
         try {
             const client = await telegramManager.createClient(handler);
             if (!client) {
-                logger.info(`Client creation failed for: ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_8__.maskMobile)(clientDetails.mobile)}`);
+                logger.info(`Client creation failed for: ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_9__.maskMobile)(clientDetails.mobile)}`);
                 await telegramManager.destroy();
                 return null;
             }
@@ -61268,7 +61581,7 @@ class TelegramService {
                 await client.getMe();
             }
             catch (getMeError) {
-                logger.info(`Client authentication failed for: ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_8__.maskMobile)(clientDetails.mobile)}`);
+                logger.info(`Client authentication failed for: ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_9__.maskMobile)(clientDetails.mobile)}`);
                 this.mobileManager.removeTelegramManager(clientDetails.mobile);
                 await telegramManager.destroy();
                 return null;
@@ -61307,7 +61620,7 @@ class TelegramService {
             }
             if (await (0,_permanent_failure__WEBPACK_IMPORTED_MODULE_2__.handlePermanentTelegramFailure)(error, clientDetails.mobile, false, 'TelegramService.createClient')) {
                 const errorDetails = (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_0__.parseError)(error, `Permanent Telegram failure for ${clientDetails.mobile}`);
-                await (0,_data_db__WEBPACK_IMPORTED_MODULE_5__.getRepositories)()?.promote.updatePromoteClient({ mobile: clientDetails.mobile }, { lastUsed: new Date(), status: "inactive", message: errorDetails.message });
+                await (0,_data_db__WEBPACK_IMPORTED_MODULE_6__.getRepositories)()?.promote.updatePromoteClient({ mobile: clientDetails.mobile }, { lastUsed: new Date(), status: "inactive", message: errorDetails.message });
                 await this.mobileManager.removeClient(clientDetails.mobile);
             }
             return null;
@@ -61330,7 +61643,7 @@ class TelegramService {
             }
         }
         logger.info("Mobiles with last message time greater than 20 minutes:");
-        mobilesWithOldMessages.forEach(entry => logger.info(entry.replace(/^\S+/, (mobile) => (0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_8__.maskMobile)(mobile))));
+        mobilesWithOldMessages.forEach(entry => logger.info(entry.replace(/^\S+/, (mobile) => (0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_9__.maskMobile)(mobile))));
         return mobilesWithOldMessages.join("\n");
     }
 }
