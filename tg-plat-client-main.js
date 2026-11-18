@@ -10598,6 +10598,66 @@ __webpack_require__.r(__webpack_exports__);
 
 /***/ },
 
+/***/ "../../packages/tg-channel-state/src/channel-message-promotions/config/promo-app-config.ts"
+/*!*************************************************************************************************!*\
+  !*** ../../packages/tg-channel-state/src/channel-message-promotions/config/promo-app-config.ts ***!
+  \*************************************************************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   FOLLOW_UP_MAX_LATE_MS: () => (/* binding */ FOLLOW_UP_MAX_LATE_MS),
+/* harmony export */   SENT_PROMO_TEXT_MAX_ENTRIES: () => (/* binding */ SENT_PROMO_TEXT_MAX_ENTRIES),
+/* harmony export */   VERIFY_ATTEMPT_GAP_MS: () => (/* binding */ VERIFY_ATTEMPT_GAP_MS),
+/* harmony export */   VERIFY_MAX_AGE_MS: () => (/* binding */ VERIFY_MAX_AGE_MS),
+/* harmony export */   VERIFY_MAX_ATTEMPTS: () => (/* binding */ VERIFY_MAX_ATTEMPTS),
+/* harmony export */   VERIFY_WINDOW_MS: () => (/* binding */ VERIFY_WINDOW_MS),
+/* harmony export */   followUpMaxLateMsFor: () => (/* binding */ followUpMaxLateMsFor),
+/* harmony export */   isFollowUpExpired: () => (/* binding */ isFollowUpExpired),
+/* harmony export */   promoAppConfig: () => (/* binding */ promoAppConfig)
+/* harmony export */ });
+const MIN = 60000;
+const HOUR = 60 * MIN;
+const APP_CONFIG = Object.freeze({
+    'tg-aut': Object.freeze({ pickerApp: 'tg-aut', flagsApp: 'tgaut', followUpMaxLateMs: 30 * MIN, channelCooldownMs: 6 * HOUR }),
+    promote: Object.freeze({ pickerApp: 'promote', flagsApp: 'promote', followUpMaxLateMs: 90 * MIN, channelCooldownMs: 3 * HOUR }),
+});
+/** Runner pickerApp ('tg-aut' | 'promote') -> its config; null for anything else (see the header for fallbacks). */
+function promoAppConfig(pickerApp) {
+    if (pickerApp === 'tg-aut' || pickerApp === 'promote')
+        return APP_CONFIG[pickerApp];
+    return null;
+}
+/** Follow-up max lateness per known app (30 min tg-aut, 90 min promote). */
+const FOLLOW_UP_MAX_LATE_MS = Object.freeze({
+    'tg-aut': APP_CONFIG['tg-aut'].followUpMaxLateMs,
+    promote: APP_CONFIG.promote.followUpMaxLateMs,
+});
+/** Runner follow-up lateness. Unknown app: the promote value (90 min), as before P5.5. */
+function followUpMaxLateMsFor(pickerApp) {
+    return pickerApp === 'tg-aut' ? FOLLOW_UP_MAX_LATE_MS['tg-aut'] : FOLLOW_UP_MAX_LATE_MS.promote;
+}
+/** The one follow-up expiry rule: strictly more than `maxLateMs` past `dueAt`. */
+function isFollowUpExpired(dueAt, nowMs, maxLateMs) {
+    return nowMs > dueAt + maxLateMs;
+}
+/**
+ * One hour, the verify window: the v3 verify payload TTL, the restore age limit for a verify item,
+ * the P4 marker-error close age, and the sent-text age cap in BasePromotionEngine.
+ */
+const VERIFY_WINDOW_MS = HOUR;
+/** P4: with >= `VERIFY_MAX_ATTEMPTS` counted attempts, a verify item this old meets the `verify_unknown` rule. */
+const VERIFY_MAX_AGE_MS = 10 * MIN;
+/** P4: counted unknown/error checks (at least `VERIFY_ATTEMPT_GAP_MS` apart) for the `verify_unknown` rule. */
+const VERIFY_MAX_ATTEMPTS = 5;
+const VERIFY_ATTEMPT_GAP_MS = 30000;
+/** BasePromotionEngine: most sent texts kept until the success hook takes them. */
+const SENT_PROMO_TEXT_MAX_ENTRIES = 200;
+
+
+/***/ },
+
 /***/ "../../packages/tg-channel-state/src/channel-message-promotions/config/promo-flags-v3.ts"
 /*!***********************************************************************************************!*\
   !*** ../../packages/tg-channel-state/src/channel-message-promotions/config/promo-flags-v3.ts ***!
@@ -10608,16 +10668,34 @@ __webpack_require__.r(__webpack_exports__);
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   PROMO_FLAGS_DEFAULTS: () => (/* binding */ PROMO_FLAGS_DEFAULTS),
+/* harmony export */   PROMO_FLAG_NAMES: () => (/* binding */ PROMO_FLAG_NAMES),
+/* harmony export */   PROMO_FLAG_VALUES: () => (/* binding */ PROMO_FLAG_VALUES),
+/* harmony export */   PromoFlagsReader: () => (/* binding */ PromoFlagsReader),
 /* harmony export */   effectivePromoFlags: () => (/* binding */ effectivePromoFlags),
+/* harmony export */   formatPromoFlags: () => (/* binding */ formatPromoFlags),
 /* harmony export */   isFollowUpV3: () => (/* binding */ isFollowUpV3),
 /* harmony export */   parsePromoFlags: () => (/* binding */ parsePromoFlags),
 /* harmony export */   promoFlagsAppFor: () => (/* binding */ promoFlagsAppFor),
 /* harmony export */   promoFlagsKey: () => (/* binding */ promoFlagsKey),
 /* harmony export */   readFlagHash: () => (/* binding */ readFlagHash),
-/* harmony export */   readPromoFlagsV3: () => (/* binding */ readPromoFlagsV3),
-/* harmony export */   resetPromoFlagsV3ForTests: () => (/* binding */ resetPromoFlagsV3ForTests)
+/* harmony export */   readPromoFlagsV3: () => (/* binding */ readPromoFlagsV3)
 /* harmony export */ });
-const PROMO_FLAGS_DEFAULTS = Object.freeze({ fu: 'off', vx: 'off', elig: 'off' });
+/* harmony import */ var _promo_app_config__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./promo-app-config */ "../../packages/tg-channel-state/src/channel-message-promotions/config/promo-app-config.ts");
+
+/**
+ * Every flag and its allowed values; the first value is the default. Any other value reads as the default.
+ * `fu`: P2+P3 follow-up v3 (`loop` behaves as `on` until P8). `vx` (P4): `on` lets the runner close a
+ * verify item as `verify_unknown`; off only counts would-closes. `elig` (P5): `on` ranks only channels
+ * that pass `eligibleNow` and writes the per-channel cooldown.
+ */
+const PROMO_FLAG_VALUES = Object.freeze({
+    fu: Object.freeze(['off', 'on', 'loop']),
+    vx: Object.freeze(['off', 'on']),
+    elig: Object.freeze(['off', 'on']),
+});
+/** Flag names in table order (the order of every flags log line). */
+const PROMO_FLAG_NAMES = Object.freeze(Object.keys(PROMO_FLAG_VALUES));
+const PROMO_FLAGS_DEFAULTS = Object.freeze(Object.fromEntries(PROMO_FLAG_NAMES.map((name) => [name, PROMO_FLAG_VALUES[name][0]])));
 const FAIL_LOG_EVERY_MS = 10 * 60 * 1000;
 const HGETALL_SCRIPT = "return redis.call('HGETALL', KEYS[1])";
 function promoFlagsKey(app) {
@@ -10625,11 +10703,7 @@ function promoFlagsKey(app) {
 }
 /** Runner pickerApp ('tg-aut' | 'promote') -> flag hash app name. Unknown app reads no flags (defaults). */
 function promoFlagsAppFor(pickerApp) {
-    if (pickerApp === 'tg-aut')
-        return 'tgaut';
-    if (pickerApp === 'promote')
-        return 'promote';
-    return null;
+    return (0,_promo_app_config__WEBPACK_IMPORTED_MODULE_0__.promoAppConfig)(pickerApp)?.flagsApp ?? null;
 }
 /** `fu=on` and `fu=loop` both enable P2+P3 (loop's main-loop folding is P8, not built here). */
 function isFollowUpV3(flags) {
@@ -10647,16 +10721,23 @@ function effectivePromoFlags(flags) {
     const vx = flags.vx === 'on' && elig === 'on' ? 'on' : 'off';
     if (flags.vx === 'on' && vx === 'off')
         ignored.push({ flag: 'vx', reason: 'elig_off' });
-    return { flags: { fu: flags.fu, vx, elig }, ignored };
+    const picked = Object.fromEntries(PROMO_FLAG_NAMES.map((name) => [name, flags[name]]));
+    return { flags: { ...picked, vx, elig }, ignored };
 }
+/** Trimmed, lowercased; a value not in the flag's list (or not a string) reads as its default. */
 function parsePromoFlags(hash) {
-    const raw = typeof hash?.fu === 'string' ? hash.fu.trim().toLowerCase() : '';
-    const fu = raw === 'on' || raw === 'loop' ? raw : 'off';
-    const rawVx = typeof hash?.vx === 'string' ? hash.vx.trim().toLowerCase() : '';
-    const vx = rawVx === 'on' ? 'on' : 'off';
-    const rawElig = typeof hash?.elig === 'string' ? hash.elig.trim().toLowerCase() : '';
-    const elig = rawElig === 'on' ? 'on' : 'off';
-    return { fu, vx, elig };
+    const out = {};
+    for (const name of PROMO_FLAG_NAMES) {
+        const value = hash?.[name];
+        const raw = typeof value === 'string' ? value.trim().toLowerCase() : '';
+        const allowed = PROMO_FLAG_VALUES[name];
+        out[name] = allowed.includes(raw) ? raw : allowed[0];
+    }
+    return out;
+}
+/** `fu=<v> vx=<v> elig=<v>`, in table order. */
+function formatPromoFlags(flags) {
+    return PROMO_FLAG_NAMES.map((name) => `${name}=${flags[name]}`).join(' ');
 }
 /** HGETALL with feature detection. Returns null when the client supports neither hgetall nor eval. Throws on a Redis error. */
 async function readFlagHash(redis, key) {
@@ -10675,41 +10756,46 @@ async function readFlagHash(redis, key) {
     }
     return null;
 }
-/** Last value read per key, per process (doc 6: a read failure keeps it). */
-const readerStates = new Map();
-async function readPromoFlagsV3(redis, app, log = () => undefined, nowMs = Date.now()) {
-    const key = promoFlagsKey(app);
-    let state = readerStates.get(key);
-    if (!state) {
-        state = { last: null, lastFailLogAt: 0, unsupportedLogged: false };
-        readerStates.set(key, state);
+/** Last value read per key (doc 6: a read failure keeps it). Production uses one per process; tests build their own. */
+class PromoFlagsReader {
+    constructor() {
+        this.states = new Map();
     }
-    if (!redis)
-        return { ...PROMO_FLAGS_DEFAULTS };
-    try {
-        const hash = await readFlagHash(redis, key);
-        if (hash === null) {
-            if (!state.unsupportedLogged) {
-                state.unsupportedLogged = true;
-                log('warn', `promo flags | key=${key} | reason=no_hgetall_no_eval | defaults`);
-            }
+    async read(redis, app, log = () => undefined, nowMs = Date.now()) {
+        const key = promoFlagsKey(app);
+        let state = this.states.get(key);
+        if (!state) {
+            state = { last: null, lastFailLogAt: 0, unsupportedLogged: false };
+            this.states.set(key, state);
+        }
+        if (!redis)
             return { ...PROMO_FLAGS_DEFAULTS };
+        try {
+            const hash = await readFlagHash(redis, key);
+            if (hash === null) {
+                if (!state.unsupportedLogged) {
+                    state.unsupportedLogged = true;
+                    log('warn', `promo flags | key=${key} | reason=no_hgetall_no_eval | defaults`);
+                }
+                return { ...PROMO_FLAGS_DEFAULTS };
+            }
+            const flags = parsePromoFlags(hash);
+            state.last = flags;
+            return flags;
         }
-        const flags = parsePromoFlags(hash);
-        state.last = flags;
-        return flags;
-    }
-    catch (error) {
-        if (nowMs - state.lastFailLogAt >= FAIL_LOG_EVERY_MS) {
-            state.lastFailLogAt = nowMs;
-            log('warn', `promo flags | key=${key} | reason=read_failed | keep=${state.last ? 'last' : 'default'} | error=${error instanceof Error ? error.message : String(error)}`);
+        catch (error) {
+            if (nowMs - state.lastFailLogAt >= FAIL_LOG_EVERY_MS) {
+                state.lastFailLogAt = nowMs;
+                log('warn', `promo flags | key=${key} | reason=read_failed | keep=${state.last ? 'last' : 'default'} | error=${error instanceof Error ? error.message : String(error)}`);
+            }
+            return state.last ? { ...state.last } : { ...PROMO_FLAGS_DEFAULTS };
         }
-        return state.last ? { ...state.last } : { ...PROMO_FLAGS_DEFAULTS };
     }
 }
-/** Tests only: forget the per-process last values. */
-function resetPromoFlagsV3ForTests() {
-    readerStates.clear();
+/** The process-wide reader. */
+const processReader = new PromoFlagsReader();
+function readPromoFlagsV3(redis, app, log, nowMs) {
+    return processReader.read(redis, app, log, nowMs);
 }
 
 
@@ -10973,16 +11059,12 @@ class PromoLogger {
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
-/* harmony export */   FOLLOW_UP_MAX_LATE_MS: () => (/* binding */ FOLLOW_UP_MAX_LATE_MS),
 /* harmony export */   PROMO_SWEEP_INTERVAL_MS: () => (/* binding */ PROMO_SWEEP_INTERVAL_MS),
 /* harmony export */   PROMO_SWEEP_MIN_INTERVAL_MS: () => (/* binding */ PROMO_SWEEP_MIN_INTERVAL_MS),
 /* harmony export */   PromoSendWindow: () => (/* binding */ PromoSendWindow),
 /* harmony export */   PromoSweep: () => (/* binding */ PromoSweep),
 /* harmony export */   PromoVerifyCloses: () => (/* binding */ PromoVerifyCloses),
 /* harmony export */   SKIP_KEYS: () => (/* binding */ SKIP_KEYS),
-/* harmony export */   VERIFY_ATTEMPT_GAP_MS: () => (/* binding */ VERIFY_ATTEMPT_GAP_MS),
-/* harmony export */   VERIFY_MAX_AGE_MS: () => (/* binding */ VERIFY_MAX_AGE_MS),
-/* harmony export */   VERIFY_MAX_ATTEMPTS: () => (/* binding */ VERIFY_MAX_ATTEMPTS),
 /* harmony export */   classifyLoadedPool: () => (/* binding */ classifyLoadedPool),
 /* harmony export */   cooldownRestPool: () => (/* binding */ cooldownRestPool),
 /* harmony export */   decideQuietReason: () => (/* binding */ decideQuietReason),
@@ -10993,16 +11075,11 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ });
 /* harmony import */ var _policy_eligible_now__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../../policy/eligible-now */ "../../packages/tg-channel-state/src/channel-message-promotions/policy/eligible-now.ts");
 /* harmony import */ var _redis_redis_channel_cooldown__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../../redis/redis-channel-cooldown */ "../../packages/tg-channel-state/src/channel-message-promotions/redis/redis-channel-cooldown.ts");
+/* harmony import */ var _config_promo_app_config__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../../config/promo-app-config */ "../../packages/tg-channel-state/src/channel-message-promotions/config/promo-app-config.ts");
+
 
 
 const MIN = 60000;
-/** P4: with >= `VERIFY_MAX_ATTEMPTS` counted attempts, a verify item this old meets the `verify_unknown` rule. */
-const VERIFY_MAX_AGE_MS = 10 * MIN;
-/** P4: counted unknown/error checks (at least `VERIFY_ATTEMPT_GAP_MS` apart) for the `verify_unknown` rule. */
-const VERIFY_MAX_ATTEMPTS = 5;
-const VERIFY_ATTEMPT_GAP_MS = 30000;
-/** A follow-up this late past due would expire under P2 (per app). */
-const FOLLOW_UP_MAX_LATE_MS = Object.freeze({ 'tg-aut': 30 * MIN, promote: 90 * MIN });
 const PROMO_SWEEP_INTERVAL_MS = 10 * MIN;
 const PROMO_SWEEP_MIN_INTERVAL_MS = 1000;
 const SEND_WINDOW_MS = 60 * MIN;
@@ -11022,7 +11099,7 @@ function queueItemUntil(item, app) {
     const ts = itemTimestamp(item);
     if (ts === null)
         return null;
-    return ts + (isFollowUpItem(item) ? FOLLOW_UP_MAX_LATE_MS[appOf(app)] : VERIFY_MAX_AGE_MS);
+    return ts + (isFollowUpItem(item) ? _config_promo_app_config__WEBPACK_IMPORTED_MODULE_2__.FOLLOW_UP_MAX_LATE_MS[appOf(app)] : _config_promo_app_config__WEBPACK_IMPORTED_MODULE_2__.VERIFY_MAX_AGE_MS);
 }
 /** Pure count over a read-only list of queue items. */
 function sweepQueueItems(items, nowMs, app) {
@@ -11072,7 +11149,7 @@ class PromoVerifyCloses {
     }
     note(sentAtMs, nowMs) {
         this.closed += 1;
-        if (Number.isFinite(sentAtMs) && sentAtMs > 0 && nowMs - sentAtMs > VERIFY_MAX_AGE_MS)
+        if (Number.isFinite(sentAtMs) && sentAtMs > 0 && nowMs - sentAtMs > _config_promo_app_config__WEBPACK_IMPORTED_MODULE_2__.VERIFY_MAX_AGE_MS)
             this.closedLate += 1;
     }
     /** P4: one terminal `verify_unknown` close (not in `closed`: no survival, no deletion). */
@@ -11279,6 +11356,356 @@ function formatCycleEndFields(m) {
 
 /***/ },
 
+/***/ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/cycle-run.ts"
+/*!************************************************************************************************************!*\
+  !*** ../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/cycle-run.ts ***!
+  \************************************************************************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   finishCycle: () => (/* binding */ finishCycle),
+/* harmony export */   runSelectedChannels: () => (/* binding */ runSelectedChannels)
+/* harmony export */ });
+/* harmony import */ var _tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/core/utils/dc-ip-family */ "../../packages/tg-core/src/utils/dc-ip-family.ts");
+/* harmony import */ var _logging_promo_logger__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../../logging/promo-logger */ "../../packages/tg-channel-state/src/channel-message-promotions/logging/promo-logger.ts");
+/* harmony import */ var _cycle_metrics__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./cycle-metrics */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/cycle-metrics.ts");
+// PromotionFlowRunner: one cycle's send loop over the selected channels, and the cycle-end summary,
+// P0 measurement line, cooldown rest and health flag.
+
+
+
+const promoLog = new _logging_promo_logger__WEBPACK_IMPORTED_MODULE_1__.PromoLogger('promo');
+/** Sends to the selected channels in order, pacing between them; stops on a stop, a budget end or the account check. */
+async function runSelectedChannels(host, selectedChannels) {
+    const tally = { sent: 0, not_sent: 0, skipped: 0, budget: 0, chans: 0 };
+    let exploreSkipped = 0;
+    for (const channel of selectedChannels) {
+        if (host.startedByStart && !host.running) {
+            host.log('debug', `Promotion cycle interrupted before channel; ${host.formatChannel(channel)}`);
+            break;
+        }
+        if (!(await host.shouldProcessNextChannel(channel)))
+            break;
+        // Selection can sit in a paced batch for minutes. Reload the durable
+        // channel state immediately before planning so an operator ban or a
+        // restriction written after loadChannels() cannot receive a stale send.
+        const outcome = await host.processChannel(channel, false, true);
+        if (outcome === 'explore_denied') {
+            exploreSkipped += 1;
+            continue;
+        }
+        tally.chans += 1;
+        if (outcome === 'sent') {
+            tally.sent += 1;
+            host.heartbeat.noteSend();
+        }
+        else if (outcome === 'skipped')
+            tally.skipped += 1;
+        else if (outcome === 'budget_exhausted')
+            tally.budget += 1;
+        else
+            tally.not_sent += 1;
+        if (outcome === 'budget_exhausted') {
+            host.log('debug', `Promotion cycle paused after account budget exhaustion; ${host.formatChannel(channel)}`);
+            break;
+        }
+        await host.sleepAfterChannel(outcome);
+    }
+    if (exploreSkipped > 0) {
+        host.log('info', `Promotion exploration budget skipped ${exploreSkipped} unproven channel(s) mid-round`);
+    }
+    return { tally, exploreSkipped };
+}
+/** Cycle end: summary line, P0 measurement line, the H2 cooldown rest, and the quiet-cycle health flag. */
+async function finishCycle(host, stats, run, selection) {
+    const { tally: cycleTally, exploreSkipped } = run;
+    const { poolClass, eligibleSource, selectionExploreDenied } = selection;
+    // Best-effort daily-cap snapshot reused for both the cap-reason on this summary and the
+    // per-mobile cycle-end line below — no new Redis reads beyond what getDailySendBudgetStatus already does.
+    const budgetSnapshot = await host.options.account.getDailySendBudgetStatus(stats.daysLeft).catch(() => null);
+    const summaryFields = {
+        sent: cycleTally.sent,
+        not_sent: cycleTally.not_sent,
+        skipped: cycleTally.skipped,
+        budget: cycleTally.budget,
+        chans: cycleTally.chans,
+    };
+    if (cycleTally.chans === 0) {
+        // Concise cap-reason so a stalled cycle is debuggable from logs alone: was it the daily send
+        // cap, or did every candidate channel get filtered out before any was attempted?
+        const capReached = !!budgetSnapshot && budgetSnapshot.remaining <= 0;
+        summaryFields.reason = capReached ? 'cap_reached' : 'all_skipped';
+        if (budgetSnapshot) {
+            summaryFields.capCount = budgetSnapshot.count;
+            summaryFields.cap = budgetSnapshot.cap;
+        }
+    }
+    promoLog.summary(summaryFields);
+    // P0 measurement fields (3.12): in-memory reads only, never a write; a failure drops the fields, not the line.
+    let measurementFields = [];
+    // P5 review H2/H2b: 0 eligible and at least 1 channel cooling (whatever the others are): rest
+    // until the earliest cooldown ends, declared as sleepUntil (capped at 50 min, the promote
+    // isRunnerAlive window) so it never reads as stuck.
+    const cooldownRest = host.channelCooldowns.size > 0 && cycleTally.sent === 0 && (0,_cycle_metrics__WEBPACK_IMPORTED_MODULE_2__.cooldownRestPool)(poolClass)
+        ? host.cooldownRestFor(Date.now())
+        : null;
+    if (cooldownRest !== null) {
+        host.cooldownRestUntil = cooldownRest;
+        host.health.sleepUntil = cooldownRest;
+    }
+    try {
+        const nowMs = Date.now();
+        const app = host.options.pickerApp ?? null;
+        const items = host.queueItems();
+        const fuSent = host.fuSentSinceCycleEnd;
+        host.fuSentSinceCycleEnd = 0;
+        let banGateTripped = false;
+        try {
+            banGateTripped = host.adapter.isBanRateGateTripped?.() === true;
+        }
+        catch {
+            banGateTripped = false;
+        }
+        measurementFields = (0,_cycle_metrics__WEBPACK_IMPORTED_MODULE_2__.formatCycleEndFields)({
+            mainSent: cycleTally.sent,
+            fuSent,
+            pool: poolClass,
+            eligibleSource,
+            sweep: (0,_cycle_metrics__WEBPACK_IMPORTED_MODULE_2__.sweepQueueItems)(items, nowMs, app),
+            verifyCloses: host.verifyCloses.takeDelta('cycle'),
+            sends1h: host.sendWindow.counts(nowMs),
+            quiet: (0,_cycle_metrics__WEBPACK_IMPORTED_MODULE_2__.decideQuietReason)({
+                mainSent: cycleTally.sent,
+                budgetExhausted: cycleTally.budget > 0 || (!!budgetSnapshot && budgetSnapshot.remaining <= 0),
+                hourlyCapWait: host.cycleWaitDeclared,
+                banGateTripped,
+                exploreDenied: exploreSkipped > 0 || selectionExploreDenied > 0,
+                pool: poolClass,
+                eligibleSource,
+                cooldownRest: cooldownRest !== null,
+            }),
+        });
+    }
+    catch {
+        measurementFields = [];
+    }
+    // Per-mobile cycle-end line (no new Redis reads: reuses this cycle's budget snapshot + stats). The
+    // timed `promo heartbeat` (flow-runner/heartbeat.ts) covers the hours inside a long paced cycle.
+    // Main sends are the `sent=` field (formatCycleEndFields); P5.5 dropped the duplicate `sends(cycle)=`.
+    host.log('info', [
+        `[${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_0__.maskMobile)(host.options.account.mobile)}] promo cycle end`,
+        `capCount=${budgetSnapshot ? budgetSnapshot.count : 'n/a'}/cap=${budgetSnapshot ? budgetSnapshot.cap : 'n/a'}`,
+        `daysLeft=${stats.daysLeft}`,
+        `queueSize=${host.messageQueue.size}`,
+        ...measurementFields,
+    ].join(' | '));
+    // Remember if this cycle produced no sends purely because the daily send cap was hit — the
+    // health monitor uses this to avoid restarting a healthy-but-capped engine.
+    // A round held back by the exploration budget is a deliberate quiet state like a capped one:
+    // restarting the runner cannot help (the budget lives in Redis) and only churns it (review
+    // 2026-10-08: ~100 "appears stuck" runner restarts in the live logs).
+    host.health.lastCycleBudgetExhausted = cycleTally.sent === 0
+        && (cycleTally.budget > 0 || exploreSkipped > 0 || selectionExploreDenied > 0);
+}
+
+
+/***/ },
+
+/***/ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/eligibility.ts"
+/*!**************************************************************************************************************!*\
+  !*** ../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/eligibility.ts ***!
+  \**************************************************************************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   COOLDOWN_REST_MAX_MS: () => (/* binding */ COOLDOWN_REST_MAX_MS),
+/* harmony export */   activeCooldownRest: () => (/* binding */ activeCooldownRest),
+/* harmony export */   classifyPool: () => (/* binding */ classifyPool),
+/* harmony export */   cooldownRestFor: () => (/* binding */ cooldownRestFor),
+/* harmony export */   cooldownUntilOf: () => (/* binding */ cooldownUntilOf),
+/* harmony export */   eligActive: () => (/* binding */ eligActive),
+/* harmony export */   eligibleOnly: () => (/* binding */ eligibleOnly),
+/* harmony export */   evaluateEligibility: () => (/* binding */ evaluateEligibility),
+/* harmony export */   loadChannelCooldowns: () => (/* binding */ loadChannelCooldowns),
+/* harmony export */   noteChannelCooldown: () => (/* binding */ noteChannelCooldown),
+/* harmony export */   prepareCycleEligibility: () => (/* binding */ prepareCycleEligibility)
+/* harmony export */ });
+/* harmony import */ var _policy_eligible_now__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../../policy/eligible-now */ "../../packages/tg-channel-state/src/channel-message-promotions/policy/eligible-now.ts");
+/* harmony import */ var _redis_redis_channel_cooldown__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../../redis/redis-channel-cooldown */ "../../packages/tg-channel-state/src/channel-message-promotions/redis/redis-channel-cooldown.ts");
+/* harmony import */ var _config_promo_flags_v3__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../../config/promo-flags-v3 */ "../../packages/tg-channel-state/src/channel-message-promotions/config/promo-flags-v3.ts");
+/* harmony import */ var _utils_channel_id__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../../utils/channel-id */ "../../packages/tg-channel-state/src/channel-message-promotions/utils/channel-id.ts");
+/* harmony import */ var _cycle_metrics__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ./cycle-metrics */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/cycle-metrics.ts");
+
+
+
+
+
+/** P5 review H2: longest cooldown rest declared at once (P1's shield; promote isRunnerAlive accepts up to 50 min). */
+const COOLDOWN_REST_MAX_MS = 50 * 60 * 1000;
+/**
+ * Flow v3 P5: `elig=on` is in force only with a known app (cooldown length) and an account that can
+ * read and write `promote:chstate:<app>:<m>` atomically (needs eval); otherwise it reads as off, logged
+ * once (doc 6: the cooldown never runs half-written).
+ */
+function eligActive(host) {
+    if (host.promoFlags.elig !== 'on')
+        return false;
+    const account = host.optionalAccount();
+    let supported = (0,_redis_redis_channel_cooldown__WEBPACK_IMPORTED_MODULE_1__.channelCooldownMsFor)(host.options.pickerApp ?? null) !== null
+        && typeof account.readChannelCooldowns === 'function'
+        && typeof account.markChannelCooldown === 'function';
+    if (supported && typeof account.channelCooldownSupported === 'function') {
+        try {
+            supported = account.channelCooldownSupported() === true;
+        }
+        catch {
+            supported = false;
+        }
+    }
+    if (!supported && !host.eligUnsupportedLogged) {
+        host.eligUnsupportedLogged = true;
+        host.log('warn', 'promo flags | elig=on unsupported (no app cooldown or no atomic chstate write) | reading elig=off');
+    }
+    return supported;
+}
+/** P5: one HGETALL of the cooldown hash for this cycle. null = read failed (the cycle pauses, like the block lookup). */
+async function loadChannelCooldowns(host) {
+    const account = host.optionalAccount();
+    const app = (0,_config_promo_flags_v3__WEBPACK_IMPORTED_MODULE_2__.promoFlagsAppFor)(host.options.pickerApp ?? null);
+    if (!app)
+        return new Map();
+    try {
+        const read = await account.readChannelCooldowns?.(app, Date.now());
+        const out = new Map();
+        if (read instanceof Map) {
+            for (const [channelId, until] of read) {
+                const id = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_3__.normalizeChannelId)(channelId);
+                if (id && Number.isFinite(until))
+                    out.set(id, until);
+            }
+        }
+        return out;
+    }
+    catch (error) {
+        host.log('warn', `Promotion channel cooldown lookup failed; pausing cycle safely; error=${host.normalizeError(error)}`);
+        return null;
+    }
+}
+/**
+ * Cycle start: decide `elig` and load this cycle's cooldowns (elig=on) or clear them (elig=off).
+ * null = the cooldown read failed and the cycle pauses.
+ */
+async function prepareCycleEligibility(host) {
+    const elig = host.eligActive();
+    if (elig) {
+        const cooldowns = await host.loadChannelCooldowns();
+        if (!cooldowns)
+            return null;
+        host.channelCooldowns = cooldowns;
+    }
+    else if (host.channelCooldowns.size > 0) {
+        host.channelCooldowns = new Map();
+    }
+    return { elig, nowMs: Date.now() };
+}
+/** A queued item or a running follow-up timer holds the channel. */
+function heldByQueue(host, channelId) {
+    return host.messageQueue.isQueued(channelId) || host.followUpTimers.has(channelId);
+}
+/** elig=on: the channels in `list` that pass `eligibleNow` (first doc per channel wins). */
+function eligibleOnly(host, list, blocked, docs, nowMs) {
+    const docById = new Map();
+    for (const doc of docs) {
+        const id = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_3__.normalizeChannelId)(doc.channelId);
+        if (id && !docById.has(id))
+            docById.set(id, doc);
+    }
+    return list.filter((channel) => (0,_policy_eligible_now__WEBPACK_IMPORTED_MODULE_0__.eligibleNow)(channel, docById.get((0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_3__.normalizeChannelId)(channel.channelId) ?? '') ?? null, {
+        chanblocked: blocked.has(channel.channelId),
+        queued: heldByQueue(host, channel.channelId),
+        cooldownUntil: host.cooldownUntilOf(channel.channelId),
+    }, nowMs).eligible);
+}
+/** P0: every loaded channel's first exclusion reason, before any drop (pure, no reads). null on any failure (last doc per channel wins). */
+function classifyPool(host, loadedChannels, blocked, docs, deadIds, cycle) {
+    try {
+        const docById = new Map();
+        for (const doc of docs) {
+            const id = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_3__.normalizeChannelId)(doc.channelId);
+            if (id)
+                docById.set(id, doc);
+        }
+        const docOf = (channelId) => docById.get((0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_3__.normalizeChannelId)(channelId) ?? '') ?? null;
+        return (0,_cycle_metrics__WEBPACK_IMPORTED_MODULE_4__.classifyLoadedPool)({
+            channels: loadedChannels,
+            isOwn: (channel) => host.isOwnChannel(channel),
+            chanblocked: (channelId) => blocked.has(channelId),
+            inCooldown: (channelId) => heldByQueue(host, channelId)
+                || (cycle.elig && (host.cooldownUntilOf(channelId) ?? 0) > cycle.nowMs),
+            isDead: (channelId) => deadIds.has((0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_3__.normalizeChannelId)(channelId) ?? ''),
+            docOf,
+        });
+    }
+    catch {
+        return null;
+    }
+}
+function activeCooldownRest(host) {
+    return host.cooldownRestUntil !== null && host.cooldownRestUntil > Date.now() ? host.cooldownRestUntil : null;
+}
+/** H2: the rest a fully cooled pool declares: the earliest live cooldown end, capped at now + 50 min. */
+function cooldownRestFor(host, nowMs) {
+    let earliest = Number.POSITIVE_INFINITY;
+    for (const until of host.channelCooldowns.values())
+        if (until > nowMs && until < earliest)
+            earliest = until;
+    return Number.isFinite(earliest) ? Math.min(earliest, nowMs + COOLDOWN_REST_MAX_MS) : null;
+}
+function cooldownUntilOf(host, channelId) {
+    return host.channelCooldowns.get((0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_3__.normalizeChannelId)(channelId) ?? '') ?? null;
+}
+/**
+ * P5: a main send, or an ambiguous one (Telegram may have posted it), starts the channel's cooldown
+ * (6 h tg-aut, 3 h promote). A write failure is logged, never fails the send.
+ */
+async function noteChannelCooldown(host, channelId) {
+    if (!host.eligActive())
+        return;
+    const cooldownMs = (0,_redis_redis_channel_cooldown__WEBPACK_IMPORTED_MODULE_1__.channelCooldownMsFor)(host.options.pickerApp ?? null);
+    const app = (0,_config_promo_flags_v3__WEBPACK_IMPORTED_MODULE_2__.promoFlagsAppFor)(host.options.pickerApp ?? null);
+    const id = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_3__.normalizeChannelId)(channelId);
+    if (cooldownMs === null || !app || !id)
+        return;
+    const until = Date.now() + cooldownMs;
+    host.channelCooldowns.set(id, until);
+    try {
+        await host.optionalAccount().markChannelCooldown?.(app, id, until, cooldownMs);
+    }
+    catch (error) {
+        host.log('warn', `Promotion channel cooldown write failed; channelId=${id} error=${host.normalizeError(error)}`);
+    }
+}
+/**
+ * Send-time eligibility, the same predicate as pre-ranking so the two cannot drift. A follow-up
+ * bypasses the queue hold and the cooldown, as before.
+ */
+function evaluateEligibility(host, channel, doc, isFollowUp) {
+    const result = (0,_policy_eligible_now__WEBPACK_IMPORTED_MODULE_0__.eligibleNow)(channel, doc, {
+        queued: !isFollowUp && heldByQueue(host, channel.channelId),
+        cooldownUntil: !isFollowUp && host.eligActive() ? host.cooldownUntilOf(channel.channelId) : null,
+    }, Date.now());
+    if (!result.eligible)
+        host.log('debug', `Skipping ${channel.channelId}: ${result.detail}`);
+    return result.eligible;
+}
+
+
+/***/ },
+
 /***/ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/follow-up.ts"
 /*!************************************************************************************************************!*\
   !*** ../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/follow-up.ts ***!
@@ -11288,19 +11715,29 @@ function formatCycleEndFields(m) {
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   FOLLOW_UP_V3_GAP_MS: () => (/* binding */ FOLLOW_UP_V3_GAP_MS),
 /* harmony export */   FOLLOW_UP_V3_MAX_OPEN: () => (/* binding */ FOLLOW_UP_V3_MAX_OPEN),
+/* harmony export */   claimFollowUpExecution: () => (/* binding */ claimFollowUpExecution),
+/* harmony export */   dropFollowUpsWithoutDueAt: () => (/* binding */ dropFollowUpsWithoutDueAt),
+/* harmony export */   handleQueuedFollowUpV3: () => (/* binding */ handleQueuedFollowUpV3),
+/* harmony export */   releaseFollowUpSlot: () => (/* binding */ releaseFollowUpSlot),
+/* harmony export */   reserveFollowUpSlot: () => (/* binding */ reserveFollowUpSlot),
 /* harmony export */   runFollowUp: () => (/* binding */ runFollowUp),
 /* harmony export */   scheduleFollowUp: () => (/* binding */ scheduleFollowUp)
 /* harmony export */ });
 /* harmony import */ var _policy__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../../policy */ "../../packages/tg-channel-state/src/channel-message-promotions/policy/index.ts");
 /* harmony import */ var _normalize__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./normalize */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/normalize.ts");
 /* harmony import */ var _promotion_message_queue__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../promotion-message-queue */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/promotion-message-queue.ts");
-// PromotionFlowRunner: follow-up scheduling and execution.
+/* harmony import */ var _config_promo_app_config__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../../config/promo-app-config */ "../../packages/tg-channel-state/src/channel-message-promotions/config/promo-app-config.ts");
+// PromotionFlowRunner: follow-up scheduling and execution (timer path and, under flow v3, the queue path).
+
 
 
 
 /** Flow v3 (P2 fix 7, doc 3.5): at most 40 open follow-ups per mobile. */
 const FOLLOW_UP_V3_MAX_OPEN = 40;
+/** Flow v3 interim pacer (P2 fix 5, until P8): at least this gap between follow-ups from either path. */
+const FOLLOW_UP_V3_GAP_MS = 5 * 60 * 1000;
 function queuedFollowUps(host) {
     const queue = host.messageQueue;
     const items = typeof queue.list === 'function' ? queue.list() : [];
@@ -11322,6 +11759,82 @@ function followUpsToReplace(host, channelId) {
     }
     return [...byKey.values()];
 }
+/** Open follow-ups now (the one being replaced excluded) and the cap that applies. */
+function followUpCapacity(host, v3, hasTimer, replacedKeys) {
+    const optionMax = host.options.maxFollowUpCount !== undefined ? (0,_normalize__WEBPACK_IMPORTED_MODULE_1__.safeNonNegativeInt)(host.options.maxFollowUpCount) : undefined;
+    if (!v3) {
+        const activeFollowUpCount = hasTimer ? Math.max(0, host.followUpTimers.size - 1) : host.followUpTimers.size;
+        return optionMax !== undefined ? { activeFollowUpCount, maxFollowUpCount: optionMax } : { activeFollowUpCount };
+    }
+    // Flow v3 (P2 fix 7): open follow-ups per mobile are the queued followUp items, at most 40.
+    return {
+        activeFollowUpCount: queuedFollowUps(host).filter((item) => !replacedKeys.has((0,_promotion_message_queue__WEBPACK_IMPORTED_MODULE_2__.queueItemKey)(item))).length,
+        maxFollowUpCount: Math.min(FOLLOW_UP_V3_MAX_OPEN, optionMax ?? FOLLOW_UP_V3_MAX_OPEN),
+    };
+}
+function followUpWorkFor(message, dueAt, v3) {
+    if (!v3)
+        return { ...message, timestamp: dueAt, workType: 'followUp' };
+    // Flow v3: sentAt is the parent's send time (never rewritten); dueAt is separate; timestamp = dueAt for readiness.
+    return { ...message, sentAt: message.sentAt ?? message.timestamp, dueAt, timestamp: dueAt, workType: 'followUp' };
+}
+/** P2 fix 3 (N5), review L5: a replaced follow-up's durable item leaves by key, so the channel keeps 1 open follow-up. */
+async function dropReplacedFollowUps(host, replacedWork, followUpWork) {
+    for (const replaced of replacedWork) {
+        if ((0,_promotion_message_queue__WEBPACK_IMPORTED_MODULE_2__.queueItemKey)(replaced) === (0,_promotion_message_queue__WEBPACK_IMPORTED_MODULE_2__.queueItemKey)(followUpWork))
+            continue;
+        host.log('info', `promo follow-up drop | ${(0,_promotion_message_queue__WEBPACK_IMPORTED_MODULE_2__.queueItemKey)(replaced)} | reason=replaced | by=${(0,_promotion_message_queue__WEBPACK_IMPORTED_MODULE_2__.queueItemKey)(followUpWork)}`);
+        try {
+            await host.removeQueuedMessage(replaced);
+        }
+        catch (error) {
+            host.log('warn', `Follow-up replaced item cleanup failed; channelId=${replaced.channelId} messageId=${replaced.messageId} error=${host.normalizeError(error)}`);
+        }
+    }
+}
+/** The timer path: one follow-up when its timer fires. `v3` is the mode it was scheduled under. */
+async function fireFollowUpTimer(host, message, followUpWork, dueAt, v3, timeout) {
+    let slot = null;
+    let sent = false;
+    try {
+        if (v3 && host.isFollowUpV3()) {
+            const nowMs = Date.now();
+            // Expiry is decided before the claim (P2 fix 5): a late follow-up never takes a claim.
+            if ((0,_config_promo_app_config__WEBPACK_IMPORTED_MODULE_3__.isFollowUpExpired)(dueAt, nowMs, host.followUpMaxLateMs())) {
+                host.log('info', `promo follow-up drop | ${(0,_promotion_message_queue__WEBPACK_IMPORTED_MODULE_2__.queueItemKey)(followUpWork)} | reason=expired | late_min=${Math.round((nowMs - dueAt) / 60000)}`);
+                await host.removeQueuedMessage(followUpWork);
+                return;
+            }
+            // Shared pacer with the queue path: none within 5 min of the last follow-up. The slot is taken
+            // before the claim await (review L1). Paced: the item stays queued for the queue path.
+            slot = host.reserveFollowUpSlot(nowMs);
+            if (!slot) {
+                host.log('debug', `promo follow-up paced | ${(0,_promotion_message_queue__WEBPACK_IMPORTED_MODULE_2__.queueItemKey)(followUpWork)} | path=timer`);
+                return;
+            }
+        }
+        const claimed = await host.claimFollowUpExecution(followUpWork);
+        if (claimed === null)
+            return;
+        if (!claimed) {
+            await host.removeQueuedMessage(followUpWork);
+            return;
+        }
+        sent = await host.runFollowUp(followUpWork);
+        await host.removeQueuedMessage(followUpWork);
+    }
+    catch (error) {
+        host.log('error', `Follow-up durable cleanup failed; retaining work for restart recovery; channelId=${message.channelId} messageId=${message.messageId} error=${host.normalizeError(error)}`);
+    }
+    finally {
+        if (slot && !sent)
+            host.releaseFollowUpSlot(slot);
+        if (!v3 || host.followUpTimers.get(message.channelId) === timeout) {
+            host.followUpTimers.delete(message.channelId);
+            host.followUpTimerWork.delete(message.channelId);
+        }
+    }
+}
 async function scheduleFollowUp(host, message) {
     if (host.shouldAbortStartedRunnerWork()) {
         host.log('debug', `Follow-up not scheduled because runner stopped; channelId=${message.channelId} messageId=${message.messageId}`);
@@ -11339,21 +11852,11 @@ async function scheduleFollowUp(host, message) {
     const v3 = host.isFollowUpV3();
     const replacedWork = v3 ? followUpsToReplace(host, message.channelId) : [];
     const replacedKeys = new Set(replacedWork.map((item) => (0,_promotion_message_queue__WEBPACK_IMPORTED_MODULE_2__.queueItemKey)(item)));
-    // Flow v3 (P2 fix 7): open follow-ups per mobile are the queued followUp items, at most 40.
-    const activeFollowUpCount = v3
-        ? queuedFollowUps(host).filter((item) => !replacedKeys.has((0,_promotion_message_queue__WEBPACK_IMPORTED_MODULE_2__.queueItemKey)(item))).length
-        : existing ? Math.max(0, host.followUpTimers.size - 1) : host.followUpTimers.size;
-    const maxFollowUpCount = v3
-        ? Math.min(FOLLOW_UP_V3_MAX_OPEN, host.options.maxFollowUpCount !== undefined ? (0,_normalize__WEBPACK_IMPORTED_MODULE_1__.safeNonNegativeInt)(host.options.maxFollowUpCount) : FOLLOW_UP_V3_MAX_OPEN)
-        : undefined;
     const followUpPolicy = (0,_policy__WEBPACK_IMPORTED_MODULE_0__.evaluateFollowUpScheduling)({
         isFollowUp: message.isFollowUp,
         daysLeft: stats.daysLeft,
         channelAvailable: true,
-        activeFollowUpCount,
-        ...(maxFollowUpCount !== undefined
-            ? { maxFollowUpCount }
-            : host.options.maxFollowUpCount !== undefined ? { maxFollowUpCount: (0,_normalize__WEBPACK_IMPORTED_MODULE_1__.safeNonNegativeInt)(host.options.maxFollowUpCount) } : {}),
+        ...followUpCapacity(host, v3, !!existing, replacedKeys),
     });
     if (!followUpPolicy.shouldSchedule) {
         host.log('debug', `Follow-up not scheduled; channelId=${message.channelId} messageId=${message.messageId} reason=${followUpPolicy.reason ?? 'policy'}`);
@@ -11363,33 +11866,8 @@ async function scheduleFollowUp(host, message) {
     if (existing)
         clearTimeout(existing);
     const dueAt = Date.now() + delayMs;
-    const followUpWork = v3
-        ? {
-            ...message,
-            // Flow v3: sentAt is the parent's send time (never rewritten); dueAt is separate; timestamp = dueAt for readiness.
-            sentAt: message.sentAt ?? message.timestamp,
-            dueAt,
-            timestamp: dueAt,
-            workType: 'followUp',
-        }
-        : {
-            ...message,
-            timestamp: dueAt,
-            workType: 'followUp',
-        };
-    for (const replaced of replacedWork) {
-        if ((0,_promotion_message_queue__WEBPACK_IMPORTED_MODULE_2__.queueItemKey)(replaced) === (0,_promotion_message_queue__WEBPACK_IMPORTED_MODULE_2__.queueItemKey)(followUpWork))
-            continue;
-        // P2 fix 3 (N5), review L5: a replaced follow-up's durable item leaves by key, so the channel
-        // keeps 1 open follow-up and does not stay queued.
-        host.log('info', `promo follow-up drop | ${(0,_promotion_message_queue__WEBPACK_IMPORTED_MODULE_2__.queueItemKey)(replaced)} | reason=replaced | by=${(0,_promotion_message_queue__WEBPACK_IMPORTED_MODULE_2__.queueItemKey)(followUpWork)}`);
-        try {
-            await host.removeQueuedMessage(replaced);
-        }
-        catch (error) {
-            host.log('warn', `Follow-up replaced item cleanup failed; channelId=${replaced.channelId} messageId=${replaced.messageId} error=${host.normalizeError(error)}`);
-        }
-    }
+    const followUpWork = followUpWorkFor(message, dueAt, v3);
+    await dropReplacedFollowUps(host, replacedWork, followUpWork);
     try {
         await host.messageQueue.enqueueDurable(followUpWork);
     }
@@ -11402,48 +11880,7 @@ async function scheduleFollowUp(host, message) {
             host.log('debug', `Follow-up timer skipped because runner stopped; channelId=${message.channelId} messageId=${message.messageId}`);
             return;
         }
-        void (async () => {
-            let slot = null;
-            let sent = false;
-            try {
-                if (v3 && host.isFollowUpV3()) {
-                    const nowMs = Date.now();
-                    // Expiry is decided before the claim (P2 fix 5): a late follow-up never takes a claim.
-                    if (nowMs > dueAt + host.followUpMaxLateMs()) {
-                        host.log('info', `promo follow-up drop | ${(0,_promotion_message_queue__WEBPACK_IMPORTED_MODULE_2__.queueItemKey)(followUpWork)} | reason=expired | late_min=${Math.round((nowMs - dueAt) / 60000)}`);
-                        await host.removeQueuedMessage(followUpWork);
-                        return;
-                    }
-                    // Shared pacer with the queue path: none within 5 min of the last follow-up. The slot is taken
-                    // before the claim await (review L1). Paced: the item stays queued for the queue path.
-                    slot = host.reserveFollowUpSlot(nowMs);
-                    if (!slot) {
-                        host.log('debug', `promo follow-up paced | ${(0,_promotion_message_queue__WEBPACK_IMPORTED_MODULE_2__.queueItemKey)(followUpWork)} | path=timer`);
-                        return;
-                    }
-                }
-                const claimed = await host.claimFollowUpExecution(followUpWork);
-                if (claimed === null)
-                    return;
-                if (!claimed) {
-                    await host.removeQueuedMessage(followUpWork);
-                    return;
-                }
-                sent = await host.runFollowUp(followUpWork);
-                await host.removeQueuedMessage(followUpWork);
-            }
-            catch (error) {
-                host.log('error', `Follow-up durable cleanup failed; retaining work for restart recovery; channelId=${message.channelId} messageId=${message.messageId} error=${host.normalizeError(error)}`);
-            }
-            finally {
-                if (slot && !sent)
-                    host.releaseFollowUpSlot(slot);
-                if (!v3 || host.followUpTimers.get(message.channelId) === timeout) {
-                    host.followUpTimers.delete(message.channelId);
-                    host.followUpTimerWork.delete(message.channelId);
-                }
-            }
-        })();
+        void fireFollowUpTimer(host, message, followUpWork, dueAt, v3, timeout);
     }, delayMs);
     timeout.unref?.();
     host.followUpTimers.set(message.channelId, timeout);
@@ -11504,6 +11941,101 @@ async function runFollowUp(host, message) {
     finally {
         host.health.lastFollowUpFinishedAt = Date.now();
     }
+}
+/**
+ * Flow v3 (P2 fix 5): a queued follow-up under `fu` on. Never reaches checkMessage and never writes
+ * survival. Expiry before the claim; shared 5 min pacer with the timer path.
+ */
+async function handleQueuedFollowUpV3(host, message) {
+    const key = (0,_promotion_message_queue__WEBPACK_IMPORTED_MODULE_2__.queueItemKey)(message);
+    if (message.dueAt === undefined || message.sentAt === undefined) {
+        host.log('info', `promo follow-up drop | ${key} | reason=legacy_no_dueAt`);
+        host.verifyCloses.noteDrop('legacy_no_dueAt');
+        return 'done';
+    }
+    if (host.followUpTimers.has(message.channelId))
+        return 'keep';
+    const nowMs = Date.now();
+    if ((0,_config_promo_app_config__WEBPACK_IMPORTED_MODULE_3__.isFollowUpExpired)(message.dueAt, nowMs, host.followUpMaxLateMs())) {
+        host.log('info', `promo follow-up drop | ${key} | reason=expired | late_min=${Math.round((nowMs - message.dueAt) / 60000)}`);
+        host.verifyCloses.noteDrop('expired');
+        return 'done';
+    }
+    if (nowMs < message.dueAt)
+        return 'keep';
+    // Review L1: the slot is taken before the claim await, and given back when nothing is sent.
+    const slot = host.reserveFollowUpSlot(nowMs);
+    if (!slot)
+        return 'keep';
+    let sent = false;
+    try {
+        const claimed = await host.claimFollowUpExecution(message);
+        if (claimed === null)
+            return 'keep';
+        if (!claimed)
+            return 'done';
+        sent = await host.runFollowUp(message);
+        return 'done';
+    }
+    finally {
+        if (!sent)
+            host.releaseFollowUpSlot(slot);
+    }
+}
+/** Review L1: check and take the 5 min slot in one step (no await between), so racing paths cannot both pass. */
+function reserveFollowUpSlot(host, nowMs) {
+    if (nowMs - host.lastFollowUpAt < FOLLOW_UP_V3_GAP_MS)
+        return null;
+    const slot = { at: nowMs, previous: host.lastFollowUpAt };
+    host.lastFollowUpAt = nowMs;
+    return slot;
+}
+/** Give a slot back when its claim failed or no follow-up was sent; a later reservation is kept. */
+function releaseFollowUpSlot(host, slot) {
+    if (host.lastFollowUpAt === slot.at)
+        host.lastFollowUpAt = slot.previous;
+}
+/** true = run it; false = another process claimed it (drop); null = claim failed (keep for retry). */
+async function claimFollowUpExecution(host, message) {
+    try {
+        const queue = host.messageQueue;
+        if (typeof queue.claimExecution !== 'function')
+            return true;
+        const claimed = await queue.claimExecution(message);
+        if (!claimed) {
+            host.log('info', `Follow-up already claimed; removing recovered duplicate; channelId=${message.channelId} messageId=${message.messageId}`);
+        }
+        return claimed;
+    }
+    catch (error) {
+        host.log('warn', `Follow-up execution claim failed; retaining for retry; channelId=${message.channelId} messageId=${message.messageId} error=${host.normalizeError(error)}`);
+        return null;
+    }
+}
+/** Flow v3 (P2 fix 9): at an off -> on flip, follow-ups without `dueAt` leave (timers and queue). */
+async function dropFollowUpsWithoutDueAt(host) {
+    // Timers armed under `fu` off own items without dueAt: clear them so no follow-up runs without one.
+    for (const [channelId, timeout] of [...host.followUpTimers.entries()]) {
+        if (host.followUpTimerWork.has(channelId))
+            continue;
+        clearTimeout(timeout);
+        host.followUpTimers.delete(channelId);
+    }
+    const queue = host.messageQueue;
+    if (typeof queue.takeFollowUpsWithoutDueAt !== 'function')
+        return;
+    const dropped = queue.takeFollowUpsWithoutDueAt();
+    for (const item of dropped) {
+        host.log('info', `promo follow-up drop | ${(0,_promotion_message_queue__WEBPACK_IMPORTED_MODULE_2__.queueItemKey)(item)} | reason=legacy_no_dueAt`);
+        host.verifyCloses.noteDrop('legacy_no_dueAt');
+        try {
+            await host.removeQueuedMessage(item);
+        }
+        catch (error) {
+            host.log('warn', `promo follow-up drop | ${(0,_promotion_message_queue__WEBPACK_IMPORTED_MODULE_2__.queueItemKey)(item)} | payload delete failed | error=${host.normalizeError(error)}`);
+        }
+    }
+    host.log('info', `promo fu flip | dropped_no_dueAt=${dropped.length}`);
 }
 
 
@@ -12573,6 +13105,243 @@ function formatPickSummary(summary) {
 
 /***/ },
 
+/***/ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/selection-pass.ts"
+/*!*****************************************************************************************************************!*\
+  !*** ../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/selection-pass.ts ***!
+  \*****************************************************************************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   selectCycleChannels: () => (/* binding */ selectCycleChannels)
+/* harmony export */ });
+/* harmony import */ var _channel_intelligence_channel_intelligence_schema__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../../channel-intelligence/channel-intelligence-schema */ "../../packages/tg-channel-state/src/channel-message-promotions/channel-intelligence/channel-intelligence-schema.ts");
+/* harmony import */ var _selection__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../../selection */ "../../packages/tg-channel-state/src/channel-message-promotions/selection/index.ts");
+/* harmony import */ var _selection_picker__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../../selection/picker */ "../../packages/tg-channel-state/src/channel-message-promotions/selection/picker.ts");
+/* harmony import */ var _policy__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../../policy */ "../../packages/tg-channel-state/src/channel-message-promotions/policy/index.ts");
+/* harmony import */ var _utils_channel_id__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../../utils/channel-id */ "../../packages/tg-channel-state/src/channel-message-promotions/utils/channel-id.ts");
+/* harmony import */ var _eligibility__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ./eligibility */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/eligibility.ts");
+/* harmony import */ var _normalize__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ./normalize */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/normalize.ts");
+// PromotionFlowRunner: one cycle's channel selection (source order or ranked, legacy/shadow/v2 picker),
+// with the P0 pool classification and, under `elig=on`, the P5 eligibility filter.
+
+
+
+
+
+
+
+const SCORE_TIMEOUT = Symbol('picker-score-timeout');
+/** `work` or SCORE_TIMEOUT after `ms`, whichever is first. The timer never outlives the race; a late rejection is swallowed. */
+function raceTimeout(work, ms) {
+    let timer;
+    work.catch(() => undefined);
+    const timeout = new Promise((resolve) => { timer = setTimeout(() => resolve(SCORE_TIMEOUT), ms); });
+    return Promise.race([work, timeout]).finally(() => clearTimeout(timer));
+}
+/**
+ * Picks this cycle's channels. `loadedChannels` is the load before the own-channel drop (P0 counts
+ * those too); `channels` is after it. null = a read failed and the cycle pauses (already logged).
+ */
+async function selectCycleChannels(host, loadedChannels, channels, stats, cycle) {
+    const batchPolicy = (0,_policy__WEBPACK_IMPORTED_MODULE_3__.calculatePromotionBatchLimit)({
+        scoringEnabled: host.options.scoringEnabled,
+        daysLeft: stats.daysLeft,
+        successCount: stats.successCount,
+        failedCount: stats.failedCount,
+        failStreak: stats.failStreak,
+        includeJitter: true,
+    });
+    const batchTarget = (0,_normalize__WEBPACK_IMPORTED_MODULE_6__.safeBatchTarget)(host.options.batchTarget, batchPolicy.limit);
+    let selectedChannels;
+    let selectionExploreDenied = 0;
+    let poolClass = null;
+    let eligibleSource = 'intel';
+    const pickerMode = (0,_selection_picker__WEBPACK_IMPORTED_MODULE_2__.readPickerMode)(process.env, host.options.pickerApp ?? null);
+    const pickerMu = (0,_selection_picker__WEBPACK_IMPORTED_MODULE_2__.readPickerMu)();
+    const pickNowMs = Date.now();
+    host.pickAnnotations = new Map();
+    if (host.options.channelSelectionMode === 'source_order' && pickerMode !== 'v2') {
+        // The adapter has already applied its bounded membership policy (promote-clients uses
+        // participant-count descending plus a Fisher-Yates shuffle). Preserve that source order;
+        // only the mobile-specific Telegram block remains a preflight exclusion here.
+        let blockedChannelIds = new Set();
+        try {
+            blockedChannelIds = await host.options.account.blockedChannelsForMobile(channels.map((channel) => channel.channelId));
+        }
+        catch (error) {
+            host.log('warn', `Promotion per-mobile block lookup failed; pausing cycle safely; error=${host.normalizeError(error)}`);
+            return null;
+        }
+        // source_order loads no intel for selection. Reuse the engine's per-cycle cache (no read); without it,
+        // say so on the line (eligible_src) so safety/health exclusions are not read as absent.
+        let cachedDocs = [];
+        try {
+            const peek = host.adapter.peekCachedIntelligenceDocs?.(channels.map((channel) => channel.channelId)) ?? null;
+            if (peek && Array.isArray(peek.docs)) {
+                cachedDocs = peek.docs.filter(_channel_intelligence_channel_intelligence_schema__WEBPACK_IMPORTED_MODULE_0__.isChannelIntelligence);
+                eligibleSource = peek.missing > 0 ? 'cache_partial' : 'cache';
+            }
+            else {
+                eligibleSource = 'no_intel';
+            }
+        }
+        catch {
+            eligibleSource = 'no_intel';
+        }
+        poolClass = (0,_eligibility__WEBPACK_IMPORTED_MODULE_5__.classifyPool)(host, loadedChannels, blockedChannelIds, cachedDocs, new Set(), cycle);
+        const unblocked = channels.filter((channel) => !blockedChannelIds.has(channel.channelId));
+        const sourceCandidates = cycle.elig ? (0,_eligibility__WEBPACK_IMPORTED_MODULE_5__.eligibleOnly)(host, unblocked, blockedChannelIds, cachedDocs, cycle.nowMs) : unblocked;
+        const exploreDenied = await host.explorationDenied(sourceCandidates, false);
+        selectionExploreDenied = exploreDenied.size;
+        selectedChannels = sourceCandidates
+            .filter((channel) => !exploreDenied.has(channel.channelId))
+            .slice(0, batchTarget);
+        if (pickerMode === 'shadow' && selectedChannels.length > 0) {
+            // Shadow only: score the same candidates for the record. A load failure skips measurement,
+            // never the cycle; the selection above is already final.
+            // Scoring fields only, from this cycle's cache plus a messagePool-free read of any missing
+            // channel. An adapter without getScoringDocs gets no measurement (never a full-doc batch).
+            // The read is bounded (PROMO_PICKER_SCORE_TIMEOUT_MS, default 1.5 s) so measurement can never
+            // delay the first send: on timeout this cycle goes unmeasured and the late read is ignored.
+            let shadowDocs = null;
+            try {
+                if (typeof host.adapter.getScoringDocs === 'function') {
+                    const timeoutMs = (0,_selection_picker__WEBPACK_IMPORTED_MODULE_2__.readPickerScoreTimeoutMs)();
+                    const loadedDocs = await raceTimeout(Promise.resolve(host.adapter.getScoringDocs(unblocked.map((channel) => channel.channelId))), timeoutMs);
+                    if (loadedDocs === SCORE_TIMEOUT) {
+                        if ((0,_selection_picker__WEBPACK_IMPORTED_MODULE_2__.shouldSample)((0,_selection_picker__WEBPACK_IMPORTED_MODULE_2__.readPickerLogSample)())) {
+                            host.log('info', `Promotion picker shadow docs load timed out; measurement skipped; timeoutMs=${timeoutMs}; candidates=${unblocked.length}`);
+                        }
+                    }
+                    else {
+                        shadowDocs = Array.isArray(loadedDocs) ? loadedDocs.filter((doc) => !!doc && typeof doc.channelId === 'string') : [];
+                    }
+                }
+            }
+            catch (error) {
+                host.log('debug', `Promotion picker shadow docs load failed; measurement skipped; error=${host.normalizeError(error)}`);
+            }
+            if (shadowDocs)
+                host.measurePicks(pickerMode, unblocked, selectedChannels, shadowDocs, () => 'o', pickNowMs, pickerMu);
+        }
+        host.log('info', [
+            'Promotion selection ready',
+            'mode=source_order',
+            `picker=${pickerMode}`,
+            `loaded=${channels.length}`,
+            `batchTarget=${batchTarget}`,
+            `selected=${selectedChannels.length}`,
+            `blocked=${blockedChannelIds.size}`,
+            `exploreDenied=${exploreDenied.size}`,
+            ...(cycle.elig ? ['elig=on', `eligible=${sourceCandidates.length}`] : []),
+            `stats=${host.formatStats(stats)}`,
+        ].join('; '));
+    }
+    else {
+        let intelligenceDocs = [];
+        try {
+            const loadedDocs = await host.adapter.getIntelligenceDocs(channels.map((channel) => channel.channelId));
+            intelligenceDocs = Array.isArray(loadedDocs) ? loadedDocs.filter(_channel_intelligence_channel_intelligence_schema__WEBPACK_IMPORTED_MODULE_0__.isChannelIntelligence) : [];
+        }
+        catch (error) {
+            host.log('warn', `Promotion intelligence docs batch load failed; pausing cycle safely; error=${host.normalizeError(error)}`);
+            return null;
+        }
+        let blockedChannelIds = new Set();
+        try {
+            blockedChannelIds = await host.options.account.blockedChannelsForMobile(channels.map((channel) => channel.channelId));
+        }
+        catch (error) {
+            host.log('warn', `Promotion per-mobile block lookup failed; pausing cycle safely; error=${host.normalizeError(error)}`);
+            return null;
+        }
+        const selectFrom = (candidates) => (0,_selection__WEBPACK_IMPORTED_MODULE_1__.selectPromotionChannels)({
+            channels: candidates,
+            intelligenceDocs,
+            batchTarget,
+            blockedChannelIds,
+            ...(pickerMode === 'v2' ? { rankScore: (doc) => (0,_selection_picker__WEBPACK_IMPORTED_MODULE_2__.v2ChannelScore)(doc, pickNowMs, pickerMu) } : {}),
+        });
+        const rankInput = cycle.elig ? (0,_eligibility__WEBPACK_IMPORTED_MODULE_5__.eligibleOnly)(host, channels, blockedChannelIds, intelligenceDocs, cycle.nowMs) : channels;
+        let selection;
+        let excludedDeadIds = new Set();
+        if (pickerMode === 'v2') {
+            // v2 only: lifetime-dead channels (>= 125 attempts, 0 DMs) leave the list. Shadow measurement
+            // below still scores them (candidates come from `channels`). Fail-safe: when nothing sendable
+            // would remain, keep them and warn.
+            const deadIds = new Set();
+            for (const doc of intelligenceDocs) {
+                const id = (0,_selection_picker__WEBPACK_IMPORTED_MODULE_2__.isLifetimeDeadChannel)(doc) ? (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_4__.normalizeChannelId)(doc.channelId) : null;
+                if (id)
+                    deadIds.add(id);
+            }
+            const live = rankInput.filter((channel) => !deadIds.has((0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_4__.normalizeChannelId)(channel.channelId) ?? ''));
+            const dead = rankInput.length - live.length;
+            selection = selectFrom(live);
+            const eligible = selection.proven.length + selection.untested.length;
+            if (dead > 0 && eligible === 0 && cycle.elig) {
+                // P5 review H1: with elig=on the live pool is empty because it is cooling (or otherwise
+                // ineligible), not because the list ran dry; sending to dead channels is never the answer.
+                excludedDeadIds = deadIds;
+                host.log('info', `Promotion v2 dead-channel skip; skipped=${dead}; dead=${dead}; eligible=0; elig=on: no live channel eligible, dead channels not sent`);
+            }
+            else if (dead > 0 && eligible === 0) {
+                selection = selectFrom(rankInput);
+                host.log('warn', `Promotion v2 dead-channel skip; skipped=0; dead=${dead}; eligible=0; fail-safe: no live channel left, dead channels kept`);
+            }
+            else if (dead > 0) {
+                excludedDeadIds = deadIds;
+                host.log('info', `Promotion v2 dead-channel skip; skipped=${dead}; dead=${dead}; eligible=${eligible}`);
+            }
+        }
+        else {
+            selection = selectFrom(rankInput);
+        }
+        poolClass = (0,_eligibility__WEBPACK_IMPORTED_MODULE_5__.classifyPool)(host, loadedChannels, blockedChannelIds, intelligenceDocs, excludedDeadIds, cycle);
+        const selectionDiagnostics = host.describeSelection(selection, intelligenceDocs);
+        const exploreDenied = await host.explorationDenied(selection.selected, false);
+        selectionExploreDenied = exploreDenied.size;
+        selectedChannels = selection.selected.filter((channel) => !exploreDenied.has(channel.channelId));
+        if (pickerMode !== 'legacy' && selectedChannels.length > 0) {
+            const provenIds = new Set(selection.proven.map((channel) => (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_4__.normalizeChannelId)(channel.channelId) ?? ''));
+            const v2 = pickerMode === 'v2';
+            const unblockedCandidates = channels.filter((channel) => !blockedChannelIds.has(channel.channelId));
+            host.measurePicks(pickerMode, unblockedCandidates, selectedChannels, intelligenceDocs, (channelId) => (provenIds.has(channelId) ? (v2 ? 'v' : 'r') : (v2 ? 'x' : 'e')), pickNowMs, pickerMu);
+        }
+        host.log('info', [
+            'Promotion selection ready',
+            'mode=ranked',
+            `picker=${pickerMode}`,
+            `loaded=${channels.length}`,
+            `intelDocs=${intelligenceDocs.length}`,
+            `batchTarget=${batchTarget}`,
+            `policyLimit=${batchPolicy.limit}`,
+            `selected=${selectedChannels.length}`,
+            `proven=${selection.proven.length}`,
+            `untested=${selection.untested.length}`,
+            `skipped=${selection.skipped.length}`,
+            `skipBreakdown=${selectionDiagnostics.skipBreakdown}`,
+            `explorePct=${selection.explorePercent.toFixed(2)}`,
+            `blocked=${blockedChannelIds.size}`,
+            `exploreDenied=${exploreDenied.size}`,
+            ...(cycle.elig ? ['elig=on', `eligible=${rankInput.length}`] : []),
+            `stats=${host.formatStats(stats)}`,
+        ].join('; '));
+        if (selectionDiagnostics.selectedSample !== 'none') {
+            host.log('debug', `Promotion selected channel sample; ${selectionDiagnostics.selectedSample}`);
+        }
+        if (selectionDiagnostics.skippedSample !== 'none') {
+            host.log('debug', `Promotion skipped channel sample; ${selectionDiagnostics.skippedSample}`);
+        }
+    }
+    return { selectedChannels, selectionExploreDenied, poolClass, eligibleSource };
+}
+
+
+/***/ },
+
 /***/ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/send-budget.ts"
 /*!**************************************************************************************************************!*\
   !*** ../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/send-budget.ts ***!
@@ -12690,6 +13459,264 @@ async function settleDailySendBudget(host, result, reservation) {
 
 /***/ },
 
+/***/ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/verify.ts"
+/*!*********************************************************************************************************!*\
+  !*** ../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/verify.ts ***!
+  \*********************************************************************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   PROMO_FLAGS_QUEUE_REFRESH_MS: () => (/* binding */ PROMO_FLAGS_QUEUE_REFRESH_MS),
+/* harmony export */   checkQueuedMessagesOnce: () => (/* binding */ checkQueuedMessagesOnce),
+/* harmony export */   queueItems: () => (/* binding */ queueItems),
+/* harmony export */   recordVerifiedOutcome: () => (/* binding */ recordVerifiedOutcome),
+/* harmony export */   runSweepOnce: () => (/* binding */ runSweepOnce),
+/* harmony export */   verifyUnknownClose: () => (/* binding */ verifyUnknownClose)
+/* harmony export */ });
+/* harmony import */ var _policy__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../../policy */ "../../packages/tg-channel-state/src/channel-message-promotions/policy/index.ts");
+/* harmony import */ var _config_promo_app_config__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../../config/promo-app-config */ "../../packages/tg-channel-state/src/channel-message-promotions/config/promo-app-config.ts");
+/* harmony import */ var _tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! @tg/core/utils/dc-ip-family */ "../../packages/tg-core/src/utils/dc-ip-family.ts");
+/* harmony import */ var _promotion_message_queue__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../promotion-message-queue */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/promotion-message-queue.ts");
+/* harmony import */ var _cycle_metrics__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ./cycle-metrics */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/cycle-metrics.ts");
+/* harmony import */ var _normalize__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ./normalize */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/normalize.ts");
+// PromotionFlowRunner: the verify queue pass (check each sent promo, record its outcome once) and the
+// flow v3 P4 `verify_unknown` close rule.
+
+
+
+
+
+
+/** Flow v3 (review M2): the queue checker re-reads the flag hash at most this often. */
+const PROMO_FLAGS_QUEUE_REFRESH_MS = 60 * 1000;
+/** Flow v3 (review L7): at most one marker_error warn per runner per this window. */
+const MARKER_ERROR_LOG_EVERY_MS = 60 * 1000;
+/** Read-only copies of the queued items; [] for a queue without list(). */
+function queueItems(host) {
+    try {
+        const queue = host.messageQueue;
+        return typeof queue.list === 'function' ? queue.list() : [];
+    }
+    catch {
+        return [];
+    }
+}
+/** One log-only sweep: counts queue items past their would-be `until`. Drops nothing. */
+function runSweepOnce(host, nowMs) {
+    const result = (0,_cycle_metrics__WEBPACK_IMPORTED_MODULE_4__.sweepQueueItems)(host.queueItems(), nowMs, host.options.pickerApp ?? null);
+    const alert = result.droppedVerify > 0 || result.droppedFu > 0;
+    host.log(alert ? 'warn' : 'info', (0,_cycle_metrics__WEBPACK_IMPORTED_MODULE_4__.formatPromoSweep)((0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_2__.maskMobile)(host.options.account.mobile), result, host.verifyCloses.takeDelta('sweep')));
+    return result;
+}
+/**
+ * Flow v3 P4. After an unknown or failed check (one counted attempt, at least 30 s after the last
+ * counted one), the rule is met when the item is >= 10 min past its send AND has >= 5 counted
+ * attempts. `vx=on`: close it as terminal `verify_unknown` (no survival, no deletion, logged once,
+ * counted). `vx=off`: keep it, and log and count `verify_unknown_would` once per item.
+ * With `fu=on`, a P3 marker error (kept for the next check) counts no attempt; it closes past 1 h, the
+ * v3 verify payload TTL, in either `vx` mode (review F7, F8). Attempts live in memory only: a restored
+ * item starts at 0 (F6).
+ */
+function verifyUnknownClose(host, original, message, last) {
+    const nowMs = Date.now();
+    const queue = host.messageQueue;
+    const sentAt = message.sentAt ?? message.timestamp;
+    const ageMs = Number.isFinite(sentAt) && sentAt > 0 ? nowMs - sentAt : 0;
+    const key = (0,_promotion_message_queue__WEBPACK_IMPORTED_MODULE_3__.queueItemKey)(original);
+    if (last === 'marker_error') {
+        if (ageMs < _promotion_message_queue__WEBPACK_IMPORTED_MODULE_3__.VERIFY_RESTORE_MAX_AGE_MS)
+            return false;
+        const attempts = typeof queue.checkAttempts === 'function' ? queue.checkAttempts(original) : 0;
+        host.log('info', `promo verify close | ${key} | reason=verify_unknown | attempts=${attempts} | age_s=${Math.round(ageMs / 1000)} | last=${last}`);
+        host.verifyCloses.noteUnknown();
+        return true;
+    }
+    const attempts = typeof queue.noteCheckAttempt === 'function'
+        ? queue.noteCheckAttempt(original, nowMs, _config_promo_app_config__WEBPACK_IMPORTED_MODULE_1__.VERIFY_ATTEMPT_GAP_MS)
+        : 0;
+    if (ageMs < _config_promo_app_config__WEBPACK_IMPORTED_MODULE_1__.VERIFY_MAX_AGE_MS || attempts < _config_promo_app_config__WEBPACK_IMPORTED_MODULE_1__.VERIFY_MAX_ATTEMPTS)
+        return false;
+    const fields = `${key} | reason=verify_unknown | attempts=${attempts} | age_s=${Math.round(ageMs / 1000)} | last=${last}`;
+    if (host.promoFlags.vx !== 'on') {
+        const first = typeof queue.markWouldClose === 'function' ? queue.markWouldClose(original) : false;
+        if (first) {
+            host.log('info', `promo verify would-close | ${fields}`);
+            host.verifyCloses.noteUnknownWould();
+        }
+        return false;
+    }
+    host.log('info', `promo verify close | ${fields}`);
+    host.verifyCloses.noteUnknown();
+    return true;
+}
+/** The today (non-v3) survival and deletion records for one checked verify item. */
+async function recordCheckedOutcome(host, message, result, sentAt) {
+    if (result.status === 'exists') {
+        const existingMessage = (0,_normalize__WEBPACK_IMPORTED_MODULE_5__.withMessageCheckText)(message, result);
+        host.log('debug', `Promotion message exists; channelId=${message.channelId} messageId=${message.messageId} isFollowUp=${message.isFollowUp}`);
+        await host.callHook('onMessageExisting', () => host.adapter.onMessageExisting?.(existingMessage));
+        await host.recordAccountSurvival(message);
+        await host.recordExploreSurvival(message);
+        await host.recordPoolOutcome(message, 'survived');
+        await host.scheduleFollowUp(message);
+        host.verifyCloses.note(sentAt, Date.now());
+        return;
+    }
+    const deletionPolicy = (0,_policy__WEBPACK_IMPORTED_MODULE_0__.evaluateDeletionPolicy)(message.messageIndex, message.availableMessageCount);
+    await host.recordDeletion(message, deletionPolicy, result.reason ?? 'message_missing');
+    host.verifyCloses.note(sentAt, Date.now());
+}
+/**
+ * Flow v3 P3: the only writer of survival, explore, pool, onMessageExisting and deletion records,
+ * for a verify item. A Redis SET NX marker per verify key makes it once across restarts; on a marker
+ * error nothing is recorded and the item stays for the next check (a missed record beats a double one).
+ * A follow-up is scheduled only from here, after a first survival.
+ */
+async function recordVerifiedOutcome(host, message, result) {
+    const key = (0,_promotion_message_queue__WEBPACK_IMPORTED_MODULE_3__.queueItemKey)(message);
+    let first = true;
+    try {
+        const queue = host.messageQueue;
+        if (typeof queue.markRecorded === 'function')
+            first = await queue.markRecorded(message);
+    }
+    catch (error) {
+        // Review L7: during a Redis outage every verify item fails on every pass; one warn per 60 s.
+        const nowMs = Date.now();
+        if (nowMs - host.markerErrorLogAt >= MARKER_ERROR_LOG_EVERY_MS) {
+            host.log('warn', `promo record skipped | ${key} | reason=marker_error | suppressed=${host.markerErrorSuppressed} | error=${host.normalizeError(error)}`);
+            host.markerErrorLogAt = nowMs;
+            host.markerErrorSuppressed = 0;
+        }
+        else {
+            host.markerErrorSuppressed += 1;
+        }
+        return 'keep';
+    }
+    if (!first) {
+        host.log('info', `promo record skipped | ${key} | reason=already_recorded`);
+        return 'done';
+    }
+    await recordCheckedOutcome(host, message, result, message.sentAt ?? message.timestamp);
+    return 'done';
+}
+/** One queue pass: every ready item is checked (verify) or run (follow-up), then the finished ones leave. */
+async function checkQueuedMessagesOnce(host) {
+    // Review M2: a flag rollback reaches a long cycle within about a minute. Read only here, at the
+    // start of a pass, so the mode never changes inside one.
+    if (Date.now() - host.promoFlagsReadAt >= PROMO_FLAGS_QUEUE_REFRESH_MS)
+        await host.refreshPromoFlags();
+    host.health.lastQueueCheckStartedAt = Date.now();
+    try {
+        const now = Date.now();
+        const v3 = host.isFollowUpV3();
+        const checkDelay = (0,_normalize__WEBPACK_IMPORTED_MODULE_5__.safeDelayMs)(host.options.messageCheckDelayMs, 15000);
+        let ready = [];
+        try {
+            ready = (0,_normalize__WEBPACK_IMPORTED_MODULE_5__.normalizeReadyMessages)(host.messageQueue.readyForCheck(now, checkDelay), v3);
+        }
+        catch (error) {
+            host.log('warn', `Promotion queue ready check failed; skipping queue pass error=${host.normalizeError(error)}`);
+            return;
+        }
+        host.log('debug', `Promotion queue check; queueSize=${host.messageQueue.size} ready=${ready.length} checkDelayMs=${checkDelay}`);
+        const completed = new Set();
+        // P4: closed as verify_unknown; leaves memory even when the Redis delete fails (P0 review LOW 3).
+        const closedUnknown = new Set();
+        const closeIfUnknown = (entry, last) => {
+            if (host.verifyUnknownClose(entry.original, entry.message, last)) {
+                completed.add(entry);
+                closedUnknown.add(entry);
+            }
+        };
+        for (const entry of ready) {
+            if (host.shouldAbortStartedRunnerWork()) {
+                host.log('debug', 'Promotion queue check interrupted because runner stopped');
+                break;
+            }
+            const { message } = entry;
+            if (v3 && message.workType === 'followUp') {
+                if (await host.handleQueuedFollowUpV3(message) === 'done')
+                    completed.add(entry);
+                continue;
+            }
+            if (message.workType === 'followUp') {
+                if (host.followUpTimers.has(message.channelId))
+                    continue;
+                const claimed = await host.claimFollowUpExecution(message);
+                if (claimed === null)
+                    continue;
+                if (!claimed) {
+                    completed.add(entry);
+                    continue;
+                }
+                await host.runFollowUp(message);
+                completed.add(entry);
+                continue;
+            }
+            let result;
+            try {
+                result = (0,_normalize__WEBPACK_IMPORTED_MODULE_5__.normalizeMessageCheckResult)(await host.adapter.checkMessage(message));
+            }
+            catch (error) {
+                host.log('warn', [
+                    'Promotion message check failed; retaining for retry',
+                    `channelId=${message.channelId}`,
+                    `messageId=${message.messageId}`,
+                    `isFollowUp=${message.isFollowUp}`,
+                    `error=${host.normalizeError(error)}`,
+                ].join('; '));
+                closeIfUnknown(entry, 'error');
+                continue;
+            }
+            if (v3 && (result.status === 'exists' || result.status === 'deleted')) {
+                // P3: the one survival writer, once per verify key. 'keep' = marker error.
+                if (await host.recordVerifiedOutcome(message, result) === 'done')
+                    completed.add(entry);
+                else
+                    closeIfUnknown(entry, 'marker_error');
+                continue;
+            }
+            if (result.status === 'exists' || result.status === 'deleted') {
+                await recordCheckedOutcome(host, message, result, message.timestamp);
+                completed.add(entry);
+            }
+            else {
+                host.log('debug', `Message check unknown for ${message.channelId}/${message.messageId}; retaining for retry`);
+                closeIfUnknown(entry, 'unknown');
+            }
+        }
+        for (const entry of completed) {
+            try {
+                await host.removeQueuedMessage(entry.original);
+            }
+            catch (error) {
+                const { message } = entry;
+                if (closedUnknown.has(entry)) {
+                    // Terminal: drop the in-memory copy so it is never re-checked or counted again. The payload
+                    // keeps its TTL; a restore before then re-checks it once more.
+                    host.messageQueue.remove(entry.original);
+                    host.log('warn', `promo verify close | ${(0,_promotion_message_queue__WEBPACK_IMPORTED_MODULE_3__.queueItemKey)(entry.original)} | payload delete failed | error=${host.normalizeError(error)}`);
+                    continue;
+                }
+                host.log('warn', `Promotion queue remove failed; channelId=${message.channelId} messageId=${message.messageId} error=${host.normalizeError(error)}`);
+            }
+        }
+        if (completed.size > 0) {
+            host.log('debug', `Promotion queue check completed; removed=${completed.size} remaining=${host.messageQueue.size}`);
+        }
+    }
+    finally {
+        host.health.totalQueueChecks += 1;
+        host.health.lastQueueCheckFinishedAt = Date.now();
+    }
+}
+
+
+/***/ },
+
 /***/ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/index.ts"
 /*!********************************************************************************************!*\
   !*** ../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/index.ts ***!
@@ -12722,33 +13749,31 @@ __webpack_require__.r(__webpack_exports__);
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
-/* harmony export */   FOLLOW_UP_MAX_LATE_MS_PROMOTE: () => (/* binding */ FOLLOW_UP_MAX_LATE_MS_PROMOTE),
-/* harmony export */   FOLLOW_UP_MAX_LATE_MS_TGAUT: () => (/* binding */ FOLLOW_UP_MAX_LATE_MS_TGAUT),
-/* harmony export */   FOLLOW_UP_V3_GAP_MS: () => (/* binding */ FOLLOW_UP_V3_GAP_MS),
-/* harmony export */   PROMO_FLAGS_QUEUE_REFRESH_MS: () => (/* binding */ PROMO_FLAGS_QUEUE_REFRESH_MS),
 /* harmony export */   PromotionFlowRunner: () => (/* binding */ PromotionFlowRunner)
 /* harmony export */ });
 /* harmony import */ var _channel_intelligence_channel_intelligence_schema__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../channel-intelligence/channel-intelligence-schema */ "../../packages/tg-channel-state/src/channel-message-promotions/channel-intelligence/channel-intelligence-schema.ts");
-/* harmony import */ var _selection__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../selection */ "../../packages/tg-channel-state/src/channel-message-promotions/selection/index.ts");
-/* harmony import */ var _selection_picker__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../selection/picker */ "../../packages/tg-channel-state/src/channel-message-promotions/selection/picker.ts");
-/* harmony import */ var _flow_runner_pick_shadow__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ./flow-runner/pick-shadow */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/pick-shadow.ts");
-/* harmony import */ var _utils_channel_id__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../utils/channel-id */ "../../packages/tg-channel-state/src/channel-message-promotions/utils/channel-id.ts");
-/* harmony import */ var _policy__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ../policy */ "../../packages/tg-channel-state/src/channel-message-promotions/policy/index.ts");
-/* harmony import */ var _tg_core_utils_spam_limit__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! @tg/core/utils/spam-limit */ "../../packages/tg-core/src/utils/spam-limit.ts");
-/* harmony import */ var _tg_core_utils_own_channels__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! @tg/core/utils/own-channels */ "../../packages/tg-core/src/utils/own-channels.ts");
-/* harmony import */ var _promotion_message_queue__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ./promotion-message-queue */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/promotion-message-queue.ts");
-/* harmony import */ var _config_promo_flags_v3__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ../config/promo-flags-v3 */ "../../packages/tg-channel-state/src/channel-message-promotions/config/promo-flags-v3.ts");
+/* harmony import */ var _selection_picker__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../selection/picker */ "../../packages/tg-channel-state/src/channel-message-promotions/selection/picker.ts");
+/* harmony import */ var _flow_runner_pick_shadow__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./flow-runner/pick-shadow */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/pick-shadow.ts");
+/* harmony import */ var _utils_channel_id__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../utils/channel-id */ "../../packages/tg-channel-state/src/channel-message-promotions/utils/channel-id.ts");
+/* harmony import */ var _policy__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../policy */ "../../packages/tg-channel-state/src/channel-message-promotions/policy/index.ts");
+/* harmony import */ var _tg_core_utils_spam_limit__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! @tg/core/utils/spam-limit */ "../../packages/tg-core/src/utils/spam-limit.ts");
+/* harmony import */ var _tg_core_utils_own_channels__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! @tg/core/utils/own-channels */ "../../packages/tg-core/src/utils/own-channels.ts");
+/* harmony import */ var _promotion_message_queue__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ./promotion-message-queue */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/promotion-message-queue.ts");
+/* harmony import */ var _config_promo_flags_v3__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ../config/promo-flags-v3 */ "../../packages/tg-channel-state/src/channel-message-promotions/config/promo-flags-v3.ts");
+/* harmony import */ var _config_promo_app_config__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ../config/promo-app-config */ "../../packages/tg-channel-state/src/channel-message-promotions/config/promo-app-config.ts");
 /* harmony import */ var _logging_promo_logger__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ../logging/promo-logger */ "../../packages/tg-channel-state/src/channel-message-promotions/logging/promo-logger.ts");
-/* harmony import */ var _policy_eligible_now__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ../policy/eligible-now */ "../../packages/tg-channel-state/src/channel-message-promotions/policy/eligible-now.ts");
-/* harmony import */ var _redis_redis_channel_cooldown__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! ../redis/redis-channel-cooldown */ "../../packages/tg-channel-state/src/channel-message-promotions/redis/redis-channel-cooldown.ts");
-/* harmony import */ var _flow_runner_normalize__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! ./flow-runner/normalize */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/normalize.ts");
-/* harmony import */ var _flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! ./flow-runner/outcome-recording */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/outcome-recording.ts");
-/* harmony import */ var _flow_runner_follow_up__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! ./flow-runner/follow-up */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/follow-up.ts");
-/* harmony import */ var _flow_runner_heartbeat__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! ./flow-runner/heartbeat */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/heartbeat.ts");
-/* harmony import */ var _flow_runner_send_budget__WEBPACK_IMPORTED_MODULE_17__ = __webpack_require__(/*! ./flow-runner/send-budget */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/send-budget.ts");
-/* harmony import */ var _flow_runner_formatting__WEBPACK_IMPORTED_MODULE_18__ = __webpack_require__(/*! ./flow-runner/formatting */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/formatting.ts");
-/* harmony import */ var _tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_19__ = __webpack_require__(/*! @tg/core/utils/dc-ip-family */ "../../packages/tg-core/src/utils/dc-ip-family.ts");
-/* harmony import */ var _flow_runner_cycle_metrics__WEBPACK_IMPORTED_MODULE_20__ = __webpack_require__(/*! ./flow-runner/cycle-metrics */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/cycle-metrics.ts");
+/* harmony import */ var _flow_runner_normalize__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ./flow-runner/normalize */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/normalize.ts");
+/* harmony import */ var _flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! ./flow-runner/outcome-recording */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/outcome-recording.ts");
+/* harmony import */ var _flow_runner_follow_up__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! ./flow-runner/follow-up */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/follow-up.ts");
+/* harmony import */ var _flow_runner_eligibility__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! ./flow-runner/eligibility */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/eligibility.ts");
+/* harmony import */ var _flow_runner_verify__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! ./flow-runner/verify */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/verify.ts");
+/* harmony import */ var _flow_runner_selection_pass__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! ./flow-runner/selection-pass */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/selection-pass.ts");
+/* harmony import */ var _flow_runner_cycle_run__WEBPACK_IMPORTED_MODULE_17__ = __webpack_require__(/*! ./flow-runner/cycle-run */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/cycle-run.ts");
+/* harmony import */ var _flow_runner_heartbeat__WEBPACK_IMPORTED_MODULE_18__ = __webpack_require__(/*! ./flow-runner/heartbeat */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/heartbeat.ts");
+/* harmony import */ var _flow_runner_send_budget__WEBPACK_IMPORTED_MODULE_19__ = __webpack_require__(/*! ./flow-runner/send-budget */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/send-budget.ts");
+/* harmony import */ var _flow_runner_formatting__WEBPACK_IMPORTED_MODULE_20__ = __webpack_require__(/*! ./flow-runner/formatting */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/formatting.ts");
+/* harmony import */ var _tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_21__ = __webpack_require__(/*! @tg/core/utils/dc-ip-family */ "../../packages/tg-core/src/utils/dc-ip-family.ts");
+/* harmony import */ var _flow_runner_cycle_metrics__WEBPACK_IMPORTED_MODULE_22__ = __webpack_require__(/*! ./flow-runner/cycle-metrics */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/cycle-metrics.ts");
 
 
 
@@ -12757,14 +13782,8 @@ __webpack_require__.r(__webpack_exports__);
 
 
 
-const SCORE_TIMEOUT = Symbol('picker-score-timeout');
-/** `work` or SCORE_TIMEOUT after `ms`, whichever is first. The timer never outlives the race; a late rejection is swallowed. */
-function raceTimeout(work, ms) {
-    let timer;
-    work.catch(() => undefined);
-    const timeout = new Promise((resolve) => { timer = setTimeout(() => resolve(SCORE_TIMEOUT), ms); });
-    return Promise.race([work, timeout]).finally(() => clearTimeout(timer));
-}
+
+
 
 
 
@@ -12779,21 +13798,9 @@ function raceTimeout(work, ms) {
 
 
 const poolLog = new _logging_promo_logger__WEBPACK_IMPORTED_MODULE_10__.PromoLogger('pool');
-const promoLog = new _logging_promo_logger__WEBPACK_IMPORTED_MODULE_10__.PromoLogger('promo');
 const defaultSleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const FAILED_CHANNEL_RETRY_MIN_MS = 5000;
-/** P5 review H2: longest cooldown rest declared at once (P1's shield; promote isRunnerAlive accepts up to 50 min). */
-const COOLDOWN_REST_MAX_MS = 50 * 60 * 1000;
 const FAILED_CHANNEL_RETRY_MAX_MS = 10000;
-/** Flow v3 (owner decision 1, doc 3.5): a follow-up is dropped this long past due. */
-const FOLLOW_UP_MAX_LATE_MS_TGAUT = 30 * 60 * 1000;
-const FOLLOW_UP_MAX_LATE_MS_PROMOTE = 90 * 60 * 1000;
-/** Flow v3 interim pacer (P2 fix 5, until P8): at least this gap between follow-ups from either path. */
-const FOLLOW_UP_V3_GAP_MS = 5 * 60 * 1000;
-/** Flow v3 (review M2): the queue checker re-reads the flag hash at most this often. */
-const PROMO_FLAGS_QUEUE_REFRESH_MS = 60 * 1000;
-/** Flow v3 (review L7): at most one marker_error warn per runner per this window. */
-const MARKER_ERROR_LOG_EVERY_MS = 60 * 1000;
 /** The instance as the flow-runner/* modules see it (same object; private members by name). */
 const hostOf = (runner) => runner;
 class PromotionFlowRunner {
@@ -12803,9 +13810,9 @@ class PromotionFlowRunner {
         this.followUpTimerWork = new Map();
         /** Flow v3 flags, read at each cycle start (doc 6) and by the queue checker at most once per 60 s. */
         /** The flags acted on: rollout order applied (review M2: elig needs fu on, vx needs elig on). */
-        this.promoFlags = { ..._config_promo_flags_v3__WEBPACK_IMPORTED_MODULE_9__.PROMO_FLAGS_DEFAULTS };
+        this.promoFlags = { ..._config_promo_flags_v3__WEBPACK_IMPORTED_MODULE_8__.PROMO_FLAGS_DEFAULTS };
         /** The flags as read (a read failure keeps these). */
-        this.promoFlagsRead = { ..._config_promo_flags_v3__WEBPACK_IMPORTED_MODULE_9__.PROMO_FLAGS_DEFAULTS };
+        this.promoFlagsRead = { ..._config_promo_flags_v3__WEBPACK_IMPORTED_MODULE_8__.PROMO_FLAGS_DEFAULTS };
         /** Ignored-flag set last logged, so "promo flags | <flag> ignored" logs once per change. */
         this.promoFlagsIgnoredKey = '';
         this.promoFlagsPrimed = false;
@@ -12821,180 +13828,15 @@ class PromotionFlowRunner {
         this.lastFollowUpAt = 0;
         this.markerErrorLogAt = Number.NEGATIVE_INFINITY;
         this.markerErrorSuppressed = 0;
-        /** Instance field, not a prototype method: flow-runner-seams pins the prototype method list. */
-        this.isOwnChannel = (channel) => this.ownChannels.isOwnChannel(channel.channelId, channel.username ?? null);
         /** This cycle's pick annotations by channelId (shadow/v2 measurement; empty in legacy). */
         this.pickAnnotations = new Map();
-        /** Instance field (prototype seam list is pinned). Follow-ups are not picks: no annotation. */
-        this.pickAnnotationFor = (channelId, isFollowUp) => isFollowUp ? null : this.pickAnnotations.get((0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_4__.normalizeChannelId)(channelId) ?? '') ?? null;
-        /** Instance field: measure one pick batch and emit the sampled debug line. Never throws. */
-        this.measurePicks = (mode, candidates, selected, docs, reasonOf, nowMs, mu) => {
-            try {
-                const result = (0,_flow_runner_pick_shadow__WEBPACK_IMPORTED_MODULE_3__.measurePickBatch)({
-                    mode,
-                    candidateIds: candidates.map((channel) => channel.channelId),
-                    selectedIds: selected.map((channel) => channel.channelId),
-                    docs,
-                    reasonOf,
-                    clientId: this.options.account.clientId ?? null,
-                    nowMs,
-                    mu,
-                    logSample: (0,_selection_picker__WEBPACK_IMPORTED_MODULE_2__.readPickerLogSample)(),
-                });
-                this.pickAnnotations = result.annotations;
-                if (result.summary)
-                    this.log('debug', `Promotion pick batch; ${(0,_flow_runner_pick_shadow__WEBPACK_IMPORTED_MODULE_3__.formatPickSummary)(result.summary)}`);
-            }
-            catch {
-                this.pickAnnotations = new Map();
-            }
-        };
-        /**
-         * Flow v3 P5: `elig=on` is in force only with a known app (cooldown length) and an account that can
-         * read and write `promote:chstate:<app>:<m>` atomically (needs eval); otherwise it reads as off, logged once (doc 6:
-         * the cooldown never runs half-written). Instance field: the prototype seam list is pinned.
-         */
-        this.eligActive = () => {
-            if (this.promoFlags.elig !== 'on')
-                return false;
-            const account = this.options.account;
-            let supported = (0,_redis_redis_channel_cooldown__WEBPACK_IMPORTED_MODULE_12__.channelCooldownMsFor)(this.options.pickerApp ?? null) !== null
-                && typeof account.readChannelCooldowns === 'function'
-                && typeof account.markChannelCooldown === 'function';
-            if (supported && typeof account.channelCooldownSupported === 'function') {
-                try {
-                    supported = account.channelCooldownSupported() === true;
-                }
-                catch {
-                    supported = false;
-                }
-            }
-            if (!supported && !this.eligUnsupportedLogged) {
-                this.eligUnsupportedLogged = true;
-                this.log('warn', 'promo flags | elig=on unsupported (no app cooldown or no atomic chstate write) | reading elig=off');
-            }
-            return supported;
-        };
-        /** P5: one HGETALL of the cooldown hash for this cycle. null = read failed (the cycle pauses, like the block lookup). */
-        this.loadChannelCooldowns = async () => {
-            const account = this.options.account;
-            const app = (0,_config_promo_flags_v3__WEBPACK_IMPORTED_MODULE_9__.promoFlagsAppFor)(this.options.pickerApp ?? null);
-            if (!app)
-                return new Map();
-            try {
-                const read = await account.readChannelCooldowns?.(app, Date.now());
-                const out = new Map();
-                if (read instanceof Map) {
-                    for (const [channelId, until] of read) {
-                        const id = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_4__.normalizeChannelId)(channelId);
-                        if (id && Number.isFinite(until))
-                            out.set(id, until);
-                    }
-                }
-                return out;
-            }
-            catch (error) {
-                this.log('warn', `Promotion channel cooldown lookup failed; pausing cycle safely; error=${this.normalizeError(error)}`);
-                return null;
-            }
-        };
-        this.activeCooldownRest = () => this.cooldownRestUntil !== null && this.cooldownRestUntil > Date.now() ? this.cooldownRestUntil : null;
-        /** H2: the rest a fully cooled pool declares: the earliest live cooldown end, capped at now + 50 min. */
-        this.cooldownRestFor = (nowMs) => {
-            let earliest = Number.POSITIVE_INFINITY;
-            for (const until of this.channelCooldowns.values())
-                if (until > nowMs && until < earliest)
-                    earliest = until;
-            return Number.isFinite(earliest) ? Math.min(earliest, nowMs + COOLDOWN_REST_MAX_MS) : null;
-        };
-        this.cooldownUntilOf = (channelId) => this.channelCooldowns.get((0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_4__.normalizeChannelId)(channelId) ?? '') ?? null;
-        /**
-         * P5: a main send, or an ambiguous one (Telegram may have posted it), starts the channel's cooldown
-         * (6 h tg-aut, 3 h promote). A write failure is logged, never fails the send.
-         */
-        this.noteChannelCooldown = async (channelId) => {
-            if (!this.eligActive())
-                return;
-            const cooldownMs = (0,_redis_redis_channel_cooldown__WEBPACK_IMPORTED_MODULE_12__.channelCooldownMsFor)(this.options.pickerApp ?? null);
-            const app = (0,_config_promo_flags_v3__WEBPACK_IMPORTED_MODULE_9__.promoFlagsAppFor)(this.options.pickerApp ?? null);
-            const id = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_4__.normalizeChannelId)(channelId);
-            if (cooldownMs === null || !app || !id)
-                return;
-            const until = Date.now() + cooldownMs;
-            this.channelCooldowns.set(id, until);
-            const account = this.options.account;
-            try {
-                await account.markChannelCooldown?.(app, id, until, cooldownMs);
-            }
-            catch (error) {
-                this.log('warn', `Promotion channel cooldown write failed; channelId=${id} error=${this.normalizeError(error)}`);
-            }
-        };
-        /** P0 measurement (instance fields: the prototype seam list is pinned). Logs only, never writes state. */
+        /** P0 measurement. Logs only, never writes state. */
         // fu_sent and sends_1h live in this runner instance: both start again at 0 on every runner restart.
-        this.sendWindow = new _flow_runner_cycle_metrics__WEBPACK_IMPORTED_MODULE_20__.PromoSendWindow();
+        this.sendWindow = new _flow_runner_cycle_metrics__WEBPACK_IMPORTED_MODULE_22__.PromoSendWindow();
         this.fuSentSinceCycleEnd = 0;
-        this.verifyCloses = new _flow_runner_cycle_metrics__WEBPACK_IMPORTED_MODULE_20__.PromoVerifyCloses();
+        this.verifyCloses = new _flow_runner_cycle_metrics__WEBPACK_IMPORTED_MODULE_22__.PromoVerifyCloses();
         /** A main-path hourly-cap wait was declared during this cycle (follow-up waits do not count). */
         this.cycleWaitDeclared = false;
-        /** Read-only copies of the queued items; [] for a queue without list(). */
-        this.queueItems = () => {
-            try {
-                const queue = this.messageQueue;
-                return typeof queue.list === 'function' ? queue.list() : [];
-            }
-            catch {
-                return [];
-            }
-        };
-        /** One log-only sweep: counts queue items past their would-be `until`. Drops nothing. */
-        this.runSweepOnce = (nowMs = Date.now()) => {
-            const result = (0,_flow_runner_cycle_metrics__WEBPACK_IMPORTED_MODULE_20__.sweepQueueItems)(this.queueItems(), nowMs, this.options.pickerApp ?? null);
-            const alert = result.droppedVerify > 0 || result.droppedFu > 0;
-            this.log(alert ? 'warn' : 'info', (0,_flow_runner_cycle_metrics__WEBPACK_IMPORTED_MODULE_20__.formatPromoSweep)((0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_19__.maskMobile)(this.options.account.mobile), result, this.verifyCloses.takeDelta('sweep')));
-            return result;
-        };
-        /**
-         * Flow v3 P4. After an unknown or failed check (one counted attempt, at least 30 s after the last
-         * counted one), the rule is met when the item is >= 10 min past its send AND has >= 5 counted
-         * attempts. `vx=on`: close it as terminal `verify_unknown` (no survival, no deletion, logged once,
-         * counted). `vx=off`: keep it, and log and count `verify_unknown_would` once per item.
-         * With `fu=on`, a P3 marker error (kept for the next check) counts no attempt; it closes past 1 h, the
-         * v3 verify payload TTL, in either `vx` mode (review F7, F8). Attempts live in memory only: a restored
-         * item starts at 0 (F6). Instance field: the prototype seam list is pinned.
-         */
-        this.verifyUnknownClose = (original, message, last) => {
-            const nowMs = Date.now();
-            const queue = this.messageQueue;
-            const sentAt = message.sentAt ?? message.timestamp;
-            const ageMs = Number.isFinite(sentAt) && sentAt > 0 ? nowMs - sentAt : 0;
-            const key = (0,_promotion_message_queue__WEBPACK_IMPORTED_MODULE_8__.queueItemKey)(original);
-            if (last === 'marker_error') {
-                if (ageMs < _promotion_message_queue__WEBPACK_IMPORTED_MODULE_8__.VERIFY_RESTORE_MAX_AGE_MS)
-                    return false;
-                const attempts = typeof queue.checkAttempts === 'function' ? queue.checkAttempts(original) : 0;
-                this.log('info', `promo verify close | ${key} | reason=verify_unknown | attempts=${attempts} | age_s=${Math.round(ageMs / 1000)} | last=${last}`);
-                this.verifyCloses.noteUnknown();
-                return true;
-            }
-            const attempts = typeof queue.noteCheckAttempt === 'function'
-                ? queue.noteCheckAttempt(original, nowMs, _flow_runner_cycle_metrics__WEBPACK_IMPORTED_MODULE_20__.VERIFY_ATTEMPT_GAP_MS)
-                : 0;
-            if (ageMs < _flow_runner_cycle_metrics__WEBPACK_IMPORTED_MODULE_20__.VERIFY_MAX_AGE_MS || attempts < _flow_runner_cycle_metrics__WEBPACK_IMPORTED_MODULE_20__.VERIFY_MAX_ATTEMPTS)
-                return false;
-            const fields = `${key} | reason=verify_unknown | attempts=${attempts} | age_s=${Math.round(ageMs / 1000)} | last=${last}`;
-            if (this.promoFlags.vx !== 'on') {
-                const first = typeof queue.markWouldClose === 'function' ? queue.markWouldClose(original) : false;
-                if (first) {
-                    this.log('info', `promo verify would-close | ${fields}`);
-                    this.verifyCloses.noteUnknownWould();
-                }
-                return false;
-            }
-            this.log('info', `promo verify close | ${fields}`);
-            this.verifyCloses.noteUnknown();
-            return true;
-        };
         /** Flow v3 P4: the queue logs its size drops through the runner and every drop is counted. */
         this.queueDropReporter = {
             log: (level, message) => this.log(level, message),
@@ -13036,22 +13878,21 @@ class PromotionFlowRunner {
             totalDurabilityFailures: 0,
             consecutiveCycleFailures: 0,
         };
-        if (!(0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_13__.isAdapterLike)(adapter)) {
+        if (!(0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_11__.isAdapterLike)(adapter)) {
             throw new Error('PromotionFlowRunner adapter is required');
         }
-        const safeOptions = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_13__.asRunnerOptions)(options);
-        if (!(0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_13__.isAccountLike)(safeOptions.account)) {
+        const safeOptions = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_11__.asRunnerOptions)(options);
+        if (!(0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_11__.isAccountLike)(safeOptions.account)) {
             throw new Error('PromotionFlowRunner account context is required');
         }
         this.adapter = adapter;
         this.options = safeOptions;
-        this.ownChannels = safeOptions.ownChannels ?? _tg_core_utils_own_channels__WEBPACK_IMPORTED_MODULE_7__.OwnChannelRegistry.getInstance();
-        this.messageQueue = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_13__.isMessageQueueLike)(safeOptions.messageQueue)
+        this.ownChannels = safeOptions.ownChannels ?? _tg_core_utils_own_channels__WEBPACK_IMPORTED_MODULE_6__.OwnChannelRegistry.getInstance();
+        this.messageQueue = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_11__.isMessageQueueLike)(safeOptions.messageQueue)
             ? safeOptions.messageQueue
-            : new _promotion_message_queue__WEBPACK_IMPORTED_MODULE_8__.PromotionMessageQueue(safeOptions.maxQueueSize ?? 500);
-        this.messageQueue
-            .setDropReporter?.(this.queueDropReporter);
-        this.heartbeat = new _flow_runner_heartbeat__WEBPACK_IMPORTED_MODULE_16__.PromoHeartbeat(async (sends) => {
+            : new _promotion_message_queue__WEBPACK_IMPORTED_MODULE_7__.PromotionMessageQueue(safeOptions.maxQueueSize ?? 500);
+        this.messageQueue.setDropReporter?.(this.queueDropReporter);
+        this.heartbeat = new _flow_runner_heartbeat__WEBPACK_IMPORTED_MODULE_18__.PromoHeartbeat(async (sends) => {
             if (!this.running)
                 return;
             // Same reads as the cycle-end line: stats + the daily cap snapshot (one Redis read per interval).
@@ -13064,18 +13905,18 @@ class PromotionFlowRunner {
             catch {
                 spamStatus = null;
             }
-            this.log('info', (0,_flow_runner_heartbeat__WEBPACK_IMPORTED_MODULE_16__.formatPromoHeartbeat)({
-                mobile: (0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_19__.maskMobile)(this.options.account.mobile),
+            this.log('info', (0,_flow_runner_heartbeat__WEBPACK_IMPORTED_MODULE_18__.formatPromoHeartbeat)({
+                mobile: (0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_21__.maskMobile)(this.options.account.mobile),
                 intervalMs: this.heartbeat.intervalMs,
                 sends,
                 capCount: budget ? budget.count : null,
                 cap: budget ? budget.cap : null,
                 daysLeft: stats.daysLeft,
-                health: (0,_flow_runner_heartbeat__WEBPACK_IMPORTED_MODULE_16__.promoHealthTier)(stats.daysLeft, spamStatus),
+                health: (0,_flow_runner_heartbeat__WEBPACK_IMPORTED_MODULE_18__.promoHealthTier)(stats.daysLeft, spamStatus),
                 queueSize: this.messageQueue.size,
             }));
         }, safeOptions.heartbeatIntervalMs);
-        this.sweep = new _flow_runner_cycle_metrics__WEBPACK_IMPORTED_MODULE_20__.PromoSweep(() => {
+        this.sweep = new _flow_runner_cycle_metrics__WEBPACK_IMPORTED_MODULE_22__.PromoSweep(() => {
             if (this.running)
                 this.runSweepOnce();
         }, safeOptions.sweepIntervalMs);
@@ -13139,19 +13980,19 @@ class PromotionFlowRunner {
         this.startQueueChecker();
         this.heartbeat.start();
         this.sweep.start();
-        this.log('info', `Promotion runner started; batchTarget=${(0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_13__.safeBatchTarget)(this.options.batchTarget, Number.MAX_SAFE_INTEGER)} queueSize=${this.messageQueue.size}`);
+        this.log('info', `Promotion runner started; batchTarget=${(0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_11__.safeBatchTarget)(this.options.batchTarget, Number.MAX_SAFE_INTEGER)} queueSize=${this.messageQueue.size}`);
         try {
             while (this.running) {
                 let active = false;
                 try {
-                    active = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_13__.isExactTrue)(await this.adapter.isActive());
+                    active = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_11__.isExactTrue)(await this.adapter.isActive());
                 }
                 catch (error) {
                     const normalizedError = this.normalizeError(error);
                     this.recordCycleFailure(normalizedError);
                     this.log('error', `Promotion active-state check failed; keeping runner alive error=${normalizedError}`);
                     if (this.running)
-                        await this.sleep((0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_13__.safeDelayMs)(this.options.channelLoopDelayMs, 5000));
+                        await this.sleep((0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_11__.safeDelayMs)(this.options.channelLoopDelayMs, 5000));
                     continue;
                 }
                 if (!active)
@@ -13169,7 +14010,7 @@ class PromotionFlowRunner {
                     this.log('error', `Promotion cycle failed: ${normalizedError}`);
                 }
                 if (this.running)
-                    await this.sleep((0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_13__.safeDelayMs)(this.options.channelLoopDelayMs, 5000));
+                    await this.sleep((0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_11__.safeDelayMs)(this.options.channelLoopDelayMs, 5000));
             }
         }
         finally {
@@ -13191,7 +14032,7 @@ class PromotionFlowRunner {
             await this.checkQueuedMessages();
             let channels = [];
             try {
-                channels = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_13__.normalizeChannels)(await this.adapter.loadChannels());
+                channels = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_11__.normalizeChannels)(await this.adapter.loadChannels());
             }
             catch (error) {
                 const normalizedError = this.normalizeError(error);
@@ -13202,32 +14043,6 @@ class PromotionFlowRunner {
             // Our own channels are never promotion targets (same strictness as a restricted channel).
             await this.ownChannels.ready?.().catch(() => undefined);
             const loadedChannels = channels;
-            let poolClass = null;
-            let eligibleSource = 'intel';
-            // P0: every loaded channel's first exclusion reason, before any drop (pure, no reads). Never fails the cycle.
-            const classifyPool = (blocked, docs, deadIds) => {
-                try {
-                    const docById = new Map();
-                    for (const doc of docs) {
-                        const id = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_4__.normalizeChannelId)(doc.channelId);
-                        if (id)
-                            docById.set(id, doc);
-                    }
-                    const docOf = (channelId) => docById.get((0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_4__.normalizeChannelId)(channelId) ?? '') ?? null;
-                    poolClass = (0,_flow_runner_cycle_metrics__WEBPACK_IMPORTED_MODULE_20__.classifyLoadedPool)({
-                        channels: loadedChannels,
-                        isOwn: (channel) => this.isOwnChannel(channel),
-                        chanblocked: (channelId) => blocked.has(channelId),
-                        inCooldown: (channelId) => this.messageQueue.isQueued(channelId) || this.followUpTimers.has(channelId)
-                            || (elig && (this.cooldownUntilOf(channelId) ?? 0) > eligNowMs),
-                        isDead: (channelId) => deadIds.has((0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_4__.normalizeChannelId)(channelId) ?? ''),
-                        docOf,
-                    });
-                }
-                catch {
-                    poolClass = null;
-                }
-            };
             const ownExcluded = channels.filter((channel) => this.isOwnChannel(channel));
             if (ownExcluded.length > 0) {
                 channels = channels.filter((channel) => !this.isOwnChannel(channel));
@@ -13239,343 +14054,15 @@ class PromotionFlowRunner {
             }
             // Flow v3 P5 (elig=on): rank only channels that pass eligibleNow, the send path's predicate,
             // with this cycle's cooldowns. elig=off: no read, no filter, today's selection.
-            const elig = this.eligActive();
-            if (elig) {
-                const cooldowns = await this.loadChannelCooldowns();
-                if (!cooldowns)
-                    return;
-                this.channelCooldowns = cooldowns;
-            }
-            else if (this.channelCooldowns.size > 0) {
-                this.channelCooldowns = new Map();
-            }
-            const eligNowMs = Date.now();
-            const eligibleOnly = (list, blocked, docs) => {
-                const docById = new Map();
-                for (const doc of docs) {
-                    const id = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_4__.normalizeChannelId)(doc.channelId);
-                    if (id && !docById.has(id))
-                        docById.set(id, doc);
-                }
-                return list.filter((channel) => (0,_policy_eligible_now__WEBPACK_IMPORTED_MODULE_11__.eligibleNow)(channel, docById.get((0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_4__.normalizeChannelId)(channel.channelId) ?? '') ?? null, {
-                    chanblocked: blocked.has(channel.channelId),
-                    queued: this.messageQueue.isQueued(channel.channelId) || this.followUpTimers.has(channel.channelId),
-                    cooldownUntil: this.cooldownUntilOf(channel.channelId),
-                }, eligNowMs).eligible);
-            };
+            const cycle = await (0,_flow_runner_eligibility__WEBPACK_IMPORTED_MODULE_14__.prepareCycleEligibility)(hostOf(this));
+            if (!cycle)
+                return;
             const stats = await this.getStatsOrDefault('planning');
-            const batchPolicy = (0,_policy__WEBPACK_IMPORTED_MODULE_5__.calculatePromotionBatchLimit)({
-                scoringEnabled: this.options.scoringEnabled,
-                daysLeft: stats.daysLeft,
-                successCount: stats.successCount,
-                failedCount: stats.failedCount,
-                failStreak: stats.failStreak,
-                includeJitter: true,
-            });
-            const batchTarget = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_13__.safeBatchTarget)(this.options.batchTarget, batchPolicy.limit);
-            let selectedChannels;
-            let selectionExploreDenied = 0;
-            const pickerMode = (0,_selection_picker__WEBPACK_IMPORTED_MODULE_2__.readPickerMode)(process.env, this.options.pickerApp ?? null);
-            const pickerMu = (0,_selection_picker__WEBPACK_IMPORTED_MODULE_2__.readPickerMu)();
-            const pickNowMs = Date.now();
-            this.pickAnnotations = new Map();
-            if (this.options.channelSelectionMode === 'source_order' && pickerMode !== 'v2') {
-                // The adapter has already applied its bounded membership policy (promote-clients uses
-                // participant-count descending plus a Fisher-Yates shuffle). Preserve that source order;
-                // only the mobile-specific Telegram block remains a preflight exclusion here.
-                let blockedChannelIds = new Set();
-                try {
-                    blockedChannelIds = await this.options.account.blockedChannelsForMobile(channels.map((channel) => channel.channelId));
-                }
-                catch (error) {
-                    this.log('warn', `Promotion per-mobile block lookup failed; pausing cycle safely; error=${this.normalizeError(error)}`);
-                    return;
-                }
-                // source_order loads no intel for selection. Reuse the engine's per-cycle cache (no read); without it,
-                // say so on the line (eligible_src) so safety/health exclusions are not read as absent.
-                let cachedDocs = [];
-                try {
-                    const peek = this.adapter.peekCachedIntelligenceDocs?.(channels.map((channel) => channel.channelId)) ?? null;
-                    if (peek && Array.isArray(peek.docs)) {
-                        cachedDocs = peek.docs.filter(_channel_intelligence_channel_intelligence_schema__WEBPACK_IMPORTED_MODULE_0__.isChannelIntelligence);
-                        eligibleSource = peek.missing > 0 ? 'cache_partial' : 'cache';
-                    }
-                    else {
-                        eligibleSource = 'no_intel';
-                    }
-                }
-                catch {
-                    eligibleSource = 'no_intel';
-                }
-                classifyPool(blockedChannelIds, cachedDocs, new Set());
-                const unblocked = channels.filter((channel) => !blockedChannelIds.has(channel.channelId));
-                const sourceCandidates = elig ? eligibleOnly(unblocked, blockedChannelIds, cachedDocs) : unblocked;
-                const exploreDenied = await this.explorationDenied(sourceCandidates, false);
-                selectionExploreDenied = exploreDenied.size;
-                selectedChannels = sourceCandidates
-                    .filter((channel) => !exploreDenied.has(channel.channelId))
-                    .slice(0, batchTarget);
-                if (pickerMode === 'shadow' && selectedChannels.length > 0) {
-                    // Shadow only: score the same candidates for the record. A load failure skips measurement,
-                    // never the cycle; the selection above is already final.
-                    // Scoring fields only, from this cycle's cache plus a messagePool-free read of any missing
-                    // channel. An adapter without getScoringDocs gets no measurement (never a full-doc batch).
-                    // The read is bounded (PROMO_PICKER_SCORE_TIMEOUT_MS, default 1.5 s) so measurement can never
-                    // delay the first send: on timeout this cycle goes unmeasured and the late read is ignored.
-                    let shadowDocs = null;
-                    try {
-                        if (typeof this.adapter.getScoringDocs === 'function') {
-                            const timeoutMs = (0,_selection_picker__WEBPACK_IMPORTED_MODULE_2__.readPickerScoreTimeoutMs)();
-                            const loadedDocs = await raceTimeout(Promise.resolve(this.adapter.getScoringDocs(unblocked.map((channel) => channel.channelId))), timeoutMs);
-                            if (loadedDocs === SCORE_TIMEOUT) {
-                                if ((0,_selection_picker__WEBPACK_IMPORTED_MODULE_2__.shouldSample)((0,_selection_picker__WEBPACK_IMPORTED_MODULE_2__.readPickerLogSample)())) {
-                                    this.log('info', `Promotion picker shadow docs load timed out; measurement skipped; timeoutMs=${timeoutMs}; candidates=${unblocked.length}`);
-                                }
-                            }
-                            else {
-                                shadowDocs = Array.isArray(loadedDocs) ? loadedDocs.filter((doc) => !!doc && typeof doc.channelId === 'string') : [];
-                            }
-                        }
-                    }
-                    catch (error) {
-                        this.log('debug', `Promotion picker shadow docs load failed; measurement skipped; error=${this.normalizeError(error)}`);
-                    }
-                    if (shadowDocs)
-                        this.measurePicks(pickerMode, unblocked, selectedChannels, shadowDocs, () => 'o', pickNowMs, pickerMu);
-                }
-                this.log('info', [
-                    'Promotion selection ready',
-                    'mode=source_order',
-                    `picker=${pickerMode}`,
-                    `loaded=${channels.length}`,
-                    `batchTarget=${batchTarget}`,
-                    `selected=${selectedChannels.length}`,
-                    `blocked=${blockedChannelIds.size}`,
-                    `exploreDenied=${exploreDenied.size}`,
-                    ...(elig ? ['elig=on', `eligible=${sourceCandidates.length}`] : []),
-                    `stats=${this.formatStats(stats)}`,
-                ].join('; '));
-            }
-            else {
-                let intelligenceDocs = [];
-                try {
-                    const loadedDocs = await this.adapter.getIntelligenceDocs(channels.map((channel) => channel.channelId));
-                    intelligenceDocs = Array.isArray(loadedDocs) ? loadedDocs.filter(_channel_intelligence_channel_intelligence_schema__WEBPACK_IMPORTED_MODULE_0__.isChannelIntelligence) : [];
-                }
-                catch (error) {
-                    this.log('warn', `Promotion intelligence docs batch load failed; pausing cycle safely; error=${this.normalizeError(error)}`);
-                    return;
-                }
-                let blockedChannelIds = new Set();
-                try {
-                    blockedChannelIds = await this.options.account.blockedChannelsForMobile(channels.map((channel) => channel.channelId));
-                }
-                catch (error) {
-                    this.log('warn', `Promotion per-mobile block lookup failed; pausing cycle safely; error=${this.normalizeError(error)}`);
-                    return;
-                }
-                const selectFrom = (candidates) => (0,_selection__WEBPACK_IMPORTED_MODULE_1__.selectPromotionChannels)({
-                    channels: candidates,
-                    intelligenceDocs,
-                    batchTarget,
-                    blockedChannelIds,
-                    ...(pickerMode === 'v2' ? { rankScore: (doc) => (0,_selection_picker__WEBPACK_IMPORTED_MODULE_2__.v2ChannelScore)(doc, pickNowMs, pickerMu) } : {}),
-                });
-                const rankInput = elig ? eligibleOnly(channels, blockedChannelIds, intelligenceDocs) : channels;
-                let selection;
-                let excludedDeadIds = new Set();
-                if (pickerMode === 'v2') {
-                    // v2 only: lifetime-dead channels (>= 125 attempts, 0 DMs) leave the list. Shadow measurement
-                    // below still scores them (candidates come from `channels`). Fail-safe: when nothing sendable
-                    // would remain, keep them and warn.
-                    const deadIds = new Set();
-                    for (const doc of intelligenceDocs) {
-                        const id = (0,_selection_picker__WEBPACK_IMPORTED_MODULE_2__.isLifetimeDeadChannel)(doc) ? (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_4__.normalizeChannelId)(doc.channelId) : null;
-                        if (id)
-                            deadIds.add(id);
-                    }
-                    const live = rankInput.filter((channel) => !deadIds.has((0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_4__.normalizeChannelId)(channel.channelId) ?? ''));
-                    const dead = rankInput.length - live.length;
-                    selection = selectFrom(live);
-                    const eligible = selection.proven.length + selection.untested.length;
-                    if (dead > 0 && eligible === 0 && elig) {
-                        // P5 review H1: with elig=on the live pool is empty because it is cooling (or otherwise
-                        // ineligible), not because the list ran dry; sending to dead channels is never the answer.
-                        excludedDeadIds = deadIds;
-                        this.log('info', `Promotion v2 dead-channel skip; skipped=${dead}; dead=${dead}; eligible=0; elig=on: no live channel eligible, dead channels not sent`);
-                    }
-                    else if (dead > 0 && eligible === 0) {
-                        selection = selectFrom(rankInput);
-                        this.log('warn', `Promotion v2 dead-channel skip; skipped=0; dead=${dead}; eligible=0; fail-safe: no live channel left, dead channels kept`);
-                    }
-                    else if (dead > 0) {
-                        excludedDeadIds = deadIds;
-                        this.log('info', `Promotion v2 dead-channel skip; skipped=${dead}; dead=${dead}; eligible=${eligible}`);
-                    }
-                }
-                else {
-                    selection = selectFrom(rankInput);
-                }
-                classifyPool(blockedChannelIds, intelligenceDocs, excludedDeadIds);
-                const selectionDiagnostics = this.describeSelection(selection, intelligenceDocs);
-                const exploreDenied = await this.explorationDenied(selection.selected, false);
-                selectionExploreDenied = exploreDenied.size;
-                selectedChannels = selection.selected.filter((channel) => !exploreDenied.has(channel.channelId));
-                if (pickerMode !== 'legacy' && selectedChannels.length > 0) {
-                    const provenIds = new Set(selection.proven.map((channel) => (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_4__.normalizeChannelId)(channel.channelId) ?? ''));
-                    const v2 = pickerMode === 'v2';
-                    const unblockedCandidates = channels.filter((channel) => !blockedChannelIds.has(channel.channelId));
-                    this.measurePicks(pickerMode, unblockedCandidates, selectedChannels, intelligenceDocs, (channelId) => (provenIds.has(channelId) ? (v2 ? 'v' : 'r') : (v2 ? 'x' : 'e')), pickNowMs, pickerMu);
-                }
-                this.log('info', [
-                    'Promotion selection ready',
-                    'mode=ranked',
-                    `picker=${pickerMode}`,
-                    `loaded=${channels.length}`,
-                    `intelDocs=${intelligenceDocs.length}`,
-                    `batchTarget=${batchTarget}`,
-                    `policyLimit=${batchPolicy.limit}`,
-                    `selected=${selectedChannels.length}`,
-                    `proven=${selection.proven.length}`,
-                    `untested=${selection.untested.length}`,
-                    `skipped=${selection.skipped.length}`,
-                    `skipBreakdown=${selectionDiagnostics.skipBreakdown}`,
-                    `explorePct=${selection.explorePercent.toFixed(2)}`,
-                    `blocked=${blockedChannelIds.size}`,
-                    `exploreDenied=${exploreDenied.size}`,
-                    ...(elig ? ['elig=on', `eligible=${rankInput.length}`] : []),
-                    `stats=${this.formatStats(stats)}`,
-                ].join('; '));
-                if (selectionDiagnostics.selectedSample !== 'none') {
-                    this.log('debug', `Promotion selected channel sample; ${selectionDiagnostics.selectedSample}`);
-                }
-                if (selectionDiagnostics.skippedSample !== 'none') {
-                    this.log('debug', `Promotion skipped channel sample; ${selectionDiagnostics.skippedSample}`);
-                }
-            }
-            const cycleTally = { sent: 0, not_sent: 0, skipped: 0, budget: 0, chans: 0 };
-            let exploreSkipped = 0;
-            for (const channel of selectedChannels) {
-                if (this.startedByStart && !this.running) {
-                    this.log('debug', `Promotion cycle interrupted before channel; ${this.formatChannel(channel)}`);
-                    break;
-                }
-                if (!(await this.shouldProcessNextChannel(channel)))
-                    break;
-                // Selection can sit in a paced batch for minutes. Reload the durable
-                // channel state immediately before planning so an operator ban or a
-                // restriction written after loadChannels() cannot receive a stale send.
-                const outcome = await this.processChannel(channel, false, true);
-                if (outcome === 'explore_denied') {
-                    exploreSkipped += 1;
-                    continue;
-                }
-                cycleTally.chans += 1;
-                if (outcome === 'sent') {
-                    cycleTally.sent += 1;
-                    this.heartbeat.noteSend();
-                }
-                else if (outcome === 'skipped')
-                    cycleTally.skipped += 1;
-                else if (outcome === 'budget_exhausted')
-                    cycleTally.budget += 1;
-                else
-                    cycleTally.not_sent += 1;
-                if (outcome === 'budget_exhausted') {
-                    this.log('debug', `Promotion cycle paused after account budget exhaustion; ${this.formatChannel(channel)}`);
-                    break;
-                }
-                await this.sleepAfterChannel(outcome);
-            }
-            if (exploreSkipped > 0) {
-                this.log('info', `Promotion exploration budget skipped ${exploreSkipped} unproven channel(s) mid-round`);
-            }
-            // Best-effort daily-cap snapshot reused for both the cap-reason on this summary and the
-            // per-mobile cycle-end line below — no new Redis reads beyond what getDailySendBudgetStatus already does.
-            const budgetSnapshot = await this.options.account.getDailySendBudgetStatus(stats.daysLeft).catch(() => null);
-            const summaryFields = {
-                sent: cycleTally.sent,
-                not_sent: cycleTally.not_sent,
-                skipped: cycleTally.skipped,
-                budget: cycleTally.budget,
-                chans: cycleTally.chans,
-            };
-            if (cycleTally.chans === 0) {
-                // Concise cap-reason so a stalled cycle is debuggable from logs alone: was it the daily send
-                // cap, or did every candidate channel get filtered out before any was attempted?
-                const capReached = !!budgetSnapshot && budgetSnapshot.remaining <= 0;
-                summaryFields.reason = capReached ? 'cap_reached' : 'all_skipped';
-                if (budgetSnapshot) {
-                    summaryFields.capCount = budgetSnapshot.count;
-                    summaryFields.cap = budgetSnapshot.cap;
-                }
-            }
-            promoLog.summary(summaryFields);
-            // P0 measurement fields (3.12): in-memory reads only, never a write; a failure drops the fields, not the line.
-            let measurementFields = [];
-            // P5 review H2/H2b: 0 eligible and at least 1 channel cooling (whatever the others are): rest
-            // until the earliest cooldown ends, declared as sleepUntil (capped at 50 min, the promote
-            // isRunnerAlive window) so it never reads as stuck.
-            const cooldownRest = this.channelCooldowns.size > 0 && cycleTally.sent === 0 && (0,_flow_runner_cycle_metrics__WEBPACK_IMPORTED_MODULE_20__.cooldownRestPool)(poolClass)
-                ? this.cooldownRestFor(Date.now())
-                : null;
-            if (cooldownRest !== null) {
-                this.cooldownRestUntil = cooldownRest;
-                this.health.sleepUntil = cooldownRest;
-            }
-            try {
-                const nowMs = Date.now();
-                const app = this.options.pickerApp ?? null;
-                const items = this.queueItems();
-                const fuSent = this.fuSentSinceCycleEnd;
-                this.fuSentSinceCycleEnd = 0;
-                let banGateTripped = false;
-                try {
-                    banGateTripped = this.adapter.isBanRateGateTripped?.() === true;
-                }
-                catch {
-                    banGateTripped = false;
-                }
-                measurementFields = (0,_flow_runner_cycle_metrics__WEBPACK_IMPORTED_MODULE_20__.formatCycleEndFields)({
-                    mainSent: cycleTally.sent,
-                    fuSent,
-                    pool: poolClass,
-                    eligibleSource,
-                    sweep: (0,_flow_runner_cycle_metrics__WEBPACK_IMPORTED_MODULE_20__.sweepQueueItems)(items, nowMs, app),
-                    verifyCloses: this.verifyCloses.takeDelta('cycle'),
-                    sends1h: this.sendWindow.counts(nowMs),
-                    quiet: (0,_flow_runner_cycle_metrics__WEBPACK_IMPORTED_MODULE_20__.decideQuietReason)({
-                        mainSent: cycleTally.sent,
-                        budgetExhausted: cycleTally.budget > 0 || (!!budgetSnapshot && budgetSnapshot.remaining <= 0),
-                        hourlyCapWait: this.cycleWaitDeclared,
-                        banGateTripped,
-                        exploreDenied: exploreSkipped > 0 || selectionExploreDenied > 0,
-                        pool: poolClass,
-                        eligibleSource,
-                        cooldownRest: cooldownRest !== null,
-                    }),
-                });
-            }
-            catch {
-                measurementFields = [];
-            }
-            // Per-mobile cycle-end line (no new Redis reads: reuses this cycle's budget snapshot + stats). The
-            // timed `promo heartbeat` (flow-runner/heartbeat.ts) covers the hours inside a long paced cycle.
-            this.log('info', [
-                `[${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_19__.maskMobile)(this.options.account.mobile)}] promo cycle end`,
-                `sends(cycle)=${cycleTally.sent}`,
-                `capCount=${budgetSnapshot ? budgetSnapshot.count : 'n/a'}/cap=${budgetSnapshot ? budgetSnapshot.cap : 'n/a'}`,
-                `daysLeft=${stats.daysLeft}`,
-                `queueSize=${this.messageQueue.size}`,
-                ...measurementFields,
-            ].join(' | '));
-            // Remember if this cycle produced no sends purely because the daily send cap was hit — the
-            // health monitor uses this to avoid restarting a healthy-but-capped engine.
-            // A round held back by the exploration budget is a deliberate quiet state like a capped one:
-            // restarting the runner cannot help (the budget lives in Redis) and only churns it (review
-            // 2026-10-08: ~100 "appears stuck" runner restarts in the live logs).
-            this.health.lastCycleBudgetExhausted = cycleTally.sent === 0
-                && (cycleTally.budget > 0 || exploreSkipped > 0 || selectionExploreDenied > 0);
+            const selection = await (0,_flow_runner_selection_pass__WEBPACK_IMPORTED_MODULE_16__.selectCycleChannels)(hostOf(this), loadedChannels, channels, stats, cycle);
+            if (!selection)
+                return;
+            const run = await (0,_flow_runner_cycle_run__WEBPACK_IMPORTED_MODULE_17__.runSelectedChannels)(hostOf(this), selection.selectedChannels);
+            await (0,_flow_runner_cycle_run__WEBPACK_IMPORTED_MODULE_17__.finishCycle)(hostOf(this), stats, run, selection);
         }
         finally {
             this.health.totalCycles += 1;
@@ -13583,7 +14070,7 @@ class PromotionFlowRunner {
         }
     }
     async processChannel(rawChannel, isFollowUp, refreshBeforePlanning = false) {
-        let channel = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_13__.normalizeChannel)(rawChannel);
+        let channel = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_11__.normalizeChannel)(rawChannel);
         if (!channel) {
             this.log('warn', `Promotion channel attempt skipped; malformed channel=${this.safeJson(rawChannel)}`);
             return 'skipped';
@@ -13595,7 +14082,7 @@ class PromotionFlowRunner {
         }
         if (refreshBeforePlanning) {
             try {
-                const refreshed = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_13__.normalizeChannel)(await this.adapter.getChannel(channel.channelId));
+                const refreshed = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_11__.normalizeChannel)(await this.adapter.getChannel(channel.channelId));
                 if (!refreshed) {
                     this.log('debug', `Promotion channel attempt skipped after final state reload; ${this.formatChannel(channel)}`);
                     return 'skipped';
@@ -13619,13 +14106,13 @@ class PromotionFlowRunner {
         catch (error) {
             this.log('warn', `Promotion intelligence doc load failed; using cold-start strategy; ${this.formatChannel(channel)} error=${this.normalizeError(error)}`);
         }
-        const mergedChannel = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_13__.mergePromotionHealthSignals)(channel, doc);
+        const mergedChannel = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_11__.mergePromotionHealthSignals)(channel, doc);
         const planningChannel = mergedChannel;
-        const eligible = await this.evaluateEligibility(planningChannel, doc, percentiles, isFollowUp);
+        const eligible = await this.evaluateEligibility(planningChannel, doc, isFollowUp);
         if (!eligible)
             return 'skipped';
         const stats = await this.getStatsOrDefault('message planning');
-        const availableMessageIds = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_13__.normalizeAvailableMessageIds)(planningChannel.availableMsgs);
+        const availableMessageIds = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_11__.normalizeAvailableMessageIds)(planningChannel.availableMsgs);
         const messagePolicyInput = {
             isFollowUp,
             ...(planningChannel.freeformDeletedCount !== undefined
@@ -13643,7 +14130,7 @@ class PromotionFlowRunner {
             ...(percentiles ? { percentiles } : {}),
             nowMs: Date.now(),
         };
-        const candidates = (0,_policy__WEBPACK_IMPORTED_MODULE_5__.selectPromotionMessageCandidates)(messagePolicyInput);
+        const candidates = (0,_policy__WEBPACK_IMPORTED_MODULE_4__.selectPromotionMessageCandidates)(messagePolicyInput);
         this.log('debug', [
             'Promotion candidate plan',
             this.formatChannel(channel),
@@ -13688,11 +14175,11 @@ class PromotionFlowRunner {
                     this.fuSentSinceCycleEnd += 1;
                 else
                     await this.noteChannelCooldown(planningChannel.channelId);
-                await this.recordSuccess(planningChannel, candidate, result, isFollowUp, percentiles, (0,_tg_core_utils_spam_limit__WEBPACK_IMPORTED_MODULE_6__.isSpamLimited)(stats.daysLeft));
+                await this.recordSuccess(planningChannel, candidate, result, isFollowUp, percentiles, (0,_tg_core_utils_spam_limit__WEBPACK_IMPORTED_MODULE_5__.isSpamLimited)(stats.daysLeft));
                 return 'sent';
             }
             if (result.errorMessage) {
-                await this.recordFailure(planningChannel, candidate, result, isFollowUp, percentiles, (0,_tg_core_utils_spam_limit__WEBPACK_IMPORTED_MODULE_6__.isSpamLimited)(stats.daysLeft));
+                await this.recordFailure(planningChannel, candidate, result, isFollowUp, percentiles, (0,_tg_core_utils_spam_limit__WEBPACK_IMPORTED_MODULE_5__.isSpamLimited)(stats.daysLeft));
             }
             // P5: an ambiguous main send (attempted, unconfirmed) may have posted, so it starts the cooldown too.
             if (!isFollowUp && result.attempted !== false)
@@ -13732,238 +14219,36 @@ class PromotionFlowRunner {
             this.queueCheckPromise = null;
         }
     }
-    async checkQueuedMessagesOnce() {
-        // Review M2: a flag rollback reaches a long cycle within about a minute. Read only here, at the
-        // start of a pass, so the mode never changes inside one.
-        if (Date.now() - this.promoFlagsReadAt >= PROMO_FLAGS_QUEUE_REFRESH_MS)
-            await this.refreshPromoFlags();
-        this.health.lastQueueCheckStartedAt = Date.now();
-        try {
-            const now = Date.now();
-            const v3 = this.isFollowUpV3();
-            const checkDelay = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_13__.safeDelayMs)(this.options.messageCheckDelayMs, 15000);
-            let ready = [];
-            try {
-                ready = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_13__.normalizeReadyMessages)(this.messageQueue.readyForCheck(now, checkDelay), v3);
-            }
-            catch (error) {
-                this.log('warn', `Promotion queue ready check failed; skipping queue pass error=${this.normalizeError(error)}`);
-                return;
-            }
-            this.log('debug', `Promotion queue check; queueSize=${this.messageQueue.size} ready=${ready.length} checkDelayMs=${checkDelay}`);
-            const completed = new Set();
-            // P4: closed as verify_unknown; leaves memory even when the Redis delete fails (P0 review LOW 3).
-            const closedUnknown = new Set();
-            for (const entry of ready) {
-                if (this.shouldAbortStartedRunnerWork()) {
-                    this.log('debug', 'Promotion queue check interrupted because runner stopped');
-                    break;
-                }
-                const { message } = entry;
-                if (v3 && message.workType === 'followUp') {
-                    if (await this.handleQueuedFollowUpV3(message) === 'done')
-                        completed.add(entry);
-                    continue;
-                }
-                if (message.workType === 'followUp') {
-                    if (this.followUpTimers.has(message.channelId))
-                        continue;
-                    const claimed = await this.claimFollowUpExecution(message);
-                    if (claimed === null)
-                        continue;
-                    if (!claimed) {
-                        completed.add(entry);
-                        continue;
-                    }
-                    await this.runFollowUp(message);
-                    completed.add(entry);
-                    continue;
-                }
-                let result;
-                try {
-                    result = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_13__.normalizeMessageCheckResult)(await this.adapter.checkMessage(message));
-                }
-                catch (error) {
-                    this.log('warn', [
-                        'Promotion message check failed; retaining for retry',
-                        `channelId=${message.channelId}`,
-                        `messageId=${message.messageId}`,
-                        `isFollowUp=${message.isFollowUp}`,
-                        `error=${this.normalizeError(error)}`,
-                    ].join('; '));
-                    if (this.verifyUnknownClose(entry.original, message, 'error')) {
-                        completed.add(entry);
-                        closedUnknown.add(entry);
-                    }
-                    continue;
-                }
-                if (v3 && (result.status === 'exists' || result.status === 'deleted')) {
-                    // P3: the one survival writer, once per verify key. 'keep' = marker error.
-                    if (await this.recordVerifiedOutcome(message, result) === 'done')
-                        completed.add(entry);
-                    else if (this.verifyUnknownClose(entry.original, message, 'marker_error')) {
-                        completed.add(entry);
-                        closedUnknown.add(entry);
-                    }
-                    continue;
-                }
-                if (result.status === 'exists') {
-                    const existingMessage = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_13__.withMessageCheckText)(message, result);
-                    this.log('debug', `Promotion message exists; channelId=${message.channelId} messageId=${message.messageId} isFollowUp=${message.isFollowUp}`);
-                    await this.callHook('onMessageExisting', () => this.adapter.onMessageExisting?.(existingMessage));
-                    await this.recordAccountSurvival(message);
-                    await this.recordExploreSurvival(message);
-                    await this.recordPoolOutcome(message, 'survived');
-                    await this.scheduleFollowUp(message);
-                    this.verifyCloses.note(message.timestamp, Date.now());
-                    completed.add(entry);
-                }
-                else if (result.status === 'deleted') {
-                    const deletionPolicy = (0,_policy__WEBPACK_IMPORTED_MODULE_5__.evaluateDeletionPolicy)(message.messageIndex, message.availableMessageCount);
-                    await this.recordDeletion(message, deletionPolicy, result.reason ?? 'message_missing');
-                    this.verifyCloses.note(message.timestamp, Date.now());
-                    completed.add(entry);
-                }
-                else {
-                    this.log('debug', `Message check unknown for ${message.channelId}/${message.messageId}; retaining for retry`);
-                    if (this.verifyUnknownClose(entry.original, message, 'unknown')) {
-                        completed.add(entry);
-                        closedUnknown.add(entry);
-                    }
-                }
-            }
-            for (const entry of completed) {
-                try {
-                    await this.removeQueuedMessage(entry.original);
-                }
-                catch (error) {
-                    const { message } = entry;
-                    if (closedUnknown.has(entry)) {
-                        // Terminal: drop the in-memory copy so it is never re-checked or counted again. The payload
-                        // keeps its TTL; a restore before then re-checks it once more.
-                        this.messageQueue.remove(entry.original);
-                        this.log('warn', `promo verify close | ${(0,_promotion_message_queue__WEBPACK_IMPORTED_MODULE_8__.queueItemKey)(entry.original)} | payload delete failed | error=${this.normalizeError(error)}`);
-                        continue;
-                    }
-                    this.log('warn', `Promotion queue remove failed; channelId=${message.channelId} messageId=${message.messageId} error=${this.normalizeError(error)}`);
-                }
-            }
-            if (completed.size > 0) {
-                this.log('debug', `Promotion queue check completed; removed=${completed.size} remaining=${this.messageQueue.size}`);
-            }
-        }
-        finally {
-            this.health.totalQueueChecks += 1;
-            this.health.lastQueueCheckFinishedAt = Date.now();
-        }
+    checkQueuedMessagesOnce() {
+        return (0,_flow_runner_verify__WEBPACK_IMPORTED_MODULE_15__.checkQueuedMessagesOnce)(hostOf(this));
     }
-    /**
-     * Flow v3 (P2 fix 5): a queued follow-up under `fu` on. Never reaches checkMessage and never writes
-     * survival. Expiry before the claim; shared 5 min pacer with the timer path.
-     */
-    async handleQueuedFollowUpV3(message) {
-        const key = (0,_promotion_message_queue__WEBPACK_IMPORTED_MODULE_8__.queueItemKey)(message);
-        if (message.dueAt === undefined || message.sentAt === undefined) {
-            this.log('info', `promo follow-up drop | ${key} | reason=legacy_no_dueAt`);
-            this.verifyCloses.noteDrop('legacy_no_dueAt');
-            return 'done';
-        }
-        if (this.followUpTimers.has(message.channelId))
-            return 'keep';
-        const nowMs = Date.now();
-        if (nowMs > message.dueAt + this.followUpMaxLateMs()) {
-            this.log('info', `promo follow-up drop | ${key} | reason=expired | late_min=${Math.round((nowMs - message.dueAt) / 60000)}`);
-            this.verifyCloses.noteDrop('expired');
-            return 'done';
-        }
-        if (nowMs < message.dueAt)
-            return 'keep';
-        // Review L1: the slot is taken before the claim await, and given back when nothing is sent.
-        const slot = this.reserveFollowUpSlot(nowMs);
-        if (!slot)
-            return 'keep';
-        let sent = false;
-        try {
-            const claimed = await this.claimFollowUpExecution(message);
-            if (claimed === null)
-                return 'keep';
-            if (!claimed)
-                return 'done';
-            sent = await this.runFollowUp(message);
-            return 'done';
-        }
-        finally {
-            if (!sent)
-                this.releaseFollowUpSlot(slot);
-        }
+    handleQueuedFollowUpV3(message) {
+        return (0,_flow_runner_follow_up__WEBPACK_IMPORTED_MODULE_13__.handleQueuedFollowUpV3)(hostOf(this), message);
     }
-    /**
-     * Flow v3 P3: the only writer of survival, explore, pool, onMessageExisting and deletion records,
-     * for a verify item. A Redis SET NX marker per verify key makes it once across restarts; on a marker
-     * error nothing is recorded and the item stays for the next check (a missed record beats a double one).
-     * A follow-up is scheduled only from here, after a first survival.
-     */
-    async recordVerifiedOutcome(message, result) {
-        const key = (0,_promotion_message_queue__WEBPACK_IMPORTED_MODULE_8__.queueItemKey)(message);
-        let first = true;
-        try {
-            const queue = this.messageQueue;
-            if (typeof queue.markRecorded === 'function')
-                first = await queue.markRecorded(message);
-        }
-        catch (error) {
-            // Review L7: during a Redis outage every verify item fails on every pass; one warn per 60 s.
-            const nowMs = Date.now();
-            if (nowMs - this.markerErrorLogAt >= MARKER_ERROR_LOG_EVERY_MS) {
-                this.log('warn', `promo record skipped | ${key} | reason=marker_error | suppressed=${this.markerErrorSuppressed} | error=${this.normalizeError(error)}`);
-                this.markerErrorLogAt = nowMs;
-                this.markerErrorSuppressed = 0;
-            }
-            else {
-                this.markerErrorSuppressed += 1;
-            }
-            return 'keep';
-        }
-        if (!first) {
-            this.log('info', `promo record skipped | ${key} | reason=already_recorded`);
-            return 'done';
-        }
-        const sentAt = message.sentAt ?? message.timestamp;
-        if (result.status === 'exists') {
-            const existingMessage = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_13__.withMessageCheckText)(message, result);
-            this.log('debug', `Promotion message exists; channelId=${message.channelId} messageId=${message.messageId} isFollowUp=${message.isFollowUp}`);
-            await this.callHook('onMessageExisting', () => this.adapter.onMessageExisting?.(existingMessage));
-            await this.recordAccountSurvival(message);
-            await this.recordExploreSurvival(message);
-            await this.recordPoolOutcome(message, 'survived');
-            await this.scheduleFollowUp(message);
-            this.verifyCloses.note(sentAt, Date.now());
-            return 'done';
-        }
-        const deletionPolicy = (0,_policy__WEBPACK_IMPORTED_MODULE_5__.evaluateDeletionPolicy)(message.messageIndex, message.availableMessageCount);
-        await this.recordDeletion(message, deletionPolicy, result.reason ?? 'message_missing');
-        this.verifyCloses.note(sentAt, Date.now());
-        return 'done';
+    recordVerifiedOutcome(message, result) {
+        return (0,_flow_runner_verify__WEBPACK_IMPORTED_MODULE_15__.recordVerifiedOutcome)(hostOf(this), message, result);
+    }
+    verifyUnknownClose(original, message, last) {
+        return (0,_flow_runner_verify__WEBPACK_IMPORTED_MODULE_15__.verifyUnknownClose)(hostOf(this), original, message, last);
+    }
+    queueItems() {
+        return (0,_flow_runner_verify__WEBPACK_IMPORTED_MODULE_15__.queueItems)(hostOf(this));
+    }
+    runSweepOnce(nowMs = Date.now()) {
+        return (0,_flow_runner_verify__WEBPACK_IMPORTED_MODULE_15__.runSweepOnce)(hostOf(this), nowMs);
     }
     /** Flow v3: `fu` is on or loop (loop's main-loop folding is P8; here it behaves as on). */
     isFollowUpV3() {
-        return (0,_config_promo_flags_v3__WEBPACK_IMPORTED_MODULE_9__.isFollowUpV3)(this.promoFlags);
+        return (0,_config_promo_flags_v3__WEBPACK_IMPORTED_MODULE_8__.isFollowUpV3)(this.promoFlags);
     }
     followUpMaxLateMs() {
-        return this.options.pickerApp === 'tg-aut' ? FOLLOW_UP_MAX_LATE_MS_TGAUT : FOLLOW_UP_MAX_LATE_MS_PROMOTE;
+        return (0,_config_promo_app_config__WEBPACK_IMPORTED_MODULE_9__.followUpMaxLateMsFor)(this.options.pickerApp);
     }
-    /** Review L1: check and take the 5 min slot in one step (no await between), so racing paths cannot both pass. */
     reserveFollowUpSlot(nowMs) {
-        if (nowMs - this.lastFollowUpAt < FOLLOW_UP_V3_GAP_MS)
-            return null;
-        const slot = { at: nowMs, previous: this.lastFollowUpAt };
-        this.lastFollowUpAt = nowMs;
-        return slot;
+        return (0,_flow_runner_follow_up__WEBPACK_IMPORTED_MODULE_13__.reserveFollowUpSlot)(hostOf(this), nowMs);
     }
-    /** Give a slot back when its claim failed or no follow-up was sent; a later reservation is kept. */
     releaseFollowUpSlot(slot) {
-        if (this.lastFollowUpAt === slot.at)
-            this.lastFollowUpAt = slot.previous;
+        (0,_flow_runner_follow_up__WEBPACK_IMPORTED_MODULE_13__.releaseFollowUpSlot)(hostOf(this), slot);
     }
     /**
      * One flag read per cycle start: `account.readPromoFlags(app)` does one HGETALL of
@@ -13973,32 +14258,26 @@ class PromotionFlowRunner {
      */
     async refreshPromoFlags() {
         this.promoFlagsReadAt = Date.now();
-        const app = (0,_config_promo_flags_v3__WEBPACK_IMPORTED_MODULE_9__.promoFlagsAppFor)(this.options.pickerApp ?? null);
-        const reader = this.options.account.readPromoFlags;
+        const app = (0,_config_promo_flags_v3__WEBPACK_IMPORTED_MODULE_8__.promoFlagsAppFor)(this.options.pickerApp ?? null);
+        const reader = this.optionalAccount().readPromoFlags;
         let next = this.promoFlagsRead;
         if (app && typeof reader === 'function') {
             try {
-                const read = await reader.call(this.options.account, app);
-                next = (0,_config_promo_flags_v3__WEBPACK_IMPORTED_MODULE_9__.parsePromoFlags)(read ? {
-                    ...(typeof read.fu === 'string' ? { fu: read.fu } : {}),
-                    ...(typeof read.vx === 'string' ? { vx: read.vx } : {}),
-                    ...(typeof read.elig === 'string' ? { elig: read.elig } : {}),
-                } : null);
+                // parsePromoFlags reads only the known flag names and ignores non-string values.
+                next = (0,_config_promo_flags_v3__WEBPACK_IMPORTED_MODULE_8__.parsePromoFlags)(await reader.call(this.options.account, app));
             }
             catch (error) {
                 next = this.promoFlagsRead;
-                this.log('warn', `promo flags | read failed; keeping fu=${next.fu} vx=${next.vx} elig=${next.elig} | error=${this.normalizeError(error)}`);
+                this.log('warn', `promo flags | read failed; keeping ${(0,_config_promo_flags_v3__WEBPACK_IMPORTED_MODULE_8__.formatPromoFlags)(next)} | error=${this.normalizeError(error)}`);
             }
         }
         else {
-            next = { ..._config_promo_flags_v3__WEBPACK_IMPORTED_MODULE_9__.PROMO_FLAGS_DEFAULTS };
+            next = { ..._config_promo_flags_v3__WEBPACK_IMPORTED_MODULE_8__.PROMO_FLAGS_DEFAULTS };
         }
         const wasOn = this.isFollowUpV3();
-        const prevFu = this.promoFlags.fu;
-        const prevVx = this.promoFlags.vx;
-        const prevElig = this.promoFlags.elig;
+        const prev = this.promoFlags;
         this.promoFlagsRead = next;
-        const effective = (0,_config_promo_flags_v3__WEBPACK_IMPORTED_MODULE_9__.effectivePromoFlags)(next);
+        const effective = (0,_config_promo_flags_v3__WEBPACK_IMPORTED_MODULE_8__.effectivePromoFlags)(next);
         this.promoFlags = effective.flags;
         const ignoredKey = effective.ignored.map((item) => `${item.flag}:${item.reason}`).join(',');
         if (ignoredKey !== this.promoFlagsIgnoredKey) {
@@ -14009,12 +14288,10 @@ class PromotionFlowRunner {
         const nowOn = this.isFollowUpV3();
         this.applyQueueV3Mode();
         const acted = this.promoFlags;
-        if (prevFu !== acted.fu)
-            this.log('info', `promo flags | fu=${acted.fu} | was=${prevFu}`);
-        if (prevVx !== acted.vx)
-            this.log('info', `promo flags | vx=${acted.vx} | was=${prevVx}`);
-        if (prevElig !== acted.elig)
-            this.log('info', `promo flags | elig=${acted.elig} | was=${prevElig}`);
+        for (const name of _config_promo_flags_v3__WEBPACK_IMPORTED_MODULE_8__.PROMO_FLAG_NAMES) {
+            if (prev[name] !== acted[name])
+                this.log('info', `promo flags | ${name}=${acted[name]} | was=${prev[name]}`);
+        }
         if (nowOn && !wasOn)
             await this.dropFollowUpsWithoutDueAt();
     }
@@ -14039,41 +14316,24 @@ class PromotionFlowRunner {
                 this.queueCheckPromise = null;
         }
     }
+    /**
+     * Binds the queue (and through it the persistence) to this runner's `fu` mode: one source, read
+     * live, so no copy of the flag is kept. Rebound at every flag read, as the old per-read push did.
+     */
     applyQueueV3Mode() {
-        const queue = this.messageQueue;
-        if (typeof queue.setFollowUpV3 !== 'function')
-            return;
-        queue.setFollowUpV3(this.isFollowUpV3()
-            ? { maxLateMs: this.followUpMaxLateMs(), log: (level, message) => this.log(level, message) }
-            : null);
+        this.messageQueue.bindFollowUpV3?.(() => this.queueV3Mode());
     }
-    async dropFollowUpsWithoutDueAt() {
-        // Timers armed under `fu` off own items without dueAt: clear them so no follow-up runs without one.
-        for (const [channelId, timeout] of [...this.followUpTimers.entries()]) {
-            if (this.followUpTimerWork.has(channelId))
-                continue;
-            clearTimeout(timeout);
-            this.followUpTimers.delete(channelId);
-        }
-        const queue = this.messageQueue;
-        if (typeof queue.takeFollowUpsWithoutDueAt !== 'function')
-            return;
-        const dropped = queue.takeFollowUpsWithoutDueAt();
-        for (const item of dropped) {
-            this.log('info', `promo follow-up drop | ${(0,_promotion_message_queue__WEBPACK_IMPORTED_MODULE_8__.queueItemKey)(item)} | reason=legacy_no_dueAt`);
-            this.verifyCloses.noteDrop('legacy_no_dueAt');
-            try {
-                await this.removeQueuedMessage(item);
-            }
-            catch (error) {
-                this.log('warn', `promo follow-up drop | ${(0,_promotion_message_queue__WEBPACK_IMPORTED_MODULE_8__.queueItemKey)(item)} | payload delete failed | error=${this.normalizeError(error)}`);
-            }
-        }
-        this.log('info', `promo fu flip | dropped_no_dueAt=${dropped.length}`);
+    queueV3Mode() {
+        return this.isFollowUpV3()
+            ? { maxLateMs: this.followUpMaxLateMs(), log: (level, message) => this.log(level, message) }
+            : null;
+    }
+    dropFollowUpsWithoutDueAt() {
+        return (0,_flow_runner_follow_up__WEBPACK_IMPORTED_MODULE_13__.dropFollowUpsWithoutDueAt)(hostOf(this));
     }
     startQueueChecker() {
         this.stopQueueChecker();
-        const intervalMs = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_13__.safeIntervalMs)(this.options.messageCheckIntervalMs ?? this.options.messageCheckDelayMs, 15000);
+        const intervalMs = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_11__.safeIntervalMs)(this.options.messageCheckIntervalMs ?? this.options.messageCheckDelayMs, 15000);
         this.queueCheckInterval = setInterval(() => {
             if (!this.running)
                 return;
@@ -14110,42 +14370,19 @@ class PromotionFlowRunner {
         }
         queue.remove(message);
     }
-    async claimFollowUpExecution(message) {
-        try {
-            const queue = this.messageQueue;
-            if (typeof queue.claimExecution !== 'function')
-                return true;
-            const claimed = await queue.claimExecution(message);
-            if (!claimed) {
-                this.log('info', `Follow-up already claimed; removing recovered duplicate; channelId=${message.channelId} messageId=${message.messageId}`);
-            }
-            return claimed;
-        }
-        catch (error) {
-            this.log('warn', `Follow-up execution claim failed; retaining for retry; channelId=${message.channelId} messageId=${message.messageId} error=${this.normalizeError(error)}`);
-            return null;
-        }
+    claimFollowUpExecution(message) {
+        return (0,_flow_runner_follow_up__WEBPACK_IMPORTED_MODULE_13__.claimFollowUpExecution)(hostOf(this), message);
     }
     shouldAbortStartedRunnerWork() {
         return this.startedByStart && !this.running;
     }
-    async evaluateEligibility(channel, doc, percentiles, isFollowUp) {
-        // Flow v3 P5: the shared predicate (policy/eligible-now.ts), so pre-ranking and send-time
-        // eligibility cannot drift. `percentiles` is unused by the gates (it never was). A follow-up
-        // bypasses the queue hold and the cooldown, as before.
-        void percentiles;
-        const result = (0,_policy_eligible_now__WEBPACK_IMPORTED_MODULE_11__.eligibleNow)(channel, doc, {
-            queued: !isFollowUp && (this.messageQueue.isQueued(channel.channelId)
-                || this.followUpTimers.has(channel.channelId)),
-            cooldownUntil: !isFollowUp && this.eligActive() ? this.cooldownUntilOf(channel.channelId) : null,
-        }, Date.now());
-        if (!result.eligible)
-            this.log('debug', `Skipping ${channel.channelId}: ${result.detail}`);
-        return result.eligible;
+    /** Flow v3 P5: the shared predicate (policy/eligible-now.ts), so pre-ranking and send-time eligibility cannot drift. */
+    async evaluateEligibility(channel, doc, isFollowUp) {
+        return (0,_flow_runner_eligibility__WEBPACK_IMPORTED_MODULE_14__.evaluateEligibility)(hostOf(this), channel, doc, isFollowUp);
     }
     async trySendPromotion(channel, candidate, isFollowUp) {
         try {
-            return (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_13__.normalizeSendResult)(await this.adapter.sendPromotion({ channel, candidate, isFollowUp }), candidate);
+            return (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_11__.normalizeSendResult)(await this.adapter.sendPromotion({ channel, candidate, isFollowUp }), candidate);
         }
         catch (error) {
             const errorMessage = this.normalizeError(error);
@@ -14182,25 +14419,25 @@ class PromotionFlowRunner {
      * deliberately no `if (analytics)` here — see the note in packages/tg-analytics/src/analytics.ts.
      */
     recordSendAnalytics(channel, candidate, result, outcome, channelIdOverride, messageText, extra) {
-        return (0,_flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_14__.recordSendAnalytics)(hostOf(this), channel, candidate, result, outcome, channelIdOverride, messageText, extra);
+        return (0,_flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_12__.recordSendAnalytics)(hostOf(this), channel, candidate, result, outcome, channelIdOverride, messageText, extra);
     }
     recordSuccess(channel, candidate, result, isFollowUp, percentiles, aggressive) {
-        return (0,_flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_14__.recordSuccess)(hostOf(this), channel, candidate, result, isFollowUp, percentiles, aggressive);
+        return (0,_flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_12__.recordSuccess)(hostOf(this), channel, candidate, result, isFollowUp, percentiles, aggressive);
     }
     recordFailure(channel, candidate, result, isFollowUp, percentiles, aggressive) {
-        return (0,_flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_14__.recordFailure)(hostOf(this), channel, candidate, result, isFollowUp, percentiles, aggressive);
+        return (0,_flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_12__.recordFailure)(hostOf(this), channel, candidate, result, isFollowUp, percentiles, aggressive);
     }
     resolveCandidateStrategy(candidate) {
-        return (0,_flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_14__.resolveCandidateStrategy)(candidate);
+        return (0,_flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_12__.resolveCandidateStrategy)(candidate);
     }
     recordDeletion(message, deletionPolicy, reason = 'message_missing') {
-        return (0,_flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_14__.recordDeletion)(hostOf(this), message, deletionPolicy, reason);
+        return (0,_flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_12__.recordDeletion)(hostOf(this), message, deletionPolicy, reason);
     }
     logHookSummary(event, channelId, strategy, isFollowUp, statuses) {
-        return (0,_flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_14__.logHookSummary)(hostOf(this), event, channelId, strategy, isFollowUp, statuses);
+        return (0,_flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_12__.logHookSummary)(hostOf(this), event, channelId, strategy, isFollowUp, statuses);
     }
     resolveQueuedPoolSource(result, isFollowUp) {
-        return (0,_flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_14__.resolveQueuedPoolSource)(result, isFollowUp);
+        return (0,_flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_12__.resolveQueuedPoolSource)(result, isFollowUp);
     }
     /**
      * Pool-fill lifecycle: bump this channel's seedProbeCounts[source] when a fresh (non-pool-reuse),
@@ -14210,19 +14447,19 @@ class PromotionFlowRunner {
      * account-wide counter (see ChannelIntelligenceService.incrementSeedProbe).
      */
     recordSeedProbeIfLearning(channel, candidate, result, isFollowUp) {
-        return (0,_flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_14__.recordSeedProbeIfLearning)(hostOf(this), channel, candidate, result, isFollowUp);
+        return (0,_flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_12__.recordSeedProbeIfLearning)(hostOf(this), channel, candidate, result, isFollowUp);
     }
     recordPoolOutcome(message, outcome) {
-        return (0,_flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_14__.recordPoolOutcome)(hostOf(this), message, outcome);
+        return (0,_flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_12__.recordPoolOutcome)(hostOf(this), message, outcome);
     }
     recordExploreFailure(channelId, candidate, result, isFollowUp) {
-        return (0,_flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_14__.recordExploreFailure)(hostOf(this), channelId, candidate, result, isFollowUp);
+        return (0,_flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_12__.recordExploreFailure)(hostOf(this), channelId, candidate, result, isFollowUp);
     }
     recordExploreSurvival(message) {
-        return (0,_flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_14__.recordExploreSurvival)(hostOf(this), message);
+        return (0,_flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_12__.recordExploreSurvival)(hostOf(this), message);
     }
     recordAccountSurvival(message) {
-        return (0,_flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_14__.recordAccountSurvival)(hostOf(this), message);
+        return (0,_flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_12__.recordAccountSurvival)(hostOf(this), message);
     }
     /**
      * Per-mobile ban/forbidden block recording (replaces the retired cross-account channel lock).
@@ -14231,16 +14468,67 @@ class PromotionFlowRunner {
      * write/send-forbidden, private, or invalid channels never accept this account — block permanently.
      */
     recordChannelBlockOnFailure(channel, result) {
-        return (0,_flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_14__.recordChannelBlockOnFailure)(hostOf(this), channel, result);
+        return (0,_flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_12__.recordChannelBlockOnFailure)(hostOf(this), channel, result);
     }
     scheduleFollowUp(message) {
-        return (0,_flow_runner_follow_up__WEBPACK_IMPORTED_MODULE_15__.scheduleFollowUp)(hostOf(this), message);
+        return (0,_flow_runner_follow_up__WEBPACK_IMPORTED_MODULE_13__.scheduleFollowUp)(hostOf(this), message);
     }
     runFollowUp(message) {
-        return (0,_flow_runner_follow_up__WEBPACK_IMPORTED_MODULE_15__.runFollowUp)(hostOf(this), message);
+        return (0,_flow_runner_follow_up__WEBPACK_IMPORTED_MODULE_13__.runFollowUp)(hostOf(this), message);
+    }
+    isOwnChannel(channel) {
+        return this.ownChannels.isOwnChannel(channel.channelId, channel.username ?? null);
+    }
+    /** Follow-ups are not picks: no annotation. */
+    pickAnnotationFor(channelId, isFollowUp) {
+        return isFollowUp ? null : this.pickAnnotations.get((0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_3__.normalizeChannelId)(channelId) ?? '') ?? null;
+    }
+    /** Measure one pick batch and emit the sampled debug line. Never throws. */
+    measurePicks(mode, candidates, selected, docs, reasonOf, nowMs, mu) {
+        try {
+            const result = (0,_flow_runner_pick_shadow__WEBPACK_IMPORTED_MODULE_2__.measurePickBatch)({
+                mode,
+                candidateIds: candidates.map((channel) => channel.channelId),
+                selectedIds: selected.map((channel) => channel.channelId),
+                docs,
+                reasonOf,
+                clientId: this.options.account.clientId ?? null,
+                nowMs,
+                mu,
+                logSample: (0,_selection_picker__WEBPACK_IMPORTED_MODULE_1__.readPickerLogSample)(),
+            });
+            this.pickAnnotations = result.annotations;
+            if (result.summary)
+                this.log('debug', `Promotion pick batch; ${(0,_flow_runner_pick_shadow__WEBPACK_IMPORTED_MODULE_2__.formatPickSummary)(result.summary)}`);
+        }
+        catch {
+            this.pickAnnotations = new Map();
+        }
+    }
+    /** Account members that older contexts and test stubs may lack (every caller feature-detects). */
+    optionalAccount() {
+        return this.options.account;
+    }
+    eligActive() {
+        return (0,_flow_runner_eligibility__WEBPACK_IMPORTED_MODULE_14__.eligActive)(hostOf(this));
+    }
+    loadChannelCooldowns() {
+        return (0,_flow_runner_eligibility__WEBPACK_IMPORTED_MODULE_14__.loadChannelCooldowns)(hostOf(this));
+    }
+    activeCooldownRest() {
+        return (0,_flow_runner_eligibility__WEBPACK_IMPORTED_MODULE_14__.activeCooldownRest)(hostOf(this));
+    }
+    cooldownRestFor(nowMs) {
+        return (0,_flow_runner_eligibility__WEBPACK_IMPORTED_MODULE_14__.cooldownRestFor)(hostOf(this), nowMs);
+    }
+    cooldownUntilOf(channelId) {
+        return (0,_flow_runner_eligibility__WEBPACK_IMPORTED_MODULE_14__.cooldownUntilOf)(hostOf(this), channelId);
+    }
+    noteChannelCooldown(channelId) {
+        return (0,_flow_runner_eligibility__WEBPACK_IMPORTED_MODULE_14__.noteChannelCooldown)(hostOf(this), channelId);
     }
     async sleep(ms) {
-        const delayMs = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_13__.safeDelayMs)(ms, 0);
+        const delayMs = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_11__.safeDelayMs)(ms, 0);
         // Declare the deliberate sleep so the supervisor watchdog doesn't mistake a long post-send rest
         // (12-20 min) for a hung runner.
         this.health.sleepUntil = Math.max(Date.now() + delayMs, this.activeCooldownRest() ?? 0);
@@ -14261,7 +14549,7 @@ class PromotionFlowRunner {
      * Optional on the account (older contexts/stubs lack it) and always fails open.
      */
     async explorationDenied(channels, charge) {
-        const account = this.options.account;
+        const account = this.optionalAccount();
         if (typeof account.explorationDeniedForMobile !== 'function' || channels.length === 0)
             return new Set();
         try {
@@ -14274,29 +14562,29 @@ class PromotionFlowRunner {
     }
     async sleepAfterChannel(outcome) {
         if (outcome !== 'sent') {
-            const delayMs = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_13__.randomIntInclusive)(FAILED_CHANNEL_RETRY_MIN_MS, FAILED_CHANNEL_RETRY_MAX_MS);
+            const delayMs = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_11__.randomIntInclusive)(FAILED_CHANNEL_RETRY_MIN_MS, FAILED_CHANNEL_RETRY_MAX_MS);
             this.log('debug', `Promotion retry delay ${delayMs}ms (${outcome})`);
             await this.sleep(delayMs);
             return;
         }
         if (!this.options.scoringEnabled) {
-            await this.sleep((0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_13__.safeDelayMs)(this.options.channelLoopDelayMs, 5000));
+            await this.sleep((0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_11__.safeDelayMs)(this.options.channelLoopDelayMs, 5000));
             return;
         }
         let stats;
         try {
-            stats = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_13__.normalizeStats)(await this.adapter.getStats());
+            stats = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_11__.normalizeStats)(await this.adapter.getStats());
         }
         catch (error) {
             this.log('warn', `Promotion delay stats load failed; using configured channel loop delay error=${this.normalizeError(error)}`);
-            await this.sleep((0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_13__.safeDelayMs)(this.options.channelLoopDelayMs, 5000));
+            await this.sleep((0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_11__.safeDelayMs)(this.options.channelLoopDelayMs, 5000));
             return;
         }
         // Session delete rate feeds the healthy-conservative scaling: deletions / (deletions + sends).
         const deletions = this.health.totalDeletions;
         const sends = this.health.totalSuccessfulSends;
         const deleteRate = deletions + sends > 0 ? deletions / (deletions + sends) : 0;
-        const delay = (0,_policy__WEBPACK_IMPORTED_MODULE_5__.calculateHealthBasedPromotionDelay)({
+        const delay = (0,_policy__WEBPACK_IMPORTED_MODULE_4__.calculateHealthBasedPromotionDelay)({
             successCount: stats.successCount,
             failedCount: stats.failedCount,
             failStreak: stats.failStreak,
@@ -14308,11 +14596,11 @@ class PromotionFlowRunner {
     }
     async getStatsOrDefault(context) {
         try {
-            return (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_13__.normalizeStats)(await this.adapter.getStats());
+            return (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_11__.normalizeStats)(await this.adapter.getStats());
         }
         catch (error) {
             this.log('warn', `Promotion stats load failed during ${context}; using safe zero counters error=${this.normalizeError(error)}`);
-            return (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_13__.normalizeStats)(null);
+            return (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_11__.normalizeStats)(null);
         }
     }
     async loadPercentiles(channel) {
@@ -14327,16 +14615,16 @@ class PromotionFlowRunner {
         }
     }
     shouldProcessNextChannel(channel) {
-        return (0,_flow_runner_send_budget__WEBPACK_IMPORTED_MODULE_17__.shouldProcessNextChannel)(hostOf(this), channel);
+        return (0,_flow_runner_send_budget__WEBPACK_IMPORTED_MODULE_19__.shouldProcessNextChannel)(hostOf(this), channel);
     }
     readDailySendBudget(channel, daysLeft) {
-        return (0,_flow_runner_send_budget__WEBPACK_IMPORTED_MODULE_17__.readDailySendBudget)(hostOf(this), channel, daysLeft);
+        return (0,_flow_runner_send_budget__WEBPACK_IMPORTED_MODULE_19__.readDailySendBudget)(hostOf(this), channel, daysLeft);
     }
     reserveDailySendBudget(channel, daysLeft, isFollowUp) {
-        return (0,_flow_runner_send_budget__WEBPACK_IMPORTED_MODULE_17__.reserveDailySendBudget)(hostOf(this), channel, daysLeft, isFollowUp);
+        return (0,_flow_runner_send_budget__WEBPACK_IMPORTED_MODULE_19__.reserveDailySendBudget)(hostOf(this), channel, daysLeft, isFollowUp);
     }
     settleDailySendBudget(result, reservation) {
-        return (0,_flow_runner_send_budget__WEBPACK_IMPORTED_MODULE_17__.settleDailySendBudget)(hostOf(this), result, reservation);
+        return (0,_flow_runner_send_budget__WEBPACK_IMPORTED_MODULE_19__.settleDailySendBudget)(hostOf(this), result, reservation);
     }
     log(level, message) {
         try {
@@ -14355,40 +14643,40 @@ class PromotionFlowRunner {
         }
     }
     formatStats(stats) {
-        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_18__.formatStats)(stats);
+        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_20__.formatStats)(stats);
     }
     describeSelection(selection, intelligenceDocs) {
-        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_18__.describeSelection)(hostOf(this), selection, intelligenceDocs);
+        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_20__.describeSelection)(hostOf(this), selection, intelligenceDocs);
     }
     toChannelIdSet(channels) {
-        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_18__.toChannelIdSet)(channels);
+        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_20__.toChannelIdSet)(channels);
     }
     getSkippedSelectionReason(channel, intelligenceByChannel) {
-        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_18__.getSkippedSelectionReason)(channel, intelligenceByChannel);
+        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_20__.getSkippedSelectionReason)(channel, intelligenceByChannel);
     }
     summarizeSelectionChannels(channels, label) {
-        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_18__.summarizeSelectionChannels)(hostOf(this), channels, label);
+        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_20__.summarizeSelectionChannels)(hostOf(this), channels, label);
     }
     formatCounts(counts) {
-        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_18__.formatCounts)(counts);
+        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_20__.formatCounts)(counts);
     }
     formatChannel(channel) {
-        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_18__.formatChannel)(channel);
+        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_20__.formatChannel)(channel);
     }
     formatCompactChannel(channel) {
-        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_18__.formatCompactChannel)(channel);
+        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_20__.formatCompactChannel)(channel);
     }
     formatCandidate(candidate) {
-        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_18__.formatCandidate)(candidate);
+        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_20__.formatCandidate)(candidate);
     }
     compact(value) {
-        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_18__.compact)(value);
+        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_20__.compact)(value);
     }
     safeJson(value) {
-        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_18__.safeJson)(hostOf(this), value);
+        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_20__.safeJson)(hostOf(this), value);
     }
     normalizeError(error) {
-        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_18__.normalizeError)(error);
+        return (0,_flow_runner_formatting__WEBPACK_IMPORTED_MODULE_20__.normalizeError)(error);
     }
     recordCycleFailure(error) {
         this.health.totalCycleFailures += 1;
@@ -14424,12 +14712,14 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _utils_channel_id__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../utils/channel-id */ "../../packages/tg-channel-state/src/channel-message-promotions/utils/channel-id.ts");
 /* harmony import */ var _pool_pool_types__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../pool/pool-types */ "../../packages/tg-channel-state/src/channel-message-promotions/pool/pool-types.ts");
 /* harmony import */ var _utils_guards__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../../utils/guards */ "../../packages/tg-channel-state/src/utils/guards.ts");
+/* harmony import */ var _config_promo_app_config__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../config/promo-app-config */ "../../packages/tg-channel-state/src/channel-message-promotions/config/promo-app-config.ts");
+
 
 
 
 
 /** A verify item older than this (from `sentAt`, else `timestamp`) is dropped at restore (P2 fix 4). */
-const VERIFY_RESTORE_MAX_AGE_MS = 60 * 60 * 1000;
+const VERIFY_RESTORE_MAX_AGE_MS = _config_promo_app_config__WEBPACK_IMPORTED_MODULE_4__.VERIFY_WINDOW_MS;
 /** Identity of a queue item: `<workType>:<channelId>:<messageId>` (the Redis `messageKey` format). */
 function queueItemKey(message) {
     return `${message.workType === 'followUp' ? 'followUp' : 'verify'}:${message.channelId}:${message.messageId}`;
@@ -14438,12 +14728,16 @@ class PromotionMessageQueue {
     constructor(maxSize = 500, persistence = null) {
         this.items = [];
         this.restored = false;
-        this.v3 = null;
+        /** Flow v3 mode, read live from the runner's flags (see bindFollowUpV3). Null = today's behaviour. */
+        this.v3Source = () => null;
         this.dropReporter = null;
         /** Flow v3 P4: check attempts per live item, in memory only (never persisted, never in list()). */
         this.attempts = new WeakMap();
         this.maxSize = Number.isFinite(maxSize) && maxSize > 0 ? Math.floor(maxSize) : 500;
         this.persistence = persistence;
+    }
+    get v3() {
+        return this.v3Source();
     }
     get size() {
         return this.items.length;
@@ -14463,13 +14757,20 @@ class PromotionMessageQueue {
             await this.persistence.enqueue(normalized);
         this.enqueueNormalized(normalized);
     }
-    /**
-     * Flow v3 (P2): the runner sets this every cycle from the `fu` flag. Null keeps today's queue:
-     * identity removal, no restore age filter, no size-drop log.
-     */
+    /** Flow v3 (P2): a fixed mode (tests, callers without a runner). Null keeps today's queue. */
     setFollowUpV3(mode) {
-        this.v3 = mode;
-        this.persistence?.setFollowUpV3?.(mode !== null);
+        this.bindFollowUpV3(() => mode);
+    }
+    /**
+     * Flow v3 (P2): the runner binds its `fu` mode here (one source, no copy). Null keeps today's queue:
+     * identity removal, no restore age filter, no size-drop log. The persistence reads the same source.
+     */
+    bindFollowUpV3(source) {
+        this.v3Source = source;
+        if (typeof this.persistence?.bindFollowUpV3 === 'function')
+            this.persistence.bindFollowUpV3(() => this.v3Source() !== null);
+        else
+            this.persistence?.setFollowUpV3?.(source() !== null);
     }
     /** Flow v3 P4: the runner sets this once; it logs the size drop line and counts every drop. */
     setDropReporter(reporter) {
@@ -14519,7 +14820,7 @@ class PromotionMessageQueue {
         if (this.persistence) {
             const persisted = await this.persistence.load();
             const v3 = this.v3;
-            const nowMs = v3?.now?.() ?? Date.now();
+            const nowMs = Date.now();
             let droppedLegacy = 0;
             let droppedExpired = 0;
             let kept = 0;
@@ -14568,10 +14869,6 @@ class PromotionMessageQueue {
             }
         }
         return dropped.reverse();
-    }
-    /** Flow v3: does the in-memory queue hold this key (verify vs followUp distinct)? */
-    hasKey(message) {
-        return this.items.some((item) => queueItemKey(item) === queueItemKey(message));
     }
     /** Read-only copies of the queued items (measurement: cycle-end counts and the log-only sweep). */
     list() {
@@ -14652,7 +14949,7 @@ function restoreDropReason(message, nowMs, maxLateMs) {
             return 'legacy_no_sentAt';
         if (message.dueAt === undefined)
             return 'legacy_no_dueAt';
-        return nowMs > message.dueAt + maxLateMs ? 'expired' : null;
+        return (0,_config_promo_app_config__WEBPACK_IMPORTED_MODULE_4__.isFollowUpExpired)(message.dueAt, nowMs, maxLateMs) ? 'expired' : null;
     }
     // Verify items are never re-armed: without sentAt, timestamp is the send time.
     const sentAt = message.sentAt ?? message.timestamp;
@@ -15266,6 +15563,10 @@ function evaluatePromotionChannelEligibility(input) {
     const health = (0,_channel_state__WEBPACK_IMPORTED_MODULE_0__.evaluateChannelPromotionHealth)({ ...channel, now: safeNow });
     if (!health.promotable)
         return { eligible: false, reason: health.reason };
+    // 24 h recent-failure gate. No production caller passes `previousResult` (eligibleNow stopped in
+    // P5.5), so it never fires in the runner. It stays because evaluatePromotionChannelEligibility and
+    // PreviousPromotionResultSnapshot are public package exports with their own unit tests
+    // (eligibility-policy.test.mjs); remove with the flow v3 flag cleanup (P12).
     const previousFailure = previousResult && !previousResult.success ? previousResult : null;
     const previousFailureTimestamp = previousFailure
         ? safeTimestamp(previousFailure.lastCheckTimestamp, 0)
@@ -15336,13 +15637,12 @@ function eligibleNow(channel, doc, state, now) {
         safetyStatus: null,
         percentiles: null,
         recentlyQueued: false,
-        ...(state.previousResult ? { previousResult: state.previousResult } : {}),
     });
     if (!result.eligible) {
         const detail = result.reason ?? '';
         if (detail === 'banned')
             return exclude('banned', detail);
-        if (detail.startsWith('health_score_below_threshold') || detail.startsWith('Recent failure'))
+        if (detail.startsWith('health_score_below_threshold'))
             return exclude('health', detail);
         return exclude(CHANNEL_RESTRICTION_REASONS.has(detail) ? 'restricted_channel' : 'restricted_mobile', detail);
     }
@@ -16734,6 +17034,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _logging_promo_logger__WEBPACK_IMPORTED_MODULE_22__ = __webpack_require__(/*! ../logging/promo-logger */ "../../packages/tg-channel-state/src/channel-message-promotions/logging/promo-logger.ts");
 /* harmony import */ var _tg_core_utils_sanitizePromotionRendering__WEBPACK_IMPORTED_MODULE_23__ = __webpack_require__(/*! @tg/core/utils/sanitizePromotionRendering */ "../../packages/tg-core/src/utils/sanitizePromotionRendering.ts");
 /* harmony import */ var _tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_24__ = __webpack_require__(/*! @tg/core/utils/dc-ip-family */ "../../packages/tg-core/src/utils/dc-ip-family.ts");
+/* harmony import */ var _config_promo_app_config__WEBPACK_IMPORTED_MODULE_25__ = __webpack_require__(/*! ../config/promo-app-config */ "../../packages/tg-channel-state/src/channel-message-promotions/config/promo-app-config.ts");
 
 
 
@@ -16770,6 +17071,7 @@ function readPromoteRestartState(mobile, clientId) {
 
 
 
+
 // =================================================================
 //  BAN-RATE GATE (restart-state helpers: @tg/core/state/state-redis)
 // =================================================================
@@ -16787,6 +17089,8 @@ const BAN_RATE_GATE_RECHECK_MS = 60000;
  * Each probe adds one landed (window refreshes, gate clears once below the threshold) or one ban (stays tripped).
  */
 const BAN_RATE_GATE_PROBE_INTERVAL_MS = 5 * 60000;
+/** A SpamBot-blocked gate that cleared by bans ageing out and re-trips within this window logs the re-trip at debug. */
+const BAN_RATE_GATE_FLAP_WINDOW_MS = 24 * 60 * 60000;
 /** True when `failed` (permanent bans) of the last `total` sends is at or above the gate (needs a full window). */
 function banRateGateTrips(outcomes) {
     if (!outcomes || outcomes.total < BAN_RATE_GATE_WINDOW)
@@ -16796,7 +17100,7 @@ function banRateGateTrips(outcomes) {
 /** Shared post-send liveness window used by both tg-aut and promote-clients. */
 const PROMOTION_MESSAGE_CHECK_DELAY_MS = 30000;
 /** Flow v3 P4: age cap for the sent-text map (the success hook takes it right after the send). */
-const SENT_PROMO_TEXT_MAX_AGE_MS = 60 * 60 * 1000;
+const SENT_PROMO_TEXT_MAX_AGE_MS = _config_promo_app_config__WEBPACK_IMPORTED_MODULE_25__.VERIFY_WINDOW_MS;
 const intelligenceLog = new _logging_promo_logger__WEBPACK_IMPORTED_MODULE_22__.PromoLogger("intelligence");
 class BasePromotionEngine {
     constructor(client, dialogManager, clientId, mobile) {
@@ -16834,7 +17138,7 @@ class BasePromotionEngine {
          * channelId -> text of the promo just sent, for the success hook's promo-log quote (the runner result only
          * carries the id and a normalised text). Taken on read; bounded in case a hook never fires.
          */
-        /** Sent text per channel until the success hook takes it. Size 200 and (flow v3 P4) 1 h age cap. */
+        /** Sent text per channel until the success hook takes it. Size SENT_PROMO_TEXT_MAX_ENTRIES (200) and (flow v3 P4) 1 h age cap. */
         this.sentPromoTexts = new Map();
         this.stats = {
             successCount: 0,
@@ -16857,6 +17161,10 @@ class BasePromotionEngine {
         this.restartRestore = Promise.resolve();
         this.promotionStatePersistScheduled = false;
         this.banRateGate = null;
+        /** The blocked-probe info line was logged for the current trip (fix B: once per trip, then debug). */
+        this.banRateGateProbeBlockLogged = false;
+        /** When the gate last cleared by bans ageing out while SpamBot-blocked (a flap); null otherwise. */
+        this.banRateGateSpamFlapClearAt = null;
         // Configuration (identical defaults across apps)
         this.MESSAGE_CHECK_DELAY = PROMOTION_MESSAGE_CHECK_DELAY_MS;
         this.MAX_QUEUE_SIZE = 200;
@@ -16976,14 +17284,19 @@ class BasePromotionEngine {
      * account for a swap. Only read after a failure (or while tripped); a read failure keeps the current behaviour.
      * While tripped: re-read every BAN_RATE_GATE_RECHECK_MS, and every BAN_RATE_GATE_PROBE_INTERVAL_MS allow exactly
      * one probe send; the next check re-reads at once, so a landed probe can clear the gate and a banned one keeps it.
+     * No probe while SpamBot says the account is limited or harsh (spamProbeBlock): nearly every such send is
+     * banned. The 60 s re-read still runs, and probing resumes once SpamBot clears it or limitedUntil passes.
+     * While blocked, bans ageing out clear and re-trip the gate; those flaps log at debug (the first trip stays warn).
      */
     async banRateGateAllows(now = Date.now()) {
         const gate = this.banRateGate;
         if (!gate?.tripped && this.stats.failStreak <= 0)
             return true;
         const judgingProbe = gate?.tripped === true && gate.probePending === true;
-        const probeDue = gate?.tripped === true && !judgingProbe
+        const probeIntervalElapsed = gate?.tripped === true && !judgingProbe
             && now - (gate.probeAt ?? gate.trippedAt ?? now) >= BAN_RATE_GATE_PROBE_INTERVAL_MS;
+        const spamBlock = probeIntervalElapsed ? this.spamProbeBlock(now) : null;
+        const probeDue = probeIntervalElapsed && !spamBlock;
         if (gate?.tripped && !judgingProbe && !probeDue && now - gate.checkedAt < BAN_RATE_GATE_RECHECK_MS)
             return false;
         let outcomes = null;
@@ -17011,14 +17324,36 @@ class BasePromotionEngine {
             probeAt: tripped ? (probe ? now : lastProbeAt) : null,
             probePending: probe,
         };
+        const tag = `[${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_24__.maskMobile)(this.mobile)}] PROMO`;
+        const counts = `${outcomes.failed}/${outcomes.total}`;
         if (tripped && !gate?.tripped) {
-            this.logRunnerMessage('warn', `[${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_24__.maskMobile)(this.mobile)}] PROMO ban-rate gate: ${outcomes.failed}/${outcomes.total} recent sends permanently banned (>= ${Math.round(BAN_RATE_GATE_THRESHOLD * 100)}%); stopping the round and asking for a swap`);
+            this.banRateGateProbeBlockLogged = false;
+            const flapAt = this.banRateGateSpamFlapClearAt;
+            this.banRateGateSpamFlapClearAt = null;
+            if (flapAt !== null && now - flapAt < BAN_RATE_GATE_FLAP_WINDOW_MS && this.spamProbeBlock(now)) {
+                this.logRunnerMessage('debug', `${tag} ban-rate gate re-tripped (${counts}) after bans aged out; SpamBot-limited, no probe`);
+            }
+            else {
+                this.logRunnerMessage('warn', `${tag} ban-rate gate: ${counts} recent sends permanently banned (>= ${Math.round(BAN_RATE_GATE_THRESHOLD * 100)}%); stopping the round and asking for a swap`);
+            }
         }
         else if (probe) {
-            this.logRunnerMessage('info', `[${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_24__.maskMobile)(this.mobile)}] PROMO ban-rate gate still tripped (${outcomes.failed}/${outcomes.total}); allowing one probe send`);
+            this.banRateGateProbeBlockLogged = false;
+            this.logRunnerMessage('info', `${tag} ban-rate gate still tripped (${counts}); allowing one probe send`);
+        }
+        else if (tripped && spamBlock) {
+            const until = spamBlock.limitedUntil !== null && Number.isFinite(spamBlock.limitedUntil)
+                ? new Date(spamBlock.limitedUntil).toISOString()
+                : 'none';
+            const line = `${tag} ban gate: probe blocked, spam=${spamBlock.status} until=${until} (${counts})`;
+            this.logRunnerMessage(this.banRateGateProbeBlockLogged ? 'debug' : 'info', line);
+            this.banRateGateProbeBlockLogged = true;
         }
         else if (!tripped && gate?.tripped) {
-            this.logRunnerMessage('info', `[${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_24__.maskMobile)(this.mobile)}] PROMO ban-rate gate cleared (${outcomes.failed}/${outcomes.total})`);
+            // Cleared without judging a probe while SpamBot-blocked: bans aged out (a flap, the next ban re-trips).
+            const flap = !judgingProbe && this.spamProbeBlock(now) !== null;
+            this.banRateGateSpamFlapClearAt = flap ? now : null;
+            this.logRunnerMessage(flap ? 'debug' : 'info', `${tag} ban-rate gate cleared (${counts})${flap ? ' by bans ageing out; SpamBot-limited' : ''}`);
         }
         return !tripped || probe;
     }
@@ -17026,9 +17361,38 @@ class BasePromotionEngine {
     getBanRateGateState() {
         return this.banRateGate ? { ...this.banRateGate } : null;
     }
-    /** Last SpamBot status, reported in the runner heartbeat only (harsh never changes sending here). */
+    /**
+     * Last SpamBot status (process memory, no read). Feeds the runner heartbeat, and stops the tripped ban-rate
+     * gate's probe (spamProbeBlock). It never changes sending while the gate is not tripped.
+     */
     getSpamStatus() {
         return null;
+    }
+    /** limitedUntil (epoch ms) of the last SpamBot 'limited' verdict; null = undated, not limited, or unknown. */
+    getSpamLimitedUntil() {
+        return null;
+    }
+    /**
+     * The SpamBot verdict that stops the tripped gate's probe: harsh, or limited with limitedUntil in the future (or
+     * undated: limited until SpamBot clears it). null = no block: unknown status, 'free', a passed limitedUntil, or a
+     * getter that throws (the probe runs as before).
+     */
+    spamProbeBlock(now) {
+        let status;
+        let limitedUntil;
+        try {
+            status = this.getSpamStatus();
+            limitedUntil = status === 'limited' ? this.getSpamLimitedUntil() : null;
+        }
+        catch {
+            return null;
+        }
+        if (status === 'harsh')
+            return { status, limitedUntil: null };
+        if (status !== 'limited')
+            return null;
+        const blocked = limitedUntil === null || !Number.isFinite(limitedUntil) || limitedUntil > now;
+        return blocked ? { status, limitedUntil } : null;
     }
     mergeLiveChannelInfo(existing, live) {
         return (0,_channel_state__WEBPACK_IMPORTED_MODULE_16__.mergeLiveChannelDocument)(existing, live, {
@@ -17758,7 +18122,7 @@ class BasePromotionEngine {
                 this.pruneSentPromoTexts();
                 this.sentPromoTexts.delete(request.channel.channelId);
                 this.sentPromoTexts.set(request.channel.channelId, { text: sendResult.message.message || materialized.messageContent || '', at: Date.now() });
-                if (this.sentPromoTexts.size > 200) {
+                if (this.sentPromoTexts.size > _config_promo_app_config__WEBPACK_IMPORTED_MODULE_25__.SENT_PROMO_TEXT_MAX_ENTRIES) {
                     this.sentPromoTexts.delete(this.sentPromoTexts.keys().next().value);
                     this.logRunnerMessage('debug', `[${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_24__.maskMobile)(this.mobile)}] sent promo text drop | pruned=1 | reason=size`);
                 }
@@ -19865,13 +20229,15 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   writeChannelCooldown: () => (/* binding */ writeChannelCooldown)
 /* harmony export */ });
 /* harmony import */ var _config_promo_flags_v3__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../config/promo-flags-v3 */ "../../packages/tg-channel-state/src/channel-message-promotions/config/promo-flags-v3.ts");
-/* harmony import */ var _utils_channel_id__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../utils/channel-id */ "../../packages/tg-channel-state/src/channel-message-promotions/utils/channel-id.ts");
-/* harmony import */ var _redis_utils__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./redis-utils */ "../../packages/tg-channel-state/src/channel-message-promotions/redis/redis-utils.ts");
+/* harmony import */ var _config_promo_app_config__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../config/promo-app-config */ "../../packages/tg-channel-state/src/channel-message-promotions/config/promo-app-config.ts");
+/* harmony import */ var _utils_channel_id__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../utils/channel-id */ "../../packages/tg-channel-state/src/channel-message-promotions/utils/channel-id.ts");
+/* harmony import */ var _redis_utils__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ./redis-utils */ "../../packages/tg-channel-state/src/channel-message-promotions/redis/redis-utils.ts");
 
 
 
-const CHANNEL_COOLDOWN_MS_TGAUT = 6 * 60 * 60 * 1000;
-const CHANNEL_COOLDOWN_MS_PROMOTE = 3 * 60 * 60 * 1000;
+
+const CHANNEL_COOLDOWN_MS_TGAUT = (0,_config_promo_app_config__WEBPACK_IMPORTED_MODULE_1__.promoAppConfig)('tg-aut').channelCooldownMs;
+const CHANNEL_COOLDOWN_MS_PROMOTE = (0,_config_promo_app_config__WEBPACK_IMPORTED_MODULE_1__.promoAppConfig)('promote').channelCooldownMs;
 /** Most expired fields one read deletes. */
 const CHANNEL_COOLDOWN_PRUNE_MAX = 100;
 const HSET_EXPIRE_SCRIPT = "redis.call('HSET', KEYS[1], ARGV[1], ARGV[2]); redis.call('EXPIRE', KEYS[1], ARGV[3]); return 1";
@@ -19880,16 +20246,12 @@ const HDEL_EXPIRED_SCRIPT = "local n = 0; for i = 1, #ARGV, 2 do if redis.call('
 function channelStateKey(app, mobile) {
     if (app !== 'tgaut' && app !== 'promote')
         return null;
-    const safeMobile = (0,_redis_utils__WEBPACK_IMPORTED_MODULE_2__.normalizeKeyPart)(mobile);
+    const safeMobile = (0,_redis_utils__WEBPACK_IMPORTED_MODULE_3__.normalizeKeyPart)(mobile);
     return safeMobile ? `promote:chstate:${app}:${safeMobile}` : null;
 }
 /** Cooldown per app (doc 5 chstate row): 6 h tg-aut, 3 h promote. Unknown app: null (no cooldown). */
 function channelCooldownMsFor(pickerApp) {
-    if (pickerApp === 'tg-aut')
-        return CHANNEL_COOLDOWN_MS_TGAUT;
-    if (pickerApp === 'promote')
-        return CHANNEL_COOLDOWN_MS_PROMOTE;
-    return null;
+    return (0,_config_promo_app_config__WEBPACK_IMPORTED_MODULE_1__.promoAppConfig)(pickerApp)?.channelCooldownMs ?? null;
 }
 /** `eval` is required: it is the only write path (atomic HSET + EXPIRE) and it also reads (HGETALL script). */
 function channelCooldownSupported(redis) {
@@ -19909,7 +20271,7 @@ async function readChannelCooldowns(redis, app, mobile, nowMs) {
         return out;
     const expired = [];
     for (const [field, raw] of Object.entries(hash)) {
-        const channelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_1__.normalizeChannelId)(field);
+        const channelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_2__.normalizeChannelId)(field);
         let until = Number.NaN;
         try {
             const parsed = JSON.parse(String(raw));
@@ -19936,7 +20298,7 @@ async function readChannelCooldowns(redis, app, mobile, nowMs) {
 /** Set one channel's cooldown end and reset the hash TTL to `ttlMs`, in one Lua call. Throws on a Redis error or a client without eval. */
 async function writeChannelCooldown(redis, app, mobile, channelId, untilMs, ttlMs) {
     const key = channelStateKey(app, mobile);
-    const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_1__.normalizeChannelId)(channelId);
+    const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_2__.normalizeChannelId)(channelId);
     if (!key || !safeChannelId)
         return;
     if (typeof redis.eval !== 'function')
@@ -20223,13 +20585,15 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
 /* harmony import */ var _utils_guards__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../../utils/guards */ "../../packages/tg-channel-state/src/utils/guards.ts");
 /* harmony import */ var _redis_utils__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./redis-utils */ "../../packages/tg-channel-state/src/channel-message-promotions/redis/redis-utils.ts");
+/* harmony import */ var _config_promo_app_config__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../config/promo-app-config */ "../../packages/tg-channel-state/src/channel-message-promotions/config/promo-app-config.ts");
+
 
 
 
 const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_0__.Logger("tg-channel-state:verification-queue");
 const PROMOTION_VERIFICATION_TTL_SECONDS = 48 * 60 * 60;
 /** Flow v3 (P2 fix 6): verify payload 1 h, index 6 h, follow-up payload `dueAt + 2 h`, min 60 s. */
-const PROMOTION_V3_VERIFY_PAYLOAD_TTL_SECONDS = 60 * 60;
+const PROMOTION_V3_VERIFY_PAYLOAD_TTL_SECONDS = _config_promo_app_config__WEBPACK_IMPORTED_MODULE_3__.VERIFY_WINDOW_MS / 1000;
 const PROMOTION_V3_INDEX_TTL_SECONDS = 6 * 60 * 60;
 const PROMOTION_V3_FOLLOW_UP_GRACE_MS = 2 * 60 * 60 * 1000;
 const PROMOTION_V3_MIN_PAYLOAD_TTL_SECONDS = 60;
@@ -20253,7 +20617,8 @@ function followUpClaimTtlSeconds(message, nowMs) {
 }
 class RedisPromotionVerificationQueue {
     constructor(redis, mobile, maxSize = 500, now = Date.now) {
-        this.v3 = false;
+        /** Flow v3 `fu` mode, read live (bindFollowUpV3) or fixed (setFollowUpV3). Off keeps today's TTLs, index and load. */
+        this.v3Source = () => false;
         if (!isRedisLike(redis))
             throw new Error('RedisPromotionVerificationQueue requires Redis get/set/del/lrange/eval');
         const safeMobile = (0,_redis_utils__WEBPACK_IMPORTED_MODULE_2__.normalizeKeyPart)(mobile);
@@ -20264,9 +20629,17 @@ class RedisPromotionVerificationQueue {
         this.maxSize = Number.isFinite(maxSize) && maxSize > 0 ? Math.floor(maxSize) : 500;
         this.now = now;
     }
-    /** Flow v3 (P2): set every cycle from the `fu` flag. Off keeps today's TTLs, index and load. */
+    get v3() {
+        return this.v3Source();
+    }
+    /** Flow v3 (P2): a fixed `fu` mode. */
     setFollowUpV3(on) {
-        this.v3 = on === true;
+        const value = on === true;
+        this.v3Source = () => value;
+    }
+    /** Flow v3 (P2): the queue binds the runner's `fu` mode here, so no copy is kept. */
+    bindFollowUpV3(source) {
+        this.v3Source = () => source() === true;
     }
     async load() {
         const ids = await this.redis.lrange(this.indexKey(), 0, -1);
@@ -62279,8 +62652,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "19bec5bab0ea207d325220129b5a88684f2ff767" : 0;
-    const builtAt =  true ? "2026-11-18T03:52:24.975Z" : 0;
+    const sha =  true ? "732b8ae144e463fae281399349cd6cbd5445ba83" : 0;
+    const builtAt =  true ? "2026-11-18T07:31:12.506Z" : 0;
     return { sha, builtAt };
 }
 
@@ -73631,6 +74004,9 @@ async function notifyGenericSpamBotMessage(text) {
  * decode this account as healthy (decode forces 'free' to daysLeft -1).
  */
 function persistUndatedLimit(mobile) {
+    // In-memory too (fix B): the ban-rate gate reads it to stop probing; without it the state stays free/null
+    // until a restart restores the undated limit from tg::acct.
+    (0,_telegram_spam_state__WEBPACK_IMPORTED_MODULE_16__.setSpamState)("limited", null);
     const sanitized = (0,_tg_core_utils_spam_limit__WEBPACK_IMPORTED_MODULE_4__.sanitizeLimitedDaysLeft)(-1);
     (0,_reply_switch__WEBPACK_IMPORTED_MODULE_12__.setDaysLeft)(sanitized);
     persistTgautDaysLeft(sanitized);
@@ -109923,7 +110299,11 @@ const DEFAULT_MAX_PER_HOUR = 25;
 const DEFAULT_RAMP_DAY1 = 18;
 const DEFAULT_RAMP_DAY2 = 22;
 const DAY_MS = 24 * 60 * 60 * 1000;
-/** A follow-up later than this past its due time (due = parent + ~60 min) is skipped instead of sent. */
+/**
+ * A follow-up later than this past its due time (due = parent + ~60 min) is skipped instead of sent.
+ * Same value and rule as the tg-aut entry in @tg/channel-state config/promo-app-config.ts (kept as a
+ * local copy so this module does not load the promotions package).
+ */
 const FOLLOW_UP_MAX_LATE_MS = 30 * 60 * 1000;
 /**
  * A pass whose reservation is not in Redis yet still holds its slot, so two callers cannot both take
@@ -110263,6 +110643,9 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_20__.Ba
     }
     getSpamStatus() {
         return (0,_telegram_spam_state__WEBPACK_IMPORTED_MODULE_19__.currentSpamStatus)();
+    }
+    getSpamLimitedUntil() {
+        return (0,_telegram_spam_state__WEBPACK_IMPORTED_MODULE_19__.currentSpamLimitedUntil)();
     }
     logRunnerMessage(level, message) {
         const normalized = this.formatHelperRunnerLog(message);
@@ -128054,6 +128437,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   MAX_SWAP_REST_DAYS: () => (/* binding */ MAX_SWAP_REST_DAYS),
 /* harmony export */   MIN_LIMIT_DAYS_FOR_SWAP: () => (/* binding */ MIN_LIMIT_DAYS_FOR_SWAP),
 /* harmony export */   clampSwapRestDays: () => (/* binding */ clampSwapRestDays),
+/* harmony export */   currentSpamLimitedUntil: () => (/* binding */ currentSpamLimitedUntil),
 /* harmony export */   currentSpamStatus: () => (/* binding */ currentSpamStatus),
 /* harmony export */   daysUntil: () => (/* binding */ daysUntil),
 /* harmony export */   resetSpamState: () => (/* binding */ resetSpamState),
@@ -128084,6 +128468,10 @@ function setSpamState(status, limitedUntil) {
 /** The last verdict's status (live, or restored at boot from tg::acct), or null when none is known. */
 function currentSpamStatus() {
     return current?.status ?? null;
+}
+/** The last verdict's limitedUntil in epoch ms (dated 'limited' only), or null. */
+function currentSpamLimitedUntil() {
+    return current?.limitedUntil ? current.limitedUntil.getTime() : null;
 }
 function resetSpamState() {
     current = null;
