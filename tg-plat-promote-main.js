@@ -45442,9 +45442,14 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   REACT_HOLDOUT_SALT: () => (/* binding */ REACT_HOLDOUT_SALT),
 /* harmony export */   RECENT_SIGNAL_WINDOW_MS: () => (/* binding */ RECENT_SIGNAL_WINDOW_MS),
 /* harmony export */   RESTRICT_PAUSE_EARLY_MIN_ATTEMPTS: () => (/* binding */ RESTRICT_PAUSE_EARLY_MIN_ATTEMPTS),
+/* harmony export */   RESTRICT_PAUSE_EARLY_PAUSE_MS: () => (/* binding */ RESTRICT_PAUSE_EARLY_PAUSE_MS),
 /* harmony export */   RESTRICT_PAUSE_EARLY_SHARE: () => (/* binding */ RESTRICT_PAUSE_EARLY_SHARE),
+/* harmony export */   RESTRICT_PAUSE_HIGH_MIN_ATTEMPTS: () => (/* binding */ RESTRICT_PAUSE_HIGH_MIN_ATTEMPTS),
+/* harmony export */   RESTRICT_PAUSE_HIGH_SHARE: () => (/* binding */ RESTRICT_PAUSE_HIGH_SHARE),
 /* harmony export */   RESTRICT_PAUSE_LOG_EVERY: () => (/* binding */ RESTRICT_PAUSE_LOG_EVERY),
+/* harmony export */   RESTRICT_PAUSE_MAX_SUCCESS_SHARE: () => (/* binding */ RESTRICT_PAUSE_MAX_SUCCESS_SHARE),
 /* harmony export */   RESTRICT_PAUSE_MIN_ATTEMPTS: () => (/* binding */ RESTRICT_PAUSE_MIN_ATTEMPTS),
+/* harmony export */   RESTRICT_PAUSE_PROBE_ATTEMPTS: () => (/* binding */ RESTRICT_PAUSE_PROBE_ATTEMPTS),
 /* harmony export */   RESTRICT_PAUSE_SHARE: () => (/* binding */ RESTRICT_PAUSE_SHARE),
 /* harmony export */   RestrictPauseTracker: () => (/* binding */ RestrictPauseTracker),
 /* harmony export */   istDayKey: () => (/* binding */ istDayKey),
@@ -45452,6 +45457,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   reactionHoldoutArm: () => (/* binding */ reactionHoldoutArm),
 /* harmony export */   readHoldoutMode: () => (/* binding */ readHoldoutMode),
 /* harmony export */   readRestrictPauseEarly: () => (/* binding */ readRestrictPauseEarly),
+/* harmony export */   readRestrictPauseHighShare: () => (/* binding */ readRestrictPauseHighShare),
 /* harmony export */   readRestrictPauseMode: () => (/* binding */ readRestrictPauseMode),
 /* harmony export */   readSignalWindowMode: () => (/* binding */ readSignalWindowMode),
 /* harmony export */   readSkipBroadcast: () => (/* binding */ readSkipBroadcast),
@@ -45464,8 +45470,11 @@ __webpack_require__.r(__webpack_exports__);
  * Flags are read on each pool refresh / outcome, so a remote-config change applies without a restart
  * of the loop (the process still reads process.env as copied at boot).
  *
- *   REACT_RESTRICT_PAUSE  record | on | off   per account per IST day: restricted >= 20% over >= 50 attempts (base),
- *                                             or >= 80% over >= 20 attempts (early; REACT_RESTRICT_PAUSE_EARLY_MIN/_SHARE)
+ *   REACT_RESTRICT_PAUSE  record | on | off   per account per IST day: restricted >= 20% and successes < 50% over >= 50
+ *                                             attempts (base, until IST midnight), or restricted >= 1/3 over >= 100
+ *                                             attempts (high, until IST midnight; REACT_RESTRICT_PAUSE_HIGH_SHARE),
+ *                                             or >= 80% over >= 20 attempts with 0 successes in the window (early; 2 h, 4 h,
+ *                                             8 h ... to midnight; REACT_RESTRICT_PAUSE_EARLY_MIN/_SHARE)
  *   REACT_SIGNAL_WINDOW   all-time | recent   source of the 35% proven-DM pool slots
  *   REACT_HOLDOUT         off | record | on   50/50 channel holdout, salt 'react-holdout-2026-11'
  *   REACT_SKIP_BROADCAST  off | on            drop broadcast channels from the pool
@@ -45483,6 +45492,8 @@ function readRestrictPauseMode(env = process.env) {
 }
 const RESTRICT_PAUSE_EARLY_MIN_ATTEMPTS = 20;
 const RESTRICT_PAUSE_EARLY_SHARE = 0.8;
+/** An early pause lasts this long; then the account tries again with a fresh window. */
+const RESTRICT_PAUSE_EARLY_PAUSE_MS = 2 * 3600000;
 /**
  * Early restrict-pause rule: REACT_RESTRICT_PAUSE_EARLY_MIN (whole number >= 1, default 20) and
  * REACT_RESTRICT_PAUSE_EARLY_SHARE (0 < share <= 1, default 0.8). A bad value falls back to its default.
@@ -45496,6 +45507,14 @@ function readRestrictPauseEarly(env = process.env) {
     };
 }
 /** REACT_SIGNAL_WINDOW: 'recent'; anything else (or unset) = 'all-time'. */
+/** Second base rule (owner, 2026-11-18): restricted >= this share over >= RESTRICT_PAUSE_HIGH_MIN_ATTEMPTS in the IST day. */
+const RESTRICT_PAUSE_HIGH_SHARE = 1 / 3;
+const RESTRICT_PAUSE_HIGH_MIN_ATTEMPTS = 100;
+/** REACT_RESTRICT_PAUSE_HIGH_SHARE (0 < share <= 1, default 1/3). A bad value falls back to the default. */
+function readRestrictPauseHighShare(env = process.env) {
+    const share = Number(raw(env, 'REACT_RESTRICT_PAUSE_HIGH_SHARE') || NaN);
+    return Number.isFinite(share) && share > 0 && share <= 1 ? share : RESTRICT_PAUSE_HIGH_SHARE;
+}
 function readSignalWindowMode(env = process.env) {
     return raw(env, 'REACT_SIGNAL_WINDOW') === 'recent' ? 'recent' : 'all-time';
 }
@@ -45534,62 +45553,165 @@ function nextIstMidnightMs(nowMs) {
 // ── restricted-share pause ───────────────────────────────────────────────────────────────────
 const RESTRICT_PAUSE_MIN_ATTEMPTS = 50;
 const RESTRICT_PAUSE_SHARE = 0.2;
+/** Base rule needs successes under this share too: a healthy account with a restricted burst still succeeds. */
+const RESTRICT_PAUSE_MAX_SUCCESS_SHARE = 0.5;
 /** 'record': one line at the first crossing of the day, then one per this many further attempts. */
 const RESTRICT_PAUSE_LOG_EVERY = 100;
+/** After an early pause, the next window trips on this many attempts (still 0 successes, same share). */
+const RESTRICT_PAUSE_PROBE_ATTEMPTS = 5;
 /**
- * Per-account restricted share for the current IST day. Counts every reaction attempt outcome that
- * names a channel. Resets at IST midnight; a pause set under 'on' ends at that midnight.
- * In memory: a process restart starts the day's counts again (and drops a running pause).
+ * Per-account restricted share. Counts every reaction attempt outcome that names a channel.
+ *
+ * base:  restricted >= 20% AND successes < 50% of >= 50 attempts in the IST day (raw counts). Pauses until IST
+ *        midnight. Restricted retries arrive every 3-11 s against one success per ~25 s, so a healthy account can
+ *        show a restricted burst (****0847: 18 of its first 20); it still succeeds on most attempts. A limited
+ *        account with a lucky success (****2630: 1 success to 39 restricted) does not.
+ * early: >= 80% restricted over >= 20 attempts with ZERO successes in the current window, raw counts (so a dead
+ *        account retrying the same channels still trips). A tripping window's outcomes leave the base count; outcomes
+ *        that land during an early pause count for no rule. Pauses 2 h, then 4 h, 8 h, ... capped at IST midnight;
+ *        after a pause the window restarts and trips on RESTRICT_PAUSE_PROBE_ATTEMPTS. A dead account makes
+ *        20 + 5 + 5 + 5 = 35 attempts a day; one whose limit lifted resumes after 2, 6 or 14 h.
+ *
+ * In memory: a process restart starts the counts again (and drops a running pause).
  */
 class RestrictPauseTracker {
     constructor() {
         this.day = '';
         this.attempts = 0;
         this.restricted = 0;
+        this.successes = 0;
         this.crossedAtAttempts = 0;
         this.pausedUntilMs = 0;
+        this.windowAttempts = 0;
+        this.windowRestricted = 0;
+        this.windowSuccesses = 0;
+        /** Base-rule counts added by the current window: removed from the day when the window trips the early rule. */
+        this.windowBaseAttempts = 0;
+        this.windowBaseRestricted = 0;
+        this.windowBaseSuccesses = 0;
+        /** Outcomes that landed while an early pause ran (in-flight calls): counted by no rule. */
+        this.duringPause = 0;
+        /** Early pauses so far this IST day: sets the next pause length and the probe size. */
+        this.earlyPauses = 0;
+        /** End of the running early pause (real under 'on', notional under 'record'); 0 = none. */
+        this.earlyUntilMs = 0;
     }
-    record(outcome, nowMs, mode, early = { minAttempts: RESTRICT_PAUSE_EARLY_MIN_ATTEMPTS, share: RESTRICT_PAUSE_EARLY_SHARE }) {
+    record(outcome, nowMs, mode, early = { minAttempts: RESTRICT_PAUSE_EARLY_MIN_ATTEMPTS, share: RESTRICT_PAUSE_EARLY_SHARE }, highShare = RESTRICT_PAUSE_HIGH_SHARE) {
         const day = istDayKey(nowMs);
         if (day !== this.day) {
             this.day = day;
             this.attempts = 0;
             this.restricted = 0;
+            this.successes = 0;
             this.crossedAtAttempts = 0;
+            this.earlyPauses = 0;
+            this.duringPause = 0;
+            this.resetWindow();
+        }
+        if (this.earlyUntilMs > 0 && nowMs >= this.earlyUntilMs)
+            this.resetWindow();
+        if (this.earlyUntilMs > 0) {
+            // In-flight outcome during an early pause: no rule counts it (the next window starts empty).
+            this.duringPause += 1;
+            return {
+                action: 'none', rule: null, day, attempts: this.attempts, restricted: this.restricted,
+                windowAttempts: this.windowAttempts, windowRestricted: this.windowRestricted, untilMs: 0,
+            };
         }
         this.attempts += 1;
-        if (outcome === 'restricted')
+        this.windowBaseAttempts += 1;
+        if (outcome === 'restricted') {
             this.restricted += 1;
-        const decision = { action: 'none', rule: null, day, attempts: this.attempts, restricted: this.restricted, untilMs: 0 };
-        const rule = mode === 'off' ? null : this.overRule(early);
-        if (!rule)
-            return decision;
-        const first = this.crossedAtAttempts === 0;
-        if (first)
-            this.crossedAtAttempts = this.attempts;
-        if (mode === 'on') {
-            if (this.pausedUntilMs > nowMs)
-                return decision;
-            this.pausedUntilMs = nextIstMidnightMs(nowMs);
-            return { ...decision, action: 'pause', rule, untilMs: this.pausedUntilMs };
+            this.windowBaseRestricted += 1;
         }
-        const sampled = first || (this.attempts - this.crossedAtAttempts) % RESTRICT_PAUSE_LOG_EVERY === 0;
-        return sampled ? { ...decision, action: 'would-pause', rule, untilMs: nextIstMidnightMs(nowMs) } : decision;
+        if (outcome === 'success') {
+            this.successes += 1;
+            this.windowBaseSuccesses += 1;
+        }
+        this.windowAttempts += 1;
+        if (outcome === 'restricted')
+            this.windowRestricted += 1;
+        if (outcome === 'success')
+            this.windowSuccesses += 1;
+        const decision = {
+            action: 'none', rule: null, day, attempts: this.attempts, restricted: this.restricted,
+            windowAttempts: this.windowAttempts, windowRestricted: this.windowRestricted, untilMs: 0,
+        };
+        if (mode === 'off')
+            return decision;
+        const baseRule = this.overBase(highShare);
+        if (baseRule) {
+            const first = this.crossedAtAttempts === 0;
+            if (first)
+                this.crossedAtAttempts = this.attempts;
+            if (mode === 'on') {
+                const untilMs = nextIstMidnightMs(nowMs);
+                if (this.pausedUntilMs >= untilMs)
+                    return decision;
+                this.pausedUntilMs = untilMs;
+                return { ...decision, action: 'pause', rule: baseRule, untilMs };
+            }
+            const sampled = first || (this.attempts - this.crossedAtAttempts) % RESTRICT_PAUSE_LOG_EVERY === 0;
+            return sampled ? { ...decision, action: 'would-pause', rule: baseRule, untilMs: nextIstMidnightMs(nowMs) } : decision;
+        }
+        if (this.earlyUntilMs === 0 && this.overEarly(early)) {
+            const untilMs = Math.min(nowMs + RESTRICT_PAUSE_EARLY_PAUSE_MS * 2 ** this.earlyPauses, nextIstMidnightMs(nowMs));
+            this.earlyPauses += 1;
+            this.earlyUntilMs = untilMs;
+            // The early rule owns this window: its outcomes leave the base count, so an account whose limit lifts
+            // during the pause is judged by the base rule on what it does afterwards.
+            this.attempts -= this.windowBaseAttempts;
+            this.restricted -= this.windowBaseRestricted;
+            this.successes -= this.windowBaseSuccesses;
+            this.windowBaseAttempts = 0;
+            this.windowBaseRestricted = 0;
+            this.windowBaseSuccesses = 0;
+            if (mode === 'on') {
+                if (this.pausedUntilMs >= untilMs)
+                    return decision;
+                this.pausedUntilMs = untilMs;
+                return { ...decision, action: 'pause', rule: 'early', untilMs };
+            }
+            return { ...decision, action: 'would-pause', rule: 'early', untilMs };
+        }
+        return decision;
     }
     /** Remaining pause in ms (0 = not paused). Only 'on' ever sets a pause. */
     pausedForMs(nowMs) {
         return this.pausedUntilMs > nowMs ? this.pausedUntilMs - nowMs : 0;
     }
     snapshot() {
-        return { day: this.day, attempts: this.attempts, restricted: this.restricted, pausedUntilMs: this.pausedUntilMs };
+        return {
+            day: this.day, attempts: this.attempts, restricted: this.restricted, successes: this.successes,
+            pausedUntilMs: this.pausedUntilMs, windowAttempts: this.windowAttempts, windowRestricted: this.windowRestricted,
+            windowSuccesses: this.windowSuccesses, earlyPauses: this.earlyPauses, duringPause: this.duringPause,
+        };
     }
-    overRule(early) {
-        const share = this.attempts > 0 ? this.restricted / this.attempts : 0;
-        if (this.attempts >= early.minAttempts && share >= early.share)
-            return 'early';
-        if (this.attempts >= RESTRICT_PAUSE_MIN_ATTEMPTS && share >= RESTRICT_PAUSE_SHARE)
+    resetWindow() {
+        this.windowBaseAttempts = 0;
+        this.windowBaseRestricted = 0;
+        this.windowBaseSuccesses = 0;
+        this.windowAttempts = 0;
+        this.windowRestricted = 0;
+        this.windowSuccesses = 0;
+        this.earlyUntilMs = 0;
+    }
+    /** Day rules, both to IST midnight on raw counts: 'base' first, then 'high' (owner, 2026-11-18). */
+    overBase(highShare) {
+        if (this.attempts < RESTRICT_PAUSE_MIN_ATTEMPTS)
+            return null;
+        const share = this.restricted / this.attempts;
+        if (share >= RESTRICT_PAUSE_SHARE && this.successes / this.attempts < RESTRICT_PAUSE_MAX_SUCCESS_SHARE)
             return 'base';
+        if (this.attempts >= RESTRICT_PAUSE_HIGH_MIN_ATTEMPTS && share >= highShare)
+            return 'high';
         return null;
+    }
+    overEarly(early) {
+        const min = this.earlyPauses > 0 ? Math.min(RESTRICT_PAUSE_PROBE_ATTEMPTS, early.minAttempts) : early.minAttempts;
+        if (this.windowSuccesses > 0 || this.windowAttempts < min)
+            return false;
+        return this.windowRestricted / this.windowAttempts >= early.share;
     }
 }
 // ── recent signal window ─────────────────────────────────────────────────────────────────────
@@ -46538,7 +46660,7 @@ class ReactionService {
                     await this.interruptibleSleep(this.CHANNEL_REFRESH_SLEEP_MS);
                 }
                 await this.healthCheckIfNeeded();
-                // REACT_RESTRICT_PAUSE=on: too many restricted outcomes today; resume at IST midnight.
+                // REACT_RESTRICT_PAUSE=on: too many restricted outcomes; resume after the early pause (2 h, 4 h, ...) or at IST midnight (base).
                 // The pause holds only while the mode is still 'on': flipping it to off/record ends a running pause.
                 const restrictPausedMs = (0,_ReactionExperiments__WEBPACK_IMPORTED_MODULE_17__.readRestrictPauseMode)() === 'on' ? this.restrictPause.pausedForMs(Date.now()) : 0;
                 if (restrictPausedMs > 0) {
@@ -46956,20 +47078,24 @@ class ReactionService {
         }
     }
     /**
-     * REACT_RESTRICT_PAUSE (default record): restricted >= 20% of >= 50 attempts (rule=base) or
-     * >= 80% of >= 20 attempts (rule=early; REACT_RESTRICT_PAUSE_EARLY_MIN/_SHARE) in this IST day.
-     * 'on' pauses reactions until IST midnight; 'record' logs a sampled `reaction-would-pause` line.
+     * REACT_RESTRICT_PAUSE (default record): restricted >= 20% and successes < 50% of >= 50 attempts
+     * in this IST day (rule=base, pause until IST midnight), restricted >= 1/3 of >= 100 attempts in this IST day
+     * (rule=high, until IST midnight; REACT_RESTRICT_PAUSE_HIGH_SHARE), or >= 80% of >= 20 attempts
+     * with 0 successes in the current window (rule=early, pause 2 h, 4 h, 8 h ... to IST midnight;
+     * REACT_RESTRICT_PAUSE_EARLY_MIN/_SHARE).
+     * 'on' pauses reactions; 'record' logs a sampled `reaction-would-pause` line.
      */
     noteRestrictPause(outcome) {
         try {
             const now = Date.now();
-            const d = this.restrictPause.record(outcome, now, (0,_ReactionExperiments__WEBPACK_IMPORTED_MODULE_17__.readRestrictPauseMode)(), (0,_ReactionExperiments__WEBPACK_IMPORTED_MODULE_17__.readRestrictPauseEarly)());
+            const d = this.restrictPause.record(outcome, now, (0,_ReactionExperiments__WEBPACK_IMPORTED_MODULE_17__.readRestrictPauseMode)(), (0,_ReactionExperiments__WEBPACK_IMPORTED_MODULE_17__.readRestrictPauseEarly)(), (0,_ReactionExperiments__WEBPACK_IMPORTED_MODULE_17__.readRestrictPauseHighShare)());
             if (d.action === 'none')
                 return;
             const share = d.attempts > 0 ? (d.restricted / d.attempts).toFixed(3) : '0';
-            const line = `rule=${d.rule}; day=${d.day}; attempts=${d.attempts}; restricted=${d.restricted}; share=${share}; until=${new Date(d.untilMs).toISOString()}`;
+            const line = `rule=${d.rule}; day=${d.day}; attempts=${d.attempts}; restricted=${d.restricted}; share=${share}; window=${d.windowAttempts}/${d.windowRestricted}; until=${new Date(d.untilMs).toISOString()}`;
             if (d.action === 'pause') {
-                logger.warn(`[${this.instanceId}] reaction-pause: restricted share over limit, reactions paused until IST midnight; ${line}`);
+                const until = d.rule === 'early' ? `for ${((d.untilMs - now) / 3600000).toFixed(1)} h` : 'until IST midnight';
+                logger.warn(`[${this.instanceId}] reaction-pause: restricted share over limit, reactions paused ${until}; ${line}`);
             }
             else {
                 logger.info(`[${this.instanceId}] reaction-would-pause; ${line}`);
@@ -51411,8 +51537,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "732b8ae144e463fae281399349cd6cbd5445ba83" : 0;
-    const builtAt =  true ? "2026-11-18T07:31:08.660Z" : 0;
+    const sha =  true ? "210e0c24fdecd66fde8366b3029f8f03b5863858" : 0;
+    const builtAt =  true ? "2026-11-18T07:47:33.651Z" : 0;
     return { sha, builtAt };
 }
 
