@@ -5904,11 +5904,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   PROMO_FLAG_NAMES: () => (/* binding */ PROMO_FLAG_NAMES),
 /* harmony export */   PROMO_FLAG_VALUES: () => (/* binding */ PROMO_FLAG_VALUES),
 /* harmony export */   PromoFlagsReader: () => (/* binding */ PromoFlagsReader),
-/* harmony export */   V3_MODE_FLAGS: () => (/* binding */ V3_MODE_FLAGS),
 /* harmony export */   formatPromoFlags: () => (/* binding */ formatPromoFlags),
-/* harmony export */   isFollowUpLoop: () => (/* binding */ isFollowUpLoop),
-/* harmony export */   isFollowUpV3: () => (/* binding */ isFollowUpV3),
-/* harmony export */   isSweepActive: () => (/* binding */ isSweepActive),
 /* harmony export */   parsePromoFlags: () => (/* binding */ parsePromoFlags),
 /* harmony export */   promoFlagsAppFor: () => (/* binding */ promoFlagsAppFor),
 /* harmony export */   promoFlagsKey: () => (/* binding */ promoFlagsKey),
@@ -5919,43 +5915,17 @@ __webpack_require__.r(__webpack_exports__);
 
 /** Operator flag fields and their allowed values; the first value is the default. Any other value reads as the default. */
 const PROMO_FLAG_VALUES = Object.freeze({
-    v3: Object.freeze(['off', 'record', 'on']),
     safety: Object.freeze(['outcomes', 'v2']),
-    refill: Object.freeze(['off', 'on']),
-});
-/** What `v3` turns on. `record` keeps the flag-off paths and adds only the P7 would-logs. */
-const V3_MODE_FLAGS = Object.freeze({
-    off: Object.freeze({ fu: 'off', vx: 'off', elig: 'off', health: 'off' }),
-    record: Object.freeze({ fu: 'off', vx: 'off', elig: 'off', health: 'record' }),
-    on: Object.freeze({ fu: 'on', vx: 'on', elig: 'on', health: 'on' }),
 });
 /** Flag names in log order (the order of every flags log line). */
-const PROMO_FLAG_NAMES = Object.freeze(['v3', 'fu', 'vx', 'elig', 'health', 'safety', 'refill']);
+const PROMO_FLAG_NAMES = Object.freeze(['safety']);
 const PROMO_FLAGS_DEFAULTS = Object.freeze({
-    v3: null,
-    ...V3_MODE_FLAGS.off,
     safety: PROMO_FLAG_VALUES.safety[0],
-    refill: PROMO_FLAG_VALUES.refill[0],
 });
 const FAIL_LOG_EVERY_MS = 10 * 60 * 1000;
 const HGETALL_SCRIPT = "return redis.call('HGETALL', KEYS[1])";
 function promoFlagsKey(app) {
     return `promote:flags:v3:${app}`;
-}
-/** P2+P3 follow-up v3 is on (`v3=on`). */
-function isFollowUpV3(flags) {
-    return flags?.fu === 'on';
-}
-/**
- * P8: follow-ups run inside the main loop's gaps (no timers). Only `v3=on`; `off` and `record` keep the
- * timer path. The runner also needs an atomic chstate write (eval).
- */
-function isFollowUpLoop(flags) {
-    return flags?.v3 === 'on' && flags.fu === 'on' && flags.elig === 'on';
-}
-/** P10b: the 10 min queue sweep drops items past their `until`. Only `v3=on`; otherwise it logs only. */
-function isSweepActive(flags) {
-    return flags?.v3 === 'on';
 }
 /** Runner pickerApp ('tg-aut' | 'promote') -> flag hash app name. Unknown app reads no flags (defaults). */
 function promoFlagsAppFor(pickerApp) {
@@ -5967,21 +5937,14 @@ function pick(value, allowed) {
 }
 /**
  * Trimmed, lowercased; a value not in the field's list (or not a string) reads as its default.
- * `fu`, `vx`, `elig`, `health` always come from `V3_MODE_FLAGS`; the same-named hash fields are ignored.
- * `v3` missing (or not a string) stays null and acts as `off`. Also accepts its own output, so a re-parse is a no-op.
+ * Also accepts its own output, so a re-parse is a no-op.
  */
 function parsePromoFlags(hash) {
-    const rawV3 = hash?.v3;
-    const v3Set = typeof rawV3 === 'string';
-    const v3 = v3Set ? pick(rawV3, PROMO_FLAG_VALUES.v3) ?? PROMO_FLAG_VALUES.v3[0] : null;
     return {
-        v3,
-        ...V3_MODE_FLAGS[v3 ?? 'off'],
         safety: pick(hash?.safety, PROMO_FLAG_VALUES.safety) ?? PROMO_FLAG_VALUES.safety[0],
-        refill: pick(hash?.refill, PROMO_FLAG_VALUES.refill) ?? PROMO_FLAG_VALUES.refill[0],
     };
 }
-/** `v3=<v|unset> fu=<v> vx=<v> elig=<v> health=<v> safety=<v> refill=<v>`, in log order. */
+/** `safety=<v>`, in log order. */
 function formatPromoFlags(flags) {
     return PROMO_FLAG_NAMES.map((name) => `${name}=${flags[name] ?? 'unset'}`).join(' ');
 }
@@ -6385,7 +6348,6 @@ class PromoVerifyCloses {
         this.closed = 0;
         this.closedLate = 0;
         this.unknown = 0;
-        this.unknownWould = 0;
         this.dropSize = 0;
         this.dropExpired = 0;
         this.dropLegacy = 0;
@@ -6400,10 +6362,6 @@ class PromoVerifyCloses {
     noteUnknown() {
         this.unknown += 1;
     }
-    /** P4 (`vx=off`): one item met the close rule and was kept (once per item). */
-    noteUnknownWould() {
-        this.unknownWould += 1;
-    }
     /** P4: one queue drop (size trim, expired, legacy). */
     noteDrop(reason) {
         if (reason === 'size')
@@ -6415,24 +6373,23 @@ class PromoVerifyCloses {
     }
     /** Closes since the previous call with the same mark. */
     takeDelta(mark) {
-        const last = this.marks.get(mark) ?? { closed: 0, closedLate: 0, unknown: 0, unknownWould: 0, dropSize: 0, dropExpired: 0, dropLegacy: 0 };
+        const last = this.marks.get(mark) ?? { closed: 0, closedLate: 0, unknown: 0, dropSize: 0, dropExpired: 0, dropLegacy: 0 };
         this.marks.set(mark, {
-            closed: this.closed, closedLate: this.closedLate, unknown: this.unknown, unknownWould: this.unknownWould,
+            closed: this.closed, closedLate: this.closedLate, unknown: this.unknown,
             dropSize: this.dropSize, dropExpired: this.dropExpired, dropLegacy: this.dropLegacy,
         });
         return {
             closed: this.closed - last.closed,
             closedAfter10m: this.closedLate - last.closedLate,
             unknown: this.unknown - last.unknown,
-            unknownWould: this.unknownWould - last.unknownWould,
             dropped: { size: this.dropSize - last.dropSize, expired: this.dropExpired - last.dropExpired, legacy: this.dropLegacy - last.dropLegacy },
         };
     }
 }
-function formatPromoSweep(mobile, r, closes, mode = 'log_only') {
+function formatPromoSweep(mobile, r, closes) {
     return [
         `[${mobile}] promo sweep`,
-        `mode=${mode}`,
+        'mode=drop',
         `dropped_verify=${r.droppedVerify}`,
         `dropped_fu=${r.droppedFu}`,
         `expired_cooldown=${r.expiredCooldown}`,
@@ -6528,7 +6485,7 @@ function classifyLoadedPool(input) {
     return { pool: input.channels.length, eligible, skips, channelSide, mobileSide };
 }
 function classifyChannel(channel, input) {
-    // P5: the same predicate the send path and the elig=on pre-filter use (policy/eligible-now.ts).
+    // P5: the same predicate the send path and the pre-ranking filter use (policy/eligible-now.ts).
     const id = channel.channelId;
     const result = (0,_policy_eligible_now__WEBPACK_IMPORTED_MODULE_0__.eligibleNow)(channel, input.docOf(id), {
         own: input.isOwn(channel),
@@ -6589,7 +6546,6 @@ function formatCycleEndFields(m) {
         `verify_closed=${m.verifyCloses.closed}`,
         `verify_closed_after_10m=${m.verifyCloses.closedAfter10m}`,
         `verify_unknown=${m.verifyCloses.unknown ?? 0}`,
-        `verify_unknown_would=${m.verifyCloses.unknownWould ?? 0}`,
         `dropped{size,expired,legacy}=${[m.verifyCloses.dropped?.size ?? 0, m.verifyCloses.dropped?.expired ?? 0, m.verifyCloses.dropped?.legacy ?? 0].join(',')}`,
         `legacy_fu=${m.sweep.legacyFu}`,
         `sends_1h=main:${m.sends1h.main},fu:${m.sends1h.fu}`,
@@ -6609,6 +6565,7 @@ function formatCycleEndFields(m) {
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   finishCycle: () => (/* binding */ finishCycle),
+/* harmony export */   notePausedCycle: () => (/* binding */ notePausedCycle),
 /* harmony export */   runSelectedChannels: () => (/* binding */ runSelectedChannels)
 /* harmony export */ });
 /* harmony import */ var _tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/core/utils/dc-ip-family */ "../../packages/tg-core/src/utils/dc-ip-family.ts");
@@ -6733,10 +6690,8 @@ async function finishCycle(host, stats, run, selection) {
             sends1h: host.sendWindow.counts(nowMs),
             quiet,
         });
-        // Flow v3 P7: with `health` record or on, keep this cycle's quiet reason and pool sides for the
-        // health ladder (in memory only). With `health=off` nothing is kept.
-        if (host.promoFlags.health !== 'off')
-            noteCycleQuiet(host, nowMs, quiet, cycleTally.sent, poolClass, eligibleSource);
+        // Flow v3 P7: keep this cycle's quiet reason and pool sides for the health ladder (in memory only).
+        noteCycleQuiet(host, nowMs, quiet, cycleTally.sent, poolClass, eligibleSource);
     }
     catch {
         measurementFields = [];
@@ -6758,6 +6713,13 @@ async function finishCycle(host, stats, run, selection) {
     // 2026-10-08: ~100 "appears stuck" runner restarts in the live logs).
     host.health.lastCycleBudgetExhausted = cycleTally.sent === 0
         && (cycleTally.budget > 0 || exploreSkipped > 0 || selectionExploreDenied > 0);
+}
+/**
+ * M1: a cycle that paused before selection (chstate unsupported or its read failed) still records a
+ * known quiet reason, so the ladder sees `chstate_unavailable` (no restart, no swap) instead of `unknown`.
+ */
+function notePausedCycle(host, nowMs = Date.now()) {
+    noteCycleQuiet(host, nowMs, 'chstate_unavailable', 0, null, 'no_intel');
 }
 function noteCycleQuiet(host, at, quiet, mainSent, pool, eligibleSource) {
     const record = {
@@ -6812,13 +6774,11 @@ __webpack_require__.r(__webpack_exports__);
 /** P5 review H2: longest cooldown rest declared at once (P1's shield; promote isRunnerAlive accepts up to 50 min). */
 const COOLDOWN_REST_MAX_MS = 50 * 60 * 1000;
 /**
- * Flow v3 P5: `elig=on` is in force only with a known app (cooldown length) and an account that can
- * read and write `promote:chstate:<app>:<m>` atomically (needs eval); otherwise it reads as off, logged
- * once (doc 6: the cooldown never runs half-written).
+ * Flow v3 P5: the runner can keep cooldowns and follow-up state only with a known app (cooldown length)
+ * and an account that can read and write `promote:chstate:<app>:<m>` atomically (needs eval). Otherwise
+ * sends pause (main and follow-up), logged once as an error (doc 6: the cooldown never runs half-written).
  */
 function eligActive(host) {
-    if (host.promoFlags.elig !== 'on')
-        return false;
     const account = host.optionalAccount();
     let supported = (0,_redis_redis_channel_cooldown__WEBPACK_IMPORTED_MODULE_1__.channelCooldownMsFor)(host.options.pickerApp ?? null) !== null
         && typeof account.readChannelCooldowns === 'function'
@@ -6831,9 +6791,9 @@ function eligActive(host) {
             supported = false;
         }
     }
-    if (!supported && !host.eligUnsupportedLogged) {
-        host.eligUnsupportedLogged = true;
-        host.log('warn', 'promo flags | elig=on unsupported (no app cooldown or no atomic chstate write) | reading elig=off');
+    if (!supported && !host.chstateUnsupportedLogged) {
+        host.chstateUnsupportedLogged = true;
+        host.log('error', 'Promotion chstate unsupported (no app cooldown or no atomic chstate write, Redis eval); pausing sends');
     }
     return supported;
 }
@@ -6861,27 +6821,32 @@ async function loadChannelCooldowns(host) {
     }
 }
 /**
- * Cycle start: decide `elig` and load this cycle's cooldowns (elig=on) or clear them (elig=off).
- * null = the cooldown read failed and the cycle pauses.
+ * Cycle start: load this cycle's cooldowns. null = the cycle pauses: no atomic chstate write (logged
+ * once as an error) or the cooldown read failed.
  */
 async function prepareCycleEligibility(host) {
-    const elig = host.eligActive();
-    if (elig) {
-        const cooldowns = await host.loadChannelCooldowns();
-        if (!cooldowns)
-            return null;
-        host.channelCooldowns = cooldowns;
+    if (!host.eligActive()) {
+        host.log('debug', 'Promotion cycle paused; no atomic chstate write');
+        return null;
     }
-    else if (host.channelCooldowns.size > 0) {
-        host.channelCooldowns = new Map();
-    }
-    return { elig, nowMs: Date.now() };
+    const cooldowns = await host.loadChannelCooldowns();
+    if (!cooldowns)
+        return null;
+    host.channelCooldowns = cooldowns;
+    return { nowMs: Date.now() };
 }
-/** A queued item or a running follow-up timer holds the channel. */
+/**
+ * A queued verify item holds the channel. A pending follow-up does not (M2): the channel is eligible again
+ * when its main-send cooldown ends, and a new main post supersedes the pending follow-up.
+ */
 function heldByQueue(host, channelId) {
-    return host.messageQueue.isQueued(channelId) || host.followUpTimers.has(channelId);
+    const queue = host.messageQueue;
+    if (typeof queue.list !== 'function')
+        return queue.isQueued(channelId);
+    const id = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_3__.normalizeChannelId)(channelId);
+    return queue.list().some((item) => item.channelId === id && item.workType !== 'followUp');
 }
-/** elig=on: the channels in `list` that pass `eligibleNow` (first doc per channel wins). */
+/** The channels in `list` that pass `eligibleNow` (first doc per channel wins). */
 function eligibleOnly(host, list, blocked, docs, nowMs) {
     const docById = new Map();
     for (const doc of docs) {
@@ -6910,7 +6875,7 @@ function classifyPool(host, loadedChannels, blocked, docs, deadIds, cycle) {
             isOwn: (channel) => host.isOwnChannel(channel),
             chanblocked: (channelId) => blocked.has(channelId),
             inCooldown: (channelId) => heldByQueue(host, channelId)
-                || (cycle.elig && (host.cooldownUntilOf(channelId) ?? 0) > cycle.nowMs),
+                || (host.cooldownUntilOf(channelId) ?? 0) > cycle.nowMs,
             isDead: (channelId) => deadIds.has((0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_3__.normalizeChannelId)(channelId) ?? ''),
             docOf,
         });
@@ -6961,7 +6926,7 @@ async function noteChannelCooldown(host, channelId) {
 function evaluateEligibility(host, channel, doc, isFollowUp) {
     const result = (0,_policy_eligible_now__WEBPACK_IMPORTED_MODULE_0__.eligibleNow)(channel, doc, {
         queued: !isFollowUp && heldByQueue(host, channel.channelId),
-        cooldownUntil: !isFollowUp && host.eligActive() ? host.cooldownUntilOf(channel.channelId) : null,
+        cooldownUntil: !isFollowUp ? host.cooldownUntilOf(channel.channelId) : null,
     }, Date.now());
     if (!result.eligible)
         host.log('debug', `Skipping ${channel.channelId}: ${result.detail}`);
@@ -6988,8 +6953,6 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   FOLLOW_UP_V3_MAX_OPEN: () => (/* binding */ FOLLOW_UP_V3_MAX_OPEN),
 /* harmony export */   claimFollowUpExecution: () => (/* binding */ claimFollowUpExecution),
 /* harmony export */   dropClosedFollowUps: () => (/* binding */ dropClosedFollowUps),
-/* harmony export */   dropFollowUpsWithoutDueAt: () => (/* binding */ dropFollowUpsWithoutDueAt),
-/* harmony export */   handleQueuedFollowUpV3: () => (/* binding */ handleQueuedFollowUpV3),
 /* harmony export */   loopMainReserve: () => (/* binding */ loopMainReserve),
 /* harmony export */   markLoopFollowUpState: () => (/* binding */ markLoopFollowUpState),
 /* harmony export */   releaseFollowUpSlot: () => (/* binding */ releaseFollowUpSlot),
@@ -6997,6 +6960,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   runFollowUp: () => (/* binding */ runFollowUp),
 /* harmony export */   scheduleFollowUp: () => (/* binding */ scheduleFollowUp),
 /* harmony export */   sleepWithFollowUps: () => (/* binding */ sleepWithFollowUps),
+/* harmony export */   supersedeFollowUps: () => (/* binding */ supersedeFollowUps),
 /* harmony export */   tryOneDueFollowUp: () => (/* binding */ tryOneDueFollowUp)
 /* harmony export */ });
 /* harmony import */ var _policy__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../../policy */ "../../packages/tg-channel-state/src/channel-message-promotions/policy/index.ts");
@@ -7005,7 +6969,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _config_promo_app_config__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../../config/promo-app-config */ "../../packages/tg-channel-state/src/channel-message-promotions/config/promo-app-config.ts");
 /* harmony import */ var _config_promo_flags_v3__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../../config/promo-flags-v3 */ "../../packages/tg-channel-state/src/channel-message-promotions/config/promo-flags-v3.ts");
 /* harmony import */ var _utils_channel_id__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ../../utils/channel-id */ "../../packages/tg-channel-state/src/channel-message-promotions/utils/channel-id.ts");
-// PromotionFlowRunner: follow-up scheduling and execution (timer path and, under flow v3, the queue path).
+// PromotionFlowRunner: follow-up scheduling and execution. Flow v3 P8: a follow-up is a durable queue item
+// that the main loop runs inside its own gaps (no timers).
 
 
 
@@ -7015,7 +6980,7 @@ __webpack_require__.r(__webpack_exports__);
 /** Flow v3 (P2 fix 7, doc 3.5): at most 40 open follow-ups per mobile. */
 const FOLLOW_UP_V3_MAX_OPEN = 40;
 /**
- * Flow v3 interim pacer (P2 fix 5, until P8): at least this gap between follow-ups from either path.
+ * Flow v3 pacer (P2 fix 5): at least this gap between follow-ups.
  * Review LOW 3: the last follow-up time (`lastFollowUpAt`) lives in memory only. After a restart the
  * first follow-up can go out less than 5 min after the last one before the restart. Accepted: one pair.
  */
@@ -7043,15 +7008,11 @@ function queuedFollowUps(host) {
     return items.filter((item) => item.workType === 'followUp');
 }
 /**
- * Flow v3: the open follow-ups a new one on this channel replaces. The timer's own item, plus any
- * queued follow-up for the channel without a timer (restored at startup; review L5), so a channel
- * has at most 1 open follow-up.
+ * Flow v3: the open follow-ups a new one on this channel replaces: every queued follow-up for the
+ * channel (restored at startup included; review L5), so a channel has at most 1 open follow-up.
  */
 function followUpsToReplace(host, channelId) {
     const byKey = new Map();
-    const timerWork = host.followUpTimerWork.get(channelId);
-    if (timerWork)
-        byKey.set((0,_promotion_message_queue__WEBPACK_IMPORTED_MODULE_2__.queueItemKey)(timerWork), timerWork);
     for (const item of queuedFollowUps(host)) {
         if (item.channelId === channelId && !byKey.has((0,_promotion_message_queue__WEBPACK_IMPORTED_MODULE_2__.queueItemKey)(item)))
             byKey.set((0,_promotion_message_queue__WEBPACK_IMPORTED_MODULE_2__.queueItemKey)(item), item);
@@ -7059,21 +7020,15 @@ function followUpsToReplace(host, channelId) {
     return [...byKey.values()];
 }
 /** Open follow-ups now (the one being replaced excluded) and the cap that applies. */
-function followUpCapacity(host, v3, hasTimer, replacedKeys) {
+function followUpCapacity(host, replacedKeys) {
     const optionMax = host.options.maxFollowUpCount !== undefined ? (0,_normalize__WEBPACK_IMPORTED_MODULE_1__.safeNonNegativeInt)(host.options.maxFollowUpCount) : undefined;
-    if (!v3) {
-        const activeFollowUpCount = hasTimer ? Math.max(0, host.followUpTimers.size - 1) : host.followUpTimers.size;
-        return optionMax !== undefined ? { activeFollowUpCount, maxFollowUpCount: optionMax } : { activeFollowUpCount };
-    }
     // Flow v3 (P2 fix 7): open follow-ups per mobile are the queued followUp items, at most 40.
     return {
         activeFollowUpCount: queuedFollowUps(host).filter((item) => !replacedKeys.has((0,_promotion_message_queue__WEBPACK_IMPORTED_MODULE_2__.queueItemKey)(item))).length,
         maxFollowUpCount: Math.min(FOLLOW_UP_V3_MAX_OPEN, optionMax ?? FOLLOW_UP_V3_MAX_OPEN),
     };
 }
-function followUpWorkFor(message, dueAt, v3) {
-    if (!v3)
-        return { ...message, timestamp: dueAt, workType: 'followUp' };
+function followUpWorkFor(message, dueAt) {
     // Flow v3: sentAt is the parent's send time (never rewritten); dueAt is separate; timestamp = dueAt for readiness.
     return { ...message, sentAt: message.sentAt ?? message.timestamp, dueAt, timestamp: dueAt, workType: 'followUp' };
 }
@@ -7083,6 +7038,7 @@ async function dropReplacedFollowUps(host, replacedWork, followUpWork) {
         if ((0,_promotion_message_queue__WEBPACK_IMPORTED_MODULE_2__.queueItemKey)(replaced) === (0,_promotion_message_queue__WEBPACK_IMPORTED_MODULE_2__.queueItemKey)(followUpWork))
             continue;
         host.log('info', `promo follow-up drop | ${(0,_promotion_message_queue__WEBPACK_IMPORTED_MODULE_2__.queueItemKey)(replaced)} | reason=replaced | by=${(0,_promotion_message_queue__WEBPACK_IMPORTED_MODULE_2__.queueItemKey)(followUpWork)}`);
+        host.messageQueue.remove(replaced); // Review HIGH 1: memory first, then the durable delete.
         try {
             await host.removeQueuedMessage(replaced);
         }
@@ -7091,57 +7047,29 @@ async function dropReplacedFollowUps(host, replacedWork, followUpWork) {
         }
     }
 }
-/** The timer path: one follow-up when its timer fires. `v3` is the mode it was scheduled under. */
-async function fireFollowUpTimer(host, message, followUpWork, dueAt, v3, timeout) {
-    let slot = null;
-    let sent = false;
-    try {
-        // P8: a timer armed before the switch to the loop leaves its item queued for the loop.
-        if (v3 && host.followUpLoopActive()) {
-            host.log('debug', `promo follow-up timer skipped | ${(0,_promotion_message_queue__WEBPACK_IMPORTED_MODULE_2__.queueItemKey)(followUpWork)} | reason=loop`);
-            return;
+/**
+ * M2: a new main post (sent or ambiguous) on a channel supersedes its pending follow-up. Its chstate is
+ * already `skipped`: the main-send cooldown write closes a `due` follow-up in the same Lua call (review
+ * MEDIUM 1), so a restore drops it. Here the item leaves memory, then its durable item is removed, so it is
+ * never sent after the newer post. The newer post gets its own follow-up after its verify.
+ */
+async function supersedeFollowUps(host, channelId) {
+    const id = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_5__.normalizeChannelId)(channelId);
+    if (!id)
+        return 0;
+    const pending = followUpsToReplace(host, id);
+    for (const item of pending) {
+        host.log('info', `promo follow-up drop | ${(0,_promotion_message_queue__WEBPACK_IMPORTED_MODULE_2__.queueItemKey)(item)} | reason=superseded`);
+        // Review HIGH 1: out of memory first, so a failed payload delete cannot leave it for the gap to send.
+        host.messageQueue.remove(item);
+        try {
+            await host.removeQueuedMessage(item);
         }
-        if (v3 && host.isFollowUpV3()) {
-            const nowMs = Date.now();
-            // Expiry is decided before the claim (P2 fix 5): a late follow-up never takes a claim.
-            if ((0,_config_promo_app_config__WEBPACK_IMPORTED_MODULE_3__.isFollowUpExpired)(dueAt, nowMs, host.followUpMaxLateMs())) {
-                host.log('info', `promo follow-up drop | ${(0,_promotion_message_queue__WEBPACK_IMPORTED_MODULE_2__.queueItemKey)(followUpWork)} | reason=expired | late_min=${Math.round((nowMs - dueAt) / 60000)}`);
-                await host.removeQueuedMessage(followUpWork);
-                return;
-            }
-            // Shared pacer with the queue path: none within 5 min of the last follow-up. The slot is taken
-            // before the claim await (review L1). Paced: the item stays queued for the queue path.
-            slot = host.reserveFollowUpSlot(nowMs);
-            if (!slot) {
-                host.log('debug', `promo follow-up paced | ${(0,_promotion_message_queue__WEBPACK_IMPORTED_MODULE_2__.queueItemKey)(followUpWork)} | path=timer`);
-                return;
-            }
-        }
-        const claimed = await host.claimFollowUpExecution(followUpWork);
-        if (claimed === null)
-            return;
-        if (!claimed) {
-            await host.removeQueuedMessage(followUpWork);
-            return;
-        }
-        const run = await host.runFollowUp(followUpWork);
-        sent = run === 'sent';
-        // Review LOW 2: a v3 follow-up the ban-rate gate held stays queued for the queue path, claim released.
-        if (run === 'held' && v3 && host.isFollowUpV3() && await releaseFollowUpClaim(host, followUpWork))
-            return;
-        await host.removeQueuedMessage(followUpWork);
-    }
-    catch (error) {
-        host.log('error', `Follow-up durable cleanup failed; retaining work for restart recovery; channelId=${message.channelId} messageId=${message.messageId} error=${host.normalizeError(error)}`);
-    }
-    finally {
-        if (slot && !sent)
-            host.releaseFollowUpSlot(slot);
-        if (!v3 || host.followUpTimers.get(message.channelId) === timeout) {
-            host.followUpTimers.delete(message.channelId);
-            host.followUpTimerWork.delete(message.channelId);
+        catch (error) {
+            host.log('warn', `Follow-up superseded item cleanup failed; channelId=${item.channelId} messageId=${item.messageId} error=${host.normalizeError(error)}`);
         }
     }
+    return pending.length;
 }
 async function scheduleFollowUp(host, message) {
     if (host.shouldAbortStartedRunnerWork()) {
@@ -7156,25 +7084,21 @@ async function scheduleFollowUp(host, message) {
         host.log('warn', `Follow-up stats load failed; not scheduling follow-up; channelId=${message.channelId} messageId=${message.messageId} error=${host.normalizeError(error)}`);
         return;
     }
-    const existing = host.followUpTimers.get(message.channelId);
-    const v3 = host.isFollowUpV3();
-    const replacedWork = v3 ? followUpsToReplace(host, message.channelId) : [];
+    const replacedWork = followUpsToReplace(host, message.channelId);
     const replacedKeys = new Set(replacedWork.map((item) => (0,_promotion_message_queue__WEBPACK_IMPORTED_MODULE_2__.queueItemKey)(item)));
     const followUpPolicy = (0,_policy__WEBPACK_IMPORTED_MODULE_0__.evaluateFollowUpScheduling)({
         isFollowUp: message.isFollowUp,
         daysLeft: stats.daysLeft,
         channelAvailable: true,
-        ...followUpCapacity(host, v3, !!existing, replacedKeys),
+        ...followUpCapacity(host, replacedKeys),
     });
     if (!followUpPolicy.shouldSchedule) {
         host.log('debug', `Follow-up not scheduled; channelId=${message.channelId} messageId=${message.messageId} reason=${followUpPolicy.reason ?? 'policy'}`);
         return;
     }
     const delayMs = (0,_policy__WEBPACK_IMPORTED_MODULE_0__.calculateFollowUpDelay)((0,_normalize__WEBPACK_IMPORTED_MODULE_1__.safeDelayMs)(host.options.followUpDelayMs, 15 * 60000), (0,_normalize__WEBPACK_IMPORTED_MODULE_1__.safeDelayMs)(host.options.followUpJitterMs, 30000));
-    if (existing)
-        clearTimeout(existing);
     const dueAt = Date.now() + delayMs;
-    const followUpWork = followUpWorkFor(message, dueAt, v3);
+    const followUpWork = followUpWorkFor(message, dueAt);
     await dropReplacedFollowUps(host, replacedWork, followUpWork);
     try {
         await host.messageQueue.enqueueDurable(followUpWork);
@@ -7183,38 +7107,14 @@ async function scheduleFollowUp(host, message) {
         host.log('error', `Follow-up persistence failed; skipping follow-up rather than leaving restart-unsafe work; channelId=${message.channelId} messageId=${message.messageId} error=${host.normalizeError(error)}`);
         return;
     }
-    if (v3 && host.followUpLoopActive()) {
-        // P8: no timer. The durable item waits in the queue; the main loop runs it in a gap.
-        if (existing) {
-            host.followUpTimers.delete(message.channelId);
-            host.followUpTimerWork.delete(message.channelId);
-        }
-        await markLoopFollowUpState(host, followUpWork, 'due');
-        host.log('info', `Follow-up scheduled; channelId=${message.channelId} messageId=${message.messageId} delayMs=${delayMs} activeFollowUps=${queuedFollowUps(host).length} replacedExisting=${replacedWork.length > 0} mode=loop`);
-        host.health.totalFollowUpsScheduled += 1;
-        host.health.lastFollowUpScheduledAt = Date.now();
-        void host.callHook('onFollowUpScheduled', () => host.adapter.onFollowUpScheduled?.(message, delayMs));
-        return;
-    }
-    const timeout = setTimeout(() => {
-        if (host.shouldAbortStartedRunnerWork()) {
-            host.log('debug', `Follow-up timer skipped because runner stopped; channelId=${message.channelId} messageId=${message.messageId}`);
-            return;
-        }
-        void fireFollowUpTimer(host, message, followUpWork, dueAt, v3, timeout);
-    }, delayMs);
-    timeout.unref?.();
-    host.followUpTimers.set(message.channelId, timeout);
-    if (v3)
-        host.followUpTimerWork.set(message.channelId, followUpWork);
-    else
-        host.followUpTimerWork.delete(message.channelId);
-    host.log('info', `Follow-up scheduled; channelId=${message.channelId} messageId=${message.messageId} delayMs=${delayMs} activeFollowUps=${host.followUpTimers.size} replacedExisting=${!!existing}`);
+    // P8: no timer. The durable item waits in the queue; the main loop runs it in a gap.
+    await markLoopFollowUpState(host, followUpWork, 'due');
+    host.log('info', `Follow-up scheduled; channelId=${message.channelId} messageId=${message.messageId} delayMs=${delayMs} activeFollowUps=${queuedFollowUps(host).length} replacedExisting=${replacedWork.length > 0}`);
     host.health.totalFollowUpsScheduled += 1;
     host.health.lastFollowUpScheduledAt = Date.now();
     void host.callHook('onFollowUpScheduled', () => host.adapter.onFollowUpScheduled?.(message, delayMs));
 }
-async function runFollowUp(host, message, options = {}) {
+async function runFollowUp(host, message) {
     host.health.lastFollowUpStartedAt = Date.now();
     try {
         host.log('debug', `Follow-up execution start; channelId=${message.channelId} messageId=${message.messageId}`);
@@ -7227,9 +7127,7 @@ async function runFollowUp(host, message, options = {}) {
             return 'not_sent';
         }
         let capRefused = false;
-        const context = options.loop
-            ? { followUp: message, noWait: true, onCapRefused: () => { capRefused = true; } }
-            : { followUp: message };
+        const context = { followUp: message, noWait: true, onCapRefused: () => { capRefused = true; } };
         if (host.adapter.shouldContinue && !(0,_normalize__WEBPACK_IMPORTED_MODULE_1__.isExactTrue)(await host.adapter.shouldContinue(context))) {
             // Review LOW 2: a tripped ban-rate gate holds the follow-up; it is not dropped.
             if (host.adapter.sendGateHolds?.(true) === true) {
@@ -7237,7 +7135,7 @@ async function runFollowUp(host, message, options = {}) {
                 return 'held';
             }
             // P8: the hourly slot went in a race (no wait inside the loop); the follow-up waits for a later gap.
-            if (options.loop && capRefused) {
+            if (capRefused) {
                 host.log('debug', `Deferring follow-up for ${message.channelId}: no hourly room`);
                 return 'deferred';
             }
@@ -7275,55 +7173,6 @@ async function runFollowUp(host, message, options = {}) {
     }
     finally {
         host.health.lastFollowUpFinishedAt = Date.now();
-    }
-}
-/**
- * Flow v3 (P2 fix 5): a queued follow-up under `fu` on. Never reaches checkMessage and never writes
- * survival. Expiry before the claim; shared 5 min pacer with the timer path.
- */
-async function handleQueuedFollowUpV3(host, message) {
-    const key = (0,_promotion_message_queue__WEBPACK_IMPORTED_MODULE_2__.queueItemKey)(message);
-    if (message.dueAt === undefined || message.sentAt === undefined) {
-        host.log('info', `promo follow-up drop | ${key} | reason=legacy_no_dueAt`);
-        host.verifyCloses.noteDrop('legacy_no_dueAt');
-        return 'done';
-    }
-    if (host.followUpTimers.has(message.channelId))
-        return 'keep';
-    const nowMs = Date.now();
-    if ((0,_config_promo_app_config__WEBPACK_IMPORTED_MODULE_3__.isFollowUpExpired)(message.dueAt, nowMs, host.followUpMaxLateMs())) {
-        host.log('info', `promo follow-up drop | ${key} | reason=expired | late_min=${Math.round((nowMs - message.dueAt) / 60000)}`);
-        host.verifyCloses.noteDrop('expired');
-        return 'done';
-    }
-    if (nowMs < message.dueAt)
-        return 'keep';
-    // P6 LOW 2 review LOW 3: a tripped gate holds it before the claim, so a held pass writes nothing to Redis.
-    if (host.adapter.sendGateHolds?.(true) === true)
-        return 'keep';
-    // Review L1: the slot is taken before the claim await, and given back when nothing is sent.
-    const slot = host.reserveFollowUpSlot(nowMs);
-    if (!slot)
-        return 'keep';
-    let sent = false;
-    try {
-        const claimed = await host.claimFollowUpExecution(message);
-        if (claimed === null)
-            return 'keep';
-        if (!claimed)
-            return 'done';
-        const run = await host.runFollowUp(message);
-        sent = run === 'sent';
-        // Review LOW 2: held by the ban-rate gate before any Telegram call: keep it queued, claim released.
-        if (run === 'held' && await releaseFollowUpClaim(host, message)) {
-            host.log('debug', `promo follow-up held | ${key} | reason=ban_gate`);
-            return 'keep';
-        }
-        return 'done';
-    }
-    finally {
-        if (!sent)
-            host.releaseFollowUpSlot(slot);
     }
 }
 /** Review L1: check and take the 5 min slot in one step (no await between), so racing paths cannot both pass. */
@@ -7368,31 +7217,6 @@ async function claimFollowUpExecution(host, message) {
         host.log('warn', `Follow-up execution claim failed; retaining for retry; channelId=${message.channelId} messageId=${message.messageId} error=${host.normalizeError(error)}`);
         return null;
     }
-}
-/** Flow v3 (P2 fix 9): at an off -> on flip, follow-ups without `dueAt` leave (timers and queue). */
-async function dropFollowUpsWithoutDueAt(host) {
-    // Timers armed under `fu` off own items without dueAt: clear them so no follow-up runs without one.
-    for (const [channelId, timeout] of [...host.followUpTimers.entries()]) {
-        if (host.followUpTimerWork.has(channelId))
-            continue;
-        clearTimeout(timeout);
-        host.followUpTimers.delete(channelId);
-    }
-    const queue = host.messageQueue;
-    if (typeof queue.takeFollowUpsWithoutDueAt !== 'function')
-        return;
-    const dropped = queue.takeFollowUpsWithoutDueAt();
-    for (const item of dropped) {
-        host.log('info', `promo follow-up drop | ${(0,_promotion_message_queue__WEBPACK_IMPORTED_MODULE_2__.queueItemKey)(item)} | reason=legacy_no_dueAt`);
-        host.verifyCloses.noteDrop('legacy_no_dueAt');
-        try {
-            await host.removeQueuedMessage(item);
-        }
-        catch (error) {
-            host.log('warn', `promo follow-up drop | ${(0,_promotion_message_queue__WEBPACK_IMPORTED_MODULE_2__.queueItemKey)(item)} | payload delete failed | error=${host.normalizeError(error)}`);
-        }
-    }
-    host.log('info', `promo fu flip | dropped_no_dueAt=${dropped.length}`);
 }
 /** P8: write a follow-up state into the channel's chstate field. Best effort: a failure logs and never blocks. */
 async function markLoopFollowUpState(host, item, state) {
@@ -7502,7 +7326,7 @@ async function tryOneDueFollowUp(host, deadlineMs) {
             host.loopRunningKey = key;
             let run;
             try {
-                run = await host.runFollowUp(item, { loop: true });
+                run = await host.runFollowUp(item);
             }
             finally {
                 host.loopRunningKey = null;
@@ -7586,7 +7410,7 @@ async function sleepWithFollowUps(host, delayMs, declare) {
     }
 }
 /**
- * P8 restore (first loop cycle and each switch to the loop): a queued follow-up whose post's chstate
+ * P8 restore (first cycle that can read chstate): a queued follow-up whose post's chstate
  * field says sent, skipped or expired is closed, so it leaves. A read failure keeps every item (the
  * 7 d claim still stops a second send).
  */
@@ -7612,6 +7436,7 @@ async function dropClosedFollowUps(host) {
             continue;
         host.log('info', `promo restore drop | ${(0,_promotion_message_queue__WEBPACK_IMPORTED_MODULE_2__.queueItemKey)(item)} | reason=state_closed | state=${state.followUpState}`);
         dropped += 1;
+        host.messageQueue.remove(item); // Review HIGH 1: memory first, then the durable delete.
         try {
             await host.removeQueuedMessage(item);
         }
@@ -7884,7 +7709,6 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   normalizeMessageText: () => (/* binding */ normalizeMessageText),
 /* harmony export */   normalizePoolMode: () => (/* binding */ normalizePoolMode),
 /* harmony export */   normalizePositiveInt: () => (/* binding */ normalizePositiveInt),
-/* harmony export */   normalizeReadyMessage: () => (/* binding */ normalizeReadyMessage),
 /* harmony export */   normalizeReadyMessages: () => (/* binding */ normalizeReadyMessages),
 /* harmony export */   normalizeSendResult: () => (/* binding */ normalizeSendResult),
 /* harmony export */   normalizeStats: () => (/* binding */ normalizeStats),
@@ -8053,46 +7877,17 @@ function normalizeAvailableMessageIds(value) {
         .map((item) => (typeof item === 'string' ? item.trim() : ''))
         .filter((item) => item.length > 0);
 }
-/**
- * `keepWorkIdentity` (flow v3, `fu` on): use the queue's one normalizer, which keeps `workType`,
- * `sentAt` and `dueAt`. Off: today's normalizer, which drops them (P2 fix 8: the flag gates it).
- */
-function normalizeReadyMessages(value, keepWorkIdentity = false) {
+/** The queue's one normalizer, which keeps `workType`, `sentAt` and `dueAt` (P2 fix 8). */
+function normalizeReadyMessages(value) {
     if (!Array.isArray(value))
         return [];
     const messages = [];
     for (const item of value) {
-        const message = keepWorkIdentity ? (0,_promotion_message_queue__WEBPACK_IMPORTED_MODULE_3__.normalizeQueuedMessage)(item) : normalizeReadyMessage(item);
+        const message = (0,_promotion_message_queue__WEBPACK_IMPORTED_MODULE_3__.normalizeQueuedMessage)(item);
         if (message)
             messages.push({ message, original: item });
     }
     return messages;
-}
-function normalizeReadyMessage(value) {
-    if (!(0,_utils_guards__WEBPACK_IMPORTED_MODULE_5__.isRecord)(value))
-        return null;
-    const channelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_4__.normalizeChannelId)(value['channelId']);
-    const messageId = asNumber(value['messageId']);
-    if (!channelId || !isValidMessageId(messageId))
-        return null;
-    const timestamp = asNumber(value['timestamp']);
-    const availableMessageCount = normalizePositiveInt(value['availableMessageCount']);
-    const strategy = normalizeMessageStrategy(value['strategy']);
-    const messageText = normalizeMessageText(value['messageText']);
-    const poolSource = (0,_pool_pool_types__WEBPACK_IMPORTED_MODULE_2__.isMessageSource)(value['poolSource']) ? value['poolSource'] : null;
-    const poolMode = normalizePoolMode(value['poolMode']);
-    return {
-        channelId,
-        messageId,
-        timestamp: Number.isFinite(timestamp) && timestamp > 0 ? Math.floor(timestamp) : 0,
-        messageIndex: normalizeText(value['messageIndex']) ?? '0',
-        ...(strategy ? { strategy } : {}),
-        isFollowUp: value['isFollowUp'] === true,
-        ...(availableMessageCount !== null ? { availableMessageCount } : {}),
-        ...(messageText !== undefined ? { messageText } : {}),
-        ...(poolSource ? { poolSource } : {}),
-        ...(poolMode ? { poolMode } : {}),
-    };
 }
 function safeNonNegativeInt(value) {
     return Number.isFinite(value) && value >= 0 ? Math.floor(value) : 0;
@@ -8354,7 +8149,7 @@ async function recordSuccess(host, channel, candidate, result, isFollowUp, perce
             messageId: result.messageId,
             timestamp: sentAt,
             // Flow v3: the post's send time, set once here and never rewritten.
-            ...(host.isFollowUpV3() ? { sentAt } : {}),
+            sentAt,
             messageIndex: result.messageIndex,
             strategy,
             isFollowUp,
@@ -8477,7 +8272,7 @@ function resolveCandidateStrategy(candidate) {
 async function recordDeletion(host, message, deletionPolicy, reason = 'message_missing') {
     const strategy = message.strategy || deletionPolicy.strategy || 'legacy';
     // Survival is measured once (check time - send time) and used by the row, the ring and the log.
-    // Flow v3 (P3, N1): from `sentAt`, never a re-armed `timestamp`. `fu` off strips `sentAt`, so today's value stays.
+    // Flow v3 (P3, N1): from `sentAt`, never a re-armed `timestamp` (a legacy item without `sentAt` falls back to it).
     const survivalMs = (0,_normalize__WEBPACK_IMPORTED_MODULE_5__.safeElapsedMs)(message.sentAt ?? message.timestamp);
     // A delivered message that the channel later removed. The send itself was already recorded as
     // 'delivered'; this is a SECOND row describing the outcome after the fact, which is exactly the
@@ -8703,7 +8498,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _eligibility__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ./eligibility */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/eligibility.ts");
 /* harmony import */ var _normalize__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ./normalize */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/normalize.ts");
 // PromotionFlowRunner: one cycle's channel selection (source order or ranked, legacy/shadow/v2 picker),
-// with the P0 pool classification and, under `elig=on`, the P5 eligibility filter.
+// with the P0 pool classification and the P5 eligibility filter.
 
 
 
@@ -8801,7 +8596,7 @@ async function selectCycleChannels(host, loadedChannels, channels, stats, cycle)
         }
         poolClass = (0,_eligibility__WEBPACK_IMPORTED_MODULE_5__.classifyPool)(host, loadedChannels, blockedChannelIds, cachedDocs, new Set(), cycle);
         const unblocked = channels.filter((channel) => !blockedChannelIds.has(channel.channelId));
-        const sourceCandidates = cycle.elig ? (0,_eligibility__WEBPACK_IMPORTED_MODULE_5__.eligibleOnly)(host, unblocked, blockedChannelIds, cachedDocs, cycle.nowMs) : unblocked;
+        const sourceCandidates = (0,_eligibility__WEBPACK_IMPORTED_MODULE_5__.eligibleOnly)(host, unblocked, blockedChannelIds, cachedDocs, cycle.nowMs);
         const exploreDenied = await host.explorationDenied(sourceCandidates, false);
         selectionExploreDenied = exploreDenied.size;
         selectedChannels = sourceCandidates
@@ -8846,7 +8641,7 @@ async function selectCycleChannels(host, loadedChannels, channels, stats, cycle)
             `selected=${selectedChannels.length}`,
             `blocked=${blockedChannelIds.size}`,
             `exploreDenied=${exploreDenied.size}`,
-            ...(cycle.elig ? ['elig=on', `eligible=${sourceCandidates.length}`] : []),
+            `eligible=${sourceCandidates.length}`,
             `stats=${host.formatStats(stats)}`,
         ].join('; '));
     }
@@ -8878,13 +8673,13 @@ async function selectCycleChannels(host, loadedChannels, channels, stats, cycle)
                 ? { rankScore: (doc) => (0,_selection_picker__WEBPACK_IMPORTED_MODULE_2__.v2ChannelScore)(doc, pickNowMs, pickerMu) }
                 : safetyV2 ? { rankScore: (doc) => (0,_selection_picker__WEBPACK_IMPORTED_MODULE_2__.legacyChannelScoreV2Safety)(doc, pickNowMs) } : {}),
         });
-        const rankInput = cycle.elig ? (0,_eligibility__WEBPACK_IMPORTED_MODULE_5__.eligibleOnly)(host, channels, blockedChannelIds, intelligenceDocs, cycle.nowMs) : channels;
+        const rankInput = (0,_eligibility__WEBPACK_IMPORTED_MODULE_5__.eligibleOnly)(host, channels, blockedChannelIds, intelligenceDocs, cycle.nowMs);
         let selection;
         let excludedDeadIds = new Set();
         if (pickerMode === 'v2') {
             // v2 only: lifetime-dead channels (>= 125 attempts, 0 DMs) leave the list. Shadow measurement
-            // below still scores them (candidates come from `channels`). Fail-safe: when nothing sendable
-            // would remain, keep them and warn.
+            // below still scores them (candidates come from `channels`). Dead channels are never sent, even
+            // when no live channel is eligible (P5 review H1).
             const deadIds = new Set();
             for (const doc of intelligenceDocs) {
                 const id = (0,_selection_picker__WEBPACK_IMPORTED_MODULE_2__.isLifetimeDeadChannel)(doc) ? (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_4__.normalizeChannelId)(doc.channelId) : null;
@@ -8895,15 +8690,11 @@ async function selectCycleChannels(host, loadedChannels, channels, stats, cycle)
             const dead = rankInput.length - live.length;
             selection = selectFrom(live);
             const eligible = selection.proven.length + selection.untested.length;
-            if (dead > 0 && eligible === 0 && cycle.elig) {
-                // P5 review H1: with elig=on the live pool is empty because it is cooling (or otherwise
-                // ineligible), not because the list ran dry; sending to dead channels is never the answer.
+            if (dead > 0 && eligible === 0) {
+                // P5 review H1: the live pool is empty because it is cooling (or otherwise ineligible), not
+                // because the list ran dry; sending to dead channels is never the answer.
                 excludedDeadIds = deadIds;
-                host.log('info', `Promotion v2 dead-channel skip; skipped=${dead}; dead=${dead}; eligible=0; elig=on: no live channel eligible, dead channels not sent`);
-            }
-            else if (dead > 0 && eligible === 0) {
-                selection = selectFrom(rankInput);
-                host.log('warn', `Promotion v2 dead-channel skip; skipped=0; dead=${dead}; eligible=0; fail-safe: no live channel left, dead channels kept`);
+                host.log('info', `Promotion v2 dead-channel skip; skipped=${dead}; dead=${dead}; eligible=0; no live channel eligible, dead channels not sent`);
             }
             else if (dead > 0) {
                 excludedDeadIds = deadIds;
@@ -8942,7 +8733,7 @@ async function selectCycleChannels(host, loadedChannels, channels, stats, cycle)
             `explorePct=${selection.explorePercent.toFixed(2)}`,
             `blocked=${blockedChannelIds.size}`,
             `exploreDenied=${exploreDenied.size}`,
-            ...(cycle.elig ? ['elig=on', `eligible=${rankInput.length}`] : []),
+            `eligible=${rankInput.length}`,
             `stats=${host.formatStats(stats)}`,
         ].join('; '));
         if (selectionDiagnostics.selectedSample !== 'none') {
@@ -9082,7 +8873,6 @@ async function settleDailySendBudget(host, result, reservation) {
 
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
-/* harmony export */   PROMO_FLAGS_QUEUE_REFRESH_MS: () => (/* binding */ PROMO_FLAGS_QUEUE_REFRESH_MS),
 /* harmony export */   checkQueuedMessagesOnce: () => (/* binding */ checkQueuedMessagesOnce),
 /* harmony export */   liveQueueItemUntil: () => (/* binding */ liveQueueItemUntil),
 /* harmony export */   queueItems: () => (/* binding */ queueItems),
@@ -9092,12 +8882,11 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ });
 /* harmony import */ var _policy__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../../policy */ "../../packages/tg-channel-state/src/channel-message-promotions/policy/index.ts");
 /* harmony import */ var _config_promo_app_config__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../../config/promo-app-config */ "../../packages/tg-channel-state/src/channel-message-promotions/config/promo-app-config.ts");
-/* harmony import */ var _config_promo_flags_v3__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../../config/promo-flags-v3 */ "../../packages/tg-channel-state/src/channel-message-promotions/config/promo-flags-v3.ts");
-/* harmony import */ var _tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! @tg/core/utils/dc-ip-family */ "../../packages/tg-core/src/utils/dc-ip-family.ts");
-/* harmony import */ var _promotion_message_queue__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../promotion-message-queue */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/promotion-message-queue.ts");
-/* harmony import */ var _cycle_metrics__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ./cycle-metrics */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/cycle-metrics.ts");
-/* harmony import */ var _normalize__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ./normalize */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/normalize.ts");
-/* harmony import */ var _follow_up__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ./follow-up */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/follow-up.ts");
+/* harmony import */ var _tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! @tg/core/utils/dc-ip-family */ "../../packages/tg-core/src/utils/dc-ip-family.ts");
+/* harmony import */ var _promotion_message_queue__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../promotion-message-queue */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/promotion-message-queue.ts");
+/* harmony import */ var _cycle_metrics__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ./cycle-metrics */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/cycle-metrics.ts");
+/* harmony import */ var _normalize__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ./normalize */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/normalize.ts");
+/* harmony import */ var _follow_up__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ./follow-up */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/follow-up.ts");
 // PromotionFlowRunner: the verify queue pass (check each sent promo, record its outcome once) and the
 // flow v3 P4 `verify_unknown` close rule.
 
@@ -9107,9 +8896,6 @@ __webpack_require__.r(__webpack_exports__);
 
 
 
-
-/** Flow v3 (review M2): the queue checker re-reads the flag hash at most this often. */
-const PROMO_FLAGS_QUEUE_REFRESH_MS = 60 * 1000;
 /** Flow v3 (review L7): at most one marker_error warn per runner per this window. */
 const MARKER_ERROR_LOG_EVERY_MS = 60 * 1000;
 /** Read-only copies of the queued items; [] for a queue without list(). */
@@ -9136,17 +8922,15 @@ function liveQueueItemUntil(item, followUpMaxLateMs) {
     return Number.isFinite(sentAt) && sentAt > 0 ? sentAt + _config_promo_app_config__WEBPACK_IMPORTED_MODULE_1__.VERIFY_WINDOW_MS : null;
 }
 /**
- * One sweep: counts queue items past their would-be `until` (P0). P10b, `v3=on` only: also drops each
- * item past its live `until` and logs one line per drop. Otherwise it drops nothing.
+ * One sweep: counts queue items past their `until` (P0), then (P10b) drops each item past its live
+ * `until` and logs one line per drop.
  */
 function runSweepOnce(host, nowMs) {
     const items = host.queueItems();
-    const result = (0,_cycle_metrics__WEBPACK_IMPORTED_MODULE_5__.sweepQueueItems)(items, nowMs, host.options.pickerApp ?? null);
-    const active = (0,_config_promo_flags_v3__WEBPACK_IMPORTED_MODULE_2__.isSweepActive)(host.promoFlags);
+    const result = (0,_cycle_metrics__WEBPACK_IMPORTED_MODULE_4__.sweepQueueItems)(items, nowMs, host.options.pickerApp ?? null);
     const alert = result.droppedVerify > 0 || result.droppedFu > 0;
-    host.log(alert ? 'warn' : 'info', (0,_cycle_metrics__WEBPACK_IMPORTED_MODULE_5__.formatPromoSweep)((0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_3__.maskMobile)(host.options.account.mobile), result, host.verifyCloses.takeDelta('sweep'), active ? 'drop' : 'log_only'));
-    if (active)
-        dropPastUntil(host, items, nowMs);
+    host.log(alert ? 'warn' : 'info', (0,_cycle_metrics__WEBPACK_IMPORTED_MODULE_4__.formatPromoSweep)((0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_2__.maskMobile)(host.options.account.mobile), result, host.verifyCloses.takeDelta('sweep')));
+    dropPastUntil(host, items, nowMs);
     return result;
 }
 /**
@@ -9160,7 +8944,7 @@ function dropPastUntil(host, items, nowMs) {
         const until = liveQueueItemUntil(item, maxLateMs);
         if (until === null || until > nowMs)
             continue;
-        const key = (0,_promotion_message_queue__WEBPACK_IMPORTED_MODULE_4__.queueItemKey)(item);
+        const key = (0,_promotion_message_queue__WEBPACK_IMPORTED_MODULE_3__.queueItemKey)(item);
         if (key === host.loopRunningKey) {
             host.log('debug', `promo sweep skip | ${key} | reason=running`);
             continue;
@@ -9172,26 +8956,24 @@ function dropPastUntil(host, items, nowMs) {
             host.log('warn', `promo sweep drop | ${key} | payload delete failed | error=${host.normalizeError(error)}`);
         });
         if (item.workType === 'followUp')
-            void (0,_follow_up__WEBPACK_IMPORTED_MODULE_7__.markLoopFollowUpState)(host, item, 'expired');
+            void (0,_follow_up__WEBPACK_IMPORTED_MODULE_6__.markLoopFollowUpState)(host, item, 'expired');
     }
 }
 /**
  * Flow v3 P4. After an unknown or failed check (one counted attempt, at least 30 s after the last
  * counted one), the rule is met when the item is >= 10 min past its send AND has >= 5 counted
- * attempts. `vx=on`: close it as terminal `verify_unknown` (no survival, no deletion, logged once,
- * counted). `vx=off`: keep it, and log and count `verify_unknown_would` once per item.
- * With `fu=on`, a P3 marker error (kept for the next check) counts no attempt; it closes past 1 h, the
- * v3 verify payload TTL, in either `vx` mode (review F7, F8). Attempts live in memory only: a restored
- * item starts at 0 (F6).
+ * attempts: close it as terminal `verify_unknown` (no survival, no deletion, logged once, counted).
+ * A P3 marker error (kept for the next check) counts no attempt; it closes past 1 h, the verify
+ * payload TTL (review F7, F8). Attempts live in memory only: a restored item starts at 0 (F6).
  */
 function verifyUnknownClose(host, original, message, last) {
     const nowMs = Date.now();
     const queue = host.messageQueue;
     const sentAt = message.sentAt ?? message.timestamp;
     const ageMs = Number.isFinite(sentAt) && sentAt > 0 ? nowMs - sentAt : 0;
-    const key = (0,_promotion_message_queue__WEBPACK_IMPORTED_MODULE_4__.queueItemKey)(original);
+    const key = (0,_promotion_message_queue__WEBPACK_IMPORTED_MODULE_3__.queueItemKey)(original);
     if (last === 'marker_error') {
-        if (ageMs < _promotion_message_queue__WEBPACK_IMPORTED_MODULE_4__.VERIFY_RESTORE_MAX_AGE_MS)
+        if (ageMs < _promotion_message_queue__WEBPACK_IMPORTED_MODULE_3__.VERIFY_RESTORE_MAX_AGE_MS)
             return false;
         const attempts = typeof queue.checkAttempts === 'function' ? queue.checkAttempts(original) : 0;
         host.log('info', `promo verify close | ${key} | reason=verify_unknown | attempts=${attempts} | age_s=${Math.round(ageMs / 1000)} | last=${last}`);
@@ -9203,23 +8985,14 @@ function verifyUnknownClose(host, original, message, last) {
         : 0;
     if (ageMs < _config_promo_app_config__WEBPACK_IMPORTED_MODULE_1__.VERIFY_MAX_AGE_MS || attempts < _config_promo_app_config__WEBPACK_IMPORTED_MODULE_1__.VERIFY_MAX_ATTEMPTS)
         return false;
-    const fields = `${key} | reason=verify_unknown | attempts=${attempts} | age_s=${Math.round(ageMs / 1000)} | last=${last}`;
-    if (host.promoFlags.vx !== 'on') {
-        const first = typeof queue.markWouldClose === 'function' ? queue.markWouldClose(original) : false;
-        if (first) {
-            host.log('info', `promo verify would-close | ${fields}`);
-            host.verifyCloses.noteUnknownWould();
-        }
-        return false;
-    }
-    host.log('info', `promo verify close | ${fields}`);
+    host.log('info', `promo verify close | ${key} | reason=verify_unknown | attempts=${attempts} | age_s=${Math.round(ageMs / 1000)} | last=${last}`);
     host.verifyCloses.noteUnknown();
     return true;
 }
-/** The today (non-v3) survival and deletion records for one checked verify item. */
+/** The survival and deletion records for one checked verify item (called once per verify key). */
 async function recordCheckedOutcome(host, message, result, sentAt) {
     if (result.status === 'exists') {
-        const existingMessage = (0,_normalize__WEBPACK_IMPORTED_MODULE_6__.withMessageCheckText)(message, result);
+        const existingMessage = (0,_normalize__WEBPACK_IMPORTED_MODULE_5__.withMessageCheckText)(message, result);
         host.log('debug', `Promotion message exists; channelId=${message.channelId} messageId=${message.messageId} isFollowUp=${message.isFollowUp}`);
         await host.callHook('onMessageExisting', () => host.adapter.onMessageExisting?.(existingMessage));
         await host.recordAccountSurvival(message);
@@ -9240,7 +9013,7 @@ async function recordCheckedOutcome(host, message, result, sentAt) {
  * A follow-up is scheduled only from here, after a first survival.
  */
 async function recordVerifiedOutcome(host, message, result) {
-    const key = (0,_promotion_message_queue__WEBPACK_IMPORTED_MODULE_4__.queueItemKey)(message);
+    const key = (0,_promotion_message_queue__WEBPACK_IMPORTED_MODULE_3__.queueItemKey)(message);
     let first = true;
     try {
         const queue = host.messageQueue;
@@ -9269,20 +9042,13 @@ async function recordVerifiedOutcome(host, message, result) {
 }
 /** One queue pass: every ready item is checked (verify) or run (follow-up), then the finished ones leave. */
 async function checkQueuedMessagesOnce(host) {
-    // Review M2: a flag rollback reaches a long cycle within about a minute. Read only here, at the
-    // start of a pass, so the mode never changes inside one.
-    if (Date.now() - host.promoFlagsReadAt >= PROMO_FLAGS_QUEUE_REFRESH_MS)
-        await host.refreshPromoFlags();
     host.health.lastQueueCheckStartedAt = Date.now();
     try {
         const now = Date.now();
-        const v3 = host.isFollowUpV3();
-        // P8: under the loop, follow-up items are the main loop's; this pass checks verify items only.
-        const loop = v3 && host.followUpLoopActive();
-        const checkDelay = (0,_normalize__WEBPACK_IMPORTED_MODULE_6__.safeDelayMs)(host.options.messageCheckDelayMs, 15000);
+        const checkDelay = (0,_normalize__WEBPACK_IMPORTED_MODULE_5__.safeDelayMs)(host.options.messageCheckDelayMs, 15000);
         let ready = [];
         try {
-            ready = (0,_normalize__WEBPACK_IMPORTED_MODULE_6__.normalizeReadyMessages)(host.messageQueue.readyForCheck(now, checkDelay), v3);
+            ready = (0,_normalize__WEBPACK_IMPORTED_MODULE_5__.normalizeReadyMessages)(host.messageQueue.readyForCheck(now, checkDelay));
         }
         catch (error) {
             host.log('warn', `Promotion queue ready check failed; skipping queue pass error=${host.normalizeError(error)}`);
@@ -9304,30 +9070,12 @@ async function checkQueuedMessagesOnce(host) {
                 break;
             }
             const { message } = entry;
-            if (v3 && message.workType === 'followUp') {
-                if (loop)
-                    continue;
-                if (await host.handleQueuedFollowUpV3(message) === 'done')
-                    completed.add(entry);
+            // P8: follow-up items are the main loop's (run in its gaps); this pass checks verify items only.
+            if (message.workType === 'followUp')
                 continue;
-            }
-            if (message.workType === 'followUp') {
-                if (host.followUpTimers.has(message.channelId))
-                    continue;
-                const claimed = await host.claimFollowUpExecution(message);
-                if (claimed === null)
-                    continue;
-                if (!claimed) {
-                    completed.add(entry);
-                    continue;
-                }
-                await host.runFollowUp(message);
-                completed.add(entry);
-                continue;
-            }
             let result;
             try {
-                result = (0,_normalize__WEBPACK_IMPORTED_MODULE_6__.normalizeMessageCheckResult)(await host.adapter.checkMessage(message));
+                result = (0,_normalize__WEBPACK_IMPORTED_MODULE_5__.normalizeMessageCheckResult)(await host.adapter.checkMessage(message));
             }
             catch (error) {
                 host.log('warn', [
@@ -9340,17 +9088,12 @@ async function checkQueuedMessagesOnce(host) {
                 closeIfUnknown(entry, 'error');
                 continue;
             }
-            if (v3 && (result.status === 'exists' || result.status === 'deleted')) {
+            if (result.status === 'exists' || result.status === 'deleted') {
                 // P3: the one survival writer, once per verify key. 'keep' = marker error.
                 if (await host.recordVerifiedOutcome(message, result) === 'done')
                     completed.add(entry);
                 else
                     closeIfUnknown(entry, 'marker_error');
-                continue;
-            }
-            if (result.status === 'exists' || result.status === 'deleted') {
-                await recordCheckedOutcome(host, message, result, message.timestamp);
-                completed.add(entry);
             }
             else {
                 host.log('debug', `Message check unknown for ${message.channelId}/${message.messageId}; retaining for retry`);
@@ -9367,7 +9110,7 @@ async function checkQueuedMessagesOnce(host) {
                     // Terminal: drop the in-memory copy so it is never re-checked or counted again. The payload
                     // keeps its TTL; a restore before then re-checks it once more.
                     host.messageQueue.remove(entry.original);
-                    host.log('warn', `promo verify close | ${(0,_promotion_message_queue__WEBPACK_IMPORTED_MODULE_4__.queueItemKey)(entry.original)} | payload delete failed | error=${host.normalizeError(error)}`);
+                    host.log('warn', `promo verify close | ${(0,_promotion_message_queue__WEBPACK_IMPORTED_MODULE_3__.queueItemKey)(entry.original)} | payload delete failed | error=${host.normalizeError(error)}`);
                     continue;
                 }
                 host.log('warn', `Promotion queue remove failed; channelId=${message.channelId} messageId=${message.messageId} error=${host.normalizeError(error)}`);
@@ -9419,20 +9162,16 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   PROMO_LADDER: () => (/* binding */ PROMO_LADDER),
 /* harmony export */   PromoQuietHistory: () => (/* binding */ PromoQuietHistory),
 /* harmony export */   PromoRestartLedger: () => (/* binding */ PromoRestartLedger),
-/* harmony export */   PromoWouldLog: () => (/* binding */ PromoWouldLog),
 /* harmony export */   decidePromoLadder: () => (/* binding */ decidePromoLadder),
 /* harmony export */   evaluatePromoLadder: () => (/* binding */ evaluatePromoLadder),
-/* harmony export */   formatPromoHealthWould: () => (/* binding */ formatPromoHealthWould),
 /* harmony export */   isKnownQuiet: () => (/* binding */ isKnownQuiet),
 /* harmony export */   mobileSideWindow: () => (/* binding */ mobileSideWindow),
 /* harmony export */   notePromoSwap: () => (/* binding */ notePromoSwap),
-/* harmony export */   promoHealthModeOf: () => (/* binding */ promoHealthModeOf),
 /* harmony export */   promoIstDay: () => (/* binding */ promoIstDay),
 /* harmony export */   promoLadderSwapBudgetKey: () => (/* binding */ promoLadderSwapBudgetKey),
 /* harmony export */   promoQuietHistory: () => (/* binding */ promoQuietHistory),
 /* harmony export */   promoRestartLedger: () => (/* binding */ promoRestartLedger),
 /* harmony export */   promoSwapBudgetTtlSec: () => (/* binding */ promoSwapBudgetTtlSec),
-/* harmony export */   promoWouldLog: () => (/* binding */ promoWouldLog),
 /* harmony export */   readPromoSwapBudget: () => (/* binding */ readPromoSwapBudget),
 /* harmony export */   resetPromoHealthLadderState: () => (/* binding */ resetPromoHealthLadderState)
 /* harmony export */ });
@@ -9460,8 +9199,6 @@ const PROMO_LADDER = Object.freeze({
     quietMaxAgeMs: 60 * MINUTE,
     /** Ladder swaps per client per IST day (Redis budget). */
     swapsPerIstDay: 2,
-    /** `promo health would` summary line interval. */
-    wouldSummaryMs: HOUR,
     historyMaxAgeMs: 7 * HOUR,
     historyMaxEntries: 400,
     maxMobiles: 500,
@@ -9469,6 +9206,7 @@ const PROMO_LADDER = Object.freeze({
 /** Quiet reasons that mean "deliberately or knowingly quiet": never a restart. */
 const KNOWN_QUIET = new Set([
     'budget', 'explore_budget', 'hourly_cap', 'ban_gate', 'cooldown', 'no_eligible_channel', 'no_eligible_mobile',
+    'chstate_unavailable',
 ]);
 function isKnownQuiet(quiet) {
     return !!quiet && KNOWN_QUIET.has(quiet);
@@ -9514,8 +9252,7 @@ class PromoQuietHistory {
     }
 }
 /**
- * Counted runner restarts per key (`<mode>:<mobile>`, so `record` would-restarts never count toward
- * an `on` swap). A restart counts only when it is more than 47 min after the previous counted one.
+ * Counted runner restarts per key (`on:<mobile>`; the prefix is kept from the retired flag modes). A restart counts only when it is more than 47 min after the previous counted one.
  */
 class PromoRestartLedger {
     constructor() {
@@ -9576,66 +9313,12 @@ class PromoRestartLedger {
         this.byKey.clear();
     }
 }
-/**
- * Record-mode log volume (review F4): one `promo health would` line per change of (mobile, would-action,
- * today's action), plus one summary line per hour with the count of every non-trivial observation.
- * A mobile whose would-action and today's action are both `none` is not counted.
- */
-class PromoWouldLog {
-    constructor() {
-        this.lastSig = new Map();
-        this.counts = new Map();
-        this.mobiles = new Set();
-        this.windowStartedAt = null;
-    }
-    /** Returns the lines to log now (0, 1 or 2). */
-    observe(mobile, maskedMobile, verdict, today, now) {
-        const lines = [];
-        if (this.windowStartedAt === null)
-            this.windowStartedAt = now;
-        const sig = `${verdict.action}|${today.action}`;
-        const quiet = verdict.action === 'none' && (today.action === 'none' || today.action === '');
-        if (!quiet) {
-            this.counts.set(verdict.action, (this.counts.get(verdict.action) ?? 0) + 1);
-            this.mobiles.add(mobile);
-        }
-        const previous = this.lastSig.get(mobile) ?? 'none|none';
-        if (sig !== previous) {
-            if (!this.lastSig.has(mobile) && this.lastSig.size >= PROMO_LADDER.maxMobiles) {
-                const oldest = this.lastSig.keys().next().value;
-                if (oldest !== undefined)
-                    this.lastSig.delete(oldest);
-            }
-            this.lastSig.set(mobile, sig);
-            if (!quiet)
-                lines.push(formatPromoHealthWould(maskedMobile, verdict, today));
-        }
-        if (now - this.windowStartedAt >= PROMO_LADDER.wouldSummaryMs) {
-            if (this.counts.size > 0) {
-                const parts = ['swap', 'restart_runner', 'none'].map((action) => `${action}=${this.counts.get(action) ?? 0}`).join(' ');
-                lines.push(`promo health would summary | window=1h | mobiles=${this.mobiles.size} | ${parts}`);
-            }
-            this.counts = new Map();
-            this.mobiles = new Set();
-            this.windowStartedAt = now;
-        }
-        return lines;
-    }
-    clear() {
-        this.lastSig.clear();
-        this.counts = new Map();
-        this.mobiles = new Set();
-        this.windowStartedAt = null;
-    }
-}
 /** Process-wide stores (one per process; tests clear them). */
 const promoQuietHistory = new PromoQuietHistory();
 const promoRestartLedger = new PromoRestartLedger();
-const promoWouldLog = new PromoWouldLog();
 function resetPromoHealthLadderState() {
     promoQuietHistory.clear();
     promoRestartLedger.clear();
-    promoWouldLog.clear();
 }
 /** The mobile-side ratio summed over every classified cycle in the window, `quiet=none` cycles included. */
 function mobileSideWindow(records, covered) {
@@ -9697,7 +9380,7 @@ function decidePromoLadder(input) {
         return { status: 'degraded', action: 'none', reason: formatWindow('no_eligible_mobile_2h', input.window2h), quiet };
     }
     if (lastMainAgeMs > input.staleMs) {
-        if (quiet === 'no_eligible_channel' || quiet === 'no_eligible_mobile') {
+        if (quiet === 'no_eligible_channel' || quiet === 'no_eligible_mobile' || quiet === 'chstate_unavailable') {
             return { status: 'degraded', action: 'none', reason: quiet, quiet };
         }
         if (!input.quietAllowed && !isKnownQuiet(quiet)) {
@@ -9706,24 +9389,21 @@ function decidePromoLadder(input) {
     }
     return { status: 'healthy', action: 'none', reason: quiet ? `quiet=${quiet}` : 'ok', quiet };
 }
-/** `health` mode from a promotion engine's stats (the current runner's flag read). Missing: `off`. */
-function promoHealthModeOf(stats) {
-    const mode = stats
-        ?.runnerHealth?.runner?.promoHealthMode;
-    return mode === 'record' || mode === 'on' ? mode : 'off';
-}
 /**
- * Health-check entry point: null with `health=off` (callers keep today's rules). Notes watchdog
+ * Health-check entry point: null when the stats carry no runner snapshot (callers keep the legacy
+ * stale rule). Notes watchdog
  * restarts and resets the restart count on a send (idempotent), then decides the ladder.
  */
 function evaluatePromoLadder(input) {
-    const mode = promoHealthModeOf(input.stats);
-    if (mode === 'off' || !input.mobile)
+    if (!input.mobile)
+        return null;
+    const supervisor = input.stats?.runnerHealth ?? null;
+    const rawRunner = supervisor?.['runner'];
+    if (!rawRunner || typeof rawRunner !== 'object')
         return null;
     const now = input.now ?? Date.now();
-    const supervisor = input.stats?.runnerHealth ?? null;
-    const runner = (supervisor?.['runner'] ?? null);
-    const ledgerKey = `${mode}:${input.mobile}`;
+    const runner = rawRunner;
+    const ledgerKey = `on:${input.mobile}`;
     promoRestartLedger.noteWatchdog(ledgerKey, supervisor?.['lastStuckAt']);
     promoRestartLedger.resetIfSent(ledgerKey, input.lastMainAt);
     const window2h = promoQuietHistory.window(input.mobile, now, PROMO_LADDER.mobileDegradedMs);
@@ -9740,11 +9420,7 @@ function evaluatePromoLadder(input) {
         restartsCounted: promoRestartLedger.counted(ledgerKey, now),
         staleMs: input.staleMs,
     });
-    return { mode, verdict, ledgerKey };
-}
-/** One record-mode line: `promo health would <action> | <mobile> | reason=<reason> | today=<status>/<action>`. */
-function formatPromoHealthWould(maskedMobile, verdict, today) {
-    return `promo health would ${verdict.action} | ${maskedMobile} | reason=${verdict.reason} | status=${verdict.status} | today=${today.status}/${today.action}`;
+    return { verdict, ledgerKey };
 }
 // IST day and TTL repeat the refill budget helpers in apps/promote-clients/src/accounts/mobile-manager.ts
 // (same math); merging them is left for P12.
@@ -9861,19 +9537,13 @@ const FAILED_CHANNEL_RETRY_MAX_MS = 10000;
 const hostOf = (runner) => runner;
 class PromotionFlowRunner {
     constructor(adapter, options) {
-        this.followUpTimers = new Map();
-        /** Flow v3: the durable item each follow-up timer owns, so a replaced timer's item leaves by key. */
-        this.followUpTimerWork = new Map();
-        /** Flow v3 flags, read at each cycle start (doc 6) and by the queue checker at most once per 60 s. */
-        /** The flags acted on (derived from `v3` only, P12). */
+        /** Promotion flags (`safety`), read at each cycle start (doc 6). A read failure keeps them. */
         this.promoFlags = { ..._config_promo_flags_v3__WEBPACK_IMPORTED_MODULE_8__.PROMO_FLAGS_DEFAULTS };
-        /** The flags as read (a read failure keeps these). */
-        this.promoFlagsRead = { ..._config_promo_flags_v3__WEBPACK_IMPORTED_MODULE_8__.PROMO_FLAGS_DEFAULTS };
         this.promoFlagsPrimed = false;
-        this.promoFlagsReadAt = Number.NEGATIVE_INFINITY;
         /** P5: this cycle's live cooldowns (normalized channelId -> until ms), read once at cycle start; sends add to it. */
         this.channelCooldowns = new Map();
-        this.eligUnsupportedLogged = false;
+        /** The `no atomic chstate write` error is logged once per runner (sends pause while it lasts). */
+        this.chstateUnsupportedLogged = false;
         /**
          * P5 review H2: every channel left is cooling, so the runner rests until the earliest cooldown ends
          * (capped at 50 min). The loop sleep keeps this as health.sleepUntil instead of clearing it.
@@ -9882,7 +9552,7 @@ class PromotionFlowRunner {
         this.lastFollowUpAt = 0;
         /** P8: the last post-send delay, for the hourly reserve of main sends (null = none yet). */
         this.lastMainDelayMs = null;
-        /** P8: drop closed follow-ups (chstate) at the first loop cycle and after each switch to the loop. */
+        /** P8: drop closed follow-ups (chstate) at the first cycle that can read chstate. */
         this.loopRestorePending = true;
         /** P8: queue key of the follow-up the gap is running now (the sweep leaves it alone). */
         this.loopRunningKey = null;
@@ -9908,7 +9578,7 @@ class PromotionFlowRunner {
         this.running = false;
         this.startedByStart = false;
         this.status = 'idle';
-        /** Flow v3 P7: last finished cycle (quiet reason, pool sides); only kept with `health` record or on. */
+        /** Flow v3 P7: last finished cycle (quiet reason, pool sides) for the health ladder. */
         this.lastQuiet = null;
         this.health = {
             createdAt: Date.now(),
@@ -9954,6 +9624,8 @@ class PromotionFlowRunner {
             ? safeOptions.messageQueue
             : new _promotion_message_queue__WEBPACK_IMPORTED_MODULE_7__.PromotionMessageQueue(safeOptions.maxQueueSize ?? 500);
         this.messageQueue.setDropReporter?.(this.queueDropReporter);
+        // Flow v3 rules before any restore: this app's follow-up lateness and the runner's logger.
+        this.messageQueue.setRules?.({ maxLateMs: this.followUpMaxLateMs(), log: (level, message) => this.log(level, message) });
         this.heartbeat = new _flow_runner_heartbeat__WEBPACK_IMPORTED_MODULE_18__.PromoHeartbeat(async (sends) => {
             if (!this.running)
                 return;
@@ -10005,7 +9677,6 @@ class PromotionFlowRunner {
             startedByStart: this.startedByStart,
             queueSize: this.messageQueue.size,
             ...this.health,
-            promoHealthMode: this.promoFlags.health,
             lastQuiet: this.lastQuiet ? { ...this.lastQuiet } : null,
         };
     }
@@ -10020,19 +9691,14 @@ class PromotionFlowRunner {
         this.stopQueueChecker();
         this.heartbeat.stop();
         this.sweep.stop();
-        for (const timeout of this.followUpTimers.values()) {
-            clearTimeout(timeout);
-        }
-        this.followUpTimers.clear();
-        this.followUpTimerWork.clear();
         this.health.stoppedAt = Date.now();
         this.status = 'stopped';
-        this.log('info', 'Promotion runner stopped; cleared queued follow-up timers');
+        this.log('info', 'Promotion runner stopped');
     }
     async start() {
         if (this.running)
             return;
-        // Flags first: restore applies the v3 age and legacy rules only under `fu` on. Counts as the first cycle's read.
+        // Flags first (counts as the first cycle's read), then restore (flow v3 age and legacy-drop rules).
         await this.refreshPromoFlags();
         this.promoFlagsPrimed = true;
         await this.restoreQueuedMessages();
@@ -10086,9 +9752,9 @@ class PromotionFlowRunner {
         if (this.promoFlagsPrimed)
             this.promoFlagsPrimed = false;
         else
-            await this.refreshPromoFlagsBetweenPasses();
+            await this.refreshPromoFlags();
         await this.restoreQueuedMessages();
-        if (this.loopRestorePending && this.followUpLoopActive()) {
+        if (this.loopRestorePending && this.eligActive()) {
             this.loopRestorePending = false;
             await (0,_flow_runner_follow_up__WEBPACK_IMPORTED_MODULE_13__.dropClosedFollowUps)(hostOf(this));
         }
@@ -10120,11 +9786,13 @@ class PromotionFlowRunner {
                 this.log('warn', 'No channels available for promotion');
                 return;
             }
-            // Flow v3 P5 (elig=on): rank only channels that pass eligibleNow, the send path's predicate,
-            // with this cycle's cooldowns. elig=off: no read, no filter, today's selection.
+            // Flow v3 P5: rank only channels that pass eligibleNow, the send path's predicate, with this
+            // cycle's cooldowns. null = no atomic chstate write or a failed cooldown read: the cycle pauses.
             const cycle = await (0,_flow_runner_eligibility__WEBPACK_IMPORTED_MODULE_14__.prepareCycleEligibility)(hostOf(this));
-            if (!cycle)
+            if (!cycle) {
+                (0,_flow_runner_cycle_run__WEBPACK_IMPORTED_MODULE_17__.notePausedCycle)(hostOf(this));
                 return;
+            }
             const stats = await this.getStatsOrDefault('planning');
             const selection = await (0,_flow_runner_selection_pass__WEBPACK_IMPORTED_MODULE_16__.selectCycleChannels)(hostOf(this), loadedChannels, channels, stats, cycle);
             if (!selection)
@@ -10302,9 +9970,6 @@ class PromotionFlowRunner {
     checkQueuedMessagesOnce() {
         return (0,_flow_runner_verify__WEBPACK_IMPORTED_MODULE_15__.checkQueuedMessagesOnce)(hostOf(this));
     }
-    handleQueuedFollowUpV3(message) {
-        return (0,_flow_runner_follow_up__WEBPACK_IMPORTED_MODULE_13__.handleQueuedFollowUpV3)(hostOf(this), message);
-    }
     recordVerifiedOutcome(message, result) {
         return (0,_flow_runner_verify__WEBPACK_IMPORTED_MODULE_15__.recordVerifiedOutcome)(hostOf(this), message, result);
     }
@@ -10316,14 +9981,6 @@ class PromotionFlowRunner {
     }
     runSweepOnce(nowMs = Date.now()) {
         return (0,_flow_runner_verify__WEBPACK_IMPORTED_MODULE_15__.runSweepOnce)(hostOf(this), nowMs);
-    }
-    /** Flow v3: `fu` is on (`v3=on`). */
-    isFollowUpV3() {
-        return (0,_config_promo_flags_v3__WEBPACK_IMPORTED_MODULE_8__.isFollowUpV3)(this.promoFlags);
-    }
-    /** Flow v3 P8: follow-ups run in the main loop's gaps (`v3=on` and an atomic chstate write). Else the timer path. */
-    followUpLoopActive() {
-        return (0,_config_promo_flags_v3__WEBPACK_IMPORTED_MODULE_8__.isFollowUpLoop)(this.promoFlags) && this.eligActive();
     }
     followUpMaxLateMs() {
         return (0,_config_promo_app_config__WEBPACK_IMPORTED_MODULE_9__.followUpMaxLateMsFor)(this.options.pickerApp);
@@ -10337,93 +9994,30 @@ class PromotionFlowRunner {
     /**
      * One flag read per cycle start: `account.readPromoFlags(app)` does one HGETALL of
      * `promote:flags:v3:<app>` (fallbacks and keep-last-on-failure live there). No reader or no app:
-     * defaults (`fu` off). Applies the queue mode and, on an off -> on flip, drops in-memory follow-ups
-     * without `dueAt` (P2 fix 9).
+     * defaults. Only `safety` is read.
      */
     async refreshPromoFlags() {
-        this.promoFlagsReadAt = Date.now();
         const app = (0,_config_promo_flags_v3__WEBPACK_IMPORTED_MODULE_8__.promoFlagsAppFor)(this.options.pickerApp ?? null);
         const reader = this.optionalAccount().readPromoFlags;
-        let next = this.promoFlagsRead;
+        const prev = this.promoFlags;
+        let next = prev;
         if (app && typeof reader === 'function') {
             try {
                 // parsePromoFlags reads only the known flag names and ignores non-string values.
                 next = (0,_config_promo_flags_v3__WEBPACK_IMPORTED_MODULE_8__.parsePromoFlags)(await reader.call(this.options.account, app));
             }
             catch (error) {
-                next = this.promoFlagsRead;
-                this.log('warn', `promo flags | read failed; keeping ${(0,_config_promo_flags_v3__WEBPACK_IMPORTED_MODULE_8__.formatPromoFlags)(next)} | error=${this.normalizeError(error)}`);
+                this.log('warn', `promo flags | read failed; keeping ${(0,_config_promo_flags_v3__WEBPACK_IMPORTED_MODULE_8__.formatPromoFlags)(prev)} | error=${this.normalizeError(error)}`);
             }
         }
         else {
             next = { ..._config_promo_flags_v3__WEBPACK_IMPORTED_MODULE_8__.PROMO_FLAGS_DEFAULTS };
         }
-        const wasOn = this.isFollowUpV3();
-        const prev = this.promoFlags;
-        const wasLoop = (0,_config_promo_flags_v3__WEBPACK_IMPORTED_MODULE_8__.isFollowUpLoop)(prev);
-        this.promoFlagsRead = next;
         this.promoFlags = { ...next };
-        const nowOn = this.isFollowUpV3();
-        this.applyQueueV3Mode();
-        const acted = this.promoFlags;
         for (const name of _config_promo_flags_v3__WEBPACK_IMPORTED_MODULE_8__.PROMO_FLAG_NAMES) {
-            // `refill` is not a runner flag; mobile-manager logs its changes once per process.
-            if (name !== 'refill' && prev[name] !== acted[name])
-                this.log('info', `promo flags | ${name}=${acted[name] ?? 'unset'} | was=${prev[name] ?? 'unset'}`);
+            if (prev[name] !== next[name])
+                this.log('info', `promo flags | ${name}=${next[name] ?? 'unset'} | was=${prev[name] ?? 'unset'}`);
         }
-        if (nowOn && !wasOn)
-            await this.dropFollowUpsWithoutDueAt();
-        // Review LOW 4: a switch back from the loop (rollback) starts no timers. The queued follow-ups go
-        // through the queue check path again, so several held ones can be released close together there
-        // (the shared 5 min pacer still spaces the sends). Accepted for a rollback.
-        if ((0,_config_promo_flags_v3__WEBPACK_IMPORTED_MODULE_8__.isFollowUpLoop)(this.promoFlags) && !wasLoop)
-            this.enterFollowUpLoop();
-    }
-    /** P8: switch to the loop. Timers go (their items stay queued for the loop); closed items are dropped at the next cycle. */
-    enterFollowUpLoop() {
-        const timers = this.followUpTimers.size;
-        for (const timeout of this.followUpTimers.values())
-            clearTimeout(timeout);
-        this.followUpTimers.clear();
-        this.followUpTimerWork.clear();
-        this.loopRestorePending = true;
-        this.log('info', `promo fu loop | on | timers_cleared=${timers}`);
-    }
-    /**
-     * Cycle-start flag read that never lands inside a queue pass (v2 review). A running pass can block
-     * in checkMessage for minutes, so it never waits: with a pass running it skips and keeps the last
-     * value (the pass checker reads at the start of each pass). Otherwise it holds the pass slot while
-     * it reads, so no pass starts until the new mode is applied.
-     */
-    async refreshPromoFlagsBetweenPasses() {
-        if (this.queueCheckPromise) {
-            this.log('debug', `promo flags | cycle-start read skipped: queue pass running | keep fu=${this.promoFlags.fu}`);
-            return;
-        }
-        const refresh = this.refreshPromoFlags();
-        this.queueCheckPromise = refresh;
-        try {
-            await refresh;
-        }
-        finally {
-            if (this.queueCheckPromise === refresh)
-                this.queueCheckPromise = null;
-        }
-    }
-    /**
-     * Binds the queue (and through it the persistence) to this runner's `fu` mode: one source, read
-     * live, so no copy of the flag is kept. Rebound at every flag read, as the old per-read push did.
-     */
-    applyQueueV3Mode() {
-        this.messageQueue.bindFollowUpV3?.(() => this.queueV3Mode());
-    }
-    queueV3Mode() {
-        return this.isFollowUpV3()
-            ? { maxLateMs: this.followUpMaxLateMs(), log: (level, message) => this.log(level, message) }
-            : null;
-    }
-    dropFollowUpsWithoutDueAt() {
-        return (0,_flow_runner_follow_up__WEBPACK_IMPORTED_MODULE_13__.dropFollowUpsWithoutDueAt)(hostOf(this));
     }
     startQueueChecker() {
         this.stopQueueChecker();
@@ -10567,8 +10161,8 @@ class PromotionFlowRunner {
     scheduleFollowUp(message) {
         return (0,_flow_runner_follow_up__WEBPACK_IMPORTED_MODULE_13__.scheduleFollowUp)(hostOf(this), message);
     }
-    runFollowUp(message, options) {
-        return (0,_flow_runner_follow_up__WEBPACK_IMPORTED_MODULE_13__.runFollowUp)(hostOf(this), message, options);
+    runFollowUp(message) {
+        return (0,_flow_runner_follow_up__WEBPACK_IMPORTED_MODULE_13__.runFollowUp)(hostOf(this), message);
     }
     isOwnChannel(channel) {
         return this.ownChannels.isOwnChannel(channel.channelId, channel.username ?? null);
@@ -10618,17 +10212,17 @@ class PromotionFlowRunner {
     cooldownUntilOf(channelId) {
         return (0,_flow_runner_eligibility__WEBPACK_IMPORTED_MODULE_14__.cooldownUntilOf)(hostOf(this), channelId);
     }
-    noteChannelCooldown(channelId) {
-        return (0,_flow_runner_eligibility__WEBPACK_IMPORTED_MODULE_14__.noteChannelCooldown)(hostOf(this), channelId);
+    /** A main post (sent or ambiguous): start the channel cooldown, then supersede its pending follow-up (M2). */
+    async noteChannelCooldown(channelId) {
+        await (0,_flow_runner_eligibility__WEBPACK_IMPORTED_MODULE_14__.noteChannelCooldown)(hostOf(this), channelId);
+        await (0,_flow_runner_follow_up__WEBPACK_IMPORTED_MODULE_13__.supersedeFollowUps)(hostOf(this), channelId);
     }
     /**
-     * Flow v3 P7 (`health=on`): the sleep after a cycle with no main send is a skip sleep, not rest, so
-     * it declares no sleepUntil; the quiet reason tells health why the runner is quiet. Real rest (the
-     * cooldown rest, post-send rests) and cap waits still declare. Other modes: today's behaviour.
+     * Flow v3 P7: the sleep after a cycle with no main send is a skip sleep, not rest, so it declares no
+     * sleepUntil; the quiet reason tells health why the runner is quiet. Real rest (the cooldown rest,
+     * post-send rests) and cap waits still declare.
      */
     declaresLoopSleep() {
-        if (this.promoFlags.health !== 'on')
-            return true;
         const last = this.lastQuiet;
         return !!last && last.mainSent > 0 && last.at >= (this.health.lastCycleStartedAt ?? 0);
     }
@@ -10657,9 +10251,13 @@ class PromotionFlowRunner {
             await defaultSleep(delayMs);
         }
     }
-    /** A main-loop gap (post-send rest, loop sleep). P8 loop: due follow-ups run inside it; otherwise the plain sleep. */
+    /**
+     * A main-loop gap (post-send rest, loop sleep). P8: due follow-ups run inside it. Without an atomic
+     * chstate write sends are paused, follow-ups included: the plain sleep. A zero gap has no room for a
+     * follow-up and takes the plain sleep too, so the loop still yields to the adapter's sleep.
+     */
     async sleepGap(ms, declare = true) {
-        if (!this.followUpLoopActive()) {
+        if ((0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_11__.safeDelayMs)(ms, 0) <= 0 || !this.eligActive()) {
             await this.sleep(ms, declare);
             return;
         }
@@ -10685,7 +10283,7 @@ class PromotionFlowRunner {
         if (outcome !== 'sent') {
             const delayMs = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_11__.randomIntInclusive)(FAILED_CHANNEL_RETRY_MIN_MS, FAILED_CHANNEL_RETRY_MAX_MS);
             this.log('debug', `Promotion retry delay ${delayMs}ms (${outcome})`);
-            await this.sleep(delayMs, this.promoFlags.health !== 'on');
+            await this.sleep(delayMs, false);
             return;
         }
         if (!this.options.scoringEnabled) {
@@ -10853,16 +10451,13 @@ class PromotionMessageQueue {
     constructor(maxSize = 500, persistence = null) {
         this.items = [];
         this.restored = false;
-        /** Flow v3 mode, read live from the runner's flags (see bindFollowUpV3). Null = today's behaviour. */
-        this.v3Source = () => null;
+        /** Flow v3 rules. Until the runner sets them: the default (promote) lateness and no log. */
+        this.rules = { maxLateMs: (0,_config_promo_app_config__WEBPACK_IMPORTED_MODULE_4__.followUpMaxLateMsFor)(null), log: () => undefined };
         this.dropReporter = null;
         /** Flow v3 P4: check attempts per live item, in memory only (never persisted, never in list()). */
         this.attempts = new WeakMap();
         this.maxSize = Number.isFinite(maxSize) && maxSize > 0 ? Math.floor(maxSize) : 500;
         this.persistence = persistence;
-    }
-    get v3() {
-        return this.v3Source();
     }
     get size() {
         return this.items.length;
@@ -10882,20 +10477,9 @@ class PromotionMessageQueue {
             await this.persistence.enqueue(normalized);
         this.enqueueNormalized(normalized);
     }
-    /** Flow v3 (P2): a fixed mode (tests, callers without a runner). Null keeps today's queue. */
-    setFollowUpV3(mode) {
-        this.bindFollowUpV3(() => mode);
-    }
-    /**
-     * Flow v3 (P2): the runner binds its `fu` mode here (one source, no copy). Null keeps today's queue:
-     * identity removal, no restore age filter, no size-drop log. The persistence reads the same source.
-     */
-    bindFollowUpV3(source) {
-        this.v3Source = source;
-        if (typeof this.persistence?.bindFollowUpV3 === 'function')
-            this.persistence.bindFollowUpV3(() => this.v3Source() !== null);
-        else
-            this.persistence?.setFollowUpV3?.(source() !== null);
+    /** Flow v3: the runner sets its app's follow-up lateness and its logger here, before restore. */
+    setRules(rules) {
+        this.rules = rules;
     }
     /** Flow v3 P4: the runner sets this once; it logs the size drop line and counts every drop. */
     setDropReporter(reporter) {
@@ -10909,7 +10493,7 @@ class PromotionMessageQueue {
         const target = this.liveItem(message);
         const entry = this.attempts.get(target);
         if (!entry || entry.count === 0) {
-            this.attempts.set(target, { count: 1, lastAt: nowMs, would: entry?.would ?? false });
+            this.attempts.set(target, { count: 1, lastAt: nowMs });
             return 1;
         }
         if (nowMs - entry.lastAt >= minGapMs) {
@@ -10922,29 +10506,23 @@ class PromotionMessageQueue {
     checkAttempts(message) {
         return this.attempts.get(this.liveItem(message))?.count ?? 0;
     }
-    /** Flow v3 P4 (`vx=off`): true the first time the item meets the close rule, false after. */
-    markWouldClose(message) {
-        const target = this.liveItem(message);
-        const entry = this.attempts.get(target) ?? { count: 0, lastAt: 0, would: false };
-        if (entry.would)
-            return false;
-        entry.would = true;
-        this.attempts.set(target, entry);
-        return true;
-    }
     /** The queued object for this item (the same object, else the same key), or the given copy. */
     liveItem(message) {
         if (this.items.includes(message))
             return message;
         return this.items.find((candidate) => queueItemKey(candidate) === queueItemKey(message)) ?? message;
     }
-    /** Load pending work after process replacement. Safe to call repeatedly. */
+    /**
+     * Load pending work after process replacement. Safe to call repeatedly. Every restore applies the
+     * flow v3 rules: a follow-up written by the retired timer path (no `sentAt` or no `dueAt`) is dropped
+     * with its payload, as is a follow-up past its max lateness or a verify item past the verify window.
+     */
     async restore() {
         if (this.restored)
             return;
         if (this.persistence) {
             const persisted = await this.persistence.load();
-            const v3 = this.v3;
+            const rules = this.rules;
             const nowMs = Date.now();
             let droppedLegacy = 0;
             let droppedExpired = 0;
@@ -10953,47 +10531,28 @@ class PromotionMessageQueue {
                 const normalized = normalizeQueuedMessage(message);
                 if (!normalized || this.hasMessage(normalized))
                     continue;
-                if (v3) {
-                    const reason = restoreDropReason(normalized, nowMs, v3.maxLateMs);
-                    if (reason) {
-                        if (reason === 'expired')
-                            droppedExpired += 1;
-                        else
-                            droppedLegacy += 1;
-                        v3.log('info', `promo restore drop | ${queueItemKey(normalized)} | reason=${reason}`);
-                        this.dropReporter?.count(reason);
-                        try {
-                            await this.persistence.remove(normalized);
-                        }
-                        catch (error) {
-                            v3.log('warn', `promo restore drop | ${queueItemKey(normalized)} | payload delete failed | error=${error instanceof Error ? error.message : String(error)}`);
-                        }
-                        continue;
+                const reason = restoreDropReason(normalized, nowMs, rules.maxLateMs);
+                if (reason) {
+                    if (reason === 'expired')
+                        droppedExpired += 1;
+                    else
+                        droppedLegacy += 1;
+                    rules.log('info', `promo restore drop | ${queueItemKey(normalized)} | reason=${reason}`);
+                    this.dropReporter?.count(reason);
+                    try {
+                        await this.persistence.remove(normalized);
                     }
-                    kept += 1;
+                    catch (error) {
+                        rules.log('warn', `promo restore drop | ${queueItemKey(normalized)} | payload delete failed | error=${error instanceof Error ? error.message : String(error)}`);
+                    }
+                    continue;
                 }
+                kept += 1;
                 this.enqueueNormalized(normalized);
             }
-            if (v3)
-                v3.log('info', `promo restore summary | dropped_legacy=${droppedLegacy} dropped_expired=${droppedExpired} kept=${kept}`);
+            rules.log('info', `promo restore summary | dropped_legacy=${droppedLegacy} dropped_expired=${droppedExpired} kept=${kept}`);
         }
         this.restored = true;
-    }
-    /**
-     * Flow v3 (P2 fix 9): at the first `fu=on` cycle, follow-up items loaded under `fu=off` (no `dueAt`
-     * or `sentAt`) are dropped, as at restore. Returns the dropped items so the caller can delete
-     * their Redis payloads.
-     */
-    takeFollowUpsWithoutDueAt() {
-        const dropped = [];
-        for (let index = this.items.length - 1; index >= 0; index -= 1) {
-            const item = this.items[index];
-            if (item.workType === 'followUp' && (item.dueAt === undefined || item.sentAt === undefined)) {
-                dropped.push(item);
-                this.items.splice(index, 1);
-            }
-        }
-        return dropped.reverse();
     }
     /** Read-only copies of the queued items (measurement: cycle-end counts and the log-only sweep). */
     list() {
@@ -11011,11 +10570,8 @@ class PromotionMessageQueue {
         return this.items.filter((message) => safeNow - safeQueuedTimestamp(message.timestamp, safeNow) >= safeDelayMs);
     }
     remove(message) {
-        // Flow v3 (P2 fix 2): by key, so a caller holding a normalized or spread copy still removes the
-        // item. Today's path keeps identity removal while `fu` is off.
-        const index = this.v3
-            ? this.items.findIndex((item) => queueItemKey(item) === queueItemKey(message))
-            : this.items.indexOf(message);
+        // Flow v3 (P2 fix 2): by key, so a caller holding a normalized or spread copy still removes the item.
+        const index = this.items.findIndex((item) => queueItemKey(item) === queueItemKey(message));
         if (index >= 0)
             this.items.splice(index, 1);
     }
@@ -11056,19 +10612,17 @@ class PromotionMessageQueue {
         this.items.length = 0;
     }
     enqueueNormalized(message) {
-        if (this.v3) {
-            // Re-enqueue of an existing key replaces it (one item per key).
-            const existing = this.items.findIndex((item) => queueItemKey(item) === queueItemKey(message));
-            if (existing >= 0)
-                this.items.splice(existing, 1);
-        }
+        // Re-enqueue of an existing key replaces it (one item per key).
+        const existing = this.items.findIndex((item) => queueItemKey(item) === queueItemKey(message));
+        if (existing >= 0)
+            this.items.splice(existing, 1);
         this.items.push(message);
         if (this.items.length > this.maxSize) {
             const dropped = this.items.splice(0, this.items.length - this.maxSize);
-            // Flow v3 P4: logged and counted in every flag mode (before P4 only under `fu` on, and never counted).
-            const log = this.dropReporter?.log ?? this.v3?.log;
+            // Flow v3 P4: logged and counted.
+            const log = this.dropReporter?.log ?? this.rules.log;
             for (const item of dropped) {
-                log?.('warn', `promo queue drop | ${queueItemKey(item)} | reason=size`);
+                log('warn', `promo queue drop | ${queueItemKey(item)} | reason=size`);
                 this.dropReporter?.count('size');
             }
         }
@@ -11081,7 +10635,7 @@ class PromotionMessageQueue {
 }
 function restoreDropReason(message, nowMs, maxLateMs) {
     if (message.workType === 'followUp') {
-        // A followUp payload from today's build has no sentAt; re-arms rewrote its timestamp, so its age is unknown.
+        // A followUp payload from the retired timer path has no sentAt; re-arms rewrote its timestamp, so its age is unknown.
         if (message.sentAt === undefined)
             return 'legacy_no_sentAt';
         if (message.dueAt === undefined)
@@ -11093,7 +10647,7 @@ function restoreDropReason(message, nowMs, maxLateMs) {
     return sentAt > 0 && nowMs > sentAt + VERIFY_RESTORE_MAX_AGE_MS ? 'expired' : null;
 }
 /**
- * The one normalizer for a queue item (memory, Redis parser, runner under `fu` on). Rebuilds the item
+ * The one normalizer for a queue item (memory, Redis parser, runner). Rebuilds the item
  * from a fixed field list: any other field is dropped. Keeps `workType`, `sentAt` (send time, never
  * rewritten) and `dueAt` (follow-up only).
  */
@@ -11337,15 +10891,12 @@ class PromotionRunnerSupervisor {
         // cycle-based check read as "active" — so a 0-send runner never got restarted (observed: 7h stall).
         // We now require a real send attempt (success or failure) or a deletion within the window. A
         // healthy-but-idle runner (e.g. legitimately budget-capped) is exempted below so we don't churn it.
-        // Flow v3 P7 (`health=on`): deletions are not send progress (a dead loop finds deletions and
+        // Flow v3 P7: deletions are not send progress (a dead loop finds deletions and
         // never sends), and a runner whose last cycle (within the stuck window) ended with a known quiet
         // reason (budget, cap, ban gate, cooldown, no eligible channel or mobile) is quiet, not stuck:
         // the health ladder owns those cases.
-        const p7 = health.promoHealthMode === 'on';
-        const lastSendProgressAt = latestTimestamp(p7
-            ? [health.lastSuccessfulSendAt, health.lastSendFailureAt]
-            : [health.lastSuccessfulSendAt, health.lastSendFailureAt, health.lastDeletionAt]);
-        if (p7 && health.lastQuiet && (0,_promo_health_ladder__WEBPACK_IMPORTED_MODULE_2__.isKnownQuiet)(health.lastQuiet.quiet) && Date.now() - health.lastQuiet.at < stuckAfterMs)
+        const lastSendProgressAt = latestTimestamp([health.lastSuccessfulSendAt, health.lastSendFailureAt]);
+        if (health.lastQuiet && (0,_promo_health_ladder__WEBPACK_IMPORTED_MODULE_2__.isKnownQuiet)(health.lastQuiet.quiet) && Date.now() - health.lastQuiet.at < stuckAfterMs)
             return;
         // If the runner has NEVER attempted a send, fall back to startedAt so a brand-new runner gets the
         // full window before being judged; the loop must still be turning (cycles finishing) to count.
@@ -16400,6 +15951,9 @@ const CHANNEL_COOLDOWN_PRUNE_MAX = 100;
 // field, which wiped P8's postMsgId / followUpState / followUpDueAt whenever follow-up delay + max late outlasted
 // the cooldown (promote: 60 + 90 min > 1 h). Now: decode the field (bad JSON = {}), raise `until` to ARGV[2] only
 // when missing or lower, keep every other key, HSET, and raise (never shorten) the hash TTL to ARGV[3] seconds.
+// Review MEDIUM 1: a main-send cooldown write is a new main post, so an open (`due`) follow-up of the older post
+// is closed as `skipped` in the same call. A crash right after the send, or a second runner on the mobile, then
+// still sees it closed and the restore drops it (the newer post's follow-up is scheduled after its verify).
 const COOLDOWN_MERGE_SCRIPT = [
     "local raw = redis.call('HGET', KEYS[1], ARGV[1])",
     'local v = {}',
@@ -16407,6 +15961,7 @@ const COOLDOWN_MERGE_SCRIPT = [
     'local u = tonumber(ARGV[2])',
     "local cur = tonumber(v['until'])",
     "if (not cur) or cur < u then v['until'] = u end",
+    "if v['followUpState'] == 'due' then v['followUpState'] = 'skipped' end",
     "redis.call('HSET', KEYS[1], ARGV[1], cjson.encode(v))",
     "local ttl = redis.call('TTL', KEYS[1])",
     "if ttl < tonumber(ARGV[3]) then redis.call('EXPIRE', KEYS[1], ARGV[3]) end",
@@ -16444,15 +15999,20 @@ async function readChannelCooldowns(redis, app, mobile, nowMs) {
     for (const [field, raw] of Object.entries(hash)) {
         const channelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_2__.normalizeChannelId)(field);
         let until = Number.NaN;
+        let followUpUntil = Number.NaN;
         try {
             const parsed = JSON.parse(String(raw));
             until = typeof parsed?.until === 'number' ? parsed.until : Number(parsed?.until);
+            followUpUntil = Number(parsed?.followUpUntil);
         }
         catch {
             until = Number.NaN;
         }
+        // Eligibility reads the main-send cooldown only. The follow-up lifetime keeps the field (not the channel) alive.
         if (channelId && Number.isFinite(until) && until > nowMs)
             out.set(channelId, until);
+        else if (channelId && Number.isFinite(followUpUntil) && followUpUntil > nowMs)
+            continue;
         else if (expired.length < CHANNEL_COOLDOWN_PRUNE_MAX * 2)
             expired.push(field, String(raw));
     }
@@ -16481,15 +16041,16 @@ async function writeChannelCooldown(redis, app, mobile, channelId, untilMs, ttlM
     await redis.eval(COOLDOWN_MERGE_SCRIPT, 1, key, safeChannelId, Math.floor(untilMs), ttlSeconds);
 }
 const FOLLOW_UP_STATES = new Set(['due', 'sent', 'skipped', 'expired']);
-// P8: merge the follow-up keys into the channel's field. `until` is never lowered (raised to the floor
-// when missing or shorter) and the hash TTL is never shortened. One call: read, merge, HSET, EXPIRE.
+// P8: merge the follow-up keys into the channel's field. `until` (the main-send cooldown) is left as it is:
+// the follow-up lifetime goes in `followUpUntil` (raised, never lowered), so a pending follow-up never
+// stretches the cooldown. The hash TTL is never shortened. One call: read, merge, HSET, EXPIRE.
 const FOLLOW_UP_STATE_SCRIPT = [
     "local raw = redis.call('HGET', KEYS[1], ARGV[1])",
     'local v = {}',
     "if raw then local ok, d = pcall(cjson.decode, raw); if ok and type(d) == 'table' then v = d end end",
-    'local floor = tonumber(ARGV[5])',
-    "local u = tonumber(v['until'])",
-    "if (not u) or u < floor then v['until'] = floor end",
+    'local fu = tonumber(ARGV[5])',
+    "local cur = tonumber(v['followUpUntil'])",
+    "if (not cur) or cur < fu then v['followUpUntil'] = fu end",
     "v['postMsgId'] = ARGV[2]",
     "v['followUpState'] = ARGV[3]",
     "v['followUpDueAt'] = tonumber(ARGV[4])",
@@ -16499,20 +16060,21 @@ const FOLLOW_UP_STATE_SCRIPT = [
     'return 1',
 ].join('\n');
 /**
- * P8: set the follow-up state of one channel's post. `untilFloorMs` = the latest moment the follow-up
- * can still matter (due + max late), so the field outlives it. Throws on a Redis error or no eval.
+ * P8: set the follow-up state of one channel's post. `followUpUntilMs` = the latest moment the follow-up
+ * can still matter (due + max late), stored as `followUpUntil` (never `until`), and the hash TTL covers it.
+ * Throws on a Redis error or no eval.
  */
-async function writeChannelFollowUpState(redis, app, mobile, channelId, state, untilFloorMs) {
+async function writeChannelFollowUpState(redis, app, mobile, channelId, state, followUpUntilMs) {
     const key = channelStateKey(app, mobile);
     const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_2__.normalizeChannelId)(channelId);
     if (!key || !safeChannelId)
         return;
     if (typeof redis.eval !== 'function')
         throw new Error('channel state unsupported: no eval (atomic merge)');
-    const ttlSeconds = Math.max(60, Math.ceil((untilFloorMs - Date.now()) / 1000));
-    await redis.eval(FOLLOW_UP_STATE_SCRIPT, 1, key, safeChannelId, String(state.postMsgId), state.followUpState, Math.floor(state.followUpDueAt), Math.floor(untilFloorMs), ttlSeconds);
+    const ttlSeconds = Math.max(60, Math.ceil((followUpUntilMs - Date.now()) / 1000));
+    await redis.eval(FOLLOW_UP_STATE_SCRIPT, 1, key, safeChannelId, String(state.postMsgId), state.followUpState, Math.floor(state.followUpDueAt), Math.floor(followUpUntilMs), ttlSeconds);
 }
-/** P8 restore: every live field with its follow-up keys (fields past `until` are left out). No prune. Throws on a read error. */
+/** P8 restore: every live field with its follow-up keys (a field is live while `until` or `followUpUntil` is ahead). No prune. Throws on a read error. */
 async function readChannelStates(redis, app, mobile, nowMs) {
     const out = new Map();
     const key = channelStateKey(app, mobile);
@@ -16532,10 +16094,15 @@ async function readChannelStates(redis, app, mobile, nowMs) {
         catch {
             continue;
         }
-        const until = Number(parsed?.until);
-        if (!Number.isFinite(until) || until <= nowMs)
+        const rawUntil = Number(parsed?.until);
+        const until = Number.isFinite(rawUntil) ? rawUntil : 0;
+        const followUpUntil = Number(parsed?.followUpUntil);
+        const liveFollowUp = Number.isFinite(followUpUntil) && followUpUntil > nowMs;
+        if (until <= nowMs && !liveFollowUp)
             continue;
         const value = { until };
+        if (Number.isFinite(followUpUntil))
+            value.followUpUntil = followUpUntil;
         if (parsed.postMsgId !== undefined && parsed.postMsgId !== null)
             value.postMsgId = String(parsed.postMsgId);
         if (typeof parsed.followUpState === 'string' && FOLLOW_UP_STATES.has(parsed.followUpState))
@@ -16838,14 +16405,12 @@ const PROMOTION_V3_MIN_PAYLOAD_TTL_SECONDS = 60;
 /** Flow v3 (P3): the once-per-verify-key outcome marker. */
 const PROMOTION_RECORDED_MARKER_TTL_SECONDS = 72 * 60 * 60;
 /**
- * Follow-up claim minimum, every flag mode (P2+P3 review M1): 7 d, not 48 h. With `fu` off the
- * in-memory re-arm loop (B1) keeps re-arming a follow-up every hour for as long as the post survives;
- * a 48 h claim let it send a 2nd follow-up at about +48.8 h. Intended difference from HEAD.
+ * Follow-up claim minimum (P2+P3 review M1): 7 d, not 48 h. Also covers follow-ups claimed by the retired
+ * timer path before the restart onto flow v3 only: a claim still alive blocks a second send of that post.
  */
 const PROMOTION_FOLLOW_UP_CLAIM_MIN_TTL_SECONDS = 7 * 24 * 60 * 60;
 /**
- * Claim TTL in every flag mode (review-2 N1, review M1): `max(7 d, dueAt + 2 h - now)`. It always
- * outlives the follow-up payload and the old path's hourly re-arm loop for 7 d.
+ * Claim TTL (review-2 N1, review M1): `max(7 d, dueAt + 2 h - now)`. It always outlives the follow-up payload.
  */
 function followUpClaimTtlSeconds(message, nowMs) {
     const dueAt = message.dueAt;
@@ -16855,8 +16420,6 @@ function followUpClaimTtlSeconds(message, nowMs) {
 }
 class RedisPromotionVerificationQueue {
     constructor(redis, mobile, maxSize = 500, now = Date.now) {
-        /** Flow v3 `fu` mode, read live (bindFollowUpV3) or fixed (setFollowUpV3). Off keeps today's TTLs, index and load. */
-        this.v3Source = () => false;
         if (!isRedisLike(redis))
             throw new Error('RedisPromotionVerificationQueue requires Redis get/set/del/lrange/eval');
         const safeMobile = (0,_redis_utils__WEBPACK_IMPORTED_MODULE_2__.normalizeKeyPart)(mobile);
@@ -16867,23 +16430,11 @@ class RedisPromotionVerificationQueue {
         this.maxSize = Number.isFinite(maxSize) && maxSize > 0 ? Math.floor(maxSize) : 500;
         this.now = now;
     }
-    get v3() {
-        return this.v3Source();
-    }
-    /** Flow v3 (P2): a fixed `fu` mode. */
-    setFollowUpV3(on) {
-        const value = on === true;
-        this.v3Source = () => value;
-    }
-    /** Flow v3 (P2): the queue binds the runner's `fu` mode here, so no copy is kept. */
-    bindFollowUpV3(source) {
-        this.v3Source = () => source() === true;
-    }
     async load() {
         const ids = await this.redis.lrange(this.indexKey(), 0, -1);
         const uniqueIds = [...new Set(ids.filter(isNonEmptyString))];
         const messages = [];
-        if (this.v3 && typeof this.redis.mget === 'function' && uniqueIds.length > 0) {
+        if (typeof this.redis.mget === 'function' && uniqueIds.length > 0) {
             const raws = await this.redis.mget(...uniqueIds.map((id) => this.payloadKey(id)));
             for (const raw of Array.isArray(raws) ? raws : []) {
                 const message = parseQueuedMessage(typeof raw === 'string' ? raw : null);
@@ -16906,13 +16457,7 @@ class RedisPromotionVerificationQueue {
             throw new Error('RedisPromotionVerificationQueue message identity is invalid');
         // Do not persist promotional text; verification obtains a fresh preview from Telegram.
         const { messageText: _messageText, ...durableMessage } = message;
-        if (this.v3) {
-            const v3Result = await this.redis.eval(ENQUEUE_V3_SCRIPT, 2, this.payloadKey(id), this.indexKey(), JSON.stringify(durableMessage), this.v3PayloadTtlSeconds(message), id, this.maxSize, PROMOTION_V3_INDEX_TTL_SECONDS);
-            if (!isRedisWriteSuccess(v3Result))
-                throw new Error('RedisPromotionVerificationQueue atomic enqueue failed');
-            return;
-        }
-        const result = await this.redis.eval(ENQUEUE_SCRIPT, 2, this.payloadKey(id), this.indexKey(), JSON.stringify(durableMessage), PROMOTION_VERIFICATION_TTL_SECONDS, id, this.maxSize);
+        const result = await this.redis.eval(ENQUEUE_V3_SCRIPT, 2, this.payloadKey(id), this.indexKey(), JSON.stringify(durableMessage), this.v3PayloadTtlSeconds(message), id, this.maxSize, PROMOTION_V3_INDEX_TTL_SECONDS);
         if (!isRedisWriteSuccess(result))
             throw new Error('RedisPromotionVerificationQueue atomic enqueue failed');
     }
@@ -16921,8 +16466,6 @@ class RedisPromotionVerificationQueue {
         if (!id)
             return;
         await this.redis.del(this.payloadKey(id));
-        if (!this.v3)
-            return;
         // Never touches the claim. LREM keeps re-armed ids from crowding real verify ids out of the index.
         if (typeof this.redis.lrem === 'function') {
             await this.redis.lrem(this.indexKey(), 0, id);
@@ -16957,8 +16500,6 @@ class RedisPromotionVerificationQueue {
         if (message.workType === 'followUp' && typeof message.dueAt === 'number' && Number.isFinite(message.dueAt)) {
             return Math.max(PROMOTION_V3_MIN_PAYLOAD_TTL_SECONDS, Math.ceil((message.dueAt + PROMOTION_V3_FOLLOW_UP_GRACE_MS - this.now()) / 1000));
         }
-        if (message.workType === 'followUp')
-            return PROMOTION_VERIFICATION_TTL_SECONDS;
         return PROMOTION_V3_VERIFY_PAYLOAD_TTL_SECONDS;
     }
     recordedKey(id) {
@@ -17012,13 +16553,6 @@ function parseQueuedMessage(raw) {
         return null;
     }
 }
-const ENQUEUE_SCRIPT = [
-    "redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[2])",
-    "redis.call('LPUSH', KEYS[2], ARGV[3])",
-    "redis.call('LTRIM', KEYS[2], 0, tonumber(ARGV[4]) - 1)",
-    "redis.call('EXPIRE', KEYS[2], ARGV[2])",
-    'return 1',
-].join('\n');
 // Flow v3: SET payload, drop any earlier copy of the id from the index, LPUSH, LTRIM, index TTL 6 h.
 const ENQUEUE_V3_SCRIPT = [
     "redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[2])",
@@ -17292,7 +16826,7 @@ class PromotionAccountContext {
             return;
         await this.runtime.accountCap.rollback(this.mobile, reservationId);
     }
-    /** Flow v3 flags: one HGETALL of `promote:flags:v3:<app>` (doc 6). No Redis: defaults (`fu` off). */
+    /** Promotion flags (`safety` only): one HGETALL of `promote:flags:v3:<app>` (doc 6). No Redis: defaults. */
     async readPromoFlags(app) {
         return (0,_config_promo_flags_v3__WEBPACK_IMPORTED_MODULE_10__.readPromoFlagsV3)(this.runtime.verificationRedis, app, (level, message) => {
             if (level === 'warn')
@@ -17301,7 +16835,7 @@ class PromotionAccountContext {
                 logger.info(message);
         });
     }
-    /** Flow v3 P5: false when Redis cannot hold `promote:chstate:<app>:<m>` atomically (no eval); the runner then keeps `elig` off. */
+    /** Flow v3 P5: false when Redis cannot hold `promote:chstate:<app>:<m>` atomically (no eval); the runner then pauses sends. */
     channelCooldownSupported() {
         return (0,_redis_redis_channel_cooldown__WEBPACK_IMPORTED_MODULE_11__.channelCooldownSupported)(this.runtime.verificationRedis);
     }
@@ -17324,10 +16858,10 @@ class PromotionAccountContext {
         return (0,_redis_redis_channel_cooldown__WEBPACK_IMPORTED_MODULE_11__.readChannelStates)(this.runtime.verificationRedis, app, this.mobile, nowMs);
     }
     /** Flow v3 P8: merge one channel's follow-up state into its chstate field (one Lua call; `until` and TTL never shortened). */
-    async markFollowUpState(app, channelId, state, untilFloorMs) {
+    async markFollowUpState(app, channelId, state, followUpUntilMs) {
         if (!this.runtime.verificationRedis)
             return;
-        await (0,_redis_redis_channel_cooldown__WEBPACK_IMPORTED_MODULE_11__.writeChannelFollowUpState)(this.runtime.verificationRedis, app, this.mobile, channelId, state, untilFloorMs);
+        await (0,_redis_redis_channel_cooldown__WEBPACK_IMPORTED_MODULE_11__.writeChannelFollowUpState)(this.runtime.verificationRedis, app, this.mobile, channelId, state, followUpUntilMs);
     }
     createVerificationQueue(maxSize) {
         return this.runtime.verificationRedis
@@ -49840,23 +49374,11 @@ class HealthMonitor {
         const allowLegacyRecovery = !recoveryPlan || this.isForcedRecoveryPlan(recoveryPlan);
         const legacyStale = lastMessageTime === null || lastMessageTime < Date.now() - restartTimeoutMs;
         const legacyReplace = lastMessageTime === null || lastMessageTime < Date.now() - stopTimeoutMs;
-        if ((0,_tg_channel_state_channel_message_promotions_orchestrator_promo_health_ladder__WEBPACK_IMPORTED_MODULE_19__.promoHealthModeOf)(messageStats) === 'record') {
-            // Flow v3 P7 record (review F3): judged every pass on its own, so a would-swap shows even when
-            // today's code does nothing. The plan's verdict is used when the plan carries one.
-            const planVerdict = promotionAction?.metadata?.promoHealth;
-            const verdict = planVerdict ?? this.evaluateLegacyLadder(mobile, messageStats, lastMessageTime);
-            const today = promotionAction
-                ? { status: promotionAction.status, action: promotionAction.action }
-                : allowLegacyRecovery && legacyStale
-                    ? { status: 'legacy', action: legacyReplace ? 'replace' : 'restart' }
-                    : { status: 'ok', action: 'none' };
-            if (verdict)
-                this.recordPromoLadder(mobile, verdict, today);
-        }
         if (promotionAction) {
             await this.recoverPromotionFromPlan(mobile, telegramManager, promoter, promotionAction, inboundSnapshot, daysLeft, lastMsgAgoMin, stopTimeoutMs);
         }
-        else if (allowLegacyRecovery && (0,_tg_channel_state_channel_message_promotions_orchestrator_promo_health_ladder__WEBPACK_IMPORTED_MODULE_19__.promoHealthModeOf)(messageStats) === 'on') {
+        else if (allowLegacyRecovery && HealthMonitor.hasRunnerSnapshot(messageStats)) {
+            // Flow v3 P7: with a runner snapshot the ladder decides; without one, the legacy stale rule below.
             await this.recoverPromotionLegacyLadder(mobile, telegramManager, promoter, messageStats, lastMessageTime, inboundSnapshot, daysLeft, lastMsgAgoMin);
         }
         else if (allowLegacyRecovery && legacyStale) {
@@ -50068,13 +49590,10 @@ class HealthMonitor {
         }
         return true;
     }
-    /** Flow v3 P7 record mode: one `promo health would <action>` line; a would-restart is counted (record ledger only). */
-    recordPromoLadder(mobile, verdict, today) {
-        // Review F4: one line per change of (would-action, today's action), plus an hourly summary.
-        for (const line of _tg_channel_state_channel_message_promotions_orchestrator_promo_health_ladder__WEBPACK_IMPORTED_MODULE_19__.promoWouldLog.observe(mobile, (0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_17__.maskMobile)(mobile), verdict, today, Date.now()))
-            logger.info(line);
-        if (verdict.action === 'restart_runner')
-            _tg_channel_state_channel_message_promotions_orchestrator_promo_health_ladder__WEBPACK_IMPORTED_MODULE_19__.promoRestartLedger.note(`record:${mobile}`, 'health', Date.now());
+    /** Flow v3 P7: the engine's stats carry a runner snapshot, so the health ladder can judge it. */
+    static hasRunnerSnapshot(messageStats) {
+        const runner = messageStats.runnerHealth?.runner;
+        return !!runner && typeof runner === 'object';
     }
     /**
      * Flow v3 P7 ladder-swap budget (review F8): at most 2 per client per IST day in Redis. Over budget or
@@ -50166,7 +49685,7 @@ class HealthMonitor {
         return evaluation?.verdict ?? null;
     }
     /**
-     * Flow v3 P7 fix 5 (`health=on`), the legacy path (no plan or a forced plan): the same ladder as the
+     * Flow v3 P7 fix 5, the legacy path (no plan or a forced plan): the same ladder as the
      * plan path. A channel-side or deliberately quiet mobile is neither restarted nor swapped; a silent
      * runner is restarted; a swap checks the last mobile first and passes keepLastMobile.
      */
@@ -50211,9 +49730,9 @@ class HealthMonitor {
             status: action.status,
             issues: action.issues,
         });
-        // Flow v3 P7: metadata.promoHealth exists only with the runner's health flag record or on.
+        // Flow v3 P7: metadata.promoHealth exists when the stats carried a runner snapshot.
         const ladder = action.metadata?.promoHealth;
-        const ladderOn = ladder?.mode === 'on';
+        const ladderOn = !!ladder;
         if (ladderOn && action.action === 'restart') {
             await this.restartPromotionRunner(mobile, promoter, ladder.reason);
             return;
@@ -50817,17 +50336,12 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   MobileManager: () => (/* binding */ MobileManager),
 /* harmony export */   OVERLAP_STAMP_WINDOW_MS: () => (/* binding */ OVERLAP_STAMP_WINDOW_MS),
 /* harmony export */   PREVIOUS_BOOT_WINDOW_MS: () => (/* binding */ PREVIOUS_BOOT_WINDOW_MS),
-/* harmony export */   PROMOTE_REFILL_FLAG_FIELD: () => (/* binding */ PROMOTE_REFILL_FLAG_FIELD),
-/* harmony export */   PROMOTE_REFILL_FLAG_KEY: () => (/* binding */ PROMOTE_REFILL_FLAG_KEY),
 /* harmony export */   PROMO_KEEP_PREVIOUS_MAX_DAYS: () => (/* binding */ PROMO_KEEP_PREVIOUS_MAX_DAYS),
 /* harmony export */   REFILL_DELAY_MS: () => (/* binding */ REFILL_DELAY_MS),
 /* harmony export */   REFILL_MAX_PER_IST_DAY: () => (/* binding */ REFILL_MAX_PER_IST_DAY),
-/* harmony export */   __resetRefillForTests: () => (/* binding */ __resetRefillForTests),
 /* harmony export */   keptHandoffDeps: () => (/* binding */ keptHandoffDeps),
-/* harmony export */   parsePromoteRefillFlag: () => (/* binding */ parsePromoteRefillFlag),
 /* harmony export */   promoteRefillBudgetKey: () => (/* binding */ promoteRefillBudgetKey),
 /* harmony export */   promoteSkipSpamStatusEnabled: () => (/* binding */ promoteSkipSpamStatusEnabled),
-/* harmony export */   readPromoteRefillFlag: () => (/* binding */ readPromoteRefillFlag),
 /* harmony export */   refillDeps: () => (/* binding */ refillDeps)
 /* harmony export */ });
 /* harmony import */ var _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/core/utils/TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
@@ -50844,8 +50358,6 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var node_os__WEBPACK_IMPORTED_MODULE_10___default = /*#__PURE__*/__webpack_require__.n(node_os__WEBPACK_IMPORTED_MODULE_10__);
 /* harmony import */ var _tg_core_utils_timers__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! @tg/core/utils/timers */ "../../packages/tg-core/src/utils/timers.ts");
 /* harmony import */ var _refill_connector__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! ./refill-connector */ "./src/accounts/refill-connector.ts");
-/* harmony import */ var _tg_channel_state_channel_message_promotions_config_promo_flags_v3__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! @tg/channel-state/channel-message-promotions/config/promo-flags-v3 */ "../../packages/tg-channel-state/src/channel-message-promotions/config/promo-flags-v3.ts");
-
 
 
 
@@ -50950,27 +50462,17 @@ const keptHandoffDeps = {
  */
 const PROMO_KEEP_PREVIOUS_MAX_DAYS = 2;
 /**
- * Mid-run slot refill (owner GO 2026-11-18). A mobile removed mid-run (removeClient after init: SpamBot limited > 3 d
- * swap, permanent error, health swap, restart route) is replaced REFILL_DELAY_MS later by one mobile picked with the
- * boot rules, at most REFILL_MAX_PER_IST_DAY per process per IST day. Off unless the Redis hash
- * PROMOTE_REFILL_FLAG_KEY has field `refill` = on (one of the flow v3 flag fields, PROMO_FLAG_VALUES; read at fire
- * time; a read failure keeps the last value, as the flow v3 flags do).
+ * Mid-run slot refill (owner GO 2026-11-18; always on fleet-wide, owner 2026-11-18). A mobile removed mid-run
+ * (removeClient after init: SpamBot limited > 3 d swap, permanent error, health swap, restart route) is replaced
+ * REFILL_DELAY_MS later by one mobile picked with the boot rules, at most REFILL_MAX_PER_IST_DAY per process per IST day.
  */
 const REFILL_DELAY_MS = 10 * 60 * 1000;
 const REFILL_MAX_PER_IST_DAY = 2;
-const PROMOTE_REFILL_FLAG_KEY = (0,_tg_channel_state_channel_message_promotions_config_promo_flags_v3__WEBPACK_IMPORTED_MODULE_13__.promoFlagsKey)('promote');
-const PROMOTE_REFILL_FLAG_FIELD = 'refill';
-const REFILL_FLAG_FAIL_LOG_EVERY_MS = 10 * 60 * 1000;
 const IST_OFFSET_MS = 330 * 60 * 1000;
 /** Seams for the refill (tests replace them). */
 const refillDeps = {
     schedule: (fn, ms) => {
         (0,_tg_core_utils_timers__WEBPACK_IMPORTED_MODULE_11__.scheduleUnrefTimeout)(() => { fn().catch((error) => (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, 'MobileManager.refill', false)); }, ms);
-    },
-    /** Raw `refill` field of the flag hash (null when missing). Throws on a Redis error. */
-    readFlag: async () => {
-        const { RedisClient } = await Promise.resolve(/*! import() */).then(__webpack_require__.bind(__webpack_require__, /*! @tg/core/utils/Redis/Redis.Client */ "../../packages/tg-core/src/utils/Redis/Redis.Client.ts"));
-        return RedisClient.getClient().hget(PROMOTE_REFILL_FLAG_KEY, PROMOTE_REFILL_FLAG_FIELD);
     },
     /** Refill budget (JSON) by key; null when missing. Throws on a Redis error. */
     budgetGet: async (key) => {
@@ -50989,38 +50491,6 @@ const refillDeps = {
         return connect(mobile);
     },
 };
-const refillFlagState = { last: null, lastFailLogAt: 0 };
-/** `refill` field value: `on` (trimmed, lowercased) = on; anything else, unset included = off (PROMO_FLAG_VALUES.refill). */
-function parsePromoteRefillFlag(raw) {
-    return (0,_tg_channel_state_channel_message_promotions_config_promo_flags_v3__WEBPACK_IMPORTED_MODULE_13__.parsePromoFlags)({ refill: raw }).refill;
-}
-/** `refill` flag for this process (parsePromoteRefillFlag). A read failure keeps the last value, else off. */
-async function readPromoteRefillFlag() {
-    try {
-        const raw = await refillDeps.readFlag();
-        const value = parsePromoteRefillFlag(raw);
-        const shown = typeof raw === 'string' ? raw : '(unset)';
-        if (refillFlagState.lastRaw === undefined || refillFlagState.lastRaw !== shown) {
-            refillFlagState.lastRaw = shown;
-            logger.info(`refill flag: value=${shown} → ${value} for ${process.env.clientId ?? '(no clientId)'}`);
-        }
-        refillFlagState.last = value;
-        return value;
-    }
-    catch (error) {
-        const now = Date.now();
-        if (now - refillFlagState.lastFailLogAt >= REFILL_FLAG_FAIL_LOG_EVERY_MS) {
-            refillFlagState.lastFailLogAt = now;
-            logger.warn(`promo flags | key=${PROMOTE_REFILL_FLAG_KEY} | field=${PROMOTE_REFILL_FLAG_FIELD} | reason=read_failed | keep=${refillFlagState.last ?? 'default'} | error=${error instanceof Error ? error.message : String(error)}`);
-        }
-        return refillFlagState.last ?? 'off';
-    }
-}
-function __resetRefillForTests() {
-    refillFlagState.last = null;
-    refillFlagState.lastFailLogAt = 0;
-    refillFlagState.lastRaw = undefined;
-}
 /** Per client per IST day refill budget (count + mobiles removed today), Redis. */
 function promoteRefillBudgetKey(clientId, day) {
     return `promote:refill:${clientId}:${day}`;
@@ -51278,7 +50748,7 @@ class MobileManager {
             this.scheduleRefill(mobile);
         }
     }
-    /** Mid-run removal: one refill attempt REFILL_DELAY_MS later (the flag is read when it fires). */
+    /** Mid-run removal: one refill attempt REFILL_DELAY_MS later. */
     scheduleRefill(removed) {
         if (!this.isInitialized || this.refillStopped)
             return;
@@ -51297,8 +50767,6 @@ class MobileManager {
         const skip = (reason, extra = '') => logger.info(`refill_skipped | removed=${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_8__.maskMobile)(removed)} | reason=${reason}${extra ? ` | ${extra}` : ''}`);
         if (this.refillStopped || !this.isInitialized)
             return skip('stopped');
-        if ((await readPromoteRefillFlag()) !== 'on')
-            return skip('flag_off');
         const now = Date.now();
         if (now - removedAt < REFILL_DELAY_MS)
             return skip('too_early');
@@ -53131,8 +52599,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "a1ce619d696d987561fdd2bae49e65137bca54f9" : 0;
-    const builtAt =  true ? "2026-11-18T15:49:52.473Z" : 0;
+    const sha =  true ? "f09d1365f1db2e518cb8914ebc08baa21b4ba4f6" : 0;
+    const builtAt =  true ? "2026-11-18T17:50:13.342Z" : 0;
     return { sha, builtAt };
 }
 
@@ -55059,7 +54527,7 @@ function collectManagerPromotionHealth(manager, mobile) {
         // A runner inside a declared deliberate sleep is resting, not stalled (mirrors the supervisor).
         const sleepUntil = stats.runnerHealth?.runner?.sleepUntil;
         const sleeping = typeof sleepUntil === "number" && Date.now() < sleepUntil + PROMOTION_SLEEP_GRACE_MS;
-        // Flow v3 P7: null with health=off (today's rules, unchanged). With on, the 3.10 ladder replaces
+        // Flow v3 P7: null only when the stats carry no runner snapshot (legacy stale rule). Otherwise the 3.10 ladder replaces
         // the 47 min stale rule: unhealthy only for a silent runner (quiet=unknown) or 6 h mobile-side starvation.
         const ladder = (0,_tg_channel_state_channel_message_promotions_orchestrator_promo_health_ladder__WEBPACK_IMPORTED_MODULE_4__.evaluatePromoLadder)({
             mobile,
@@ -55068,7 +54536,7 @@ function collectManagerPromotionHealth(manager, mobile) {
             quietAllowed: budgetCapped || sleeping,
             staleMs: PROMOTION_STALE_MS,
         });
-        const ladderOn = ladder?.mode === "on";
+        const ladderOn = ladder !== null;
         let otherUnhealthy = false;
         if (ladderOn) {
             if (ladder.verdict.status !== "healthy") {
@@ -55148,7 +54616,7 @@ function collectManagerPromotionHealth(manager, mobile) {
                 budgetCapped,
                 channels: stats.channelsTotal ?? null,
                 queueSize: stats.runnerHealth?.runner?.queueSize ?? stats.queueSize ?? null,
-                ...(ladder ? { promoHealth: { mode: ladder.mode, ...ladder.verdict } } : {}),
+                ...(ladder ? { promoHealth: { ...ladder.verdict } } : {}),
             },
         });
     }
