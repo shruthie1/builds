@@ -11503,6 +11503,7 @@ function noteCycleQuiet(host, at, quiet, mainSent, pool, eligibleSource) {
         mobileSide: pool?.mobileSide ?? 0,
         channelSide: pool?.channelSide ?? 0,
         classified: !!pool && (eligibleSource === 'intel' || eligibleSource === 'cache'),
+        cooling: pool ? pool.skips.cooldown ?? 0 : undefined,
     };
     host.lastQuiet = record;
     const mobile = host.options.account.mobile;
@@ -13946,8 +13947,10 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   PROMO_LADDER: () => (/* binding */ PROMO_LADDER),
 /* harmony export */   PromoQuietHistory: () => (/* binding */ PromoQuietHistory),
 /* harmony export */   PromoRestartLedger: () => (/* binding */ PromoRestartLedger),
+/* harmony export */   channelDryWindow: () => (/* binding */ channelDryWindow),
 /* harmony export */   decidePromoLadder: () => (/* binding */ decidePromoLadder),
 /* harmony export */   evaluatePromoLadder: () => (/* binding */ evaluatePromoLadder),
+/* harmony export */   forgetPromoLadderMobile: () => (/* binding */ forgetPromoLadderMobile),
 /* harmony export */   isKnownQuiet: () => (/* binding */ isKnownQuiet),
 /* harmony export */   mobileSideWindow: () => (/* binding */ mobileSideWindow),
 /* harmony export */   notePromoSwap: () => (/* binding */ notePromoSwap),
@@ -13957,7 +13960,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   promoRestartLedger: () => (/* binding */ promoRestartLedger),
 /* harmony export */   promoSwapBudgetTtlSec: () => (/* binding */ promoSwapBudgetTtlSec),
 /* harmony export */   readPromoSwapBudget: () => (/* binding */ readPromoSwapBudget),
-/* harmony export */   resetPromoHealthLadderState: () => (/* binding */ resetPromoHealthLadderState)
+/* harmony export */   resetPromoHealthLadderState: () => (/* binding */ resetPromoHealthLadderState),
+/* harmony export */   swapRefusedFallback: () => (/* binding */ swapRefusedFallback)
 /* harmony export */ });
 const MINUTE = 60 * 1000;
 const HOUR = 60 * MINUTE;
@@ -13970,6 +13974,14 @@ const PROMO_LADDER = Object.freeze({
     starvedEligibleShare: 0.05,
     /** At least this many classified cycles in the window. */
     minWindowCycles: 2,
+    /**
+     * Review MEDIUM 1 (b97e8097): a window is watched only from the first record after the last gap longer than
+     * this between consecutive records (or since the last record, at `now`). Runner stopped, intel load failing,
+     * mobile re-added: the watch starts again.
+     */
+    maxRecordGapMs: 60 * MINUTE,
+    /** Channel-side 6 h swap: at least this many cycles in the window, every one channel-dry (about 1 per hour). */
+    channelSwapMinCycles: 6,
     unknownRestartMs: 47 * MINUTE,
     restartWindowMs: 3 * HOUR,
     restartsToSwap: 3,
@@ -14023,13 +14035,32 @@ class PromoQuietHistory {
         const records = this.byMobile.get(mobile)?.records;
         return records && records.length > 0 ? records[records.length - 1] : null;
     }
-    /** Records ending inside [now - windowMs, now]; `covered` when this process has watched the mobile that long. */
+    /**
+     * Records ending inside [now - windowMs, now]; `covered` when this process has watched the mobile that long
+     * with no gap over PROMO_LADDER.maxRecordGapMs between consecutive records or since the last one.
+     */
     window(mobile, now, windowMs) {
         const entry = this.byMobile.get(mobile);
         if (!entry)
             return { covered: false, records: [] };
         const from = now - windowMs;
-        return { covered: entry.since <= from, records: entry.records.filter((record) => record.at >= from && record.at <= now) };
+        return { covered: this.watchedSince(entry, now) <= from, records: entry.records.filter((record) => record.at >= from && record.at <= now) };
+    }
+    /** Start of the unbroken run of records that reaches `now` (POSITIVE_INFINITY when the last record is too old). */
+    watchedSince(entry, now) {
+        const records = entry.records.filter((record) => record.at <= now);
+        if (records.length === 0 || now - records[records.length - 1].at > PROMO_LADDER.maxRecordGapMs)
+            return Number.POSITIVE_INFINITY;
+        for (let index = records.length - 1; index > 0; index -= 1) {
+            if (records[index].at - records[index - 1].at > PROMO_LADDER.maxRecordGapMs)
+                return records[index].at;
+        }
+        // Review MEDIUM 1b: the 7 h cut may have dropped the record before a gap, so the watch starts no earlier
+        // than the oldest retained record. Watched for 6 h = retained records span 6 h with no gap over 60 min.
+        return Math.max(entry.since, records[0].at);
+    }
+    forget(mobile) {
+        this.byMobile.delete(mobile);
     }
     clear() {
         this.byMobile.clear();
@@ -14093,6 +14124,9 @@ class PromoRestartLedger {
         entry.counted = entry.counted.filter((at) => now - at <= PROMO_LADDER.restartWindowMs);
         return entry.counted.length;
     }
+    forget(key) {
+        this.byKey.delete(key);
+    }
     clear() {
         this.byKey.clear();
     }
@@ -14100,6 +14134,13 @@ class PromoRestartLedger {
 /** Process-wide stores (one per process; tests clear them). */
 const promoQuietHistory = new PromoQuietHistory();
 const promoRestartLedger = new PromoRestartLedger();
+/** A mobile removed or swapped out: drop its quiet history and restart count (a re-added mobile starts fresh). */
+function forgetPromoLadderMobile(mobile) {
+    if (!mobile)
+        return;
+    promoQuietHistory.forget(mobile);
+    promoRestartLedger.forget(`on:${mobile}`);
+}
 function resetPromoHealthLadderState() {
     promoQuietHistory.clear();
     promoRestartLedger.clear();
@@ -14129,6 +14170,19 @@ function mobileSideWindow(records, covered) {
         && eligibleShare <= PROMO_LADDER.starvedEligibleShare;
     return { hit, covered, cycles, mobileSide, channelSide, pool, eligible, ratio, eligibleShare };
 }
+function channelDryWindow(records, covered) {
+    const dry = (record) => record.quiet === 'no_eligible_channel'
+        && record.classified && record.pool > 0 && record.eligible === 0 && record.cooling === 0 && record.mainSent === 0;
+    const allDry = records.every(dry);
+    return { hit: covered && allDry && records.length >= PROMO_LADDER.channelSwapMinCycles, covered, cycles: records.length };
+}
+/**
+ * Edge review LOW 4: the action to take when a ladder swap is refused by the swap budget. A silent runner
+ * (restart escalation) still gets a restart; starvation swaps do nothing (a restart cannot add channels).
+ */
+function swapRefusedFallback(verdict) {
+    return verdict?.action === 'swap' && verdict.swapCause === 'restart_escalation' ? 'restart_runner' : 'none';
+}
 function formatWindow(label, window) {
     return `${label} ratio=${window.ratio.toFixed(2)} eligible_share=${window.eligibleShare.toFixed(3)} cycles=${window.cycles}`;
 }
@@ -14151,11 +14205,14 @@ function decidePromoLadder(input) {
         ? (ownRecordAged ? 'unknown' : ownRecord.quiet)
         : runnerAgeMs >= PROMO_LADDER.unknownRestartMs ? 'unknown' : null;
     if (input.window6h.hit) {
-        return { status: 'unhealthy', action: 'swap', reason: formatWindow('no_eligible_mobile_6h', input.window6h), quiet };
+        return { status: 'unhealthy', action: 'swap', reason: formatWindow('no_eligible_mobile_6h', input.window6h), quiet, swapCause: 'no_eligible_mobile_6h' };
+    }
+    if (input.channelDry6h?.hit && quiet === 'no_eligible_channel' && lastMainAgeMs >= PROMO_LADDER.mobileSwapMs) {
+        return { status: 'unhealthy', action: 'swap', reason: `no_eligible_channel_6h cycles=${input.channelDry6h.cycles}`, quiet, swapCause: 'no_eligible_channel_6h' };
     }
     if (!input.quietAllowed && quiet === 'unknown' && lastMainAgeMs > PROMO_LADDER.unknownRestartMs && runnerAgeMs >= PROMO_LADDER.unknownRestartMs) {
         if (input.restartsCounted >= PROMO_LADDER.restartsToSwap) {
-            return { status: 'unhealthy', action: 'swap', reason: `restart_escalation restarts=${input.restartsCounted}`, quiet };
+            return { status: 'unhealthy', action: 'swap', reason: `restart_escalation restarts=${input.restartsCounted}`, quiet, swapCause: 'restart_escalation' };
         }
         const aged = ownRecordAged ? ` aged_quiet=${ownRecord.quiet}` : '';
         return { status: 'unhealthy', action: 'restart_runner', reason: `quiet_unknown_47m restarts=${input.restartsCounted}${aged}`, quiet };
@@ -14201,6 +14258,7 @@ function evaluatePromoLadder(input) {
         lastQuiet: promoQuietHistory.last(input.mobile),
         window2h: mobileSideWindow(window2h.records, window2h.covered),
         window6h: mobileSideWindow(window6h.records, window6h.covered),
+        channelDry6h: channelDryWindow(window6h.records, window6h.covered),
         restartsCounted: promoRestartLedger.counted(ledgerKey, now),
         staleMs: input.staleMs,
     });
@@ -63422,8 +63480,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "f09d1365f1db2e518cb8914ebc08baa21b4ba4f6" : 0;
-    const builtAt =  true ? "2026-11-18T17:50:10.640Z" : 0;
+    const sha =  true ? "01534e93867e8a36086abb527d9b9b5d598ca7bb" : 0;
+    const builtAt =  true ? "2026-11-18T18:44:06.018Z" : 0;
     return { sha, builtAt };
 }
 
@@ -91910,6 +91968,9 @@ class JobManager {
                         this.ladderBudgetLogAt.set(logKey, Date.now());
                         this.log('warn', `promo health swap skipped: ${budget.reason} client=${clientId} ${budget.detail}`);
                     }
+                    // Edge review LOW 4: a silent runner whose swap the budget refuses still gets a restart.
+                    if ((0,_tg_channel_state_channel_message_promotions_orchestrator_promo_health_ladder__WEBPACK_IMPORTED_MODULE_31__.swapRefusedFallback)(ladder) === 'restart_runner')
+                        await this.restartPromoRunner(promotor, `${ladder?.reason ?? 'n/a'} swap_refused`);
                     return;
                 }
                 ladderBudget = budget;
@@ -91958,11 +92019,15 @@ class JobManager {
         const ladder = check?.metadata?.promoHealth;
         if (!check || !ladder)
             return false;
-        const mobile = String(_telegram_client_access__WEBPACK_IMPORTED_MODULE_15__.TelegramManager.getInstance().mobile ?? process.env.mobile ?? '');
-        const now = Date.now();
         if (check.action !== 'restart')
             return false;
-        this.log('warn', `promo health restart_runner | ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_30__.maskMobile)(mobile)} | reason=${ladder.reason ?? 'n/a'}`);
+        await this.restartPromoRunner(promotor, ladder.reason ?? 'n/a');
+        return true;
+    }
+    /** Flow v3 P7 `restart_runner`: stop + forced start, counted in the restart ledger. */
+    async restartPromoRunner(promotor, reason, now = Date.now()) {
+        const mobile = String(_telegram_client_access__WEBPACK_IMPORTED_MODULE_15__.TelegramManager.getInstance().mobile ?? process.env.mobile ?? '');
+        this.log('warn', `promo health restart_runner | ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_30__.maskMobile)(mobile)} | reason=${reason}`);
         try {
             await promotor.stopPromotions?.();
             await promotor.startPromotion({ force: true });
@@ -91971,7 +92036,6 @@ class JobManager {
             (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, 'JobManager.promoHealthRestart', false);
         }
         _tg_channel_state_channel_message_promotions_orchestrator_promo_health_ladder__WEBPACK_IMPORTED_MODULE_31__.promoRestartLedger.note(`on:${mobile}`, 'health', now);
-        return true;
     }
     logServiceHealth(label, check) {
         if (!check) {
