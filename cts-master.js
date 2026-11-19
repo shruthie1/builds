@@ -30954,6 +30954,7 @@ var AnalyticsPgReader_1;
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.AnalyticsPgReader = void 0;
 const common_1 = __webpack_require__(/*! @nestjs/common */ "@nestjs/common");
+const redact_secrets_1 = __webpack_require__(/*! ../../utils/redact-secrets */ "./src/utils/redact-secrets.ts");
 const QUERY_TIMEOUT_MS = 10_000;
 const LOG_INTERVAL_MS = 60_000;
 let AnalyticsPgReader = AnalyticsPgReader_1 = class AnalyticsPgReader {
@@ -31000,7 +31001,7 @@ let AnalyticsPgReader = AnalyticsPgReader_1 = class AnalyticsPgReader {
         if (now - this.lastLogAt < LOG_INTERVAL_MS)
             return;
         this.lastLogAt = now;
-        this.logger.warn(`Analytics Postgres ${what}: ${err?.message ?? err}`);
+        this.logger.warn(`Analytics Postgres ${what}: ${(0, redact_secrets_1.maskDigitRuns)(err?.message ?? err)}`);
     }
     async query(sql, params = [], onError) {
         const pool = this.getPool();
@@ -32873,6 +32874,7 @@ const user_data_schema_1 = __webpack_require__(/*! ../user-data/schemas/user-dat
 const analytics_pg_reader_1 = __webpack_require__(/*! ../daily-analytics/analytics-pg.reader */ "./src/components/daily-analytics/analytics-pg.reader.ts");
 const channel_category_enum_1 = __webpack_require__(/*! ../bots/channel-category.enum */ "./src/components/bots/channel-category.enum.ts");
 const utils_1 = __webpack_require__(/*! ../../utils */ "./src/utils/index.ts");
+const redact_secrets_1 = __webpack_require__(/*! ../../utils/redact-secrets */ "./src/utils/redact-secrets.ts");
 const payment_proofs_service_1 = __webpack_require__(/*! ../payment-proofs/payment-proofs.service */ "./src/components/payment-proofs/payment-proofs.service.ts");
 const payment_proofs_classify_1 = __webpack_require__(/*! ../payment-proofs/payment-proofs.classify */ "./src/components/payment-proofs/payment-proofs.classify.ts");
 exports.CHAT_ID_RE = /^-?\d{3,20}$/;
@@ -32909,6 +32911,9 @@ let FakePaymentService = FakePaymentService_1 = class FakePaymentService {
             await this.paymentProofs?.chatChanged(chatId);
         }
     }
+    static masked(chatId) {
+        return `****${chatId.slice(-4)}`;
+    }
     chatIdOrThrow(chatId) {
         const id = typeof chatId === 'string' ? chatId.trim() : '';
         if (!exports.CHAT_ID_RE.test(id))
@@ -32917,6 +32922,21 @@ let FakePaymentService = FakePaymentService_1 = class FakePaymentService {
     }
     async rows(chatId) {
         return this.userDataModel.find({ chatId }, ROW_PROJECTION).lean().exec();
+    }
+    logMarkCoverage(chatId, rows, postgres) {
+        const mongoClients = new Set(rows.map((r) => r.clientId).filter(Boolean)).size;
+        const line = (pg) => this.logger.warn(`[fake-mark] chat ${FakePaymentService_1.masked(chatId)} mongo rows ${rows.length} clients ${mongoClients} | ${pg} | payer-days ${postgres.payerDays} skipped ${postgres.payerDaysSkipped}`);
+        void this.readMarkCoverage(chatId)
+            .then(line)
+            .catch((e) => line(`pg coverage unavailable (${(0, redact_secrets_1.maskDigitRuns)(e?.message ?? e)})`));
+    }
+    async readMarkCoverage(chatId) {
+        const cov = await this.pgCall(`SELECT count(*)::int AS rows, count(*) FILTER (WHERE is_fake)::int AS fake, count(DISTINCT client_id)::int AS clients,
+                    count(DISTINCT persona_id)::int AS personas, count(DISTINCT mobile)::int AS mobiles
+               FROM payment_event WHERE chat_id = $1`, [chatId]);
+        return cov.row
+            ? `pg rows ${Number(cov.row.rows)} fake ${Number(cov.row.fake)} clients ${Number(cov.row.clients)} personas ${Number(cov.row.personas)} mobiles ${Number(cov.row.mobiles)}`
+            : `pg coverage unavailable (${(0, redact_secrets_1.maskDigitRuns)(cov.error)})`;
     }
     async pgCall(sql, params) {
         let failure;
@@ -33006,7 +33026,7 @@ let FakePaymentService = FakePaymentService_1 = class FakePaymentService {
         const mongo = { rows: rows.length, newlyMarked };
         const pg = await this.pgCall('SELECT * FROM fake_payment_mark($1)', [chatId]);
         if (!pg.row) {
-            this.logger.error(`fake-payment mark ${chatId}: Mongo marked ${newlyMarked}/${rows.length} rows, Postgres failed: ${pg.error}`);
+            this.logger.error(`fake-payment mark ${FakePaymentService_1.masked(chatId)}: Mongo marked ${newlyMarked}/${rows.length} rows, Postgres failed: ${(0, redact_secrets_1.maskDigitRuns)(pg.error)}`);
             this.notify('error', 'Fake payment mark: Postgres FAILED (repeat the mark)', chatId, by, reason, [
                 { label: 'Mongo rows marked', value: `${newlyMarked}/${rows.length}` },
                 { label: 'Postgres error', value: String(pg.error) },
@@ -33020,12 +33040,13 @@ let FakePaymentService = FakePaymentService_1 = class FakePaymentService {
             payerDays: Number(pg.row.payer_days),
             payerDaysSkipped: Number(pg.row.payer_days_skipped),
         };
-        this.logger.warn(`fake-payment mark ${chatId} by ${by}: mongo ${newlyMarked}/${rows.length}, pg ${JSON.stringify(postgres)}`);
+        this.logger.warn(`fake-payment mark ${FakePaymentService_1.masked(chatId)} by ${by}: mongo ${newlyMarked}/${rows.length}, pg ${JSON.stringify(postgres)}`);
         this.notify('warning', 'Payment marked fake', chatId, by, reason, [
             { label: 'Persona rows', value: `${newlyMarked} newly marked of ${rows.length}` },
             { label: 'Payments excluded', value: postgres.payments ? `${postgres.payments} (₹${postgres.amountMarked} newly)` : 'none in Postgres (no payment_event rows for this chat)' },
             { label: 'Payer-days taken back', value: `${postgres.payerDays} (skipped ${postgres.payerDaysSkipped})` },
         ]);
+        this.logMarkCoverage(chatId, rows, postgres);
         return { chatId, marked: true, mongo, postgres };
     }
     async unmark(rawChatId, body = {}) {
@@ -33063,7 +33084,7 @@ let FakePaymentService = FakePaymentService_1 = class FakePaymentService {
         const mongo = { rowsUnmarked: rows.length };
         const pg = await this.pgCall('SELECT * FROM fake_payment_unmark($1)', [chatId]);
         if (!pg.row) {
-            this.logger.error(`fake-payment unmark ${chatId}: Mongo unmarked ${rows.length} rows, Postgres failed: ${pg.error}`);
+            this.logger.error(`fake-payment unmark ${FakePaymentService_1.masked(chatId)}: Mongo unmarked ${rows.length} rows, Postgres failed: ${(0, redact_secrets_1.maskDigitRuns)(pg.error)}`);
             this.notify('error', 'Fake payment unmark: Postgres FAILED (repeat the unmark)', chatId, by, reason, [
                 { label: 'Mongo rows unmarked', value: String(rows.length) },
                 { label: 'Postgres error', value: String(pg.error) },
@@ -33075,7 +33096,7 @@ let FakePaymentService = FakePaymentService_1 = class FakePaymentService {
             amountRestored: Number(pg.row.amount_restored),
             payerDays: Number(pg.row.payer_days),
         };
-        this.logger.warn(`fake-payment unmark ${chatId} by ${by}: mongo ${rows.length}, pg ${JSON.stringify(postgres)}`);
+        this.logger.warn(`fake-payment unmark ${FakePaymentService_1.masked(chatId)} by ${by}: mongo ${rows.length}, pg ${JSON.stringify(postgres)}`);
         this.notify('info', 'Fake payment mark removed', chatId, by, reason, [
             { label: 'Persona rows restored', value: String(rows.length) },
             { label: 'Payments restored', value: `${postgres.unmarkedNow} (₹${postgres.amountRestored})` },
@@ -33111,7 +33132,7 @@ let FakePaymentService = FakePaymentService_1 = class FakePaymentService {
                 },
             },
         })));
-        this.logger.warn(`fake-payment not-fake ${chatId} by ${by}: ${source}, rows unmuted ${muted.length}, asks closed ${closed.proofIds.length}`);
+        this.logger.warn(`fake-payment not-fake ${FakePaymentService_1.masked(chatId)} by ${by}: ${source}, rows unmuted ${muted.length}, asks closed ${closed.proofIds.length}`);
         this.notify('info', 'Mute lifted (not fake)', chatId, by, reason, [
             { label: 'Source', value: source === 'fraud_block' ? 'payment check fraud block' : 'unknown' },
             { label: 'Persona rows unmuted', value: `${muted.length} of ${rows.length}` },
@@ -33133,10 +33154,10 @@ let FakePaymentService = FakePaymentService_1 = class FakePaymentService {
                     ...(reason ? [{ label: 'Reason', value: reason }] : []),
                     ...extra,
                 ],
-            }).catch((e) => this.logger.warn(`fake-payment notice failed: ${e?.message ?? e}`));
+            }).catch((e) => this.logger.warn(`fake-payment notice failed: ${(0, redact_secrets_1.maskDigitRuns)(e?.message ?? e)}`));
         }
         catch (e) {
-            this.logger.warn(`fake-payment notice failed: ${e?.message ?? e}`);
+            this.logger.warn(`fake-payment notice failed: ${(0, redact_secrets_1.maskDigitRuns)(e?.message ?? e)}`);
         }
     }
 };
@@ -45557,10 +45578,17 @@ let PaymentUncreditService = PaymentUncreditService_1 = class PaymentUncreditSer
         const key = (0, payment_proofs_classify_1.parseProofId)(rawProofId);
         if (!key)
             throw new common_1.BadRequestException('proofId must be <clientId>-<chatId>-<telegramMsgId>');
-        const proof = await this.proofs.findOne({ chatId: key.chatId, clientId: key.clientId, telegramMsgId: key.telegramMsgId }, { projection: { shadow: 0, ocr: 0, imageHash: 0 } });
-        if (!proof)
+        const rows = await this.proofs.find({ chatId: key.chatId, clientId: key.clientId, telegramMsgId: key.telegramMsgId }, { projection: { shadow: 0, ocr: 0, imageHash: 0 }, limit: 2 }).toArray();
+        if (!rows.length)
             throw new common_1.NotFoundException('no such proof (gone after the 7-day TTL?)');
-        return proof;
+        if (rows.length > 1) {
+            this.logger.warn(`[proof-lookup] ambiguous_proof client ${key.clientId} chat ****${String(key.chatId).slice(-4)} msg ${key.telegramMsgId}: 2+ rows (receiving accounts), refused 409`);
+            throw new common_1.ConflictException({
+                code: 'ambiguous_proof',
+                message: 'two receiving accounts of this client stored a payment with this message id: not changed; fix it by hand',
+            });
+        }
+        return rows[0];
     }
     async setJournal(id, set) {
         await this.proofs.updateOne({ _id: id }, { $set: set });
@@ -45626,6 +45654,7 @@ let PaymentUncreditService = PaymentUncreditService_1 = class PaymentUncreditSer
                        FROM payment_void($1, $2, $3, $4, $5::integer, $6::timestamptz, $7, $8)`, [proofId, proof.chatId, proof.clientId, proof.profile, A, new Date(proof.servedAt).toISOString(), voidReason, by]);
                 if (!pg.row)
                     throw new StepError('postgres', pg.error ?? 'no row');
+                this.logger.warn(`[payment-void] ${pg.row.status} client ${proof.clientId} chat ****${String(proof.chatId).slice(-4)} msg ${proof.telegramMsgId} ₹${A} payment ${pg.row.payment_id ?? '-'} payers_taken=${!!pg.row.payers_taken}`);
                 if (pg.row.status === 'fake_marked') {
                     await this.release(proof._id, journal);
                     throw new common_1.ConflictException({ code: 'fake_marked', message: 'the chat is marked fake in Postgres: no payment of it counts already' });
@@ -66993,6 +67022,7 @@ function getReadableTimeDifference(ms1, ms2 = Date.now()) {
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.REDACTED = void 0;
 exports.isSecretKey = isSecretKey;
+exports.maskDigitRuns = maskDigitRuns;
 exports.redactSecretText = redactSecretText;
 const SECRET_KEYS = new Set([
     'session', 'stringsession', 'sessionstring', 'activesession', 'backupsession',
@@ -67004,6 +67034,9 @@ const BOT_TOKEN_LIKE = /(?<!\d)(\d{6,12}):[A-Za-z0-9_-]{30,}/g;
 exports.REDACTED = '[redacted]';
 function isSecretKey(key) {
     return SECRET_KEYS.has(String(key).toLowerCase());
+}
+function maskDigitRuns(text) {
+    return String(text).replace(/\d{6,}/g, (run) => `****${run.slice(-4)}`);
 }
 function redactSecretText(text) {
     if (typeof text !== 'string')
