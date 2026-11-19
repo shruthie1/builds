@@ -22365,7 +22365,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 };
 var BufferClientService_1;
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.BufferClientService = void 0;
+exports.BufferClientService = exports.CandidateChangedException = void 0;
 const channels_service_1 = __webpack_require__(/*! ../channels/channels.service */ "./src/components/channels/channels.service.ts");
 const common_1 = __webpack_require__(/*! @nestjs/common */ "@nestjs/common");
 const mongoose_1 = __webpack_require__(/*! @nestjs/mongoose */ "@nestjs/mongoose");
@@ -22398,6 +22398,9 @@ const candidate_source_1 = __webpack_require__(/*! ../shared/onboarding/candidat
 const account_facet_read_1 = __webpack_require__(/*! ../shared/account-facet-read */ "./src/components/shared/account-facet-read.ts");
 const buffer_supply_1 = __webpack_require__(/*! ./buffer-supply */ "./src/components/buffer-clients/buffer-supply.ts");
 const monitor_util_1 = __webpack_require__(/*! ../monitor/monitor-util */ "./src/components/monitor/monitor-util.ts");
+class CandidateChangedException extends common_1.ConflictException {
+}
+exports.CandidateChangedException = CandidateChangedException;
 let BufferClientService = BufferClientService_1 = class BufferClientService extends base_client_service_1.BaseClientService {
     get checkingBufferClientsSince() {
         return this.isWarmupCheckProcessing ? 1 : 0;
@@ -22875,14 +22878,21 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
     async releaseProbeLeases(owner, mobile) {
         await this.bufferClientModel.updateMany({ 'probeLease.owner': owner, ...(mobile ? { mobile } : {}) }, { $unset: { probeLease: '' } }).exec();
     }
-    async setPrimaryInUse(clientId, mobile, session) {
+    async setPrimaryInUse(clientId, mobile, session, expectedSession) {
         const now = new Date();
+        const candidateFilter = { mobile, clientId, status: 'active', ...(expectedSession ? { session: expectedSession } : {}) };
         const existsQuery = this.bufferClientModel.exists({ mobile, clientId });
         if (session)
             existsQuery.session(session);
         const exists = await existsQuery;
         if (!exists) {
             throw new common_1.NotFoundException(`Primary buffer client ${mobile} for ${clientId} not found`);
+        }
+        const unchangedQuery = this.bufferClientModel.exists(candidateFilter);
+        if (session)
+            unchangedQuery.session(session);
+        if (!(await unchangedQuery)) {
+            throw new CandidateChangedException(`Candidate ${mobile} for ${clientId} changed since selection (status or session); cutover aborted`);
         }
         const revoked = await this.bufferClientModel.updateMany({
             clientId,
@@ -22911,7 +22921,7 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
                 });
         }
         const updatedBufferClient = await this.bufferClientModel
-            .findOneAndUpdate({ mobile, clientId }, {
+            .findOneAndUpdate(candidateFilter, {
             $set: {
                 inUse: true,
                 status: 'active',
@@ -22920,7 +22930,7 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
         }, { returnDocument: 'after', ...(session ? { session } : {}) })
             .exec();
         if (!updatedBufferClient) {
-            throw new common_1.NotFoundException(`Primary buffer client ${mobile} for ${clientId} not found`);
+            throw new CandidateChangedException(`Candidate ${mobile} for ${clientId} changed since selection (status or session); cutover aborted`);
         }
         this.logger.info(`Set primary in-use buffer client for ${clientId}`, {
             mobile: (0, monitor_util_1.maskMobile)(mobile),
@@ -26927,6 +26937,7 @@ let ClientService = ClientService_1 = class ClientService {
             clientId,
             existingMobile: existingClientMobile,
             newMobile: newBufferClient.mobile,
+            candidateSession: newBufferClient.session,
         });
         try {
             this.logger.info(`[${clientId}] Selected replacement buffer client`, {
@@ -26994,6 +27005,9 @@ let ClientService = ClientService_1 = class ClientService {
             if (ownerOfMobile) {
                 this.logger.warn(`[${clientId}] Swap failed on ${(0, monitor_util_1.maskMobile)(newBufferClient.mobile)}, now the live main of ${ownerOfMobile}; leaving it untouched`);
             }
+            else if (error instanceof buffer_client_service_1.CandidateChangedException) {
+                this.logger.warn(`[${clientId}] Candidate ${(0, monitor_util_1.maskMobile)(newBufferClient.mobile)} changed after selection; cutover aborted, row left as is`);
+            }
             else if (permanent) {
                 await this.usersService.expireAccount(newBufferClient.mobile, `Setup failed permanently: ${errorDetails.message}`);
             }
@@ -27029,7 +27043,7 @@ let ClientService = ClientService_1 = class ClientService {
         if (expectedClientId && setup.clientId !== expectedClientId) {
             throw new common_1.ConflictException(`Active setup for ${setupMobile} belongs to ${setup.clientId}, not ${expectedClientId}`);
         }
-        const { archiveOld: returnOldToPool, clientId, existingMobile, formalities, newMobile, reason } = setup;
+        const { archiveOld: returnOldToPool, clientId, existingMobile, formalities, newMobile, reason, candidateSession } = setup;
         const days = setup.days ?? 0;
         this.logger.info(`[${clientId}] Starting client session cutover`, {
             existingMobile: (0, monitor_util_1.maskMobile)(existingMobile),
@@ -27081,7 +27095,7 @@ let ClientService = ClientService_1 = class ClientService {
                 username: updatedUsername,
                 session: newSession,
                 name: mirroredActiveName,
-            }, degradedPlan);
+            }, degradedPlan, candidateSession);
             cutoverCommitted = true;
             this.recordMainChangeEvents(clientId, existingMobile, newMobile, 'cms:cutover', reason, degradedPlan, this.cutoverRoleEventOpId(clientId, committedClient?.swappedAt) ?? (0, crypto_1.randomUUID)());
             this.logger.info(`[${clientId}] Cutover committed`, {
@@ -27147,7 +27161,7 @@ let ClientService = ClientService_1 = class ClientService {
             this.logger.warn(`[${clientId}] Parked cutover hook failed; continuing the cutover`, { newMobile: (0, monitor_util_1.maskMobile)(newMobile), error: error instanceof Error ? error.message : String(error) });
         }
     }
-    async commitClientCutover(clientId, expectedExistingMobile, updateClientDto, degradedPlan = null) {
+    async commitClientCutover(clientId, expectedExistingMobile, updateClientDto, degradedPlan = null, candidateSession) {
         if (!updateClientDto.session?.trim()) {
             throw new common_1.BadRequestException('Cannot update client with a blank session');
         }
@@ -27182,7 +27196,7 @@ let ClientService = ClientService_1 = class ClientService {
                 if (degradedPlan?.fromClientId) {
                     await this.bufferClientService.reassignClientId(cleanUpdateDto.mobile, degradedPlan.fromClientId, clientId, session);
                 }
-                await this.bufferClientService.setPrimaryInUse(clientId, cleanUpdateDto.mobile, session);
+                await this.bufferClientService.setPrimaryInUse(clientId, cleanUpdateDto.mobile, session, candidateSession);
             });
         }
         finally {
@@ -27333,6 +27347,10 @@ let ClientService = ClientService_1 = class ClientService {
         try {
             const users = (await this.usersService.findByMobileAnyStatus(mobile)) ?? [];
             if (users.some((u) => u.expired !== true))
+                return false;
+            const promote = await this.clientModel.db.collection('promoteClients')
+                .findOne({ mobile }, { projection: { status: 1 } });
+            if (promote && promote.status !== 'inactive')
                 return false;
             const buffer = await this.bufferClientService.findOne(mobile, false);
             if (!users.length)
@@ -32283,8 +32301,8 @@ let EventManagerController = class EventManagerController {
         const data = await this.eventManagerService.createMultiple(events);
         return { data };
     }
-    async deleteMultiple(chatId) {
-        const entriesDeleted = await this.eventManagerService.deleteMultiple(chatId);
+    async deleteMultiple(chatId, clientId) {
+        const entriesDeleted = await this.eventManagerService.deleteMultiple(chatId, clientId);
         return { status: 'Deleted Sucessfully', entriesDeleted };
     }
 };
@@ -32331,10 +32349,11 @@ __decorate([
 ], EventManagerController.prototype, "createMultiple", null);
 __decorate([
     (0, common_1.Delete)('delete'),
-    (0, swagger_1.ApiOperation)({ summary: 'Delete all events for a chatId' }),
+    (0, swagger_1.ApiOperation)({ summary: "Delete one client's events for a chatId (without clientId: every client's, deprecated)" }),
     __param(0, (0, common_1.Query)('chatId')),
+    __param(1, (0, common_1.Query)('clientId')),
     __metadata("design:type", Function),
-    __metadata("design:paramtypes", [String]),
+    __metadata("design:paramtypes", [String, String]),
     __metadata("design:returntype", Promise)
 ], EventManagerController.prototype, "deleteMultiple", null);
 exports.EventManagerController = EventManagerController = __decorate([
@@ -32448,9 +32467,14 @@ let EventManagerService = EventManagerService_1 = class EventManagerService {
             this.logger.error('Error inserting events', error);
         }
     }
-    async deleteMultiple(chatId) {
+    async deleteMultiple(chatId, clientId) {
+        if (!chatId?.trim())
+            return 0;
+        const client = clientId?.trim();
+        if (!client)
+            this.logger.warn(`deleteMultiple without clientId for chat ****${chatId.slice(-4)}: deleting every client's events (old caller)`);
         try {
-            const result = await this.eventModel.deleteMany({ chatId });
+            const result = await this.eventModel.deleteMany(client ? { chatId, clientId: client } : { chatId });
             return result.deletedCount;
         }
         catch (error) {
