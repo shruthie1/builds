@@ -4795,6 +4795,14 @@ const DEFAULTS = {
 const MAX_STATEMENTS_PER_FLUSH = 64;
 /** Rows per spool file before a new one is started, so a replay never reads a huge file. */
 const SPOOL_ROTATE_ROWS = 5000;
+/**
+ * Share of maxSpoolBytes that only payment_event rows may use (review finding 9, 2026-11-19).
+ * Lower-value rows stop spilling at 90% of the cap (counted droppedSpoolFull, onLoss), so a long
+ * outage never fills the disk budget before a payment arrives. A payment row is never shed: one
+ * that would pass the full cap is still written (the cap is overshot by that row), with a warn line
+ * and an onStall alert. ~250 bytes a row: the 20 MB reserve holds ~80k payments.
+ */
+const PAYMENT_SPOOL_RESERVE = 0.1;
 const SPOOL_RESCAN_MS = 60000;
 /** Quarantined spool files are deleted at start() after this long, and beyond maxQuarantineBytes. */
 const QUARANTINE_MAX_AGE_MS = 30 * 24 * 3600000;
@@ -4949,6 +4957,8 @@ const V2_EXTRA_COLUMNS = {
     promotion_send: ["pick_mode", "pick_reason", "pick_score_legacy", "pick_score_v2", "pick_rank_v2", "channel_state",
         "score_version", "arm", "survival_ms", "delete_reason"],
     conversion_event: ["mobile", "dm_ts"],
+    // analytics/upgrade-2026-11-19-payment-mobile.sql: the mobile that counted the payer (fake mark / void read it).
+    payment_event: ["mobile"],
 };
 /**
  * Per-channel reaction counters: table daily_channel_reaction (analytics/upgrade-2026-11-15-channel-reactions.sql).
@@ -5025,8 +5035,11 @@ const TABLES = {
     // legacy shape so a spool written by the previous build still replays its payments: upgradeLegacyValues
     // maps by name, so the three retired values are dropped and nothing else changes.
     payment_event: {
-        columns: ["ts", "chat_id", "client_id", "persona_id", "amount", "source"],
-        legacyColumns: [["ts", "chat_id", "client_id", "persona_id", "amount", "balance_after", "lifetime_after", "is_cheat", "source"]],
+        columns: ["ts", "chat_id", "client_id", "persona_id", "amount", "source", "mobile"],
+        legacyColumns: [
+            ["ts", "chat_id", "client_id", "persona_id", "amount", "balance_after", "lifetime_after", "is_cheat", "source"],
+            ["ts", "chat_id", "client_id", "persona_id", "amount", "source"],
+        ],
     },
     daily_client: {
         columns: [...DAILY_CLIENT_KEY, ...COUNTER_COLUMNS],
@@ -5252,6 +5265,8 @@ class AnalyticsSink {
         /** Makes quarantine file names unique within one process and millisecond. */
         this.quarantineSeq = 0;
         this.spillScheduled = false;
+        /** notePaymentOverCap already alerted for the current over-cap stretch. */
+        this.paymentOverCapAlerted = false;
         this.spillInFlight = null;
         /** When the current failure streak started (0 = healthy) and the last stall alert. */
         this.failingSince = 0;
@@ -5575,7 +5590,7 @@ class AnalyticsSink {
             columns: TABLES.payment_event.columns,
             values: [
                 row.ts ?? new Date(this.opts.now()),
-                row.chatId, row.clientId, row.personaId, row.amount, row.source ?? null,
+                row.chatId, row.clientId, row.personaId, row.amount, row.source ?? null, row.mobile ?? null,
             ],
         });
     }
@@ -5605,9 +5620,8 @@ class AnalyticsSink {
         if (!this.accepting())
             return;
         this.enqueued += 1;
-        if (row.table === "payment_event" && this.spoolAtEnqueue(row))
-            return;
-        this.buffer.push(row);
+        if (!(row.table === "payment_event" && this.spoolAtEnqueue(row)))
+            this.buffer.push(row);
         this.enforceCap();
     }
     /**
@@ -5624,8 +5638,10 @@ class AnalyticsSink {
         try {
             const slim = spoolShape(row);
             const line = JSON.stringify({ b: batch.id, f: firstAt, t: row.table, c: slim.columns, v: slim.values });
+            const text = `${line}\n${spoolEndMarker(1)}`;
             fs__WEBPACK_IMPORTED_MODULE_1__.mkdirSync(this.spoolDir, { recursive: true });
-            fs__WEBPACK_IMPORTED_MODULE_1__.writeFileSync(tmp, `${line}\n${spoolEndMarker(1)}`);
+            this.notePaymentOverCap(this.spoolBytesUsed() + Buffer.byteLength(text), 1);
+            fs__WEBPACK_IMPORTED_MODULE_1__.writeFileSync(tmp, text);
             fs__WEBPACK_IMPORTED_MODULE_1__.renameSync(tmp, file);
         }
         catch (err) {
@@ -5641,6 +5657,23 @@ class AnalyticsSink {
         this.fileRefs.set(file, 1);
         this.retryQueue.push(batch);
         return true;
+    }
+    /**
+     * PAYMENT_SPOOL_RESERVE: a payment row that takes the spool past maxSpoolBytes is still written
+     * (payments are never shed). Loud: a warn line per write, and onStall once per crossing.
+     */
+    notePaymentOverCap(bytesAfter, rows) {
+        if (bytesAfter <= this.opts.maxSpoolBytes) {
+            this.paymentOverCapAlerted = false;
+            return;
+        }
+        const msg = `[analytics] spool over its ${this.opts.maxSpoolBytes}-byte cap (${bytesAfter} bytes): `
+            + `${rows} payment_event row(s) written anyway, payments are never shed; free the spool dir ${this.spoolDir}`;
+        this.log("warn", msg);
+        if (!this.paymentOverCapAlerted) {
+            this.paymentOverCapAlerted = true;
+            this.alert(msg);
+        }
     }
     retryRows() {
         let n = 0;
@@ -5672,19 +5705,34 @@ class AnalyticsSink {
             }
             while (over > 0 && !this.flushing && this.retryQueue.length > 0) {
                 const b = this.retryQueue.shift();
-                this.pendingSpill.push(b);
                 over -= b.rows.length;
+                if (b.file && this.fileRefs.get(b.file) === 1 && !b.released) {
+                    // The batch's own file is on disk and holds nothing else unresolved (a payment row's
+                    // spool file, review finding 9): leave memory, keep the file. A rescan by this process,
+                    // or the next start, replays it; its batch id keeps the replay exactly-once.
+                    this.fileRefs.delete(b.file);
+                    b.released = true;
+                    continue;
+                }
+                this.pendingSpill.push(b);
             }
         }
         let pending = this.pendingSpillRows();
         let dropped = 0;
+        const keptPayments = [];
         while (pending > max && this.pendingSpill.length > 0) {
             const b = this.pendingSpill.shift();
             pending -= b.rows.length;
+            if (b.table === "payment_event" && !b.file) {
+                keptPayments.push(b);
+                continue;
+            } // never shed
             if (b.file)
                 continue; // still on disk in its source file (kept: not released); not lost
             dropped += b.rows.length;
         }
+        if (keptPayments.length > 0)
+            this.pendingSpill.unshift(...keptPayments);
         if (dropped > 0) {
             this.droppedSpoolFull += dropped;
             this.reportLoss("spool cannot keep up (pending spill over the row cap)", dropped);
@@ -5853,10 +5901,14 @@ class AnalyticsSink {
         this.flushing = true;
         let failedThisFlush = false;
         let statements = 0;
+        // Tables that failed transiently in THIS flush: their batches wait for the next flush, while
+        // every other table keeps its turn (review finding 8, 2026-11-19: a payment_event batch failing
+        // forever used to keep the queue non-empty, so new buffer rows and counters never got queued).
+        const failedTables = new Set();
         try {
             while (!this.finalSpilled) {
-                if (this.retryQueue.length === 0) {
-                    if (failedThisFlush || statements >= MAX_STATEMENTS_PER_FLUSH)
+                if (!this.retryQueue.some((b) => !failedTables.has(b.table))) {
+                    if (statements >= MAX_STATEMENTS_PER_FLUSH)
                         break;
                     if (this.buffer.length > 0) {
                         // Build first, then remove: an exception in toBatches must not lose the rows.
@@ -5868,7 +5920,9 @@ class AnalyticsSink {
                         || this.opts.now() - this.lastCounterDrainAt >= this.opts.counterFlushIntervalMs)) {
                         this.drainCounters();
                     }
-                    else if (!(await this.loadNextSpoolFile())) {
+                    else if (failedThisFlush || !(await this.loadNextSpoolFile())) {
+                        // After a failure, in-memory rows still get their turn but no spool file is loaded:
+                        // that would pull a long outage's whole spool into memory.
                         break;
                     }
                     continue;
@@ -5876,7 +5930,6 @@ class AnalyticsSink {
                 // One pass over the queue. A transient failure on a table skips that table's remaining
                 // batches for this flush but still gives the other tables their attempt (one table's
                 // outage must not stall the rest); the loop then stops on the armed backoff.
-                const failedTables = new Set();
                 let i = 0;
                 while (i < this.retryQueue.length && !this.finalSpilled) {
                     const batch = this.retryQueue[i];
@@ -5945,7 +5998,7 @@ class AnalyticsSink {
                     this.log("warn", `[analytics] dropped 1 ${batch.table} row (permanent error): ${describe(error)}`);
                     this.reportLoss(`${batch.table}: ${describe(error)}`, 1);
                 }
-                if (failedThisFlush || statements >= MAX_STATEMENTS_PER_FLUSH)
+                if (statements >= MAX_STATEMENTS_PER_FLUSH)
                     break;
             }
             if (!failedThisFlush)
@@ -6089,7 +6142,7 @@ class AnalyticsSink {
         if (this.v2Off !== null)
             return;
         this.v2Off = describe(err).slice(0, 300);
-        this.log("warn", `[analytics] picker measurement columns OFF until restart (rows keep writing without them; apply analytics/upgrade-2026-11-15-picker-measurement.sql): ${this.v2Off}`);
+        this.log("warn", `[analytics] picker measurement columns OFF until restart (rows keep writing without them; apply analytics/upgrade-2026-11-15-picker-measurement.sql and analytics/upgrade-2026-11-19-payment-mobile.sql): ${this.v2Off}`);
     }
     /** Turns the daily_channel_reaction writer off for this process (once), with one warn line. */
     disableChannelReactions(err) {
@@ -6190,14 +6243,19 @@ class AnalyticsSink {
         const accepted = [];
         let bytes = 0;
         let rows = 0;
+        const max = this.opts.maxSpoolBytes;
+        const otherMax = Math.floor(max * (1 - PAYMENT_SPOOL_RESERVE));
         for (const b of live) {
             const text = b.rows.map((r) => { const slim = spoolShape(r); return JSON.stringify({ b: b.id, f: b.firstAt, t: r.table, c: slim.columns, v: slim.values }); }).join("\n") + "\n";
             const size = Buffer.byteLength(text);
-            if (used + bytes + size > this.opts.maxSpoolBytes) {
+            if (b.table === "payment_event") {
+                this.notePaymentOverCap(used + bytes + size, b.rows.length);
+            }
+            else if (used + bytes + size > otherMax) {
                 if (b.file)
                     continue;
                 this.droppedSpoolFull += b.rows.length;
-                this.reportLoss(`spool full (${this.opts.maxSpoolBytes} bytes)`, b.rows.length);
+                this.reportLoss(`spool full (${otherMax} of ${max} bytes; the rest is kept for payment_event)`, b.rows.length);
                 continue;
             }
             chunks.push(text);
@@ -26590,7 +26648,6 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   numberMap: () => (/* reexport safe */ _utils_obfuscateText__WEBPACK_IMPORTED_MODULE_27__.numberMap),
 /* harmony export */   obfuscateText: () => (/* reexport safe */ _utils_obfuscateText__WEBPACK_IMPORTED_MODULE_27__.obfuscateText),
 /* harmony export */   othersFilter: () => (/* reexport safe */ _utils_user_scope__WEBPACK_IMPORTED_MODULE_28__.othersFilter),
-/* harmony export */   ownFilter: () => (/* reexport safe */ _utils_user_scope__WEBPACK_IMPORTED_MODULE_28__.ownFilter),
 /* harmony export */   ownershipOnInsert: () => (/* reexport safe */ _utils_user_scope__WEBPACK_IMPORTED_MODULE_28__.ownershipOnInsert),
 /* harmony export */   paceDelayWindowMs: () => (/* reexport safe */ _account_health__WEBPACK_IMPORTED_MODULE_41__.paceDelayWindowMs),
 /* harmony export */   paceTier: () => (/* reexport safe */ _account_health__WEBPACK_IMPORTED_MODULE_41__.paceTier),
@@ -26603,7 +26660,6 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   probeDue: () => (/* reexport safe */ _account_health__WEBPACK_IMPORTED_MODULE_41__.probeDue),
 /* harmony export */   probeFloorAt: () => (/* reexport safe */ _account_health__WEBPACK_IMPORTED_MODULE_41__.probeFloorAt),
 /* harmony export */   quickGetEntity: () => (/* reexport safe */ _telegram_utils_getSafeEntity__WEBPACK_IMPORTED_MODULE_17__.quickGetEntity),
-/* harmony export */   readFilter: () => (/* reexport safe */ _utils_user_scope__WEBPACK_IMPORTED_MODULE_28__.readFilter),
 /* harmony export */   readLatestSpamBotReply: () => (/* reexport safe */ _telegram_utils_spam_bot_probe__WEBPACK_IMPORTED_MODULE_35__.readLatestSpamBotReply),
 /* harmony export */   readPaceEnvMs: () => (/* reexport safe */ _account_health__WEBPACK_IMPORTED_MODULE_41__.readPaceEnvMs),
 /* harmony export */   reconcilePromotionParseMode: () => (/* reexport safe */ _utils_stylePromotionText__WEBPACK_IMPORTED_MODULE_31__.reconcilePromotionParseMode),
@@ -39110,10 +39166,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   currentScopeIdentity: () => (/* binding */ currentScopeIdentity),
 /* harmony export */   mineFilter: () => (/* binding */ mineFilter),
 /* harmony export */   othersFilter: () => (/* binding */ othersFilter),
-/* harmony export */   ownFilter: () => (/* binding */ ownFilter),
 /* harmony export */   ownershipOnInsert: () => (/* binding */ ownershipOnInsert),
 /* harmony export */   personaFilter: () => (/* binding */ personaFilter),
-/* harmony export */   readFilter: () => (/* binding */ readFilter),
 /* harmony export */   requireProfile: () => (/* binding */ requireProfile)
 /* harmony export */ });
 /**
@@ -39133,24 +39187,22 @@ __webpack_require__.r(__webpack_exports__);
  * accounts. A user who pays shruthi1 reads as already-paid to shruthi2 (revenue leak), and a video
  * watched via one gates the other (the concern vcui's callPolicy.test.ts:34 already names).
  *
- * ── THE FOUR SCOPES ────────────────────────────────────────────────────────────────────────────
+ * ── THE THREE SCOPES ────────────────────────────────────────────────────────────────────────────
  * Every `userData` query expresses exactly one of these intents. Naming them here means the rule
  * lives in ONE place instead of being re-derived at ~17 call sites, and changing the model later is
  * a change to this file rather than a sweep.
  *
- *   OWN      — "this client's row for this user". Preferred for reads once rows carry clientId.
- *   PERSONA  — "the (chatId, profile) row" — the legacy shape and the unique-index key. Required
- *              verbatim for UPSERTS: an $or filter cannot seed an insert, and a client-scoped
- *              filter would insert a SECOND row for a user who already has a persona row,
- *              violating chatId_Profile (E11000).
+ *   PERSONA  — "the (chatId, profile) row", the unique-index key. The ONE filter for every
+ *              per-chat read and write (personaFilter). An $or filter cannot seed an insert, and a
+ *              client-scoped filter would insert a SECOND row for a user who already has a persona
+ *              row, violating chatId_Profile (E11000).
  *   MINE     — "every row belonging to this client/persona", for sweeps and bulk updates.
  *   OTHERS   — "rows belonging to OTHER personas", for cross-client lookups.
  *
  * ── MIGRATION POSTURE ──────────────────────────────────────────────────────────────────────────
  * Additive and reversible. Rows created from 2026-08-15 carry `clientId`; historical rows do not,
- * and absence means "not known" — never a value. Reads therefore prefer an OWN row and fall back to
- * PERSONA, so both eras coexist with no destructive migration and no behaviour change for existing
- * users. History is deliberately NOT backfilled: only ~1.4% of 54,919 rows have usable evidence
+ * and absence means "not known" — never a value. `clientId` records the inserting client only:
+ * no filter reads it, so both eras resolve to the same row. History is deliberately NOT backfilled: only ~1.4% of 54,919 rows have usable evidence
  * (stats2 is a small rolling window, not history), so dividing the rest would be guesswork.
  */
 function currentScopeIdentity() {
@@ -39188,31 +39240,19 @@ function requireProfile(identity = currentScopeIdentity()) {
     }
     return profile;
 }
-/** PERSONA scope — the exact unique-index key. Safe for upserts; the only shape that can insert. */
+/**
+ * THE user-row filter: the exact unique-index key (chatId, profile). Every per-chat read and write of
+ * a userData row uses this, and nothing else, so a row a reader finds is the row every writer updates.
+ *
+ * WHY THERE IS NO CLIENT-FIRST VARIANT. `chatId_Profile` is unique, so a persona has ONE row per user
+ * whichever of its two clients created it; `clientId` only records which client inserted it. Earlier
+ * code read OWN-then-persona in one method and `{ clientId } OR { no clientId, profile }` in others.
+ * For a row the sibling client created, the second shape matched nothing, so the conversation read and
+ * the completion write landed while the watched-video $addToSet silently missed (review bug 2,
+ * 2026-11-19). Splitting users per client needs a different unique key first, not a different filter.
+ */
 function personaFilter(chatId, identity = currentScopeIdentity()) {
     return { chatId, profile: identity.profile };
-}
-/** OWN scope — rows this client owns. Returns null when the process has no clientId. */
-function ownFilter(chatId, identity = currentScopeIdentity()) {
-    return identity.clientId ? { chatId, clientId: identity.clientId } : null;
-}
-/**
- * READ scope — one filter matching either an OWN row or an un-owned PERSONA row.
- *
- * The `clientId: { $exists: false }` on the persona branch is what keeps the two eras disjoint:
- * without it this would also match the OTHER client's owned row, re-creating the exact sharing bug
- * this module exists to remove.
- */
-function readFilter(chatId, identity = currentScopeIdentity()) {
-    if (!identity.clientId)
-        return personaFilter(chatId, identity);
-    return {
-        chatId,
-        $or: [
-            { clientId: identity.clientId },
-            { clientId: { $exists: false }, profile: identity.profile },
-        ],
-    };
 }
 /** MINE scope — all rows for this client/persona, for sweeps and bulk updates. */
 function mineFilter(identity = currentScopeIdentity()) {
@@ -42335,7 +42375,9 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   NEAR_HASH_MAX_DISTANCE: () => (/* binding */ NEAR_HASH_MAX_DISTANCE),
 /* harmony export */   NEAR_HASH_SCAN_LIMIT: () => (/* binding */ NEAR_HASH_SCAN_LIMIT),
+/* harmony export */   PAYMENT_PROOF_KEY_INDEX: () => (/* binding */ PAYMENT_PROOF_KEY_INDEX),
 /* harmony export */   PAYMENT_PROOF_MAX_REASONS: () => (/* binding */ PAYMENT_PROOF_MAX_REASONS),
+/* harmony export */   PAYMENT_PROOF_OLD_KEY_INDEX: () => (/* binding */ PAYMENT_PROOF_OLD_KEY_INDEX),
 /* harmony export */   PAYMENT_PROOF_TTL_INDEX: () => (/* binding */ PAYMENT_PROOF_TTL_INDEX),
 /* harmony export */   PAYMENT_PROOF_TTL_SECONDS: () => (/* binding */ PAYMENT_PROOF_TTL_SECONDS),
 /* harmony export */   PaymentProofsRepository: () => (/* binding */ PaymentProofsRepository),
@@ -42343,7 +42385,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   SERVED_NEAR_SCAN_MAX_MS: () => (/* binding */ SERVED_NEAR_SCAN_MAX_MS),
 /* harmony export */   hexHamming: () => (/* binding */ hexHamming),
 /* harmony export */   isRealPaymentReference: () => (/* binding */ isRealPaymentReference),
-/* harmony export */   otherRealReference: () => (/* binding */ otherRealReference)
+/* harmony export */   otherRealReference: () => (/* binding */ otherRealReference),
+/* harmony export */   proofKeyFilter: () => (/* binding */ proofKeyFilter)
 /* harmony export */ });
 /* harmony import */ var _base_repository__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../base-repository */ "../../packages/tg-db/src/base-repository.ts");
 
@@ -42363,6 +42406,10 @@ __webpack_require__.r(__webpack_exports__);
 const PAYMENT_PROOF_TTL_SECONDS = 7 * 24 * 60 * 60; // 604_800 (was 45 days; see ensureTtlIndex migration)
 const PAYMENT_PROOF_TTL_INDEX = 'createdAt_ttl';
 const PAYMENT_PROOF_MAX_REASONS = 6;
+/** The unique per-screenshot index (ProofKey). */
+const PAYMENT_PROOF_KEY_INDEX = 'chatId_1_profile_1_clientId_1_mobile_1_telegramMsgId_1_unique';
+/** The live (pre-2026-11-19) unique index without clientId and mobile; dropped by scripts/payment-proofs-key-index.cjs. */
+const PAYMENT_PROOF_OLD_KEY_INDEX = 'chatId_1_profile_1_telegramMsgId_1_unique';
 /** Rows scanned for a near-duplicate hash. Bounded so one lookup never walks the collection. */
 const NEAR_HASH_SCAN_LIMIT = 200;
 /** Default Hamming radius (of 256 bits) for "same image, re-encoded". */
@@ -42371,6 +42418,15 @@ const NEAR_HASH_MAX_DISTANCE = 4;
 const NOT_RECORD_ONLY = { mode: { $ne: 'record' } };
 /** The review fields recordReview sets (always $set: they describe the final outcome). */
 const REVIEW_FIELDS = ['proofId', 'verdict', 'image', 'ocr'];
+/** The Mongo filter of one screenshot's row (see ProofKey); null when chatId or profile is missing. */
+function proofKeyFilter(key) {
+    const chatId = String(key?.chatId || '').trim();
+    if (!chatId || !key.profile)
+        return null;
+    const clientId = typeof key.clientId === 'string' ? key.clientId.trim() : '';
+    const mobile = typeof key.mobile === 'string' ? key.mobile.trim() : '';
+    return { chatId, profile: key.profile, ...(clientId ? { clientId } : {}), ...(mobile ? { mobile } : {}), telegramMsgId: key.telegramMsgId };
+}
 /** Served rows scanned for a near picture (any chat). ~200 credits/day fleet-wide, so this covers a few days. */
 const SERVED_NEAR_SCAN_LIMIT = 600;
 /** The near-picture scan gives up after this (the exact UTR / file lookups still answer). */
@@ -42433,13 +42489,15 @@ class PaymentProofsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_
         this.collectionName = 'paymentProofs';
     }
     /**
-     * Idempotent per (chatId, profile, telegramMsgId): a re-delivered message does not add a row.
+     * Idempotent per screenshot (ProofKey: chatId, profile, clientId, mobile, telegramMsgId): a re-delivered message does not add
+     * a row.
      * Absent fields are omitted (the utr/imageHash indexes are partial on $exists).
      */
     async insert(input) {
-        const chatId = String(input.chatId || '').trim();
-        if (!chatId || !input.profile)
+        const key = proofKeyFilter({ chatId: input.chatId, profile: input.profile, clientId: input.clientId, mobile: input.mobile, telegramMsgId: input.telegramMsgId });
+        if (!key)
             return false;
+        const chatId = key.chatId;
         const doc = {};
         for (const [k, v] of Object.entries(input)) {
             if (v !== undefined && v !== null && k !== '_id')
@@ -42462,7 +42520,6 @@ class PaymentProofsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_
         for (const k of REVIEW_FIELDS)
             delete doc[k]; // review fields: recordReview only
         delete doc.review; // the operator's review stamp: written by CMS only, never by tg-aut
-        const key = { chatId, profile: input.profile, telegramMsgId: input.telegramMsgId };
         return this.guardWrite(`insert(${chatId})`, async () => {
             let upserted = false;
             try {
@@ -42489,9 +42546,10 @@ class PaymentProofsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_
      * the last call's review fields win. Never touches served / ask state.
      */
     async recordReview(input) {
-        const chatId = String(input.chatId || '').trim();
-        if (!chatId || !input.profile || !input.proofId)
+        const key = proofKeyFilter({ chatId: input.chatId, profile: input.profile, clientId: input.clientId, mobile: input.mobile, telegramMsgId: input.telegramMsgId });
+        if (!key || !input.proofId)
             return false;
+        const chatId = key.chatId;
         const review = {};
         const base = {};
         for (const [k, v] of Object.entries(input)) {
@@ -42513,7 +42571,6 @@ class PaymentProofsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_
         // 'review' = the operator's stamp: written by CMS only, never by tg-aut.
         for (const k of ['servedAt', 'servedService', 'servedUtr', 'servedSha', 'servedMin', 'creditAmount', 'ask', 'proof', 'review'])
             delete base[k];
-        const key = { chatId, profile: input.profile, telegramMsgId: input.telegramMsgId };
         return this.guardWrite(`recordReview(${chatId})`, async () => {
             try {
                 await this.collection.updateOne(key, { $set: review, $setOnInsert: base }, { upsert: true });
@@ -42527,12 +42584,12 @@ class PaymentProofsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_
         });
     }
     /** The image + sidecar of this screenshot landed on the VM disk. */
-    async markProofStored(chatId, profile, telegramMsgId) {
-        const id = String(chatId || '').trim();
-        if (!id || !profile)
+    async markProofStored(proof) {
+        const key = proofKeyFilter(proof);
+        if (!key)
             return false;
-        return this.guard(`markProofStored(${id})`, false, async () => {
-            const res = await this.collection.updateOne({ chatId: id, profile, telegramMsgId, image: { $exists: true } }, { $set: { 'image.stored': true } });
+        return this.guard(`markProofStored(${key.chatId})`, false, async () => {
+            const res = await this.collection.updateOne({ ...key, image: { $exists: true } }, { $set: { 'image.stored': true } });
             return res.matchedCount > 0;
         });
     }
@@ -42643,7 +42700,7 @@ class PaymentProofsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_
         const chatId = String(query.chatId || '').trim();
         if (!chatId)
             return null;
-        const self = { chatId, profile: query.profile, telegramMsgId: query.telegramMsgId };
+        const self = proofKeyFilter({ ...query, chatId }) ?? { chatId, profile: query.profile, telegramMsgId: query.telegramMsgId };
         const served = { servedAt: { $exists: true }, $nor: [self] };
         const wrap = (by, distance, doc) => ({ by, distance, doc, sameChat: doc.chatId === chatId && doc.profile === query.profile });
         return this.guard(`findServedDuplicate(${chatId})`, null, async () => {
@@ -42697,23 +42754,26 @@ class PaymentProofsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_
      * without the key (otherRealReference), unless its reference is the holder's or a cut of it (nidhi1 2026-11-06:
      * `21992078` then `219920787057`, ₹25 twice). A receipt with no UTR or a short / odd one loses (owner rule 7).
      */
-    async markServed(chatId, profile, telegramMsgId, service, creditAmount, minuteKey) {
-        const first = await this.markServedOnce(chatId, profile, telegramMsgId, service, creditAmount, minuteKey);
+    async markServed(proof, service, creditAmount, minuteKey) {
+        const first = await this.markServedOnce(proof, service, creditAmount, minuteKey);
         if (first !== 'duplicate_minute')
             return first;
-        const id = String(chatId || '').trim();
+        const key = proofKeyFilter(proof);
+        if (!key)
+            return 'missing';
+        const id = key.chatId;
         try {
-            const mine = await this.collection.find({ chatId: id, profile, telegramMsgId }).limit(1).next();
+            const mine = await this.collection.find(key).limit(1).next();
             const holder = await this.collection.find({ servedMin: minuteKey }).limit(1).next();
             if (!holder) {
                 // The holder's claim was released in between (its credit failed): claim the key again, once.
-                const retry = await this.markServedOnce(chatId, profile, telegramMsgId, service, creditAmount, minuteKey);
+                const retry = await this.markServedOnce(proof, service, creditAmount, minuteKey);
                 return retry === 'duplicate_minute' ? 'duplicate' : retry;
             }
             if (!otherRealReference(mine?.utr, holder?.utr))
                 return 'duplicate';
             // A real reference that is not the holder's: another payment in this minute (same UTR: servedUtr_unique).
-            const again = await this.markServedOnce(chatId, profile, telegramMsgId, service, creditAmount, undefined);
+            const again = await this.markServedOnce(proof, service, creditAmount, undefined);
             return again === 'duplicate_minute' ? 'duplicate' : again;
         }
         catch (error) {
@@ -42721,12 +42781,13 @@ class PaymentProofsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_
             return 'error';
         }
     }
-    async markServedOnce(chatId, profile, telegramMsgId, service, creditAmount, minuteKey) {
-        const id = String(chatId || '').trim();
-        if (!id || !profile)
+    async markServedOnce(proof, service, creditAmount, minuteKey) {
+        const key = proofKeyFilter(proof);
+        if (!key)
             return 'missing';
+        const id = key.chatId;
         try {
-            const filter = { chatId: id, profile, telegramMsgId };
+            const filter = key;
             const credit = Number(creditAmount);
             const res = await this.collection.updateOne({ ...filter, servedAt: { $exists: false } }, 
             // Pipeline update so servedUtr copies this row's own utr (absent when the row has none). creditAmount is
@@ -42758,7 +42819,7 @@ class PaymentProofsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_
         const chatId = String(query.chatId || '').trim();
         if (!chatId)
             return [];
-        const self = { chatId, profile: query.profile, telegramMsgId: query.telegramMsgId };
+        const self = proofKeyFilter({ ...query, chatId }) ?? { chatId, profile: query.profile, telegramMsgId: query.telegramMsgId };
         const served = { servedAt: { $exists: true }, $nor: [self] };
         const seenAnywhere = {
             $or: [{ servedAt: { $exists: true } }, { chatId: { $ne: chatId }, ask: { $exists: true }, ...NOT_RECORD_ONLY }],
@@ -42851,13 +42912,13 @@ class PaymentProofsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_
         return out;
     }
     /** Record a request sent to the user about this screenshot (see PaymentProofAsk). True when the row exists. */
-    async openAsk(chatId, profile, telegramMsgId, kind, reasons = []) {
-        const id = String(chatId || '').trim();
-        if (!id || !profile)
+    async openAsk(proof, kind, reasons = []) {
+        const key = proofKeyFilter(proof);
+        if (!key)
             return false;
         const ask = { kind, state: 'open', openedAt: new Date(), reasons: reasons.slice(0, PAYMENT_PROOF_MAX_REASONS) };
-        return this.guard(`openAsk(${id})`, false, async () => {
-            const res = await this.collection.updateOne({ chatId: id, profile, telegramMsgId }, { $set: { ask } });
+        return this.guard(`openAsk(${key.chatId})`, false, async () => {
+            const res = await this.collection.updateOne(key, { $set: { ask } });
             return res.matchedCount > 0;
         });
     }
@@ -42876,25 +42937,25 @@ class PaymentProofsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_
             .toArray());
     }
     /** Close an open request. Only the first caller wins (true); a concurrent or repeated resolve gets false. */
-    async resolveAsk(chatId, profile, telegramMsgId, byMsgId) {
-        const id = String(chatId || '').trim();
-        if (!id || !profile)
+    async resolveAsk(proof, byMsgId) {
+        const key = proofKeyFilter(proof);
+        if (!key)
             return false;
-        return this.guard(`resolveAsk(${id})`, false, async () => {
-            const res = await this.collection.updateOne({ chatId: id, profile, telegramMsgId, 'ask.state': 'open' }, { $set: { 'ask.state': 'resolved', 'ask.resolvedAt': new Date(), 'ask.resolvedByMsgId': byMsgId } });
+        return this.guard(`resolveAsk(${key.chatId})`, false, async () => {
+            const res = await this.collection.updateOne({ ...key, 'ask.state': 'open' }, { $set: { 'ask.state': 'resolved', 'ask.resolvedAt': new Date(), 'ask.resolvedByMsgId': byMsgId } });
             return res.matchedCount > 0;
         });
     }
     /** The fake/edited flow blocked the user over this request (see PaymentProofAsk.blockedAt). */
-    async markAskBlocked(chatId, profile, telegramMsgId) {
-        const id = String(chatId || '').trim();
-        if (!id || !profile)
+    async markAskBlocked(proof) {
+        const key = proofKeyFilter(proof);
+        if (!key)
             return false;
-        return this.guard(`markAskBlocked(${id})`, false, async () => {
+        return this.guard(`markAskBlocked(${key.chatId})`, false, async () => {
             const res = await this.collection.updateOne(
             // Only while the warning is still open (a credit that closed it in the meantime wins: no block), and once:
             // the deadline is checked on every touch from any client, only the first caller blocks.
-            { chatId: id, profile, telegramMsgId, 'ask.kind': 'fraud', 'ask.state': 'open', 'ask.blockedAt': { $exists: false } }, { $set: { 'ask.blockedAt': new Date() } });
+            { ...key, 'ask.kind': 'fraud', 'ask.state': 'open', 'ask.blockedAt': { $exists: false } }, { $set: { 'ask.blockedAt': new Date() } });
             return res.matchedCount > 0;
         });
     }
@@ -42902,12 +42963,12 @@ class PaymentProofsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_
      * Undo markServed when the credit itself failed (service never started), so the payer's retry of the same payment
      * is judged again instead of being called a repeat.
      */
-    async releaseServed(chatId, profile, telegramMsgId) {
-        const id = String(chatId || '').trim();
-        if (!id || !profile)
+    async releaseServed(proof) {
+        const key = proofKeyFilter(proof);
+        if (!key)
             return false;
-        return this.guard(`releaseServed(${id})`, false, async () => {
-            const res = await this.collection.updateOne({ chatId: id, profile, telegramMsgId, servedAt: { $exists: true } }, { $unset: { servedAt: '', servedService: '', servedUtr: '', servedSha: '', servedMin: '', creditAmount: '' } });
+        return this.guard(`releaseServed(${key.chatId})`, false, async () => {
+            const res = await this.collection.updateOne({ ...key, servedAt: { $exists: true } }, { $unset: { servedAt: '', servedService: '', servedUtr: '', servedSha: '', servedMin: '', creditAmount: '' } });
             return res.matchedCount > 0;
         });
     }
@@ -42943,9 +43004,13 @@ class PaymentProofsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_
         await this.guardWrite('ensureIndexes(chatId,createdAt)', () => c.createIndex({ chatId: 1, createdAt: -1 }, { name: 'chatId_1_createdAt_-1' }));
         await this.guardWrite('ensureIndexes(imageHash)', () => c.createIndex({ imageHash: 1 }, { name: 'imageHash_1', partialFilterExpression: { imageHash: { $exists: true } } }));
         await this.guardWrite('ensureIndexes(imageSha256)', () => c.createIndex({ imageSha256: 1 }, { name: 'imageSha256_1', partialFilterExpression: { imageSha256: { $exists: true } } }));
-        // One row per screenshot: insert() upserts on this key, and without a unique index concurrent upserts
-        // race into duplicate rows (6 rows from 10 parallel inserts on Mongo 8.2).
-        await this.guardWrite('ensureIndexes(chatId,profile,telegramMsgId unique)', () => c.createIndex({ chatId: 1, profile: 1, telegramMsgId: 1 }, { name: 'chatId_1_profile_1_telegramMsgId_1_unique', unique: true }));
+        // One row per screenshot (ProofKey): insert() upserts on this key, and without a unique index concurrent upserts
+        // race into duplicate rows (6 rows from 10 parallel inserts on Mongo 8.2). The live older unique index
+        // (chatId_1_profile_1_telegramMsgId_1_unique) still refuses a sibling client's or a replacement account's row
+        // with the same message id until it is dropped: that insert gets E11000, the claim finds no row of its own and the
+        // screenshot is held. Drop it with scripts/payment-proofs-key-index.cjs (owner-run, after every tg-aut runs this
+        // build). Never created here any more, so a restart does not bring it back.
+        await this.guardWrite('ensureIndexes(chatId,profile,clientId,mobile,telegramMsgId unique)', () => c.createIndex({ chatId: 1, profile: 1, clientId: 1, mobile: 1, telegramMsgId: 1 }, { name: PAYMENT_PROOF_KEY_INDEX, unique: true }));
         // Race guard: at most one SERVED proof per UTR, across chats and personas. Keyed on servedUtr
         // (not utr) so it never shares a key pattern with utr_1 (older Mongo rejects two partial
         // indexes on one key pattern).
@@ -44044,37 +44109,30 @@ class UserDataRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_2__.B
         this.collectionName = 'userData';
     }
     /**
-     * Read a user row for this client: prefer a row the client owns, else the shared persona row.
+     * Read this persona's row for chatId: the row every writer here addresses (personaFilter).
      *
-     * Two queries rather than one $or because Mongo gives NO ordering guarantee inside $or, and a
-     * user with both an owned and a legacy row must deterministically resolve to the owned one.
+     * It used to read OWN (`{ chatId, clientId }`) first, then the persona row. With the unique key
+     * chatId_Profile both resolve to the same row, except when they differ, and then the read showed a
+     * row no writer touches. One filter keeps the read and every write on one row (review bug 2).
      */
-    /** `options.projection` (optional) limits the returned fields; without it both reads are exactly as before. */
+    /** `options.projection` (optional) limits the returned fields. */
     async findForClient(chatId, identity, options = {}) {
         // Deliberately NOT `guard` (which degrades a failure to the fallback): null here means
         // "no such user", and tg-aut's PrivateMessageHandler routes that to the NEW-user flow. A
         // transient read error must surface as an error, exactly as the raw findOne did before.
         try {
+            const filter = (0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.personaFilter)(chatId, identity);
             const { projection } = options;
-            const read = (filter) => (projection
-                ? this.collection.findOne(filter, { projection })
-                : this.collection.findOne(filter));
-            const own = (0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.ownFilter)(chatId, identity);
-            if (own) {
-                const owned = await read(own);
-                if (owned)
-                    return owned;
-            }
-            return await read((0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.personaFilter)(chatId, identity));
+            return await (projection ? this.collection.findOne(filter, { projection }) : this.collection.findOne(filter));
         }
         catch (error) {
             this.logger.error(`[${this.collectionName}] findForClient(${chatId}) failed: ${(0,_connection__WEBPACK_IMPORTED_MODULE_3__.describeError)(error)}`);
             throw error;
         }
     }
-    /** Read using the combined scope filter — one round-trip where determinism is not required. */
+    /** The persona row, degrading a read failure to null (callers that treat a miss as optional). */
     async findScoped(chatId, identity) {
-        return this.guard(`findScoped(${chatId})`, null, async () => this.collection.findOne((0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.readFilter)(chatId, identity)));
+        return this.guard(`findScoped(${chatId})`, null, async () => this.collection.findOne((0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.personaFilter)(chatId, identity)));
     }
     /**
      * Upsert a user row, retrying once on a duplicate-key race.
@@ -44302,9 +44360,9 @@ class UserDataRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_2__.B
             $setOnInsert: setOnInsert,
         });
     }
-    /** $addToSet a video and backdate callTime 5 min, on the client-first read scope. No upsert. Throws. */
+    /** $addToSet a video and backdate callTime 5 min, on the persona row every reader sees. No upsert. Throws. */
     async addVideo(chatId, identity, video, now = Date.now()) {
-        return this.collection.updateOne((0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.readFilter)(chatId, identity), {
+        return this.collection.updateOne((0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.personaFilter)(chatId, identity), {
             $addToSet: { videos: video },
             $set: { callTime: now - 5 * 60000 },
         });
@@ -44344,13 +44402,13 @@ class UserDataRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_2__.B
         return this.collection.updateMany((0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.mineFilter)(identity), { $set: { paidReply: true } });
     }
     // ── reads ───────────────────────────────────────────────────────────────────────────────────
-    /** Does this client/persona hold a row for chatId (client-first scope). Throws. */
+    /** Does this persona hold a row for chatId. Throws. */
     async exists(chatId, identity) {
-        return !!(await this.collection.findOne((0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.readFilter)(chatId, identity)));
+        return !!(await this.collection.findOne((0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.personaFilter)(chatId, identity)));
     }
-    /** One field of the client-first row, or undefined. Throws. */
+    /** One field of the persona row, or undefined. Throws. */
     async findField(chatId, identity, key) {
-        const row = await this.collection.findOne((0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.readFilter)(chatId, identity), { projection: { [key]: 1 } });
+        const row = await this.collection.findOne((0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.personaFilter)(chatId, identity), { projection: { [key]: 1 } });
         return row ? row[key] : undefined;
     }
     /**
@@ -44375,7 +44433,7 @@ class UserDataRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_2__.B
     async findAttributionChannelIds(chatId, identity) {
         return this.collection.findOne((0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.personaFilter)(chatId, identity), { projection: { attributionChannelIds: 1 } });
     }
-    /** The persona row (persona scope only, no client-first preference). Throws. */
+    /** The persona row. Throws. */
     async findForPersona(chatId, identity) {
         return this.collection.findOne((0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.personaFilter)(chatId, identity));
     }
@@ -63480,8 +63538,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "01534e93867e8a36086abb527d9b9b5d598ca7bb" : 0;
-    const builtAt =  true ? "2026-11-18T18:44:06.018Z" : 0;
+    const sha =  true ? "cf860744b9e4f1a320c6b6036ddd0e81ddda1a62" : 0;
+    const builtAt =  true ? "2026-11-19T07:27:25.579Z" : 0;
     return { sha, builtAt };
 }
 
@@ -83677,30 +83735,47 @@ class UserDataDtoCrud {
         // it genuinely doesn't yet (pre === null), there is by definition no prior same-day count,
         // so counting paid:1 is correct and cannot double-count. The marker keys on
         // (chatId, profile, client, dayKey) — same day identity as the userStatsDaily bucket.
-        try {
+        // A replayed key ('duplicate') was booked by its first run: it writes nothing here, not even today's marker.
+        // Stamping the marker would make the next genuine payment today look already counted (no paid:1; review
+        // 2026-11-19, a replay after midnight took the day's payer).
+        if (ledger !== 'duplicate') {
+            const mobile = process.env.mobile;
+            // 'applied' books its full amount whatever the stats2 write does: the Mongo credit already happened and a
+            // retry of this key is a 'duplicate' that books nothing, so a missed enqueue here is never repaired
+            // (review 2026-11-19). The stats2 pre-image only decides paid:1 for it.
+            // undefined = the write failed; null = no stats2 row (first payment today by definition, see above).
+            let pre;
             const dayKey = this.todayKey();
-            const pre = await this.statsRepository().markDailyPaid(normalizedChatId, { profile, client: clientId }, dayKey, roundedAmount, floorAmount);
-            const countedToday = pre?.dailyPaidCountedAt === dayKey;
-            // Amount this call newly credited in Mongo; 0 means a re-entry for an already-counted
-            // payment (repeat screenshot / full-show), which must not write another payment_event.
-            let creditedNow = 0;
-            if (ledger === 'duplicate') {
-                creditedNow = 0;
+            try {
+                pre = await this.statsRepository().markDailyPaid(normalizedChatId, { profile, client: clientId }, dayKey, roundedAmount, floorAmount);
             }
-            else if (ledger === 'applied') {
+            catch (error) {
+                // Analytics counting must never block payment service.
+                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, `recordPaymentAttribution.dailyCount.${normalizedChatId}`, false);
+            }
+            const statsOk = pre !== undefined;
+            const countedToday = pre?.dailyPaidCountedAt === dayKey;
+            // Amount this call newly credited; 0 means a re-entry for an already-counted payment (repeat screenshot /
+            // full-show), which must not write another payment_event.
+            let creditedNow = 0;
+            if (ledger === 'applied') {
                 creditedNow = floorAmount;
-                void this.recordDailyUser(process.env.mobile, countedToday ? { revenue: floorAmount } : { paid: 1, revenue: floorAmount });
+                // stats2 unreadable: the day's payer state is unknown, so revenue only (never a second paid:1).
+                void this.recordDailyUser(mobile, statsOk && !countedToday ? { paid: 1, revenue: floorAmount } : { revenue: floorAmount });
+            }
+            else if (!statsOk) {
+                creditedNow = 0; // legacy rule without its pre-image: nothing booked, nothing marked (a retry counts it)
             }
             else if (!countedToday) {
                 creditedNow = floorAmount;
-                void this.recordDailyUser(process.env.mobile, { paid: 1, revenue: floorAmount });
+                void this.recordDailyUser(mobile, { paid: 1, revenue: floorAmount });
             }
             else {
                 const prevCounted = Number(pre?.dailyRevenueCounted);
                 const prev = Number.isFinite(prevCounted) ? prevCounted : 0;
                 if (floorAmount > prev) {
                     creditedNow = floorAmount - prev;
-                    void this.recordDailyUser(process.env.mobile, { revenue: floorAmount - prev });
+                    void this.recordDailyUser(mobile, { revenue: floorAmount - prev });
                 }
             }
             // Mirror into the OPTIONAL analytics store.
@@ -83714,7 +83789,8 @@ class UserDataDtoCrud {
             // inflation into a store built to be trustworthy, so they are deliberately excluded.
             //
             // `amount >= 15` is enforced by the guard at the top of this method, so sub-15 noise
-            // never lands here either.
+            // never lands here either. `mobile` = the daily_mobile row this call counted the payer on: the
+            // fake mark / void take the payer back from exactly that row (analytics/upgrade-2026-11-19-payment-mobile.sql).
             try {
                 if (creditedNow > 0)
                     (0,_tg_analytics__WEBPACK_IMPORTED_MODULE_3__.getAnalytics)().recordPayment({
@@ -83722,6 +83798,7 @@ class UserDataDtoCrud {
                         clientId,
                         personaId: profile,
                         amount: creditedNow,
+                        mobile: mobile?.trim() || null,
                         // balance_after / lifetime_after / is_cheat were dropped in cleanup wave 3
                         // (analytics/upgrade-2026-11-08-cleanup-wave3.sql; always NULL / NULL / false).
                         // Owner revenue excludes chats via payment_event.is_fake in payment_event_owner.
@@ -83729,10 +83806,6 @@ class UserDataDtoCrud {
                     });
             }
             catch { /* analytics is optional and must never affect payment service */ }
-        }
-        catch (error) {
-            // Analytics counting must never block payment service.
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, `recordPaymentAttribution.dailyCount.${normalizedChatId}`, false);
         }
         await this.processPendingPaymentAttributions(normalizedChatId);
     }
@@ -84003,7 +84076,7 @@ class UserDataDtoCrud {
     async resetPpl() {
         return this.userDataRepository().enablePaidReplyForAll((0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_1__.currentScopeIdentity)());
     }
-    /** One field of the client-first row; undefined at runtime when the row or field is missing. */
+    /** One field of the persona row; undefined at runtime when the row or field is missing. */
     async getSingleKey(chatId, key) {
         return await this.userDataRepository().findField(chatId, (0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_1__.currentScopeIdentity)(), key);
     }
@@ -90050,7 +90123,7 @@ function paymentFlowWith(client, chatId, db, amountRead, proof) {
         schedule: (task, delayMs, context) => scheduleProcessImageTask(task, delayMs, context),
         // The 15-min block after a fake-payment warning: a delayed record (restart-safe; markAskBlocked is atomic).
         scheduleFraudBlock: (due, delayMs) => {
-            const args = { profile: due.profile, msgId: due.msgId, label: due.label, amountRead, ...(due.openedAtMs ? { openedAtMs: due.openedAtMs } : {}) };
+            const args = { profile: due.profile, msgId: due.msgId, ...(due.clientId ? { clientId: due.clientId } : {}), ...(due.mobile ? { mobile: due.mobile } : {}), label: due.label, amountRead, ...(due.openedAtMs ? { openedAtMs: due.openedAtMs } : {}) };
             (0,_jobs_delayed__WEBPACK_IMPORTED_MODULE_49__.scheduleDelayed)(due.chatId, 'fraudBlock', args, delayMs, `pifraud::${due.chatId}::${due.msgId}`);
         },
         log: (m) => logger.log(m),
@@ -90068,6 +90141,7 @@ function startProofRecord(event, chatId, db, photoBuffer, imageDetails) {
         chatId,
         msgId: Number(event.message.id) || 0,
         clientId: process.env.clientId || "",
+        ...receivingMobile(),
         profile: (process.env.dbcoll || "").toLowerCase(),
         photo: photoBuffer,
         details: imageDetails,
@@ -90101,6 +90175,11 @@ function rejectOutcome(title) {
     if (title && /misread/i.test(title))
         return ["old_time", "TIME_MISREAD"];
     return ["other", "REJECTED"];
+}
+/** This process's receiving account (part of the paymentProofs row key); nothing when unknown. */
+function receivingMobile() {
+    const mobile = String(process.env.mobile ?? "").trim();
+    return mobile ? { mobile } : {};
 }
 /** Delayed record 'fraudBlock'. */
 /**
@@ -90146,7 +90225,7 @@ async function fraudDeadlineOnTouch(client, chatId) {
         const label = (due.ask?.reasons ?? []).join(',') || 'fraud';
         const own = (process.env.dbcoll || '').toLowerCase();
         await paymentFlowWith(client, chatId, db, Number(due.amount) || 0)
-            .fraudBlockDue({ chatId, profile: due.profile, msgId: due.telegramMsgId, label, quiet: due.profile !== own, ...(due.ask?.openedAt ? { openedAtMs: new Date(due.ask.openedAt).getTime() } : {}) });
+            .fraudBlockDue({ chatId, profile: due.profile, msgId: due.telegramMsgId, ...(due.clientId ? { clientId: due.clientId } : {}), ...(due.mobile ? { mobile: due.mobile } : {}), label, quiet: due.profile !== own, ...(due.ask?.openedAt ? { openedAtMs: new Date(due.ask.openedAt).getTime() } : {}) });
         return { fired: true, blocked: true };
     }
     catch (error) {
@@ -90157,7 +90236,7 @@ async function fraudDeadlineOnTouch(client, chatId) {
 async function runFraudBlock(client, chatId, args) {
     try {
         await paymentFlowWith(client, chatId, _data_user_data_crud__WEBPACK_IMPORTED_MODULE_0__.UserDataDtoCrud.getInstance(), Number(args.amountRead) || 0)
-            .fraudBlockDue({ chatId, profile: args.profile, msgId: Number(args.msgId) || 0, label: args.label, ...(Number(args.openedAtMs) > 0 ? { openedAtMs: Number(args.openedAtMs) } : {}) });
+            .fraudBlockDue({ chatId, profile: args.profile, msgId: Number(args.msgId) || 0, ...(typeof args.clientId === 'string' && args.clientId ? { clientId: args.clientId } : {}), ...(typeof args.mobile === 'string' && args.mobile ? { mobile: args.mobile } : {}), label: args.label, ...(Number(args.openedAtMs) > 0 ? { openedAtMs: Number(args.openedAtMs) } : {}) });
     }
     catch (error) {
         (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_20__.parseError)(error, `paymentGate.fraudBlock.${chatId}`);
@@ -90169,6 +90248,7 @@ function screenshotRef(event, chatId, photoBuffer, imageDetails, paymentMs) {
         chatId,
         msgId: Number(event.message.id) || 0,
         clientId: process.env.clientId || "",
+        ...receivingMobile(),
         profile: (process.env.dbcoll || "").toLowerCase(),
         photo: photoBuffer,
         details: imageDetails,
@@ -104488,6 +104568,7 @@ class ProofRecord {
         const amount = Number(i.details.amount);
         const row = {
             chatId: i.chatId, profile: i.profile, clientId: i.clientId, telegramMsgId: i.msgId,
+            ...(i.mobile ? { mobile: i.mobile } : {}),
             ...(utr ? { utr } : {}),
             ...(i.details.payeeUpiId ? { payeeUpiId: i.details.payeeUpiId } : {}),
             ...(i.details.payeeName ? { payeeName: i.details.payeeName } : {}),
@@ -104519,7 +104600,7 @@ class ProofRecord {
             stored = false;
         }
         if (stored && rowWritten && store?.markProofStored) {
-            await bounded(store.markProofStored(i.chatId, i.profile, i.msgId), false, `markProofStored(${proofId})`);
+            await bounded(store.markProofStored({ chatId: i.chatId, profile: i.profile, clientId: i.clientId, ...(i.mobile ? { mobile: i.mobile } : {}), telegramMsgId: i.msgId }), false, `markProofStored(${proofId})`);
         }
         return { proofId, verdict, rowWritten, stored };
     }
@@ -105719,7 +105800,7 @@ function buildDuplicateQuery(vision, ctx) {
     if (!e)
         return null;
     return {
-        chatId: ctx.chatId, profile: ctx.profile, telegramMsgId: ctx.telegramMsgId,
+        chatId: ctx.chatId, profile: ctx.profile, telegramMsgId: ctx.telegramMsgId, ...(ctx.clientId ? { clientId: ctx.clientId } : {}),
         ...(e.utr ? { utr: e.utr } : {}),
         ...(ctx.imageSha256 ? { imageSha256: ctx.imageSha256 } : {}),
         ...(ctx.imageHash ? { imageHash: ctx.imageHash } : {}),
@@ -107044,6 +107125,7 @@ class PaymentFlow {
                 return null;
             return await this.gate.begin(gateFacts(ref), {
                 clientId: ref.clientId,
+                ...(ref.mobile ? { mobile: ref.mobile } : {}),
                 ...(ref.details.payeeUpiId ? { payeeUpiId: ref.details.payeeUpiId } : {}),
                 ...(ref.details.payeeName ? { payeeName: ref.details.payeeName } : {}),
                 ...(ref.creditAmount !== undefined ? { creditAmount: ref.creditAmount } : {}),
@@ -107100,7 +107182,8 @@ class PaymentFlow {
         await this.io.reply(this.pick(_messages__WEBPACK_IMPORTED_MODULE_3__.FRAUD_WARNING_MESSAGES));
         this.io.fraudWarned?.();
         await this.io.notifyOps({ title: 'User warned', summary: 'Blocked in 15 min unless the real payment page arrives.', fields: [{ label: 'Reason', value: label, code: false }] });
-        const due = { chatId, profile, msgId, label, openedAtMs: Date.now() };
+        const { clientId, mobile } = session.key;
+        const due = { chatId, profile, msgId, ...(clientId ? { clientId } : {}), ...(mobile ? { mobile } : {}), label, openedAtMs: Date.now() };
         if (this.io.scheduleFraudBlock) {
             await this.io.scheduleFraudBlock(due, _decide__WEBPACK_IMPORTED_MODULE_0__.FRAUD_GRACE_MS, `paymentGate.fraudBlock.${chatId}`);
             return;
@@ -107110,6 +107193,7 @@ class PaymentFlow {
     /** The warning's grace period is over: block unless the user is already blocked or a real payment closed it. */
     async fraudBlockDue(due) {
         const { chatId, profile, msgId, label } = due;
+        const key = { chatId, profile, telegramMsgId: msgId, ...(due.clientId ? { clientId: due.clientId } : {}), ...(due.mobile ? { mobile: due.mobile } : {}) };
         if ((await this.io.readCanReply()) === 0)
             return;
         // K1 (gate rewrite 2026-11-14): never block a user who paid. A credit of this user (any persona) after the warning
@@ -107123,12 +107207,12 @@ class PaymentFlow {
         }
         if (paid) {
             this.io.warn(`[payment-gate] ${chatId}/${msgId}: fraud deadline due, but msg ${paid.telegramMsgId} was credited after the warning: not blocking, warning closed`);
-            await this.gate.resolveAsk(chatId, profile, msgId, paid.telegramMsgId);
+            await this.gate.resolveAsk(key, paid.telegramMsgId);
             this.io.fraudCleared?.();
             return;
         }
         // Atomic "still open → blocked" on the warning row: a credit that closed it first wins; no record, no block.
-        if (!(await this.gate.markAskBlocked(chatId, profile, msgId)))
+        if (!(await this.gate.markAskBlocked(key)))
             return;
         await this.io.block();
         this.io.fraudCleared?.();
@@ -107452,6 +107536,16 @@ class GateSession {
         this.store = store;
         this.facts = facts;
         this.creditAmount = creditAmount;
+        this.key = {
+            chatId: facts.chatId, profile: facts.profile, telegramMsgId: facts.msgId,
+            ...(facts.clientId ? { clientId: facts.clientId } : {}), ...(facts.mobile ? { mobile: facts.mobile } : {}),
+        };
+    }
+    /** A row of this very screenshot (same key; a row or session without clientId / mobile matches on the rest, as before). */
+    isOwnRow(r) {
+        return r.chatId === this.key.chatId && r.profile === this.key.profile && r.telegramMsgId === this.key.telegramMsgId
+            && (!r.clientId || !this.key.clientId || r.clientId === this.key.clientId)
+            && (!r.mobile || !this.key.mobile || r.mobile === this.key.mobile);
     }
     bound(work, fallback, what) {
         return withTimeout(work, this.deps.timeoutMs, fallback, `${what}(${this.facts.chatId}/${this.facts.msgId})`);
@@ -107470,7 +107564,7 @@ class GateSession {
             : null;
         const [served, recent, credited, suspect, open] = await Promise.all([
             this.bound(this.store.servedCandidates({
-                chatId: f.chatId, profile: f.profile, telegramMsgId: f.msgId,
+                ...this.key,
                 ...(f.utr ? { utr: f.utr } : {}), imageSha256: f.sha256, ...(f.dHash ? { imageHash: f.dHash } : {}),
                 ...(payment ? { payment } : {}),
             }), null, 'servedCandidates'),
@@ -107539,7 +107633,7 @@ class GateSession {
     /** An earlier fake/edited warning from this user (any persona) is still in its grace period. */
     async fraudGraceOpen() {
         const now = this.deps.now();
-        return (await this.openAsks()).some((r) => !(r.profile === this.facts.profile && r.telegramMsgId === this.facts.msgId) && (0,_decide__WEBPACK_IMPORTED_MODULE_1__.fraudGraceOpen)(r, now));
+        return (await this.openAsks()).some((r) => !this.isOwnRow(r) && (0,_decide__WEBPACK_IMPORTED_MODULE_1__.fraudGraceOpen)(r, now));
     }
     /** The holds check() found, raised by flow.ts only after the credit rules accepted (history.ts PostRulesHolds). */
     postRulesHolds() {
@@ -107554,11 +107648,11 @@ class GateSession {
         return this.holds.chatFake;
     }
     async openAsk(kind, reasons) {
-        return this.bound(this.store.openAsk(this.facts.chatId, this.facts.profile, this.facts.msgId, kind, reasons), false, 'openAsk');
+        return this.bound(this.store.openAsk(this.key, kind, reasons), false, 'openAsk');
     }
     /** Close the request this screenshot answered. Only one screenshot can win it. */
     async resolve(asked) {
-        return this.bound(this.store.resolveAsk(asked.chatId, asked.profile, asked.telegramMsgId, this.facts.msgId), false, 'resolveAsk');
+        return this.bound(this.store.resolveAsk(asked, this.facts.msgId), false, 'resolveAsk');
     }
     /**
      * A credited payment closes every open fake/edited warning of this user, on every persona (the delayed block then
@@ -107570,7 +107664,7 @@ class GateSession {
         let gateBlocked = false;
         for (const r of await this.openAsks()) {
             const kind = r.ask?.kind;
-            if ((kind !== 'fraud' && kind !== 'held') || r.ask?.state !== 'open' || (r.profile === this.facts.profile && r.telegramMsgId === this.facts.msgId))
+            if ((kind !== 'fraud' && kind !== 'held') || r.ask?.state !== 'open' || this.isOwnRow(r))
                 continue;
             if (await this.resolve(r) && kind === 'fraud') {
                 closed += 1;
@@ -107582,7 +107676,7 @@ class GateSession {
     }
     /** The fake/edited flow blocked the user over this screenshot's warning. */
     async markBlocked() {
-        return this.bound(this.store.markAskBlocked(this.facts.chatId, this.facts.profile, this.facts.msgId), false, 'markAskBlocked');
+        return this.bound(this.store.markAskBlocked(this.key), false, 'markAskBlocked');
     }
     /**
      * Claim the credit BEFORE any service starts. `lost` when another chat/persona already holds a credit for the
@@ -107594,7 +107688,7 @@ class GateSession {
         // never at begin, so a row carries it only when it was credited, and release removes both.
         const minuteKey = (0,_decide__WEBPACK_IMPORTED_MODULE_1__.servedMinuteKey)(this.facts);
         this.claimStartedAt = this.deps.now();
-        const r = await this.bound(this.store.markServed(this.facts.chatId, this.facts.profile, this.facts.msgId, 'other', this.creditAmount, minuteKey ?? undefined), 'error', 'markServed');
+        const r = await this.bound(this.store.markServed(this.key, 'other', this.creditAmount, minuteKey ?? undefined), 'error', 'markServed');
         if (r === 'duplicate')
             return 'lost';
         if (r === 'already_served')
@@ -107614,7 +107708,7 @@ class GateSession {
         if (!this.store.recentForChat)
             return null;
         const rows = await this.bound(this.store.recentForChat(this.facts.chatId, CHAT_SERVED_SCAN), null, 'recentForChat(claim)');
-        const own = (rows ?? []).find((r) => r.chatId === this.facts.chatId && r.profile === this.facts.profile && r.telegramMsgId === this.facts.msgId);
+        const own = (rows ?? []).find((r) => this.isOwnRow(r));
         if (!own)
             return null;
         if (!own.servedAt)
@@ -107626,7 +107720,7 @@ class GateSession {
     }
     /** The credit failed after the claim (service never started): free the claim so a retry is judged again. */
     async release() {
-        return this.bound(this.store.releaseServed(this.facts.chatId, this.facts.profile, this.facts.msgId), false, 'releaseServed');
+        return this.bound(this.store.releaseServed(this.key), false, 'releaseServed');
     }
 }
 class ProofGate {
@@ -107643,6 +107737,7 @@ class ProofGate {
             return null;
         const row = {
             chatId: facts.chatId, profile: facts.profile, clientId: extra.clientId, telegramMsgId: facts.msgId,
+            ...(extra.mobile ? { mobile: extra.mobile } : {}),
             ...(facts.utr ? { utr: facts.utr } : {}),
             ...(extra.payeeUpiId ? { payeeUpiId: extra.payeeUpiId } : {}),
             ...(extra.payeeName ? { payeeName: extra.payeeName } : {}),
@@ -107657,7 +107752,9 @@ class ProofGate {
         const stored = await withTimeout(store.insert(row), this.deps.timeoutMs, false, `insert(${facts.chatId}/${facts.msgId})`);
         if (!stored)
             return 'unavailable';
-        return new GateSession(this.deps, store, facts, extra.creditAmount);
+        // The session's key is the stored row's key: clientId and mobile as written above.
+        const keyed = { ...facts, ...(extra.clientId ? { clientId: extra.clientId } : {}), ...(extra.mobile ? { mobile: extra.mobile } : {}) };
+        return new GateSession(this.deps, store, keyed, extra.creditAmount);
     }
     /**
      * An open request from this user (any persona) that can still be answered (24 h). Its photos must reach the gate
@@ -107701,18 +107798,18 @@ class ProofGate {
         return rows.find((r) => new Date(r.createdAt ?? 0).getTime() >= sinceMs) ?? false;
     }
     /** Close one ask (K1: a credit answered the warning). Best effort. */
-    async resolveAsk(chatId, profile, msgId, byMsgId) {
+    async resolveAsk(key, byMsgId) {
         const store = safeStore(this.deps);
         if (!store)
             return false;
-        return withTimeout(store.resolveAsk(chatId, profile, msgId, byMsgId), this.deps.timeoutMs, false, `resolveAsk(${chatId})`);
+        return withTimeout(store.resolveAsk(key, byMsgId), this.deps.timeoutMs, false, `resolveAsk(${key.chatId})`);
     }
     /** The delayed block fired over this warning. */
-    async markAskBlocked(chatId, profile, msgId) {
+    async markAskBlocked(key) {
         const store = safeStore(this.deps);
         if (!store)
             return false;
-        return withTimeout(store.markAskBlocked(chatId, profile, msgId), this.deps.timeoutMs, false, `markAskBlocked(${chatId})`);
+        return withTimeout(store.markAskBlocked(key), this.deps.timeoutMs, false, `markAskBlocked(${key.chatId})`);
     }
 }
 function safeStore(deps) {
