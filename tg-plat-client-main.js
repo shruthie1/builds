@@ -63675,8 +63675,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "465df56153a94062b1f94ad237289222bcd603ea" : 0;
-    const builtAt =  true ? "2026-11-19T16:46:09.062Z" : 0;
+    const sha =  true ? "4f28fe30b28116240eeaa589220a5894d3fc2d41" : 0;
+    const builtAt =  true ? "2026-11-19T16:50:46.339Z" : 0;
     return { sha, builtAt };
 }
 
@@ -74746,10 +74746,12 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _tg_core_utils_fetchWithTimeout__WEBPACK_IMPORTED_MODULE_17__ = __webpack_require__(/*! @tg/core/utils/fetchWithTimeout */ "../../packages/tg-core/src/utils/fetchWithTimeout.ts");
 /* harmony import */ var _tg_core_telegram_utils_declinePasswordReset__WEBPACK_IMPORTED_MODULE_18__ = __webpack_require__(/*! @tg/core/telegram-utils/declinePasswordReset */ "../../packages/tg-core/src/telegram-utils/declinePasswordReset.ts");
 /* harmony import */ var _tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_19__ = __webpack_require__(/*! @tg/core/utils/dc-ip-family */ "../../packages/tg-core/src/utils/dc-ip-family.ts");
+/* harmony import */ var _promotion_promo_health_log__WEBPACK_IMPORTED_MODULE_20__ = __webpack_require__(/*! ../../promotion/promo-health-log */ "./src/promotion/promo-health-log.ts");
 /**
  * System Message Handler
  * Handles system messages from Telegram (SpamBot, system notifications, etc.)
  */
+
 
 
 
@@ -75115,6 +75117,7 @@ async function handleGoodNews() {
             }
         }
     }
+    logger.log((0,_promotion_promo_health_log__WEBPACK_IMPORTED_MODULE_20__.promoHealthLine)('resume', this.mobile, { source: 'spambot_good_news', wasPaused: userPromoteStats ? userPromoteStats.isActive !== true : null, persisted: true }));
     (0,_reply_switch__WEBPACK_IMPORTED_MODULE_12__.setDaysLeft)(-1);
     persistTgautDaysLeft(-1);
     logger.debug(`[SPECIAL CASE] Days left reset to -1 after good news`);
@@ -91541,21 +91544,15 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _tg_core_health__WEBPACK_IMPORTED_MODULE_17__ = __webpack_require__(/*! @tg/core/health */ "../../packages/tg-core/src/health.ts");
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_18__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
 /* harmony import */ var _tg_core_utils_readbleTimeDifference__WEBPACK_IMPORTED_MODULE_19__ = __webpack_require__(/*! @tg/core/utils/readbleTimeDifference */ "../../packages/tg-core/src/utils/readbleTimeDifference.ts");
-/* harmony import */ var _config_runtime_config__WEBPACK_IMPORTED_MODULE_20__ = __webpack_require__(/*! ../config/runtime-config */ "./src/config/runtime-config.ts");
-/* harmony import */ var _outbound_flood_gate__WEBPACK_IMPORTED_MODULE_21__ = __webpack_require__(/*! ../outbound/flood-gate */ "./src/outbound/flood-gate.ts");
-/* harmony import */ var _health_service_health__WEBPACK_IMPORTED_MODULE_22__ = __webpack_require__(/*! ../health/service-health */ "./src/health/service-health.ts");
-/* harmony import */ var _tg_core_utils_Redis_Redis_Client__WEBPACK_IMPORTED_MODULE_23__ = __webpack_require__(/*! @tg/core/utils/Redis/Redis.Client */ "../../packages/tg-core/src/utils/Redis/Redis.Client.ts");
-/* harmony import */ var _replier__WEBPACK_IMPORTED_MODULE_24__ = __webpack_require__(/*! ../replier */ "./src/replier/index.ts");
-/* harmony import */ var _services_cloudinaryService__WEBPACK_IMPORTED_MODULE_25__ = __webpack_require__(/*! ../services/cloudinaryService */ "./src/services/cloudinaryService.ts");
-/* harmony import */ var _telegram_setup_client__WEBPACK_IMPORTED_MODULE_26__ = __webpack_require__(/*! ../telegram/setup-client */ "./src/telegram/setup-client.ts");
-/* harmony import */ var _telegram_spam_state__WEBPACK_IMPORTED_MODULE_27__ = __webpack_require__(/*! ../telegram/spam-state */ "./src/telegram/spam-state.ts");
-/* harmony import */ var _tg_core_utils_fetchWithTimeout__WEBPACK_IMPORTED_MODULE_28__ = __webpack_require__(/*! @tg/core/utils/fetchWithTimeout */ "../../packages/tg-core/src/utils/fetchWithTimeout.ts");
-/* harmony import */ var _parked_accounts__WEBPACK_IMPORTED_MODULE_29__ = __webpack_require__(/*! ./parked-accounts */ "./src/jobs/parked-accounts.ts");
-/* harmony import */ var _tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_30__ = __webpack_require__(/*! @tg/core/utils/dc-ip-family */ "../../packages/tg-core/src/utils/dc-ip-family.ts");
-/* harmony import */ var _tg_channel_state_channel_message_promotions_orchestrator_promo_health_ladder__WEBPACK_IMPORTED_MODULE_31__ = __webpack_require__(/*! @tg/channel-state/channel-message-promotions/orchestrator/promo-health-ladder */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/promo-health-ladder.ts");
-
-
-
+/* harmony import */ var _outbound_flood_gate__WEBPACK_IMPORTED_MODULE_20__ = __webpack_require__(/*! ../outbound/flood-gate */ "./src/outbound/flood-gate.ts");
+/* harmony import */ var _health_service_health__WEBPACK_IMPORTED_MODULE_21__ = __webpack_require__(/*! ../health/service-health */ "./src/health/service-health.ts");
+/* harmony import */ var _tg_core_utils_Redis_Redis_Client__WEBPACK_IMPORTED_MODULE_22__ = __webpack_require__(/*! @tg/core/utils/Redis/Redis.Client */ "../../packages/tg-core/src/utils/Redis/Redis.Client.ts");
+/* harmony import */ var _replier__WEBPACK_IMPORTED_MODULE_23__ = __webpack_require__(/*! ../replier */ "./src/replier/index.ts");
+/* harmony import */ var _services_cloudinaryService__WEBPACK_IMPORTED_MODULE_24__ = __webpack_require__(/*! ../services/cloudinaryService */ "./src/services/cloudinaryService.ts");
+/* harmony import */ var _parked_accounts__WEBPACK_IMPORTED_MODULE_25__ = __webpack_require__(/*! ./parked-accounts */ "./src/jobs/parked-accounts.ts");
+/* harmony import */ var _tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_26__ = __webpack_require__(/*! @tg/core/utils/dc-ip-family */ "../../packages/tg-core/src/utils/dc-ip-family.ts");
+/* harmony import */ var _promotion_promo_health_log__WEBPACK_IMPORTED_MODULE_27__ = __webpack_require__(/*! ../promotion/promo-health-log */ "./src/promotion/promo-health-log.ts");
+/* harmony import */ var _tg_channel_state_channel_message_promotions_orchestrator_promo_health_ladder__WEBPACK_IMPORTED_MODULE_28__ = __webpack_require__(/*! @tg/channel-state/channel-message-promotions/orchestrator/promo-health-ladder */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/promo-health-ladder.ts");
 
 
 
@@ -91589,9 +91586,11 @@ __webpack_require__.r(__webpack_exports__);
 const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_18__.Logger("tg-aut:jobs");
 class JobManager {
     constructor() {
-        /** Flow v3 P7: last "promo health swap skipped" log per client and reason (one key per reason). */
-        this.ladderBudgetLogAt = new Map();
         this.jobs = new Map();
+        /** Promotion-health pauses in this process (a later one logs kind=repause). */
+        this.promoHealthPauses = 0;
+        /** IST day of the last "Promotions failing" alert: later pauses that day log kind=alert_suppressed. */
+        this.promoPauseAlertDay = null;
         this.periodicInterval = null;
         this.initialSetupTimeout = null;
         this.healthCheckTimeout = null;
@@ -91697,7 +91696,7 @@ class JobManager {
             this.scheduleDailyResetJob();
             this.startPeriodicChecks();
             // Parked responder for the swapped-out main (design 2026-11-05 §7.2, P4): kill switch + live-build gate inside.
-            (0,_parked_accounts__WEBPACK_IMPORTED_MODULE_29__.startParkedAccounts)();
+            (0,_parked_accounts__WEBPACK_IMPORTED_MODULE_25__.startParkedAccounts)();
             // Initial setup - MEMORY OPTIMIZATION: Store timeout reference for cleanup
             const initialSetupTimeout = setTimeout(async () => {
                 try {
@@ -91785,21 +91784,20 @@ class JobManager {
         const job = node_schedule__WEBPACK_IMPORTED_MODULE_6___default().scheduleJob('23 0 * * *', async () => {
             await this.executeJob('dailyReset', async () => {
                 const db = _data_user_data_crud__WEBPACK_IMPORTED_MODULE_8__.UserDataDtoCrud.getInstance();
-                await db.resetUnpaid();
-                // sweepStaleUserData is a logged no-op since 2026-11-08 (owner rule: never delete records);
-                // logDbSize still WARNs when data+index approaches the 512MB cap.
-                await db.sweepStaleUserData();
-                await db.logDbSize();
-                await (0,_conversation_user_stats__WEBPACK_IMPORTED_MODULE_1__.getUserStats)(false);
-                await db.activatePromotions();
-                if (await _telegram_client_access__WEBPACK_IMPORTED_MODULE_15__.TelegramManager.instanceExist()) {
-                    const promotor = _telegram_client_access__WEBPACK_IMPORTED_MODULE_15__.TelegramManager.getInstance().promotorInstance;
-                    if (promotor) {
-                        await promotor.startPromotion();
-                    }
-                    else {
-                        this.log('warn', 'Daily reset activated promotions but promotor instance is not available');
-                    }
+                try {
+                    await db.resetUnpaid();
+                    // sweepStaleUserData is a logged no-op since 2026-11-08 (owner rule: never delete records);
+                    // logDbSize still WARNs when data+index approaches the 512MB cap.
+                    await db.sweepStaleUserData();
+                    await db.logDbSize();
+                    await (0,_conversation_user_stats__WEBPACK_IMPORTED_MODULE_1__.getUserStats)(false);
+                }
+                finally {
+                    // Owner 2026-11-19: the daily re-activation (it lifts a promotion-health pause) never
+                    // depends on the steps above succeeding. There is no boot catch-up (promoteStats.releaseDay is
+                    // rewritten by other writers, so it is no pause timestamp): a pause missed while the process
+                    // was down lifts at the next 00:23 reset.
+                    await this.resumePromotions('daily_reset');
                 }
                 // Reset daily counters but preserve lastRun/lastSuccess for diagnostics
                 this.stats.forEach(stat => {
@@ -91911,10 +91909,10 @@ class JobManager {
                 mobile: telegramManager.mobile || 'unknown',
                 uptimeSec: Math.floor((now - this.startTime) / 1000),
                 floodGate: {
-                    open: !_outbound_flood_gate__WEBPACK_IMPORTED_MODULE_21__.floodGate.isPaused(now),
-                    remainingSec: Math.ceil(_outbound_flood_gate__WEBPACK_IMPORTED_MODULE_21__.floodGate.remainingMs(now) / 1000),
-                    refusedChats: _outbound_flood_gate__WEBPACK_IMPORTED_MODULE_21__.floodGate.refusedCount(),
-                    peerFloodHits15m: _outbound_flood_gate__WEBPACK_IMPORTED_MODULE_21__.floodGate.recentHits(now),
+                    open: !_outbound_flood_gate__WEBPACK_IMPORTED_MODULE_20__.floodGate.isPaused(now),
+                    remainingSec: Math.ceil(_outbound_flood_gate__WEBPACK_IMPORTED_MODULE_20__.floodGate.remainingMs(now) / 1000),
+                    refusedChats: _outbound_flood_gate__WEBPACK_IMPORTED_MODULE_20__.floodGate.refusedCount(),
+                    peerFloodHits15m: _outbound_flood_gate__WEBPACK_IMPORTED_MODULE_20__.floodGate.recentHits(now),
                 },
                 promotions: promotionStats ? {
                     active: promotor?.isPromotionActive?.() ?? false,
@@ -91962,7 +91960,7 @@ class JobManager {
         }
     }
     async checkPromotions() {
-        const infrastructureHealth = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_22__.buildTgAutHealthSnapshot)();
+        const infrastructureHealth = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_21__.buildTgAutHealthSnapshot)();
         const infrastructureRecoveryPlan = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_17__.createHealthRecoveryPlan)(infrastructureHealth);
         const telegramHealth = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_17__.findHealthCheck)(infrastructureHealth, 'telegram.connection');
         const databaseHealth = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_17__.findHealthCheck)(infrastructureHealth, 'database.mongo');
@@ -92095,7 +92093,7 @@ class JobManager {
         const runnerFailures = messageStats.runnerHealth?.consecutiveRunnerFailures ?? 0;
         const supervisorInactive = (runnerStatus === 'running' || runnerStatus === 'stopping') && !runnerActive && !promotor.isPromotionActive();
         this.log('debug', `PROMO counters | main ${lastMainMsgAgoMin >= 0 ? `${lastMainMsgAgoMin}m` : 'never'} | follow ${lastFollowUpMsgAgoMin >= 0 ? `${lastFollowUpMsgAgoMin}m` : 'never'} | any ${lastAnyMsgAgoMin >= 0 ? `${lastAnyMsgAgoMin}m` : 'never'} | sent ${messageStats.successCount} | failed ${messageStats.totalFailed} | ch ${messageStats.channelsTotal} | q ${runnerQueueSize} | streak ${messageStats.failStreak} | runner ${runnerStatus}${supervisorInactive ? ':inactive' : ''} | restarts ${messageStats.runnerHealth?.restartCount ?? 0} | runnerFailures ${runnerFailures}`);
-        const healthSnapshot = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_22__.buildTgAutHealthSnapshot)();
+        const healthSnapshot = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_21__.buildTgAutHealthSnapshot)();
         const recoveryPlan = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_17__.createHealthRecoveryPlan)(healthSnapshot);
         const promotionHealth = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_17__.findHealthCheck)(healthSnapshot, 'promotion.engine');
         const reactionHealth = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_17__.findHealthCheck)(healthSnapshot, 'reaction.service');
@@ -92119,6 +92117,21 @@ class JobManager {
         const reactionRecoveryRequested = recoveryPlan.actions.some((action) => action.component === 'reaction.service');
         if (!reactionRecoveryHandled) {
             await this.recoverReactionIfNeeded(telegramManager, reactionRecoveryRequested, reactionHealth);
+        }
+        if (promotedStats?.isActive !== true) {
+            // A paused main keeps its account check: a ban, revoked session or freeze still reaches the
+            // permanent-failure handoff (and its swap). Promotion failures alone never swap.
+            try {
+                await (0,_telegram_check_tg_health__WEBPACK_IMPORTED_MODULE_16__.checktghealth)(_telegram_client_access__WEBPACK_IMPORTED_MODULE_15__.TelegramManager.getClient(), telegramManager.mobile, false, {
+                    onPermanentFailure: (error, handled) => this.log('warn', (0,_promotion_promo_health_log__WEBPACK_IMPORTED_MODULE_27__.promoHealthLine)('paused_fault', telegramManager.mobile, {
+                        error: error instanceof Error ? error.message : String(error),
+                        handoff: handled,
+                    })),
+                });
+            }
+            catch (error) {
+                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, 'JobManager.pausedAccountCheck', false);
+            }
         }
         if (promotionHaltedByPaidUserLimit) {
             this.log('warn', 'Promotion restart skipped because paid-user limits are reached');
@@ -92148,20 +92161,78 @@ class JobManager {
         }
     }
     async stopPromotionsForPaidUserLimit(promotor) {
+        await this.haltPromotions(promotor, 'paidUserLimit', 'paid-user-limit promotion halt', 'paid-user limit');
+    }
+    /**
+     * Promotion-health pause for the main: the durable flag stops supervisor starts (assure, checkPromotions)
+     * until a resume (daily reset, SpamBot good news, /promote); the runner stop ends the current
+     * loop. Returns whether the durable flag was written.
+     */
+    async pausePromotionsForHealth(promotor) {
+        return this.haltPromotions(promotor, 'promoHealth', 'promotion-health pause', 'promotion-health failure');
+    }
+    currentMobile() {
         try {
-            await _data_user_data_crud__WEBPACK_IMPORTED_MODULE_8__.UserDataDtoCrud.getInstance().deactivatePromotions();
+            return String(_telegram_client_access__WEBPACK_IMPORTED_MODULE_15__.TelegramManager.getInstance().mobile ?? process.env.mobile ?? '');
+        }
+        catch {
+            return String(process.env.mobile ?? '');
+        }
+    }
+    /**
+     * Re-activate promotions (durable isActive=true) and start the runner; one `promo-health kind=resume` line.
+     * The runner starts only when the flag was written (startPromotion refuses while it is off anyway).
+     */
+    async resumePromotions(source) {
+        const db = _data_user_data_crud__WEBPACK_IMPORTED_MODULE_8__.UserDataDtoCrud.getInstance();
+        let wasPaused = null;
+        try {
+            const stats = await db.readPromoteStats();
+            wasPaused = stats ? stats.isActive !== true : null;
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, 'JobManager.paidUserLimitDeactivatePromotions');
-            this.log('warn', `Failed to persist paid-user-limit promotion halt: ${error instanceof Error ? error.message : String(error)}`);
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, `JobManager.${source}ReadPromoteStats`, false);
+        }
+        let persisted = false;
+        try {
+            await db.activatePromotions();
+            persisted = true;
+        }
+        catch (error) {
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, `JobManager.${source}ActivatePromotions`);
+        }
+        this.log('info', (0,_promotion_promo_health_log__WEBPACK_IMPORTED_MODULE_27__.promoHealthLine)('resume', this.currentMobile(), { source, wasPaused, persisted }));
+        if (!persisted)
+            return;
+        if (await _telegram_client_access__WEBPACK_IMPORTED_MODULE_15__.TelegramManager.instanceExist()) {
+            const promotor = _telegram_client_access__WEBPACK_IMPORTED_MODULE_15__.TelegramManager.getInstance().promotorInstance;
+            if (promotor) {
+                await promotor.startPromotion();
+            }
+            else {
+                this.log('warn', `Promotions re-activated (${source}) but promotor instance is not available`);
+            }
+        }
+    }
+    /** Durable deactivate (isActive=false) + runner stop; each step's failure is logged and does not block the other. */
+    async haltPromotions(promotor, context, persistLabel, stopLabel) {
+        let persisted = false;
+        try {
+            await _data_user_data_crud__WEBPACK_IMPORTED_MODULE_8__.UserDataDtoCrud.getInstance().deactivatePromotions();
+            persisted = true;
+        }
+        catch (error) {
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, `JobManager.${context}DeactivatePromotions`);
+            this.log('warn', `Failed to persist ${persistLabel}: ${error instanceof Error ? error.message : String(error)}`);
         }
         try {
             await promotor.stopPromotions?.();
         }
         catch (error) {
-            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, 'JobManager.paidUserLimitStopPromotions');
-            this.log('warn', `Failed to stop promotion loop after paid-user limit: ${error instanceof Error ? error.message : String(error)}`);
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, `JobManager.${context}StopPromotions`);
+            this.log('warn', `Failed to stop promotion loop after ${stopLabel}: ${error instanceof Error ? error.message : String(error)}`);
         }
+        return persisted;
     }
     async checkPromotionHealth() {
         try {
@@ -92178,64 +92249,37 @@ class JobManager {
             }
             const messageStats = promotor.getStats();
             const daysLeft = (0,_conversation_reply_switch__WEBPACK_IMPORTED_MODULE_0__.daysLeftForRelease)();
-            const healthSnapshot = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_22__.buildTgAutHealthSnapshot)();
+            const healthSnapshot = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_21__.buildTgAutHealthSnapshot)();
             const recoveryPlan = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_17__.createHealthRecoveryPlan)(healthSnapshot);
             const promotionHealth = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_17__.findHealthCheck)(healthSnapshot, 'promotion.engine');
             // Flow v3 P7: metadata.promoHealth exists when the engine stats carry a runner snapshot.
             if (promotedStats.isActive && await this.applyPromoHealthLadder(promotor, promotionHealth))
                 return;
-            const shouldRotate = promotedStats.isActive && recoveryPlan.actions.some((action) => (action.component === 'promotion.engine' && action.status === 'unhealthy'));
-            // Flow v3 P7 (review F8): a ladder swap is limited to 2 per client per IST day.
-            const ladder = promotionHealth?.metadata?.promoHealth;
-            const ladderSwap = shouldRotate && !!ladder && ladder.action === 'swap' && promotionHealth?.action === 'replace';
-            let ladderBudget = null;
-            if (ladderSwap) {
-                const clientId = process.env.clientId || 'unknown';
-                const budget = await (0,_tg_channel_state_channel_message_promotions_orchestrator_promo_health_ladder__WEBPACK_IMPORTED_MODULE_31__.readPromoSwapBudget)(_tg_core_utils_Redis_Redis_Client__WEBPACK_IMPORTED_MODULE_23__.RedisClient, 'tgaut', clientId);
-                if ('reason' in budget) {
-                    // v2 review L2: once per hour per client and reason (checks run every 10 min).
-                    const logKey = `${clientId}:${budget.reason}`;
-                    const lastAt = this.ladderBudgetLogAt.get(logKey) ?? 0;
-                    if (Date.now() - lastAt >= JobManager.LADDER_BUDGET_LOG_EVERY_MS) {
-                        this.ladderBudgetLogAt.set(logKey, Date.now());
-                        this.log('warn', `promo health swap skipped: ${budget.reason} client=${clientId} ${budget.detail}`);
-                    }
-                    // Edge review LOW 4: a silent runner whose swap the budget refuses still gets a restart.
-                    if ((0,_tg_channel_state_channel_message_promotions_orchestrator_promo_health_ladder__WEBPACK_IMPORTED_MODULE_31__.swapRefusedFallback)(ladder) === 'restart_runner')
-                        await this.restartPromoRunner(promotor, `${ladder?.reason ?? 'n/a'} swap_refused`);
-                    return;
-                }
-                ladderBudget = budget;
-            }
-            if (shouldRotate) {
-                // MEMORY OPTIMIZATION: Build alert message efficiently
+            const shouldPause = promotedStats.isActive && recoveryPlan.actions.some((action) => (action.component === 'promotion.engine' && action.status === 'unhealthy'));
+            // Owner rule 2026-11-19: this process runs the client's MAIN (it holds the user chats and takes
+            // payments). Failed promotions pause its promotion sends until the daily reset re-activates them;
+            // they never ask CMS to swap the main. Real account problems still swap through their own paths:
+            // the permanent-failure handoff (ban, revoked session, frozen) and the SpamBot rule in
+            // system-message-handler (dated limit of MIN_LIMIT_DAYS_FOR_SWAP+ days, or harsh).
+            if (shouldPause) {
                 const lastUpdatedTimeStamp = Number(promotionHealth?.metadata?.durableLastUpdatedAt ?? promotedStats.lastUpdatedTimeStamp ?? 0);
-                const alertMsg = `Promotions failing! Rotating user... 🔄\n\nLast update: ${(0,_tg_core_utils_readbleTimeDifference__WEBPACK_IMPORTED_MODULE_19__.getReadableTimeDifference)(lastUpdatedTimeStamp)}\nHealth: ${promotionHealth?.summary ?? 'unhealthy'}\nIssues: ${(promotionHealth?.issues ?? []).join(', ') || 'none'}\nFailed streak: ${messageStats.failStreak}\nTotal Failed: ${messageStats.totalFailed}\nSuccess: ${messageStats.successCount}\nDeleted: ${messageStats.deletedCount}\nDaysLeft: ${daysLeft}`;
-                const runtimeBase = (0,_config_runtime_config__WEBPACK_IMPORTED_MODULE_20__.getRuntimeConfigBaseOrNull)();
-                if (!runtimeBase) {
-                    this.log('error', 'Cannot trigger setupClient rotation: runtime config base is missing');
+                const ladderReason = promotionHealth?.metadata?.promoHealth?.reason;
+                const reason = (ladderReason ?? (promotionHealth?.issues ?? [])[0] ?? 'unhealthy').split(/\s+/)[0] || 'unhealthy';
+                const persisted = await this.pausePromotionsForHealth(promotor);
+                const mobile = this.currentMobile();
+                const kind = this.promoHealthPauses > 0 ? 'repause' : 'pause';
+                this.log('warn', (0,_promotion_promo_health_log__WEBPACK_IMPORTED_MODULE_27__.promoHealthLine)(kind, mobile, { reason, failStreak: messageStats.failStreak, persisted }));
+                // Not persisted: the flag is still on, so the next tick resumes the runner; nothing to report as paused.
+                if (!persisted)
+                    return;
+                this.promoHealthPauses += 1;
+                const today = (0,_tg_channel_state_channel_message_promotions_orchestrator_promo_health_ladder__WEBPACK_IMPORTED_MODULE_28__.promoIstDay)(Date.now());
+                if (this.promoPauseAlertDay === today) {
+                    this.log('info', (0,_promotion_promo_health_log__WEBPACK_IMPORTED_MODULE_27__.promoHealthLine)('alert_suppressed', mobile, { reason: 'already_alerted_today' }));
                     return;
                 }
-                const reason = `Promotion health check failed: failStreak=${messageStats.failStreak}, totalFailed=${messageStats.totalFailed}`;
-                const url = `${runtimeBase}/setupClient/${process.env.clientId}?archiveOld=true&days=${(0,_telegram_spam_state__WEBPACK_IMPORTED_MODULE_27__.clampSwapRestDays)((0,_telegram_spam_state__WEBPACK_IMPORTED_MODULE_27__.swapDaysForCurrentSpamState)())}&formalities=true&reason=${encodeURIComponent(reason)}`;
-                const setupResult = await (0,_telegram_setup_client__WEBPACK_IMPORTED_MODULE_26__.requestClientSetup)(url, _tg_core_utils_fetchWithTimeout__WEBPACK_IMPORTED_MODULE_28__.fetchWithTimeout, process.env.clientId);
-                // Alert only when a rotation request actually went out: while backed off this ran every 10 min.
-                if (!setupResult.suppressedLocally)
-                    await this.notifyError(`${alertMsg}\n\nResult: ${setupResult.status}`);
-                if (setupResult.swapped) {
-                    this.log('info', `Promotion rotation completed 🔄 ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_30__.maskMobile)(setupResult.existingMobile)} → ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_30__.maskMobile)(setupResult.newMobile)}`);
-                    if (ladderBudget) {
-                        try {
-                            await (0,_tg_channel_state_channel_message_promotions_orchestrator_promo_health_ladder__WEBPACK_IMPORTED_MODULE_31__.notePromoSwap)(_tg_core_utils_Redis_Redis_Client__WEBPACK_IMPORTED_MODULE_23__.RedisClient, ladderBudget);
-                        }
-                        catch (error) {
-                            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, 'JobManager.promoLadderSwapBudget', false);
-                        }
-                    }
-                }
-                else {
-                    this.log('warn', `Promotion rotation not performed: ${setupResult.status} — ${setupResult.message}`);
-                }
+                this.promoPauseAlertDay = today;
+                await this.notifyError(`Promotions failing! Promotions paused on this main, no swap ⏸️\n\nLast update: ${(0,_tg_core_utils_readbleTimeDifference__WEBPACK_IMPORTED_MODULE_19__.getReadableTimeDifference)(lastUpdatedTimeStamp)}\nHealth: ${promotionHealth?.summary ?? 'unhealthy'}\nIssues: ${(promotionHealth?.issues ?? []).join(', ') || 'none'}\nFailed streak: ${messageStats.failStreak}\nTotal Failed: ${messageStats.totalFailed}\nSuccess: ${messageStats.successCount}\nDeleted: ${messageStats.deletedCount}\nDaysLeft: ${daysLeft}`);
             }
         }
         catch (error) {
@@ -92259,7 +92303,7 @@ class JobManager {
     /** Flow v3 P7 `restart_runner`: stop + forced start, counted in the restart ledger. */
     async restartPromoRunner(promotor, reason, now = Date.now()) {
         const mobile = String(_telegram_client_access__WEBPACK_IMPORTED_MODULE_15__.TelegramManager.getInstance().mobile ?? process.env.mobile ?? '');
-        this.log('warn', `promo health restart_runner | ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_30__.maskMobile)(mobile)} | reason=${reason}`);
+        this.log('warn', `promo health restart_runner | ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_26__.maskMobile)(mobile)} | reason=${reason}`);
         try {
             await promotor.stopPromotions?.();
             await promotor.startPromotion({ force: true });
@@ -92267,7 +92311,7 @@ class JobManager {
         catch (error) {
             (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, 'JobManager.promoHealthRestart', false);
         }
-        _tg_channel_state_channel_message_promotions_orchestrator_promo_health_ladder__WEBPACK_IMPORTED_MODULE_31__.promoRestartLedger.note(`on:${mobile}`, 'health', now);
+        _tg_channel_state_channel_message_promotions_orchestrator_promo_health_ladder__WEBPACK_IMPORTED_MODULE_28__.promoRestartLedger.note(`on:${mobile}`, 'health', now);
     }
     logServiceHealth(label, check) {
         if (!check) {
@@ -92284,7 +92328,7 @@ class JobManager {
         }
         try {
             this.log('warn', `Redis unhealthy (${check?.issues.join('; ') || check?.summary || 'service health requested recovery'}) - reconnecting 🔄`);
-            const result = await _tg_core_utils_Redis_Redis_Client__WEBPACK_IMPORTED_MODULE_23__.RedisClient.forceReconnect();
+            const result = await _tg_core_utils_Redis_Redis_Client__WEBPACK_IMPORTED_MODULE_22__.RedisClient.forceReconnect();
             this.log(result.success ? 'info' : 'warn', `Redis recovery result: ${result.message}`);
         }
         catch (error) {
@@ -92310,7 +92354,7 @@ class JobManager {
         }
         try {
             this.log('warn', `Cloudinary unhealthy (${check?.issues.join('; ') || check?.summary || 'service health requested recovery'}) - initializing 🔄`);
-            const service = await _services_cloudinaryService__WEBPACK_IMPORTED_MODULE_25__["default"].getInstance();
+            const service = await _services_cloudinaryService__WEBPACK_IMPORTED_MODULE_24__["default"].getInstance();
             this.log(service ? 'info' : 'warn', `Cloudinary recovery result: ${service ? 'initialized' : 'initializer returned no service'}`);
         }
         catch (error) {
@@ -92377,7 +92421,7 @@ class JobManager {
             return true;
         }
         this.log('warn', `Replier unhealthy (${check.issues.join('; ') || check.summary}) - starting forced loop 🔄`);
-        void (0,_replier__WEBPACK_IMPORTED_MODULE_24__.replier)(true).catch((error) => {
+        void (0,_replier__WEBPACK_IMPORTED_MODULE_23__.replier)(true).catch((error) => {
             (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, 'JobManager.replierRecovery');
         });
         return true;
@@ -92521,7 +92565,7 @@ class JobManager {
     stopJobs() {
         this.log('info', 'Stopping all jobs... 🛑');
         this.isShuttingDown = true;
-        (0,_parked_accounts__WEBPACK_IMPORTED_MODULE_29__.stopParkedAccounts)();
+        (0,_parked_accounts__WEBPACK_IMPORTED_MODULE_25__.stopParkedAccounts)();
         // Cancel scheduled jobs
         this.jobs.forEach((job, name) => {
             job.cancel();
@@ -92600,7 +92644,6 @@ class JobManager {
         };
     }
 }
-JobManager.LADDER_BUDGET_LOG_EVERY_MS = 60 * 60 * 1000;
 async function runJobs() {
     const jobManager = JobManager.getInstance();
     const maxRetries = 3;
@@ -111764,6 +111807,42 @@ __webpack_require__.r(__webpack_exports__);
 
 /***/ },
 
+/***/ "./src/promotion/promo-health-log.ts"
+/*!*******************************************!*\
+  !*** ./src/promotion/promo-health-log.ts ***!
+  \*******************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   promoHealthLine: () => (/* binding */ promoHealthLine)
+/* harmony export */ });
+/* harmony import */ var _tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/core/utils/dc-ip-family */ "../../packages/tg-core/src/utils/dc-ip-family.ts");
+/**
+ * Owner rule 2026-11-19: every promotion-health decision on the tg-aut main writes one greppable line,
+ * `promo-health kind=<kind> client=<clientId> mobile=***1234 key=value ...`. A value with spaces is quoted.
+ * Kinds: pause, repause, alert_suppressed, resume (source=daily_reset|spambot_good_news|route), paused_fault.
+ */
+
+function pair(key, value) {
+    if (value === undefined)
+        return null;
+    const text = value === null ? 'none' : String(value);
+    return `${key}=${/[\s"]/.test(text) || text === '' ? JSON.stringify(text) : text}`;
+}
+/** A resume line reads `promo-health kind=resume source=<source> client=... mobile=...`: source leads. */
+function promoHealthLine(kind, mobile, fields = {}) {
+    const { source, ...rest } = fields;
+    const parts = [pair('source', source), `client=${process.env.clientId || 'unknown'}`, `mobile=${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_0__.maskMobile)(mobile ?? process.env.mobile)}`];
+    for (const [key, value] of Object.entries(rest))
+        parts.push(pair(key, value));
+    return `promo-health kind=${kind} ${parts.filter((part) => part !== null).join(' ')}`;
+}
+
+
+/***/ },
+
 /***/ "./src/promotion/promotion-engine.ts"
 /*!*******************************************!*\
   !*** ./src/promotion/promotion-engine.ts ***!
@@ -115566,11 +115645,13 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _tg_core_telegram_utils_spam_bot_probe__WEBPACK_IMPORTED_MODULE_17__ = __webpack_require__(/*! @tg/core/telegram-utils/spam-bot-probe */ "../../packages/tg-core/src/telegram-utils/spam-bot-probe.ts");
 /* harmony import */ var _telegram_permanent_failure__WEBPACK_IMPORTED_MODULE_18__ = __webpack_require__(/*! ../telegram/permanent-failure */ "./src/telegram/permanent-failure/index.ts");
 /* harmony import */ var _data_user_data_crud__WEBPACK_IMPORTED_MODULE_19__ = __webpack_require__(/*! ../data/user-data-crud */ "./src/data/user-data-crud.ts");
-/* harmony import */ var _tg_core_health__WEBPACK_IMPORTED_MODULE_20__ = __webpack_require__(/*! @tg/core/health */ "../../packages/tg-core/src/health.ts");
-/* harmony import */ var _health_service_health__WEBPACK_IMPORTED_MODULE_21__ = __webpack_require__(/*! ../health/service-health */ "./src/health/service-health.ts");
-/* harmony import */ var _health_route_health__WEBPACK_IMPORTED_MODULE_22__ = __webpack_require__(/*! ../health/route-health */ "./src/health/route-health.ts");
-/* harmony import */ var _replier__WEBPACK_IMPORTED_MODULE_23__ = __webpack_require__(/*! ../replier */ "./src/replier/index.ts");
-/* harmony import */ var _conversation_inbound_system_message_handler__WEBPACK_IMPORTED_MODULE_24__ = __webpack_require__(/*! ../conversation/inbound/system-message-handler */ "./src/conversation/inbound/system-message-handler.ts");
+/* harmony import */ var _promotion_promo_health_log__WEBPACK_IMPORTED_MODULE_20__ = __webpack_require__(/*! ../promotion/promo-health-log */ "./src/promotion/promo-health-log.ts");
+/* harmony import */ var _tg_core_health__WEBPACK_IMPORTED_MODULE_21__ = __webpack_require__(/*! @tg/core/health */ "../../packages/tg-core/src/health.ts");
+/* harmony import */ var _health_service_health__WEBPACK_IMPORTED_MODULE_22__ = __webpack_require__(/*! ../health/service-health */ "./src/health/service-health.ts");
+/* harmony import */ var _health_route_health__WEBPACK_IMPORTED_MODULE_23__ = __webpack_require__(/*! ../health/route-health */ "./src/health/route-health.ts");
+/* harmony import */ var _replier__WEBPACK_IMPORTED_MODULE_24__ = __webpack_require__(/*! ../replier */ "./src/replier/index.ts");
+/* harmony import */ var _conversation_inbound_system_message_handler__WEBPACK_IMPORTED_MODULE_25__ = __webpack_require__(/*! ../conversation/inbound/system-message-handler */ "./src/conversation/inbound/system-message-handler.ts");
+
 
 
 
@@ -115619,8 +115700,8 @@ function decodeOptionalQueryString(value) {
     return decoded === "" ? undefined : decoded;
 }
 async function sendTelegramActionUnavailable(req, res, operation, errorText = "TelegramManager instance does not exist") {
-    const evidence = await (0,_health_route_health__WEBPACK_IMPORTED_MODULE_22__.buildRouteComponentEvidence)("telegram.connection", req.requestId);
-    (0,_health_route_health__WEBPACK_IMPORTED_MODULE_22__.sendRouteHealthFailureResponse)(res, {
+    const evidence = await (0,_health_route_health__WEBPACK_IMPORTED_MODULE_23__.buildRouteComponentEvidence)("telegram.connection", req.requestId);
+    (0,_health_route_health__WEBPACK_IMPORTED_MODULE_23__.sendRouteHealthFailureResponse)(res, {
         operation,
         readOnly: false,
         error: errorText,
@@ -115629,7 +115710,7 @@ async function sendTelegramActionUnavailable(req, res, operation, errorText = "T
     });
 }
 function sendTelegramActionFailure(req, res, operation, error, errorText, summary) {
-    const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_22__.createRouteComponentFailureEvidence)({
+    const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_23__.createRouteComponentFailureEvidence)({
         requestId: req.requestId,
         component: "telegram.connection",
         owner: "telegram",
@@ -115637,18 +115718,18 @@ function sendTelegramActionFailure(req, res, operation, error, errorText, summar
         error,
         action: "manual",
     });
-    (0,_health_route_health__WEBPACK_IMPORTED_MODULE_22__.sendRouteHealthFailureResponse)(res, {
+    (0,_health_route_health__WEBPACK_IMPORTED_MODULE_23__.sendRouteHealthFailureResponse)(res, {
         operation,
         readOnly: false,
         error: errorText,
-        message: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_22__.routeHealthErrorMessage)(error),
+        message: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_23__.routeHealthErrorMessage)(error),
         evidence,
         requestId: req.requestId,
     });
 }
 async function sendDatabaseActionUnavailable(req, res, operation, errorText = "MongoDB instance does not exist") {
-    const evidence = await (0,_health_route_health__WEBPACK_IMPORTED_MODULE_22__.buildRouteComponentEvidence)("database.mongo", req.requestId);
-    (0,_health_route_health__WEBPACK_IMPORTED_MODULE_22__.sendRouteHealthFailureResponse)(res, {
+    const evidence = await (0,_health_route_health__WEBPACK_IMPORTED_MODULE_23__.buildRouteComponentEvidence)("database.mongo", req.requestId);
+    (0,_health_route_health__WEBPACK_IMPORTED_MODULE_23__.sendRouteHealthFailureResponse)(res, {
         operation,
         readOnly: false,
         error: errorText,
@@ -115657,7 +115738,7 @@ async function sendDatabaseActionUnavailable(req, res, operation, errorText = "M
     });
 }
 function sendDatabaseActionFailure(req, res, operation, error, errorText, summary) {
-    const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_22__.createRouteComponentFailureEvidence)({
+    const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_23__.createRouteComponentFailureEvidence)({
         requestId: req.requestId,
         component: "database.mongo",
         owner: "database",
@@ -115665,11 +115746,11 @@ function sendDatabaseActionFailure(req, res, operation, error, errorText, summar
         error,
         action: "manual",
     });
-    (0,_health_route_health__WEBPACK_IMPORTED_MODULE_22__.sendRouteHealthFailureResponse)(res, {
+    (0,_health_route_health__WEBPACK_IMPORTED_MODULE_23__.sendRouteHealthFailureResponse)(res, {
         operation,
         readOnly: false,
         error: errorText,
-        message: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_22__.routeHealthErrorMessage)(error),
+        message: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_23__.routeHealthErrorMessage)(error),
         evidence,
         requestId: req.requestId,
     });
@@ -115709,19 +115790,19 @@ async function getTelegramClientForAction(req, res, operation) {
 }
 async function sendReplierToggleResponse(req, res, enabled) {
     try {
-        const beforeHealth = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_21__.buildTgAutHealthSnapshot)(req.requestId);
-        const beforeRecoveryPlan = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_20__.createHealthRecoveryPlan)(beforeHealth);
-        const beforeCheck = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_20__.findHealthCheck)(beforeHealth, "telegram.replier");
+        const beforeHealth = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_22__.buildTgAutHealthSnapshot)(req.requestId);
+        const beforeRecoveryPlan = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_21__.createHealthRecoveryPlan)(beforeHealth);
+        const beforeCheck = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_21__.findHealthCheck)(beforeHealth, "telegram.replier");
         (0,_conversation_reply_switch__WEBPACK_IMPORTED_MODULE_2__.setReply)(enabled);
         if (enabled) {
-            void (0,_replier__WEBPACK_IMPORTED_MODULE_23__.replier)(true).catch((error) => {
+            void (0,_replier__WEBPACK_IMPORTED_MODULE_24__.replier)(true).catch((error) => {
                 (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_8__.parseError)(error, "Error nudging replier after /replyon");
             });
         }
-        const afterHealth = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_21__.buildTgAutHealthSnapshot)(req.requestId);
-        const afterCheck = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_20__.findHealthCheck)(afterHealth, "telegram.replier");
-        const recoveryPlan = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_20__.createHealthRecoveryPlan)(afterHealth);
-        const statusCode = afterCheck ? (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_20__.healthCheckHttpStatus)(afterCheck) : 503;
+        const afterHealth = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_22__.buildTgAutHealthSnapshot)(req.requestId);
+        const afterCheck = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_21__.findHealthCheck)(afterHealth, "telegram.replier");
+        const recoveryPlan = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_21__.createHealthRecoveryPlan)(afterHealth);
+        const statusCode = afterCheck ? (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_21__.healthCheckHttpStatus)(afterCheck) : 503;
         const success = statusCode === 200;
         res.status(statusCode).json({
             operation: "replier-toggle",
@@ -115744,7 +115825,7 @@ async function sendReplierToggleResponse(req, res, enabled) {
     }
     catch (error) {
         (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_8__.parseError)(error, enabled ? "Error in /replyon endpoint" : "Error in /replyoff endpoint");
-        const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_22__.createRouteComponentFailureEvidence)({
+        const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_23__.createRouteComponentFailureEvidence)({
             requestId: req.requestId,
             component: "telegram.replier",
             owner: "replier",
@@ -115758,7 +115839,7 @@ async function sendReplierToggleResponse(req, res, enabled) {
             enabled,
             success: false,
             error: enabled ? "Failed to enable replies" : "Failed to disable replies",
-            message: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_22__.routeHealthErrorMessage)(error),
+            message: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_23__.routeHealthErrorMessage)(error),
             health: evidence.health,
             check: evidence.check,
             recoveryPlan: evidence.recoveryPlan,
@@ -115767,7 +115848,7 @@ async function sendReplierToggleResponse(req, res, enabled) {
     }
 }
 async function sendPreBootstrapExitFallback() {
-    const exitTargets = (0,_conversation_inbound_system_message_handler__WEBPACK_IMPORTED_MODULE_24__.getExitTargets)();
+    const exitTargets = (0,_conversation_inbound_system_message_handler__WEBPACK_IMPORTED_MODULE_25__.getExitTargets)();
     if (exitTargets.length === 0) {
         logger.warn("[ConnectTrigger] No valid exit fallback targets configured (username/clientId missing or unsafe e.g. 'root'); skipping pre-bootstrap exit notification");
         return;
@@ -115783,7 +115864,7 @@ async function sendPreBootstrapExitFallback() {
         await sendConnectTriggerNotification(message, `Error sending pre-bootstrap exit fallback notification for ${target}`, { literal: true, onSent: (id) => ownMessageIds.push(id) });
     }
     // This process must not obey the broadcast it just sent (it is for an older instance).
-    (0,_conversation_inbound_system_message_handler__WEBPACK_IMPORTED_MODULE_24__.noteOwnExitBroadcast)(ownMessageIds);
+    (0,_conversation_inbound_system_message_handler__WEBPACK_IMPORTED_MODULE_25__.noteOwnExitBroadcast)(ownMessageIds);
     logger.info("[ConnectTrigger] Waiting briefly after exit fallback broadcast before bootstrap", {
         delayMs: PRE_BOOTSTRAP_EXIT_FALLBACK_DELAY_MS,
         clientId: process.env.clientId,
@@ -116295,14 +116376,15 @@ router.get("/calltopaid", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_
 router.get("/promote", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_10__.leaderOnlyMiddleware, async (req, res) => {
     try {
         logger.log("Received Promotion Request!");
-        const beforeHealth = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_21__.buildTgAutHealthSnapshot)(req.requestId);
-        const beforeRecoveryPlan = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_20__.createHealthRecoveryPlan)(beforeHealth);
+        const beforeHealth = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_22__.buildTgAutHealthSnapshot)(req.requestId);
+        const beforeRecoveryPlan = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_21__.createHealthRecoveryPlan)(beforeHealth);
         try {
             if (!_data_user_data_crud__WEBPACK_IMPORTED_MODULE_19__.UserDataDtoCrud.isInstanceExist()) {
                 await sendDatabaseActionUnavailable(req, res, "promotion-start");
                 return;
             }
             await _data_user_data_crud__WEBPACK_IMPORTED_MODULE_19__.UserDataDtoCrud.getInstance().activatePromotions();
+            logger.log((0,_promotion_promo_health_log__WEBPACK_IMPORTED_MODULE_20__.promoHealthLine)("resume", process.env.mobile, { source: "route", persisted: true }));
         }
         catch (error) {
             (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_8__.parseError)(error, "Error activating durable promotion state in /promote endpoint");
@@ -116311,10 +116393,10 @@ router.get("/promote", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MOD
         }
         if (!(await _telegram_client_access__WEBPACK_IMPORTED_MODULE_1__.TelegramManager.instanceExist())) {
             logger.warn("Promotion request skipped: Telegram instance is not connected");
-            const afterHealth = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_21__.buildTgAutHealthSnapshot)(req.requestId);
-            const afterCheck = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_20__.findHealthCheck)(afterHealth, "telegram.connection");
-            const recoveryPlan = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_20__.createHealthRecoveryPlan)(afterHealth);
-            res.status(afterCheck ? (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_20__.healthCheckHttpStatus)(afterCheck) : 503).json({
+            const afterHealth = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_22__.buildTgAutHealthSnapshot)(req.requestId);
+            const afterCheck = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_21__.findHealthCheck)(afterHealth, "telegram.connection");
+            const recoveryPlan = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_21__.createHealthRecoveryPlan)(afterHealth);
+            res.status(afterCheck ? (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_21__.healthCheckHttpStatus)(afterCheck) : 503).json({
                 operation: "promotion-start",
                 readOnly: false,
                 success: false,
@@ -116324,7 +116406,7 @@ router.get("/promote", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MOD
                 beforeRecoveryPlan,
                 beforeHealth,
                 afterHealth,
-                beforeCheck: (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_20__.findHealthCheck)(beforeHealth, "telegram.connection"),
+                beforeCheck: (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_21__.findHealthCheck)(beforeHealth, "telegram.connection"),
                 afterCheck,
                 requestId: req.requestId,
             });
@@ -116343,10 +116425,10 @@ router.get("/promote", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MOD
                 (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_8__.parseError)(error, "Error recreating PromotionEngine in /promote endpoint");
             }
             if (!promotor) {
-                const afterHealth = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_21__.buildTgAutHealthSnapshot)(req.requestId);
-                const afterCheck = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_20__.findHealthCheck)(afterHealth, "promotion.engine");
-                const recoveryPlan = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_20__.createHealthRecoveryPlan)(afterHealth);
-                res.status(afterCheck ? (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_20__.healthCheckHttpStatus)(afterCheck) : 503).json({
+                const afterHealth = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_22__.buildTgAutHealthSnapshot)(req.requestId);
+                const afterCheck = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_21__.findHealthCheck)(afterHealth, "promotion.engine");
+                const recoveryPlan = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_21__.createHealthRecoveryPlan)(afterHealth);
+                res.status(afterCheck ? (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_21__.healthCheckHttpStatus)(afterCheck) : 503).json({
                     operation: "promotion-start",
                     readOnly: false,
                     success: false,
@@ -116356,7 +116438,7 @@ router.get("/promote", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MOD
                     beforeRecoveryPlan,
                     beforeHealth,
                     afterHealth,
-                    beforeCheck: (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_20__.findHealthCheck)(beforeHealth, "promotion.engine"),
+                    beforeCheck: (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_21__.findHealthCheck)(beforeHealth, "promotion.engine"),
                     afterCheck,
                     requestId: req.requestId,
                 });
@@ -116364,10 +116446,10 @@ router.get("/promote", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MOD
             }
         }
         await promotor.startPromotion({ force: true });
-        const afterHealth = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_21__.buildTgAutHealthSnapshot)(req.requestId);
-        const afterCheck = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_20__.findHealthCheck)(afterHealth, "promotion.engine");
-        const recoveryPlan = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_20__.createHealthRecoveryPlan)(afterHealth);
-        const statusCode = afterCheck ? (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_20__.healthCheckHttpStatus)(afterCheck) : 503;
+        const afterHealth = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_22__.buildTgAutHealthSnapshot)(req.requestId);
+        const afterCheck = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_21__.findHealthCheck)(afterHealth, "promotion.engine");
+        const recoveryPlan = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_21__.createHealthRecoveryPlan)(afterHealth);
+        const statusCode = afterCheck ? (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_21__.healthCheckHttpStatus)(afterCheck) : 503;
         const success = statusCode === 200;
         if (res.headersSent) {
             return;
@@ -116383,7 +116465,7 @@ router.get("/promote", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MOD
             beforeRecoveryPlan,
             beforeHealth,
             afterHealth,
-            beforeCheck: (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_20__.findHealthCheck)(beforeHealth, "promotion.engine"),
+            beforeCheck: (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_21__.findHealthCheck)(beforeHealth, "promotion.engine"),
             afterCheck,
             requestId: req.requestId,
         });
@@ -116393,7 +116475,7 @@ router.get("/promote", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MOD
         if (res.headersSent) {
             return;
         }
-        const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_22__.createRouteComponentFailureEvidence)({
+        const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_23__.createRouteComponentFailureEvidence)({
             requestId: req.requestId,
             component: "promotion.engine",
             owner: "promotion",
@@ -116406,7 +116488,7 @@ router.get("/promote", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MOD
             readOnly: false,
             success: false,
             error: "Failed to start promotions",
-            message: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_22__.routeHealthErrorMessage)(error),
+            message: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_23__.routeHealthErrorMessage)(error),
             health: evidence.health,
             check: evidence.check,
             recoveryPlan: evidence.recoveryPlan,
@@ -116454,13 +116536,13 @@ router.get("/promote", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MOD
  */
 router.get("/checktghealth", _http_middlewares_leader_middleware__WEBPACK_IMPORTED_MODULE_10__.leaderOnlyMiddleware, async (req, res) => {
     try {
-        const snapshot = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_21__.buildTgAutHealthSnapshot)(req.requestId);
-        const check = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_20__.findHealthCheck)(snapshot, "telegram.connection");
+        const snapshot = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_22__.buildTgAutHealthSnapshot)(req.requestId);
+        const check = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_21__.findHealthCheck)(snapshot, "telegram.connection");
         if (!check) {
             throw new Error("Telegram health check is missing from service health snapshot");
         }
         if (check.status !== "healthy") {
-            res.status((0,_tg_core_health__WEBPACK_IMPORTED_MODULE_20__.healthCheckHttpStatus)(check)).json({
+            res.status((0,_tg_core_health__WEBPACK_IMPORTED_MODULE_21__.healthCheckHttpStatus)(check)).json({
                 operation: "manual-telegram-health-check",
                 readOnly: false,
                 success: false,
@@ -116470,7 +116552,7 @@ router.get("/checktghealth", _http_middlewares_leader_middleware__WEBPACK_IMPORT
                 health: snapshot,
                 healthStatus: check.status,
                 check,
-                recoveryPlan: (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_20__.createHealthRecoveryPlan)(snapshot),
+                recoveryPlan: (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_21__.createHealthRecoveryPlan)(snapshot),
                 requestId: req.requestId,
             });
             return;
@@ -116478,7 +116560,7 @@ router.get("/checktghealth", _http_middlewares_leader_middleware__WEBPACK_IMPORT
         const telegramManager = _telegram_client_access__WEBPACK_IMPORTED_MODULE_1__.TelegramManager.getInstance();
         const client = telegramManager.client;
         if (!client) {
-            const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_22__.createRouteComponentFailureEvidence)({
+            const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_23__.createRouteComponentFailureEvidence)({
                 requestId: req.requestId,
                 component: "telegram.connection",
                 owner: "telegram",
@@ -116503,12 +116585,12 @@ router.get("/checktghealth", _http_middlewares_leader_middleware__WEBPACK_IMPORT
             return;
         }
         const spamBot = await (0,_tg_core_telegram_utils_spam_bot_probe__WEBPACK_IMPORTED_MODULE_17__.runManualSpamBotProbe)(telegramManager.mobile, client);
-        const afterSnapshot = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_21__.buildTgAutHealthSnapshot)(req.requestId);
-        const afterCheck = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_20__.findHealthCheck)(afterSnapshot, "telegram.connection") ?? check;
+        const afterSnapshot = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_22__.buildTgAutHealthSnapshot)(req.requestId);
+        const afterCheck = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_21__.findHealthCheck)(afterSnapshot, "telegram.connection") ?? check;
         if (res.headersSent) {
             return;
         }
-        res.status((0,_tg_core_health__WEBPACK_IMPORTED_MODULE_20__.healthCheckHttpStatus)(afterCheck)).json({
+        res.status((0,_tg_core_health__WEBPACK_IMPORTED_MODULE_21__.healthCheckHttpStatus)(afterCheck)).json({
             operation: "manual-telegram-health-check",
             readOnly: false,
             success: true,
@@ -116523,7 +116605,7 @@ router.get("/checktghealth", _http_middlewares_leader_middleware__WEBPACK_IMPORT
             health: afterSnapshot,
             healthStatus: afterCheck.status,
             check: afterCheck,
-            recoveryPlan: (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_20__.createHealthRecoveryPlan)(afterSnapshot),
+            recoveryPlan: (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_21__.createHealthRecoveryPlan)(afterSnapshot),
             requestId: req.requestId,
         });
     }
@@ -116532,13 +116614,13 @@ router.get("/checktghealth", _http_middlewares_leader_middleware__WEBPACK_IMPORT
         if (res.headersSent) {
             return;
         }
-        const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_22__.createRouteComponentFailureEvidence)({
+        const evidence = (0,_health_route_health__WEBPACK_IMPORTED_MODULE_23__.createRouteComponentFailureEvidence)({
             requestId: req.requestId,
             component: "telegram.connection",
             owner: "telegram",
             summary: "Manual Telegram health check failed",
             error,
-            action: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_22__.routeHealthFailureAction)(error, "recover"),
+            action: (0,_health_route_health__WEBPACK_IMPORTED_MODULE_23__.routeHealthFailureAction)(error, "recover"),
         });
         const check = evidence.check;
         res.status(evidence.statusCode).json({
@@ -126833,11 +126915,15 @@ const redisThrottle = {
 /**
  * Lightweight Telegram liveness audit (tg-aut). Orchestration-only.
  */
-async function checktghealth(client, mobile = process.env.mobile, force = false) {
+async function checktghealth(client, mobile = process.env.mobile, force = false, opts = {}) {
     return (0,_tg_core_telegram_utils_checkTgHealth__WEBPACK_IMPORTED_MODULE_1__.checktghealth)(client, mobile, force, {
         store: daysLeftStore,
         throttle: redisThrottle,
-        onPermanentFailure: (error) => (0,_permanent_failure__WEBPACK_IMPORTED_MODULE_3__.handlePermanentTelegramFailure)(error),
+        onPermanentFailure: async (error) => {
+            const handled = await (0,_permanent_failure__WEBPACK_IMPORTED_MODULE_3__.handlePermanentTelegramFailure)(error);
+            opts.onPermanentFailure?.(error, handled);
+            return handled;
+        },
     });
 }
 /**
