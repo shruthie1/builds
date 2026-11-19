@@ -63706,8 +63706,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "c61f51d804e237902b8337771d0278232b33a09e" : 0;
-    const builtAt =  true ? "2026-11-19T18:16:07.111Z" : 0;
+    const sha =  true ? "3fec5484e4f71af11f9441c8b0c9e3498c593e3b" : 0;
+    const builtAt =  true ? "2026-11-19T18:35:03.273Z" : 0;
     return { sha, builtAt };
 }
 
@@ -64417,9 +64417,9 @@ async function initiateCall(amount, userDetails, reason = "Default") {
 }
 /** The "you already paid, call in 1-2 minutes" replies (same copy as the paid "already paid" pattern). */
 const ALREADY_PAID_CALL_SOON_MESSAGES = [
-    `You already paid! 😊\n\nI will call you in **1-2 minutes!**\n\nJust wait a bit! ⏱️`,
-    `Yes baby, I know you paid! 💋\n\nCall is coming in **1-2 mins**...\nJust be patient! 😉`,
-    `Payment received! ✅\n\nI'm preparing for your call...\nWait **1-2 minutes** na! ⏰`,
+    `Wait Baby!!\n\nlet me check!`,
+    `Yes baby!\n\nwait a minute!`,
+    `wait dear...!!\n\nI am checking!`,
 ];
 /**
  * A paid service is still owed (the user re-sent a credited screenshot, or asks for the call): answer from their state
@@ -77202,7 +77202,7 @@ const explicitWordsReplies = [
     "You want xxx na 😈\n\nAlone in my room I'll be your girl on **Call** 🔥",
     "**Dirty** talk kavala 😏\n\nI'll say dirty things in your ear 💋",
     "Call me randi Baby 🤤\n\nDoor is locked I'll be your personal one 💃",
-    "Tittu me Baby 😈\n\nLying **Naked** I love being your dirty girl 🔥",
+    "Baby 😈\n\nLying **Naked** I love being your dirty girl 🔥",
     "Gaali kavala 🤤\n\nI'll talk like your bad randi on **Call** 💋",
     "Say it dirty na 😏\n\nIn full **mood** call me your little one Baby 🔥",
 ];
@@ -77600,11 +77600,11 @@ const callOverMessages = [
     `**Your Call is Over Baby!!** ⏰\n\nPay Again if u want more! 💋\n\n**No MONEY? then No SERVICE!!**\nDont WASTE your TIME!! 😤`,
     `**Call Finished Dear!** 📞\n\nPay again for another Call! 💸\n\nI'm ready whenever you are... 😉`,
     `**Your Call Time's over babu!!** ⏱️\n\n**Want more?** Pay again na! 💦\n\nDon't be shy, I know you enjoyed it... 🙈`,
-    `**Call Over!!** 🔚\n\n**Pay for next session** if you want to continue Baby! 💋\n\nNo money = No service! Simple! 😏`,
+    `**Call is Over!!** 🔚\n\n**Pay for next session** if you want to continue Baby! 💋\n\nNo money = No service! Simple! 😏`,
     `**Your time Finished reyy!** ⏰\n\n**Pay again** and I'll show you more... 🔥\n\nOtherwise bye bye! 👋`,
     `**Payment time ended Baby!** 📱\n\n**Want another round?** Pay fast! 💸\n\nI'm getting Mood thinking about it... 💦`,
     `**Your Payment Over!!** ✅\n\n**Pay for more** if you're still hard... 🍆\n\nNo payment? Then stop wasting my time! ⏰`,
-    `**Call Finished!!** 🔚\n\n**Enjoyed it?** Pay again for full service! 💋`,
+    `**Your Call Finished!!** 🔚\n\n**Enjoyed it na?\n**Pay again for full service! 💋`,
 ];
 // Menu arrays (internal use only)
 // The demo menu body is the single shared source (buildDemoMenu); only the header varies here.
@@ -78904,9 +78904,9 @@ const paidPatterns = [
                 if ((0,_payments_service_eligibility__WEBPACK_IMPORTED_MODULE_7__.canProceedWithService)(userDetails)) {
                     // User recently paid - reassure them
                     (0,_pattern_followup__WEBPACK_IMPORTED_MODULE_14__.holdPaymentClaimReply)(event, context, (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_2__.pickOneMsg)([
-                        `You already paid! 😊\n\nI will call you in **1-2 minutes!**\n\nJust wait a bit! ⏱️`,
-                        `Yes baby, I know you paid! 💋\n\nCall is coming in **1-2 mins**...\nJust be patient! 😉`,
-                        `Payment received! ✅\n\nI'm preparing for your call...\nWait **1-2 minutes** na! ⏰`
+                        `Wait Baby!!\n\nlet me check!`,
+                        `Yes baby!\n\nwait a minute!`,
+                        `wait dear...!!\n\nI am checking!`,
                     ]), 'paid.alreadyPaid');
                     return true;
                 }
