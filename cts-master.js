@@ -26417,7 +26417,7 @@ let ClientService = ClientService_1 = class ClientService {
             let newMainMobile = null;
             let oldMainMobile = null;
             if (cleanUpdateDto.mobile !== undefined || cleanUpdateDto.session !== undefined) {
-                const current = await this.clientModel.findOne({ clientId }, { mobile: 1, session: 1, degraded: 1, deadMain: 1 })
+                const current = await this.clientModel.findOne({ clientId }, { mobile: 1, session: 1, degraded: 1, deadMain: 1, swappedAt: 1, sessionChangedAt: 1 })
                     .lean().exec();
                 const mobileChanged = !!current && cleanUpdateDto.mobile !== undefined && this.canonicalMobile(current.mobile) !== cleanUpdateDto.mobile;
                 const sessionChanged = !!current && cleanUpdateDto.session !== undefined && current.session !== cleanUpdateDto.session;
@@ -26435,12 +26435,21 @@ let ClientService = ClientService_1 = class ClientService {
                     this.logger.warn(`[${clientId}] ${mobileChanged ? 'Mobile' : 'Session'} changed by update; clearing the dead-main report`);
                 }
                 const extraSet = {};
-                if (sessionChanged)
+                if (mobileChanged) {
                     extraSet.swappedAt = new Date();
-                if (sessionChanged && !mobileChanged)
-                    extraSet.sessionChangedAt = extraSet.swappedAt;
-                else if (mobileChanged)
                     unset.sessionChangedAt = '';
+                }
+                else if (sessionChanged && (0, degraded_swap_1.isSessionOnlyStamp)(current)) {
+                    const at = new Date();
+                    extraSet.swappedAt = at;
+                    extraSet.sessionChangedAt = at;
+                    this.logger.log(`client-update kind=session_refresh swappedAt=legacy_session_only client=${clientId}`);
+                }
+                else if (sessionChanged) {
+                    extraSet.sessionChangedAt = new Date();
+                    const keptMs = current.swappedAt ? new Date(current.swappedAt).getTime() : NaN;
+                    this.logger.log(`client-update kind=session_refresh swappedAt=kept client=${clientId} hoursSinceSwap=${Number.isFinite(keptMs) ? ((Date.now() - keptMs) / 3_600_000).toFixed(1) : 'none'}`);
+                }
                 if (Object.keys(unset).length || Object.keys(extraSet).length) {
                     clientUpdate = { $set: { ...cleanUpdateDto, ...extraSet }, ...(Object.keys(unset).length ? { $unset: unset } : {}) };
                 }
@@ -26661,10 +26670,10 @@ let ClientService = ClientService_1 = class ClientService {
                 },
             };
         }
-        const swappedAtMs = current.swappedAt ? new Date(current.swappedAt).getTime() : 0;
+        const swappedAtMs = Math.max(current.swappedAt ? new Date(current.swappedAt).getTime() : 0, current.sessionChangedAt ? new Date(current.sessionChangedAt).getTime() : 0) || 0;
         const graceLeftMs = swappedAtMs + degraded_swap_1.SWAP_REPORT_GRACE_MS - Date.now();
         if (dto?.reason && !dto?.mobile && swappedAtMs && graceLeftMs > 0) {
-            this.logger.warn(`[${clientId}] setupClient report without reportedMobile ${Math.round((Date.now() - swappedAtMs) / 1000)}s after a cutover; ignored (may be the replaced process)`, { reason: dto.reason });
+            this.logger.warn(`[${clientId}] setupClient report without reportedMobile ${Math.round((Date.now() - swappedAtMs) / 1000)}s after a cutover or session change; ignored (may be the replaced process)`, { reason: dto.reason });
             return {
                 answer: {
                     status: 'cooldown',
@@ -26746,6 +26755,9 @@ let ClientService = ClientService_1 = class ClientService {
         const renewal = setInterval(() => { void this.renewSetupLeases(clientId, leaseOwner); }, this.leaseRenewMs);
         renewal.unref?.();
         try {
+            if (internal.refillSnapshot && await this.refillTargetStale(clientId, internal.refillSnapshot)) {
+                return { status: 'stale_main', swapped: false, clientId, message: 'Refill target changed since the sweep snapshot' };
+            }
             return await this.handleSetupClient(clientId, setupClientQueryDto, { ...internal, leaseOwner });
         }
         finally {
@@ -26758,6 +26770,31 @@ let ClientService = ClientService_1 = class ClientService {
                 this.logger.warn(`[${clientId}] Lease release failed (expires in ${degraded_swap_1.SWAP_LEASE_TTL_MS / 60_000} min): ${(0, parseError_1.parseError)(error, '', false).message}`);
             }
         }
+    }
+    async refillTargetStale(clientId, snapshot) {
+        const fresh = await this.clientModel.findOne({ clientId }).lean().exec();
+        if (!fresh)
+            return false;
+        const now = Date.now();
+        let detail = null;
+        let health = { spamStatus: null, limitedUntilMs: null };
+        if (this.canonicalMobile(fresh.mobile) !== this.canonicalMobile(snapshot.mobile))
+            detail = 'mobile_changed';
+        else if ((0, degraded_swap_1.toTimeMs)(fresh.swappedAt) !== snapshot.swappedAtMs)
+            detail = 'swapped';
+        else {
+            const state = await this.readMainState(fresh);
+            health = state.health;
+            const skip = state.limited ? (0, degraded_swap_1.poolRefillSkip)(fresh, state.health, now) : null;
+            if (!state.limited)
+                detail = 'limit_gone';
+            else if (skip)
+                detail = skip === 'skipped_recent_swap' ? 'recent_swap' : 'short_limit';
+        }
+        if (!detail)
+            return false;
+        this.logger.log((0, degraded_swap_1.poolRefillLogLine)('skip', clientId, 'stale_main', fresh, health, now, `detail=${detail}`));
+        return true;
     }
     async renewSetupLeases(clientId, leaseOwner) {
         const until = new Date(Date.now() + degraded_swap_1.SWAP_LEASE_TTL_MS);
@@ -27818,7 +27855,7 @@ let ClientService = ClientService_1 = class ClientService {
         const upgrade = await this.upgradeDegradedClients(clients.filter((c) => !handled.has(c.clientId) && c.degraded && !states.get(c.clientId)?.dead), states, clients);
         for (const row of upgrade)
             handled.add(row.clientId);
-        const refill = await this.refillLimitedMains(clients.filter((c) => !handled.has(c.clientId) && !c.degraded && states.get(c.clientId)?.limited), clients);
+        const refill = await this.refillLimitedMains(clients.filter((c) => !handled.has(c.clientId) && !c.degraded && states.get(c.clientId)?.limited), clients, states);
         return { rescue, upgrade, refill };
     }
     async readMainState(client) {
@@ -27912,7 +27949,7 @@ let ClientService = ClientService_1 = class ClientService {
             (0, parseError_1.parseError)(error, `[${client.clientId}] ${pass} failed`, false);
             return { clientId: client.clientId, status: 'failed', attempts: await this.notePassOutcome(pass, client, all, decision, false) };
         }
-        if (result.status === 'cooldown' || result.status === 'disabled')
+        if (result.status === 'cooldown' || result.status === 'disabled' || result.status === 'stale_main')
             return { clientId: client.clientId, status: result.status };
         const used = await this.notePassOutcome(pass, client, all, decision, result.swapped);
         return {
@@ -28021,7 +28058,7 @@ let ClientService = ClientService_1 = class ClientService {
             && docUntil <= now
             && markerUntil <= now;
     }
-    async refillLimitedMains(clients, all) {
+    async refillLimitedMains(clients, all, states) {
         const results = [];
         const today = client_helper_utils_1.ClientHelperUtils.getTodayDateString();
         let attempts = 0;
@@ -28029,6 +28066,13 @@ let ClientService = ClientService_1 = class ClientService {
             if (attempts >= degraded_swap_1.POOL_REFILL_MAX_PER_RUN)
                 break;
             try {
+                const health = states.get(client.clientId).health;
+                const skip = (0, degraded_swap_1.poolRefillSkip)(client, health, Date.now());
+                if (skip) {
+                    this.logger.log((0, degraded_swap_1.poolRefillLogLine)('skip', client.clientId, skip === 'skipped_recent_swap' ? 'recent_swap' : 'short_limit', client, health, Date.now()));
+                    results.push({ clientId: client.clientId, status: skip });
+                    continue;
+                }
                 const decision = await this.passDecision('refill', client, all);
                 if (decision.kind !== 'due') {
                     results.push({ clientId: client.clientId, status: decision.kind === 'stopped' ? 'stopped' : 'skipped_cooldown', attempts: decision.attempts });
@@ -28039,7 +28083,11 @@ let ClientService = ClientService_1 = class ClientService {
                 if (!spare.length)
                     continue;
                 attempts++;
-                results.push(await this.runPassAttempt('refill', client, all, decision, { days: 0, archiveOld: true, formalities: true, reason: degraded_swap_1.POOL_REFILL_REASON }, {}));
+                const row = await this.runPassAttempt('refill', client, all, decision, { days: 0, archiveOld: true, formalities: true, reason: degraded_swap_1.POOL_REFILL_REASON }, { refillSnapshot: { mobile: client.mobile, swappedAtMs: (0, degraded_swap_1.toTimeMs)(client.swappedAt) } });
+                if (row.status !== 'stale_main') {
+                    this.logger.log((0, degraded_swap_1.poolRefillLogLine)('swap', client.clientId, degraded_swap_1.POOL_REFILL_REASON, client, health, Date.now(), `result=${row.status}`));
+                }
+                results.push(row);
             }
             catch (error) {
                 (0, parseError_1.parseError)(error, `[${client.clientId}] pool refill failed`, false);
@@ -28480,7 +28528,10 @@ exports.ClientService = ClientService = ClientService_1 = __decorate([
 
 
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.PASS_MAX_ATTEMPTS = exports.PASS_RETRY_BASE_MS = exports.MAIN_SPAM_STATUS_FRESH_MS = exports.SWAP_REPORT_GRACE_MS = exports.SWAP_LEASE_RENEW_MS = exports.SWAP_LEASE_TTL_MS = exports.DEAD_MAIN_HANDOFF_WAIT_MS = exports.POOL_REFILL_MAX_PER_RUN = exports.UPGRADE_MAX_PER_RUN = exports.RESCUE_MAX_PER_RUN = exports.POOL_REFILL_REASON = exports.DEAD_MAIN_RESCUE_REASON = exports.DEAD_SWAP_REASON_CODES = exports.DEGRADED_UPGRADE_REASON = exports.SIBLING_MIN_SPARES_AFTER = exports.ALL_DEGRADED_TIERS = void 0;
+exports.PASS_MAX_ATTEMPTS = exports.PASS_RETRY_BASE_MS = exports.toTimeMs = exports.POOL_REFILL_RECENT_SWAP_MS = exports.MIN_LIMIT_DAYS_FOR_SWAP = exports.MAIN_SPAM_STATUS_FRESH_MS = exports.SWAP_REPORT_GRACE_MS = exports.SWAP_LEASE_RENEW_MS = exports.SWAP_LEASE_TTL_MS = exports.DEAD_MAIN_HANDOFF_WAIT_MS = exports.POOL_REFILL_MAX_PER_RUN = exports.UPGRADE_MAX_PER_RUN = exports.RESCUE_MAX_PER_RUN = exports.POOL_REFILL_REASON = exports.DEAD_MAIN_RESCUE_REASON = exports.DEAD_SWAP_REASON_CODES = exports.DEGRADED_UPGRADE_REASON = exports.SIBLING_MIN_SPARES_AFTER = exports.ALL_DEGRADED_TIERS = void 0;
+exports.isSessionOnlyStamp = isSessionOnlyStamp;
+exports.poolRefillSkip = poolRefillSkip;
+exports.poolRefillLogLine = poolRefillLogLine;
 exports.leaseFreeFilter = leaseFreeFilter;
 exports.isDeadMainEvidence = isDeadMainEvidence;
 exports.passRetryDelayMs = passRetryDelayMs;
@@ -28519,6 +28570,36 @@ exports.SWAP_LEASE_TTL_MS = 10 * 60 * 1000;
 exports.SWAP_LEASE_RENEW_MS = 2 * 60 * 1000;
 exports.SWAP_REPORT_GRACE_MS = 15 * 60 * 1000;
 exports.MAIN_SPAM_STATUS_FRESH_MS = 7 * 24 * 60 * 60 * 1000;
+exports.MIN_LIMIT_DAYS_FOR_SWAP = 3;
+exports.POOL_REFILL_RECENT_SWAP_MS = 24 * 60 * 60 * 1000;
+const toTimeMs = (value) => {
+    const ms = value ? new Date(value).getTime() : NaN;
+    return Number.isFinite(ms) ? ms : 0;
+};
+exports.toTimeMs = toTimeMs;
+function isSessionOnlyStamp(client) {
+    const swappedAtMs = (0, exports.toTimeMs)(client.swappedAt);
+    return swappedAtMs > 0 && (0, exports.toTimeMs)(client.sessionChangedAt) === swappedAtMs;
+}
+function poolRefillSkip(client, health, now) {
+    const swappedAtMs = (0, exports.toTimeMs)(client.swappedAt);
+    if (swappedAtMs > 0 && !isSessionOnlyStamp(client) && now - swappedAtMs < exports.POOL_REFILL_RECENT_SWAP_MS)
+        return 'skipped_recent_swap';
+    if (health.spamStatus === 'harsh')
+        return null;
+    const untilMs = health.limitedUntilMs ?? 0;
+    if (!(untilMs > now))
+        return 'skipped_short_limit';
+    return Math.ceil((untilMs - now) / (24 * 60 * 60 * 1000)) >= exports.MIN_LIMIT_DAYS_FOR_SWAP ? null : 'skipped_short_limit';
+}
+function poolRefillLogLine(kind, clientId, reason, client, health, now, extra = '') {
+    const untilMs = health.limitedUntilMs ?? 0;
+    const daysLeft = health.spamStatus === 'harsh' ? 'harsh'
+        : untilMs > 0 ? String(Math.ceil((untilMs - now) / (24 * 60 * 60 * 1000))) : 'none';
+    const swappedAtMs = (0, exports.toTimeMs)(client.swappedAt);
+    const hoursSinceSwap = swappedAtMs > 0 ? ((now - swappedAtMs) / 3_600_000).toFixed(1) : 'none';
+    return `pool-refill kind=${kind} client=${clientId} reason=${reason} daysLeft=${daysLeft} hoursSinceSwap=${hoursSinceSwap}${extra ? ` ${extra}` : ''}`;
+}
 function leaseFreeFilter(field, now) {
     return { $or: [{ [field]: { $exists: false } }, { [field]: null }, { [`${field}.until`]: { $lte: now } }] };
 }
