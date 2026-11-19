@@ -6953,7 +6953,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   evaluateEligibility: () => (/* binding */ evaluateEligibility),
 /* harmony export */   loadChannelCooldowns: () => (/* binding */ loadChannelCooldowns),
 /* harmony export */   noteChannelCooldown: () => (/* binding */ noteChannelCooldown),
-/* harmony export */   prepareCycleEligibility: () => (/* binding */ prepareCycleEligibility)
+/* harmony export */   prepareCycleEligibility: () => (/* binding */ prepareCycleEligibility),
+/* harmony export */   promoSkipLine: () => (/* binding */ promoSkipLine)
 /* harmony export */ });
 /* harmony import */ var _policy_eligible_now__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../../policy/eligible-now */ "../../packages/tg-channel-state/src/channel-message-promotions/policy/eligible-now.ts");
 /* harmony import */ var _redis_redis_channel_cooldown__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../../redis/redis-channel-cooldown */ "../../packages/tg-channel-state/src/channel-message-promotions/redis/redis-channel-cooldown.ts");
@@ -7117,13 +7118,22 @@ async function noteChannelCooldown(host, channelId) {
  * Send-time eligibility, the same predicate as pre-ranking so the two cannot drift. A follow-up
  * bypasses the queue hold and the cooldown, as before.
  */
-function evaluateEligibility(host, channel, doc, isFollowUp) {
+/** One greppable send-path skip line (owner logging rule 2026-11-19); the mobile is masked to its last 4. */
+function promoSkipLine(reason, channelId, mobile, isFollowUp) {
+    return `promo-flow kind=skip reason=${reason} channel=${channelId} mobile=****${String(mobile ?? '').slice(-4)} stage=${isFollowUp ? 'followup' : 'main'}`;
+}
+function evaluateEligibility(host, channel, doc, isFollowUp, chanblocked = false) {
     const result = (0,_policy_eligible_now__WEBPACK_IMPORTED_MODULE_0__.eligibleNow)(channel, doc, {
+        chanblocked,
         queued: !isFollowUp && heldByQueue(host, channel.channelId),
         cooldownUntil: !isFollowUp ? host.cooldownUntilOf(channel.channelId) : null,
     }, Date.now());
-    if (!result.eligible)
+    if (result.reason === 'chanblock') {
+        host.log('info', promoSkipLine('chanblocked_mobile', channel.channelId, host.options.account.mobile, isFollowUp));
+    }
+    else if (!result.eligible) {
         host.log('debug', `Skipping ${channel.channelId}: ${result.detail}`);
+    }
     return result.eligible;
 }
 
@@ -10083,6 +10093,19 @@ class PromotionFlowRunner {
                 return 'skipped';
             }
         }
+        // Follow-ups and refreshed mains re-read the per-mobile block (USER_BANNED 3 h / forbidden 30 d): a block set
+        // after selection, or after the follow-up was queued, must stop this send. Fail closed on a failed read.
+        let chanblocked = false;
+        if (isFollowUp || refreshBeforePlanning) {
+            try {
+                const blocked = new Set(await this.options.account.blockedChannelsForMobile([channel.channelId]));
+                chanblocked = blocked.has((0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_3__.normalizeChannelId)(channel.channelId) ?? channel.channelId);
+            }
+            catch (error) {
+                this.log('warn', `${(0,_flow_runner_eligibility__WEBPACK_IMPORTED_MODULE_14__.promoSkipLine)('chanblock_read_failed', channel.channelId, this.options.account.mobile, isFollowUp)} error=${this.compact(this.normalizeError(error))}`);
+                return 'skipped';
+            }
+        }
         this.log('debug', `Promotion channel attempt start; ${this.formatChannel(channel)} isFollowUp=${isFollowUp}`);
         const percentiles = await this.loadPercentiles(channel);
         let doc = null;
@@ -10095,7 +10118,7 @@ class PromotionFlowRunner {
         }
         const mergedChannel = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_11__.mergePromotionHealthSignals)(channel, doc);
         const planningChannel = mergedChannel;
-        const eligible = await this.evaluateEligibility(planningChannel, doc, isFollowUp);
+        const eligible = await this.evaluateEligibility(planningChannel, doc, isFollowUp, chanblocked);
         if (!eligible)
             return 'skipped';
         const stats = await this.getStatsOrDefault('message planning');
@@ -10316,8 +10339,8 @@ class PromotionFlowRunner {
         return this.startedByStart && !this.running;
     }
     /** Flow v3 P5: the shared predicate (policy/eligible-now.ts), so pre-ranking and send-time eligibility cannot drift. */
-    async evaluateEligibility(channel, doc, isFollowUp) {
-        return (0,_flow_runner_eligibility__WEBPACK_IMPORTED_MODULE_14__.evaluateEligibility)(hostOf(this), channel, doc, isFollowUp);
+    async evaluateEligibility(channel, doc, isFollowUp, chanblocked = false) {
+        return (0,_flow_runner_eligibility__WEBPACK_IMPORTED_MODULE_14__.evaluateEligibility)(hostOf(this), channel, doc, isFollowUp, chanblocked);
     }
     async trySendPromotion(channel, candidate, isFollowUp) {
         try {
@@ -30699,6 +30722,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   REDACTED: () => (/* binding */ REDACTED),
 /* harmony export */   isSecretKey: () => (/* binding */ isSecretKey),
+/* harmony export */   maskDigitRuns: () => (/* binding */ maskDigitRuns),
 /* harmony export */   redactSecretText: () => (/* binding */ redactSecretText)
 /* harmony export */ });
 /**
@@ -30722,6 +30746,13 @@ const BOT_TOKEN_LIKE = /(?<!\d)(\d{6,12}):[A-Za-z0-9_-]{30,}/g; // also inside "
 const REDACTED = '[redacted]';
 function isSecretKey(key) {
     return SECRET_KEYS.has(String(key).toLowerCase());
+}
+/**
+ * Log lines only: every run of 6+ digits (chat id, mobile, UTR, UPI handle digits) becomes "****" + its last 4.
+ * For raw error messages that may embed an id. Never apply it to stored or returned data.
+ */
+function maskDigitRuns(text) {
+    return String(text).replace(/\d{6,}/g, (run) => `****${run.slice(-4)}`);
 }
 function redactSecretText(text) {
     if (typeof text !== 'string')
@@ -52865,8 +52896,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "465df56153a94062b1f94ad237289222bcd603ea" : 0;
-    const builtAt =  true ? "2026-11-19T16:46:17.526Z" : 0;
+    const sha =  true ? "c61f51d804e237902b8337771d0278232b33a09e" : 0;
+    const builtAt =  true ? "2026-11-19T18:16:05.430Z" : 0;
     return { sha, builtAt };
 }
 
