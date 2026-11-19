@@ -48,6 +48,17 @@ const DEFAULTS = {
 };
 /** Statements per flush. Bounds a bisect of an all-bad batch (2N-1 statements) to one tick's worth. */
 const MAX_STATEMENTS_PER_FLUSH = 64;
+/** Subdirectory of the spool dir for lines of a shape this build does not know (keepUnknownLines). */
+const UNKNOWN_SPOOL_DIR = "unknown";
+/**
+ * A whole spool record this build cannot place: batch id, table, a column-name list and a value list of the same
+ * length. A newer build wrote it; it is kept, not dropped. Anything less is a corrupt line.
+ */
+function isForeignRecord(rec) {
+    return typeof rec.b === "string" && rec.b !== "" && typeof rec.t === "string" && rec.t !== ""
+        && Array.isArray(rec.c) && rec.c.length > 0 && rec.c.every((c) => typeof c === "string")
+        && Array.isArray(rec.v) && rec.v.length === rec.c.length;
+}
 /** Rows per spool file before a new one is started, so a replay never reads a huge file. */
 const SPOOL_ROTATE_ROWS = 5000;
 /**
@@ -556,6 +567,8 @@ class AnalyticsSink {
         this.replayedRows = 0;
         this.alreadyCommitted = 0;
         this.spoolErrors = 0;
+        /** Spool lines of a shape this build does not know, kept in <spoolDir>/unknown (keepUnknownLines). */
+        this.spoolUnknown = 0;
         this.droppedAfterStop = 0;
         this.internalErrors = 0;
         this.everEnabled = false;
@@ -624,6 +637,7 @@ class AnalyticsSink {
         this.disabledReason = "";
         this.stopped = false;
         this.finalSpilled = false;
+        this.restoreUnknownSpool();
         this.claimSpoolFiles();
         this.reportOrphanSpools();
         this.pruneQuarantine();
@@ -891,8 +905,7 @@ class AnalyticsSink {
         const tmp = path__WEBPACK_IMPORTED_MODULE_3__.join(this.spoolDir, `${base}.tmp-${process.pid}`);
         const file = path__WEBPACK_IMPORTED_MODULE_3__.join(this.spoolDir, `${base}.claimed-${process.pid}-${this.instanceKey}`);
         try {
-            const slim = spoolShape(row);
-            const line = JSON.stringify({ b: batch.id, f: firstAt, t: row.table, c: slim.columns, v: slim.values });
+            const line = spoolLine(batch.id, firstAt, row);
             const text = `${line}\n${spoolEndMarker(1)}`;
             fs__WEBPACK_IMPORTED_MODULE_1__.mkdirSync(this.spoolDir, { recursive: true });
             this.notePaymentOverCap(this.spoolBytesUsed() + Buffer.byteLength(text), 1);
@@ -1501,7 +1514,7 @@ class AnalyticsSink {
         const max = this.opts.maxSpoolBytes;
         const otherMax = Math.floor(max * (1 - PAYMENT_SPOOL_RESERVE));
         for (const b of live) {
-            const text = b.rows.map((r) => { const slim = spoolShape(r); return JSON.stringify({ b: b.id, f: b.firstAt, t: r.table, c: slim.columns, v: slim.values }); }).join("\n") + "\n";
+            const text = b.rows.map((r) => spoolLine(b.id, b.firstAt, r)).join("\n") + "\n";
             const size = Buffer.byteLength(text);
             if (b.table === "payment_event") {
                 this.notePaymentOverCap(used + bytes + size, b.rows.length);
@@ -2130,6 +2143,9 @@ class AnalyticsSink {
             let corrupt = 0;
             let retired = 0;
             let parsed = 0;
+            const unknownLines = [];
+            const unknownIds = new Map();
+            const knownLines = new Map();
             for (const line of text.split("\n")) {
                 if (!line.trim())
                     continue;
@@ -2167,12 +2183,33 @@ class AnalyticsSink {
                     : undefined;
                 if (!spec || !known || typeof rec.b !== "string" || !rec.b
                     || rec.v.length !== known.length) {
+                    // A whole record in a shape this build does not know (a newer build wrote it): kept, never deleted.
+                    if (isForeignRecord(rec)) {
+                        unknownLines.push(line);
+                        unknownIds.set(rec.b, (unknownIds.get(rec.b) ?? 0) + 1);
+                        continue;
+                    }
                     this.spoolErrors += 1;
                     corrupt += 1;
                     continue;
                 }
-                if (known !== spec.columns)
-                    rec.v = this.upgradeLegacyValues(spec.columns, known, rec.v);
+                // `x`: extra values by name (spoolShape). Only names of this table's own columns are taken; any other name is
+                // dropped and the row replays without it (no deferral). Accepted trade-off (re-review 2): a reader that does
+                // not know a name in `x` (this build for a future name; cf860744 and c9609bc4^, which ignore `x`) commits the
+                // row without that value. A rollback to those builds loses `mobile` on payment lines written in this shape.
+                let cols = known;
+                let vals = rec.v;
+                if (rec.x !== null && typeof rec.x === "object" && !Array.isArray(rec.x)) {
+                    const x = rec.x;
+                    for (const c of spec.columns) {
+                        if (!cols.includes(c) && Object.prototype.hasOwnProperty.call(x, c)) {
+                            cols = [...cols, c];
+                            vals = [...vals, x[c]];
+                        }
+                    }
+                }
+                if (cols !== spec.columns)
+                    rec.v = this.upgradeLegacyValues(spec.columns, cols, vals);
                 const firstAt = typeof rec.f === "number" && Number.isFinite(rec.f) ? rec.f : fallbackAt;
                 if (Date.now() - firstAt > SPOOL_MAX_AGE_MS) {
                     const list = oldLines.get(rec.b) ?? [];
@@ -2187,6 +2224,31 @@ class AnalyticsSink {
                 }
                 batch.rows.push({ table, columns: spec.columns, values: rec.v });
                 rows += 1;
+                const own = knownLines.get(rec.b) ?? [];
+                own.push(line);
+                knownLines.set(rec.b, own);
+            }
+            // One batch id covers every row of a batch (daily counters share one id across tables). Committing the known
+            // rows under it would make the newer reader that knows the rest see the id as written and drop those rows
+            // (re-review 1 finding 1): a batch with any unknown row is kept whole, uncommitted. "Unknown" = a table or
+            // `c` column list this build does not know. Unknown names inside `x` do not defer (see the `x` merge above).
+            for (const [id, unknownRows] of unknownIds) {
+                let knownRows = 0;
+                const batch = batches.get(id);
+                if (batch) {
+                    batches.delete(id);
+                    rows -= batch.rows.length;
+                    knownRows += batch.rows.length;
+                    unknownLines.push(...(knownLines.get(id) ?? []));
+                }
+                const old = oldLines.get(id);
+                if (old) {
+                    oldLines.delete(id);
+                    knownRows += old.length;
+                    unknownLines.push(...old);
+                }
+                // One greppable line per deferred batch (owner 2026-11-19). Batch ids are random uuids, no user data.
+                this.log("warn", `[analytics] spool batch ${id} deferred whole (unknown shape): ${knownRows} known + ${unknownRows} unknown row(s) kept for a newer build (${path__WEBPACK_IMPORTED_MODULE_3__.basename(file).replace(/\.claimed-.*$/, "")})`);
             }
             if (retired > 0)
                 this.log("info", `[analytics] ${retired} line(s) of a retired table skipped in ${file}`);
@@ -2194,6 +2256,10 @@ class AnalyticsSink {
                 this.log("warn", `[analytics] ${corrupt} corrupt/partial line(s) skipped in ${file}`);
                 this.reportLoss(`corrupt spool line (${path__WEBPACK_IMPORTED_MODULE_3__.basename(file)})`, corrupt);
             }
+            // Unknown-shape lines go to <spoolDir>/unknown before the file can be deleted; if that fails the file stays
+            // (claimed by this pid, re-read at the next start) and nothing of it is queued now.
+            if (unknownLines.length > 0 && !(await this.keepUnknownLines(file, unknownLines)))
+                continue;
             await this.quarantineLines(file, oldLines);
             if (this.finalSpilled)
                 return false;
@@ -2208,6 +2274,51 @@ class AnalyticsSink {
             return true;
         }
         return false;
+    }
+    /**
+     * Lines of a shape this build does not know (a newer build's table or columns): written whole to
+     * <spoolDir>/unknown/<base>.u<ms>-<pid>-<n> (tmp + rename), never deleted by this build. start() moves this
+     * instance's files there back into the spool (restoreUnknownSpool), so the build that knows the shape replays
+     * them, exactly once by batch id. Not a loss: counted in stats().spoolUnknown and logged. Returns false when
+     * the lines could not be kept (the caller then keeps the source file).
+     */
+    async keepUnknownLines(file, lines) {
+        const dir = path__WEBPACK_IMPORTED_MODULE_3__.join(this.spoolDir, UNKNOWN_SPOOL_DIR);
+        this.quarantineSeq += 1;
+        const target = path__WEBPACK_IMPORTED_MODULE_3__.join(dir, `${path__WEBPACK_IMPORTED_MODULE_3__.basename(file).replace(/\.claimed-.*$/, "")}.u${Date.now()}-${process.pid}-${this.quarantineSeq}`);
+        try {
+            await fs__WEBPACK_IMPORTED_MODULE_1__.promises.mkdir(dir, { recursive: true });
+            await fs__WEBPACK_IMPORTED_MODULE_1__.promises.writeFile(`${target}.tmp`, `${lines.join("\n")}\n`);
+            await fs__WEBPACK_IMPORTED_MODULE_1__.promises.rename(`${target}.tmp`, target);
+        }
+        catch (err) {
+            this.spoolErrors += 1;
+            this.log("warn", `[analytics] cannot keep ${lines.length} unknown-shape spool line(s) of ${file}, file kept: ${describe(err)}`);
+            return false;
+        }
+        this.spoolUnknown += lines.length;
+        this.log("warn", `[analytics] ${lines.length} spool line(s) of a shape this build does not know kept in ${target} (a newer build replays them)`);
+        return true;
+    }
+    /** start(): this instance's files in <spoolDir>/unknown go back into the spool for this build's replay. */
+    restoreUnknownSpool() {
+        const dir = path__WEBPACK_IMPORTED_MODULE_3__.join(this.spoolDir, UNKNOWN_SPOOL_DIR);
+        let names;
+        try {
+            names = fs__WEBPACK_IMPORTED_MODULE_1__.readdirSync(dir).sort();
+        }
+        catch {
+            return;
+        }
+        const own = new RegExp(`^${this.instanceKey}-\\d{13}-[a-z0-9]+\\.jsonl\\.u\\d+-\\d+-\\d+$`);
+        for (const name of names) {
+            if (!own.test(name))
+                continue;
+            try {
+                fs__WEBPACK_IMPORTED_MODULE_1__.renameSync(path__WEBPACK_IMPORTED_MODULE_3__.join(dir, name), this.newSpoolPath());
+            }
+            catch { /* another process took it */ }
+        }
     }
     /**
      * A spool line from an older build: pad it to the current column list. `service` is filled with
@@ -2386,7 +2497,7 @@ class AnalyticsSink {
             this.log("info", `[analytics] summary written=${s.written} buffered=${s.buffered} retryPending=${s.retryPending} `
                 + `spooled=${s.spooledRows} replayed=${s.replayedRows} alreadyCommitted=${s.alreadyCommitted} `
                 + `droppedOverflow=${s.droppedOverflow} droppedError=${s.droppedError} droppedSpoolFull=${s.droppedSpoolFull} `
-                + `droppedInvalid=${s.droppedInvalid} flushFailures=${s.flushFailures} spoolErrors=${s.spoolErrors} internalErrors=${s.internalErrors} droppedHourly=${s.droppedHourly ?? 0}`);
+                + `droppedInvalid=${s.droppedInvalid} flushFailures=${s.flushFailures} spoolErrors=${s.spoolErrors} spoolUnknown=${s.spoolUnknown ?? 0} internalErrors=${s.internalErrors} droppedHourly=${s.droppedHourly ?? 0}`);
         }
         catch { /* never */ }
     }
@@ -2412,6 +2523,7 @@ class AnalyticsSink {
             droppedSpoolFull: this.droppedSpoolFull,
             alreadyCommitted: this.alreadyCommitted,
             spoolErrors: this.spoolErrors,
+            spoolUnknown: this.spoolUnknown,
             droppedHourly: this.droppedHourly,
             droppedV2: this.droppedV2,
             droppedChannelReactions: this.droppedChannelReactions,
@@ -2446,12 +2558,35 @@ function projectV2Columns(table, rows, withV2) {
     return { rows: rows.map((r) => ({ ...r, columns: r.columns.slice(0, base), values: r.values.slice(0, base) })), v2: false };
 }
 /**
- * Spool line shape: a row with no measurement value is written in the pre-2026-11-15 shape (a
- * legacyColumns entry), so lines stay small and an older build can still replay them after a rollback.
+ * Columns a spool line carries by name in `x`, never in `c`/`v`: those the build before cf860744 (c9609bc4^) does
+ * not know. That reader rejects an unknown column list and deletes the file (review 2026-11-19 #003 finding 4), so
+ * `c` stays a list it accepts and a rollback replays the row without these values. The replay of this build merges
+ * `x` back by name (loadNextSpoolFile). Trade-off: a reader that ignores `x` (cf860744, c9609bc4^) writes the payment
+ * WITHOUT its mobile, so a rollback to those builds loses `mobile` on these lines (payer corrections then use the
+ * pre-2026-11-19 guess for them). The other measurement columns are known to that build and keep the
+ * pre-2026-11-19 rule: dropped when empty, else in `c`.
  */
+const SPOOL_BY_NAME = { payment_event: ["mobile"] };
 function spoolShape(row) {
-    const projected = projectV2Columns(row.table, [row], true);
-    return projected.rows[0];
+    const byName = SPOOL_BY_NAME[row.table];
+    const base = byName ? row.columns.length - byName.length : 0;
+    if (!byName || base <= 0 || !byName.every((c, i) => row.columns[base + i] === c)) {
+        const projected = projectV2Columns(row.table, [row], true).rows[0];
+        return { columns: projected.columns, values: projected.values, extra: null };
+    }
+    const x = {};
+    byName.forEach((c, i) => {
+        const v = row.values[base + i];
+        if (v !== null && v !== undefined)
+            x[c] = v;
+    });
+    return { columns: row.columns.slice(0, base), values: row.values.slice(0, base), extra: Object.keys(x).length ? x : null };
+}
+function spoolLine(id, firstAt, row) {
+    const slim = spoolShape(row);
+    return JSON.stringify(slim.extra
+        ? { b: id, f: firstAt, t: row.table, c: slim.columns, v: slim.values, x: slim.extra }
+        : { b: id, f: firstAt, t: row.table, c: slim.columns, v: slim.values });
 }
 /** Rows of a batch that could have carried measurement columns. */
 function v2Rows(batch) {
@@ -2836,7 +2971,7 @@ const DISABLED = {
         droppedInvalid: 0,
         flushFailures: 0, consecutiveFailures: 0, backoffUntil: 0,
         retryPending: 0, spooledRows: 0, replayedRows: 0,
-        droppedSpoolFull: 0, alreadyCommitted: 0, spoolErrors: 0, pendingSpill: 0, droppedAfterStop: 0, internalErrors: 0,
+        droppedSpoolFull: 0, alreadyCommitted: 0, spoolErrors: 0, spoolUnknown: 0, pendingSpill: 0, droppedAfterStop: 0, internalErrors: 0,
     }),
 };
 
@@ -37581,6 +37716,8 @@ class UserDataRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_2__.B
         const paid = Number(input.lifetimeAmount);
         const lifetimeAmount = Number.isFinite(paid) && paid > 0 ? paid : amount;
         const sumLifetime = input.lifetimeMode !== 'max';
+        const legacyKey = String(input.legacyKey ?? '').trim();
+        const keys = legacyKey && legacyKey !== key ? [key, legacyKey] : [key];
         // upsert:false — a credit merges into an EXISTING conversation row. Creating one here would
         // produce a money row for a user who has never spoken, and the row is always created on
         // first inbound message anyway (a payment screenshot IS an inbound message).
@@ -37594,7 +37731,7 @@ class UserDataRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_2__.B
         // by scripts/verify-credit-payment.cjs.
         const pipeline = [
             // `key` is wrapped in $literal: inside a pipeline a value starting with '$' would be read as a field path.
-            { $set: { __seen: { $in: [{ $literal: key }, { $ifNull: ['$creditKeys', []] }] } } },
+            { $set: { __seen: { $or: keys.map((k) => ({ $in: [{ $literal: k }, { $ifNull: ['$creditKeys', []] }] })) } } },
             {
                 $set: {
                     payAmount: {
@@ -37637,7 +37774,7 @@ class UserDataRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_2__.B
                 return { applied: false, reason: 'no-row' };
             // Decide from the PRE-image, never from a second read: if the key was already present
             // before this write, this call is the replay.
-            const seen = Array.isArray(before.creditKeys) && before.creditKeys.includes(key);
+            const seen = Array.isArray(before.creditKeys) && keys.some((k) => before.creditKeys.includes(k));
             if (seen) {
                 return {
                     applied: false,
@@ -52728,8 +52865,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "cf860744b9e4f1a320c6b6036ddd0e81ddda1a62" : 0;
-    const builtAt =  true ? "2026-11-19T07:27:24.774Z" : 0;
+    const sha =  true ? "465df56153a94062b1f94ad237289222bcd603ea" : 0;
+    const builtAt =  true ? "2026-11-19T16:46:17.526Z" : 0;
     return { sha, builtAt };
 }
 
