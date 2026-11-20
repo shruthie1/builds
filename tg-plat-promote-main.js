@@ -36653,6 +36653,8 @@ function normalizePromoteStatsData(data) {
 
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   CREDITED_PAYER_MAX_PAGES: () => (/* binding */ CREDITED_PAYER_MAX_PAGES),
+/* harmony export */   CREDITED_PAYER_MAX_TIME_MS: () => (/* binding */ CREDITED_PAYER_MAX_TIME_MS),
 /* harmony export */   CREDITED_PAYER_MIN_AMOUNT: () => (/* binding */ CREDITED_PAYER_MIN_AMOUNT),
 /* harmony export */   CREDITED_PAYER_SCAN_LIMIT: () => (/* binding */ CREDITED_PAYER_SCAN_LIMIT),
 /* harmony export */   PERSONA_ASSIGNMENT_PROJECTION: () => (/* binding */ PERSONA_ASSIGNMENT_PROJECTION),
@@ -36790,8 +36792,12 @@ function promoHealthPauseFilter(expect) {
 }
 /** A credited payer row: highestPayAmount >= 15, not fake-marked (the listPaidChatIds rule). */
 const CREDITED_PAYER_MIN_AMOUNT = 15;
-/** Most userData rows the payer check reads (credited payers of one persona active in 6 h; far fewer in practice). */
+/** userData rows per page of the payer check (newest first; the check stops at the first row that counts). */
 const CREDITED_PAYER_SCAN_LIMIT = 500;
+/** Pages the payer check reads at most; past them it throws (the caller holds the swap as payer_check_failed). */
+const CREDITED_PAYER_MAX_PAGES = 20;
+/** Server time limit of each payer-check query (a slow read throws: payer_check_failed, swap held). */
+const CREDITED_PAYER_MAX_TIME_MS = 5000;
 class PromoteRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_1__.BaseRepository {
     constructor() {
         super(...arguments);
@@ -37387,36 +37393,69 @@ class PromoteRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_1__.Ba
      * inserted the row, and a swap or a parked reply never moves it. So a row counts when it is stamped for this
      * client or unstamped (legacy), or, stamped for a sibling client, when this client has its own stats2 row for the
      * chat (stats2 is keyed {chatId, profile, client} and upserted by this client on every inbound funnel event).
-     * Reads: userData by the profile_lastMsgTimeStamp index (at most CREDITED_PAYER_SCAN_LIMIT rows, newest first);
-     * stats2 by its unique {chatId, profile, client} index, only for sibling-stamped rows. Throws, also when the
-     * persona is unknown.
+     * Reads: userData by the profile_lastMsgTimeStamp index, newest first, in pages of CREDITED_PAYER_SCAN_LIMIT
+     * (keyset on lastMsgTimeStamp; a page's last stamp is read in full by equality, then the next page continues
+     * strictly below it), stopping at the first page with a row that counts, so
+     * sibling clients' payers can never push this client's payer past a cap; stats2 by its unique {chatId, profile,
+     * client} index, only for a page's sibling-stamped rows. Each query has maxTimeMS CREDITED_PAYER_MAX_TIME_MS.
+     * Throws, also when the persona is unknown, a query times out, or CREDITED_PAYER_MAX_PAGES pages were read
+     * without an answer.
      */
     async findRecentCreditedPayer(identity, since) {
         if (!identity.profile)
             throw new Error('persona (dbcoll) unset; payer check unavailable');
-        const filter = {
+        const clientId = identity.clientId;
+        const isOwn = (row) => !clientId || row.clientId == null || row.clientId === clientId;
+        const seen = new Set();
+        const base = {
             profile: identity.profile,
             highestPayAmount: { $gte: CREDITED_PAYER_MIN_AMOUNT },
             fakePaymentAt: null,
-            lastMsgTimeStamp: { $gte: since },
         };
-        const rows = await this.connection.collection('userData').find(filter, {
+        const readUserData = (lastMsgTimeStamp, limit) => this.connection
+            .collection('userData')
+            .find({ ...base, lastMsgTimeStamp }, {
             projection: { chatId: 1, lastMsgTimeStamp: 1, clientId: 1 },
             sort: { lastMsgTimeStamp: -1 },
-            limit: CREDITED_PAYER_SCAN_LIMIT,
-        }).toArray();
-        const clientId = identity.clientId;
-        const isOwn = (row) => !clientId || row.clientId == null || row.clientId === clientId;
-        const siblingChatIds = rows.filter((row) => !isOwn(row)).map((row) => String(row.chatId ?? '')).filter(Boolean);
-        let talksHere = new Set();
-        if (clientId && siblingChatIds.length > 0) {
-            const stats = await this.connection.collection('stats2').find({ chatId: { $in: siblingChatIds }, profile: identity.profile, client: clientId }, { projection: { chatId: 1 } }).toArray();
-            talksHere = new Set(stats.map((row) => String(row.chatId ?? '')));
+            ...(limit === undefined ? {} : { limit }),
+            maxTimeMS: CREDITED_PAYER_MAX_TIME_MS,
+        })
+            .toArray();
+        /** The first row of `candidates` (newest first) that counts for this client; rows already judged are skipped. */
+        const firstCounting = async (candidates) => {
+            const rows = candidates.filter((row) => {
+                const key = String(row._id ?? `${row.chatId}:${row.lastMsgTimeStamp}`);
+                if (seen.has(key))
+                    return false;
+                seen.add(key);
+                return true;
+            });
+            const siblingChatIds = rows.filter((row) => !isOwn(row)).map((row) => String(row.chatId ?? '')).filter(Boolean);
+            let talksHere = new Set();
+            if (clientId && siblingChatIds.length > 0) {
+                const stats = await this.connection.collection('stats2').find({ chatId: { $in: siblingChatIds }, profile: identity.profile, client: clientId }, { projection: { chatId: 1 }, maxTimeMS: CREDITED_PAYER_MAX_TIME_MS }).toArray();
+                talksHere = new Set(stats.map((row) => String(row.chatId ?? '')));
+            }
+            return rows.find((candidate) => isOwn(candidate) || talksHere.has(String(candidate.chatId ?? ''))) ?? null;
+        };
+        const answer = (row) => ({ chatId: String(row.chatId ?? ''), lastMsgTimeStamp: Number(row.lastMsgTimeStamp ?? 0) });
+        let below = null;
+        for (let page = 0; page < CREDITED_PAYER_MAX_PAGES; page += 1) {
+            const fetched = await readUserData(below === null ? { $gte: since } : { $gte: since, $lt: below }, CREDITED_PAYER_SCAN_LIMIT);
+            const row = await firstCounting(fetched);
+            if (row)
+                return answer(row);
+            if (fetched.length < CREDITED_PAYER_SCAN_LIMIT)
+                return null;
+            // Keyset on lastMsgTimeStamp: the page may end inside rows sharing its last stamp, so read that stamp's
+            // rows in full (an equality read on the index) before the next page continues strictly below it.
+            const boundary = Number(fetched[fetched.length - 1].lastMsgTimeStamp ?? 0);
+            const tied = await firstCounting(await readUserData(boundary));
+            if (tied)
+                return answer(tied);
+            below = boundary;
         }
-        const row = rows.find((candidate) => isOwn(candidate) || talksHere.has(String(candidate.chatId ?? '')));
-        if (!row)
-            return null;
-        return { chatId: String(row.chatId ?? ''), lastMsgTimeStamp: Number(row.lastMsgTimeStamp ?? 0) };
+        throw new Error(`payer check: no answer within ${CREDITED_PAYER_MAX_PAGES} pages of ${CREDITED_PAYER_SCAN_LIMIT} rows`);
     }
     async readPromoteStats(client) {
         await this.ensurePromoteStatsInitialized(client);
@@ -38454,6 +38493,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   AccountRoleEventsRepository: () => (/* reexport safe */ _collections_account_role_events_repository__WEBPACK_IMPORTED_MODULE_15__.AccountRoleEventsRepository),
 /* harmony export */   AdoptedDbConnection: () => (/* reexport safe */ _adopt_connection__WEBPACK_IMPORTED_MODULE_1__.AdoptedDbConnection),
 /* harmony export */   BaseRepository: () => (/* reexport safe */ _base_repository__WEBPACK_IMPORTED_MODULE_2__.BaseRepository),
+/* harmony export */   CREDITED_PAYER_MAX_PAGES: () => (/* reexport safe */ _collections_promote_repository__WEBPACK_IMPORTED_MODULE_7__.CREDITED_PAYER_MAX_PAGES),
+/* harmony export */   CREDITED_PAYER_MAX_TIME_MS: () => (/* reexport safe */ _collections_promote_repository__WEBPACK_IMPORTED_MODULE_7__.CREDITED_PAYER_MAX_TIME_MS),
 /* harmony export */   CREDITED_PAYER_MIN_AMOUNT: () => (/* reexport safe */ _collections_promote_repository__WEBPACK_IMPORTED_MODULE_7__.CREDITED_PAYER_MIN_AMOUNT),
 /* harmony export */   CREDITED_PAYER_SCAN_LIMIT: () => (/* reexport safe */ _collections_promote_repository__WEBPACK_IMPORTED_MODULE_7__.CREDITED_PAYER_SCAN_LIMIT),
 /* harmony export */   CREDIT_KEY_HISTORY: () => (/* reexport safe */ _collections_user_data_repository__WEBPACK_IMPORTED_MODULE_3__.CREDIT_KEY_HISTORY),
@@ -52995,8 +53036,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "bf3a81c284360b4189bf1bdf819ca35685edb76e" : 0;
-    const builtAt =  true ? "2026-11-20T05:54:44.816Z" : 0;
+    const sha =  true ? "9eb6d6f0d102875bb858a0936ce37a27e68dd0b2" : 0;
+    const builtAt =  true ? "2026-11-20T06:37:43.998Z" : 0;
     return { sha, builtAt };
 }
 
