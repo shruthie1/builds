@@ -35772,7 +35772,7 @@ class ParkedChatsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_0_
         if (!persona || ids.length === 0)
             return out;
         const docs = await this.guardStrict(`readUserDataCounts(${persona})`, () => this.connection.collection('userData')
-            .find({ chatId: { $in: ids }, $or: [{ profile: persona }, { fakePaymentAt: { $ne: null } }] }, { projection: { chatId: 1, profile: 1, msgCount: 1, canReply: 1, payAmount: 1, lastMsgTimeStamp: 1, limitTime: 1, fakePaymentAt: 1, totalCount: 1, clientId: 1 }, maxTimeMS: 5000 })
+            .find({ chatId: { $in: ids }, $or: [{ profile: persona }, { fakePaymentAt: { $ne: null } }] }, { projection: { chatId: 1, profile: 1, msgCount: 1, canReply: 1, payAmount: 1, lastMsgTimeStamp: 1, limitTime: 1, fakePaymentAt: 1, windowCount: 1, clientId: 1 }, maxTimeMS: 5000 })
             .toArray());
         const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : undefined);
         // P4 verification fix 5: lastMsgTimeStamp / limitTime may be stored as BSON dates: read them as ms, not unknown.
@@ -35810,9 +35810,9 @@ class ParkedChatsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_0_
             if (limit !== undefined && limit > 0)
                 row.limitTime = Math.max(prev?.limitTime ?? limit, limit);
             // Review M7: max over duplicates (fail safe: any row at the main's cap skips the chat).
-            const total = num(doc.totalCount);
+            const total = num(doc.windowCount);
             if (total !== undefined)
-                row.totalCount = Math.max(prev?.totalCount ?? total, total);
+                row.windowCount = Math.max(prev?.windowCount ?? total, total);
             out.set(chatId, row);
         }
         return out;
@@ -36655,7 +36655,6 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   CREDITED_PAYER_MAX_PAGES: () => (/* binding */ CREDITED_PAYER_MAX_PAGES),
 /* harmony export */   CREDITED_PAYER_MAX_TIME_MS: () => (/* binding */ CREDITED_PAYER_MAX_TIME_MS),
-/* harmony export */   CREDITED_PAYER_MIN_AMOUNT: () => (/* binding */ CREDITED_PAYER_MIN_AMOUNT),
 /* harmony export */   CREDITED_PAYER_SCAN_LIMIT: () => (/* binding */ CREDITED_PAYER_SCAN_LIMIT),
 /* harmony export */   PERSONA_ASSIGNMENT_PROJECTION: () => (/* binding */ PERSONA_ASSIGNMENT_PROJECTION),
 /* harmony export */   PROMOTE_HARSH_REST_MS: () => (/* binding */ PROMOTE_HARSH_REST_MS),
@@ -36675,6 +36674,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _promote_stats_normalize__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ./promote-stats.normalize */ "../../packages/tg-db/src/collections/promote-stats.normalize.ts");
 /* harmony import */ var _tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! @tg/core/utils/dc-ip-family */ "../../packages/tg-core/src/utils/dc-ip-family.ts");
 /* harmony import */ var _account_facet_common__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ./account-facet-common */ "../../packages/tg-db/src/collections/account-facet-common.ts");
+/* harmony import */ var _user_data_repository__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ./user-data.repository */ "../../packages/tg-db/src/collections/user-data.repository.ts");
+
 
 
 
@@ -36790,8 +36791,6 @@ function promoHealthPauseFilter(expect) {
         filter.isActive = { $ne: true };
     return filter;
 }
-/** A credited payer row: highestPayAmount >= 15, not fake-marked (the listPaidChatIds rule). */
-const CREDITED_PAYER_MIN_AMOUNT = 15;
 /** userData rows per page of the payer check (newest first; the check stops at the first row that counts). */
 const CREDITED_PAYER_SCAN_LIMIT = 500;
 /** Pages the payer check reads at most; past them it throws (the caller holds the swap as payer_check_failed). */
@@ -37388,7 +37387,7 @@ class PromoteRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_1__.Ba
     }
     /**
      * The most recently active credited payer of this persona who talks to THIS client, since `since` (ms epoch), or
-     * null. userData rule (the listPaidChatIds rule): highestPayAmount >= 15, fakePaymentAt null, lastMsgTimeStamp >=
+     * null. userData rule (PAYER_FILTER, the listPaidChatIds rule): lifetimePaid > 0, fakePaymentAt null, lastMsgTimeStamp >=
      * since. userData has one row per (chatId, persona) and records no current main: `clientId` is only the client that
      * inserted the row, and a swap or a parked reply never moves it. So a row counts when it is stamped for this
      * client or unstamped (legacy), or, stamped for a sibling client, when this client has its own stats2 row for the
@@ -37409,8 +37408,7 @@ class PromoteRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_1__.Ba
         const seen = new Set();
         const base = {
             profile: identity.profile,
-            highestPayAmount: { $gte: CREDITED_PAYER_MIN_AMOUNT },
-            fakePaymentAt: null,
+            ..._user_data_repository__WEBPACK_IMPORTED_MODULE_6__.PAYER_FILTER,
         };
         const readUserData = (lastMsgTimeStamp, limit) => this.connection
             .collection('userData')
@@ -37725,8 +37723,12 @@ class StatsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_1__.Base
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   CREDIT_KEY_HISTORY: () => (/* binding */ CREDIT_KEY_HISTORY),
+/* harmony export */   PAYER_FILTER: () => (/* binding */ PAYER_FILTER),
 /* harmony export */   USER_DATA_DEFAULTS: () => (/* binding */ USER_DATA_DEFAULTS),
-/* harmony export */   UserDataRepository: () => (/* binding */ UserDataRepository)
+/* harmony export */   USER_DATA_RESET_FIELDS: () => (/* binding */ USER_DATA_RESET_FIELDS),
+/* harmony export */   USER_DATA_RESET_KEEPS: () => (/* binding */ USER_DATA_RESET_KEEPS),
+/* harmony export */   UserDataRepository: () => (/* binding */ UserDataRepository),
+/* harmony export */   isPayerRow: () => (/* binding */ isPayerRow)
 /* harmony export */ });
 /* harmony import */ var _tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/core/utils/user-scope */ "../../packages/tg-core/src/utils/user-scope.ts");
 /* harmony import */ var _tg_core_utils_mongo_errors__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! @tg/core/utils/mongo-errors */ "../../packages/tg-core/src/utils/mongo-errors.ts");
@@ -37758,12 +37760,44 @@ const USER_DATA_DEFAULTS = {
     secondShow: false,
     accessHash: '',
     username: '',
-    totalCount: 0,
     msgCount: 0,
     windowCount: 0,
 };
+/**
+ * "Is a payer" (owner 2026-11-20, userData audit A4): a credited payment (lifetimePaid > 0, raised only by
+ * creditPayment) and no operator fake-payment mark. highestPayAmount is the current service tier, never this.
+ */
+const PAYER_FILTER = Object.freeze({ lifetimePaid: { $gt: 0 }, fakePaymentAt: null });
+/** The same rule on a row in memory. */
+function isPayerRow(row) {
+    const paid = Number(row?.lifetimePaid);
+    return Number.isFinite(paid) && paid > 0 && row?.fakePaymentAt == null;
+}
+/**
+ * Keys a user-data reset (tg /reset, tg admin reset-user, CMS DELETE /userData/:profile/:chatId) never touches
+ * (owner 2026-11-20, audit A11): identity, payment history, the fake-payment mark, attribution and the completion
+ * counters. CMS user-data.reset.ts holds the same lists.
+ */
+const USER_DATA_RESET_KEEPS = Object.freeze([
+    'chatId', 'profile', 'clientId', 'username', 'accessHash', 'lastMsgTimeStamp',
+    'lifetimePaid', 'lifetimeCredits', 'creditKeys', 'firstPaidAt', 'lastPaidAt',
+    'fakePaymentAt', 'fakePaymentBy', 'fakePaymentReason', 'fakePaymentPrev', 'fakePaymentHistory', 'fakePaymentProofIds',
+    'attributionChannelIds', 'attributionUpdatedAt',
+    'demoCompletions', 'showCompletions',
+]);
+/**
+ * What a reset $sets: a fresh row's defaults (USER_DATA_DEFAULTS) minus the kept keys, plus the service-cycle fields a
+ * fresh row lacks, at their "absent" value. Never deletes the row, never $unsets.
+ */
+const USER_DATA_RESET_FIELDS = Object.freeze({
+    ...Object.fromEntries(Object.entries(USER_DATA_DEFAULTS).filter(([key]) => !USER_DATA_RESET_KEEPS.includes(key))),
+    cycleVideoBase: 0,
+    cyclePaid: 0,
+    showsPaidTo: 0,
+    callProgress: {},
+});
 /** Keys createOrUpdate/recordInbound never accept from callers ($inc-ed or identity). */
-const INBOUND_FORBIDDEN_KEYS = ['chatId', 'profile', 'totalCount', 'msgCount', 'lastMsgTimeStamp'];
+const INBOUND_FORBIDDEN_KEYS = ['chatId', 'profile', 'msgCount', 'windowCount', 'lastMsgTimeStamp'];
 /** How many recent idempotency keys a row remembers. See `creditPayment`. */
 const CREDIT_KEY_HISTORY = 20;
 class UserDataRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_2__.BaseRepository {
@@ -38033,9 +38067,9 @@ class UserDataRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_2__.B
         });
     }
     /**
-     * One inbound message: $set `updates`, $inc totalCount + msgCount (D3 dual-write), seed defaults
-     * on insert. totalCount/msgCount are never in $setOnInsert: a key in both $inc and $setOnInsert
-     * is rejected by Mongo with error 40 on every call. The caller detects creation by totalCount===1.
+     * One inbound message: $set `updates`, $inc msgCount (lifetime) + windowCount (reply window), seed defaults on
+     * insert. The $inc keys are never in $setOnInsert: a key in both $inc and $setOnInsert is rejected by Mongo with
+     * error 40 on every call. The caller detects a new row by msgCount === 1.
      */
     async recordInbound(chatId, identity, updates, now = Date.now()) {
         const profile = (0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.requireProfile)(identity);
@@ -38046,7 +38080,7 @@ class UserDataRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_2__.B
         }
         const setOnInsert = { chatId, profile, ...(0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.ownershipOnInsert)(identity) };
         for (const [key, value] of Object.entries(USER_DATA_DEFAULTS)) {
-            if (key === 'totalCount' || key === 'msgCount')
+            if (key === 'msgCount' || key === 'windowCount')
                 continue;
             if (key in safeUpdates)
                 continue;
@@ -38054,7 +38088,7 @@ class UserDataRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_2__.B
         }
         return this.upsert(chatId, identity, {
             $set: { ...safeUpdates, lastMsgTimeStamp: now },
-            $inc: { totalCount: 1, msgCount: 1 },
+            $inc: { msgCount: 1, windowCount: 1 },
             $setOnInsert: setOnInsert,
         });
     }
@@ -38086,9 +38120,13 @@ class UserDataRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_2__.B
         const result = await this.collection.updateOne((0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.personaFilter)(chatId, { profile }), { $set: fields }, { upsert: false });
         return result.acknowledged && result.matchedCount === 1;
     }
-    /** Delete the persona row(s) of chatId. Throws. */
-    async deleteForPersona(chatId, identity) {
-        return this.collection.deleteMany((0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.personaFilter)(chatId, identity));
+    /**
+     * Reset the persona row of chatId to a fresh row's state (USER_DATA_RESET_FIELDS), keeping USER_DATA_RESET_KEEPS.
+     * Never deletes, never creates (upsert false). Returns the matched count. Throws.
+     */
+    async resetForPersona(chatId, identity) {
+        const result = await this.collection.updateMany((0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.personaFilter)(chatId, identity), { $set: { ...USER_DATA_RESET_FIELDS } }, { upsert: false });
+        return Number(result?.matchedCount ?? 0);
     }
     // ── bulk maintenance (MINE scope = this persona) ────────────────────────────────────────────
     /** paidCount -> 0 on rows idle > 30 days that never paid. Throws. */
@@ -38144,21 +38182,21 @@ class UserDataRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_2__.B
             .toArray();
     }
     /**
-     * chatIds of this persona's real payers (highestPayAmount >= 15, not fake-marked by an operator), most recently
+     * chatIds of this persona's payers (PAYER_FILTER: lifetimePaid > 0, not fake-marked by an operator), most recently
      * active first. Feeds the in-house call allow-list. Until 2026-11-02 this excluded cheatCount > 0, which is the
      * user's complaint score, not payment fraud (owner 2026-11-02). Throws.
      */
     async listPaidChatIds(identity, limit) {
         const rows = await this.collection
-            .find({ ...(0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.mineFilter)(identity), highestPayAmount: { $gte: 15 }, fakePaymentAt: null }, { projection: { chatId: 1 } })
+            .find({ ...(0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.mineFilter)(identity), ...PAYER_FILTER }, { projection: { chatId: 1 } })
             .sort({ lastMsgTimeStamp: -1 })
             .limit(limit)
             .toArray();
         return rows.map((row) => String(row.chatId)).filter(Boolean);
     }
-    /** Rows of `profile` among chatIds that have messaged at least once (totalCount > 0). Throws. */
+    /** Rows of `profile` among chatIds that have messaged at least once (lifetime msgCount > 0). Throws. */
     async findReachedRecords(profile, chatIds) {
-        return this.collection.find({ profile, chatId: { $in: chatIds }, totalCount: { $gt: 0 } }, { projection: { chatId: 1, attributionUpdatedAt: 1 } }).toArray();
+        return this.collection.find({ profile, chatId: { $in: chatIds }, msgCount: { $gt: 0 } }, { projection: { chatId: 1, attributionUpdatedAt: 1 } }).toArray();
     }
     async ensureIndexesForTests() {
         await this.ensureIndexes();
@@ -38514,7 +38552,6 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   BaseRepository: () => (/* reexport safe */ _base_repository__WEBPACK_IMPORTED_MODULE_2__.BaseRepository),
 /* harmony export */   CREDITED_PAYER_MAX_PAGES: () => (/* reexport safe */ _collections_promote_repository__WEBPACK_IMPORTED_MODULE_7__.CREDITED_PAYER_MAX_PAGES),
 /* harmony export */   CREDITED_PAYER_MAX_TIME_MS: () => (/* reexport safe */ _collections_promote_repository__WEBPACK_IMPORTED_MODULE_7__.CREDITED_PAYER_MAX_TIME_MS),
-/* harmony export */   CREDITED_PAYER_MIN_AMOUNT: () => (/* reexport safe */ _collections_promote_repository__WEBPACK_IMPORTED_MODULE_7__.CREDITED_PAYER_MIN_AMOUNT),
 /* harmony export */   CREDITED_PAYER_SCAN_LIMIT: () => (/* reexport safe */ _collections_promote_repository__WEBPACK_IMPORTED_MODULE_7__.CREDITED_PAYER_SCAN_LIMIT),
 /* harmony export */   CREDIT_KEY_HISTORY: () => (/* reexport safe */ _collections_user_data_repository__WEBPACK_IMPORTED_MODULE_3__.CREDIT_KEY_HISTORY),
 /* harmony export */   ChannelsRepository: () => (/* reexport safe */ _collections_channels_repository__WEBPACK_IMPORTED_MODULE_6__.ChannelsRepository),
@@ -38537,6 +38574,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   PARKED_CHATS_MAX_LOOKUP: () => (/* reexport safe */ _collections_parked_chats_repository__WEBPACK_IMPORTED_MODULE_13__.PARKED_CHATS_MAX_LOOKUP),
 /* harmony export */   PARKED_CHATS_REACH_INDEX: () => (/* reexport safe */ _collections_parked_chats_repository__WEBPACK_IMPORTED_MODULE_13__.PARKED_CHATS_REACH_INDEX),
 /* harmony export */   PARKED_EPISODE_GC_MS: () => (/* reexport safe */ _collections_parked_accounts_repository__WEBPACK_IMPORTED_MODULE_12__.PARKED_EPISODE_GC_MS),
+/* harmony export */   PAYER_FILTER: () => (/* reexport safe */ _collections_user_data_repository__WEBPACK_IMPORTED_MODULE_3__.PAYER_FILTER),
 /* harmony export */   PERSONA_ASSIGNMENT_PROJECTION: () => (/* reexport safe */ _collections_promote_repository__WEBPACK_IMPORTED_MODULE_7__.PERSONA_ASSIGNMENT_PROJECTION),
 /* harmony export */   PROMOTE_HARSH_REST_MS: () => (/* reexport safe */ _collections_promote_repository__WEBPACK_IMPORTED_MODULE_7__.PROMOTE_HARSH_REST_MS),
 /* harmony export */   PROMOTE_RUNTIME_MIN_AGE_DAYS: () => (/* reexport safe */ _collections_promote_repository__WEBPACK_IMPORTED_MODULE_7__.PROMOTE_RUNTIME_MIN_AGE_DAYS),
@@ -38552,6 +38590,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   SELECTION_READ_DEADLINE_MS: () => (/* reexport safe */ _collections_promote_repository__WEBPACK_IMPORTED_MODULE_7__.SELECTION_READ_DEADLINE_MS),
 /* harmony export */   StatsRepository: () => (/* reexport safe */ _collections_stats_repository__WEBPACK_IMPORTED_MODULE_9__.StatsRepository),
 /* harmony export */   USER_DATA_DEFAULTS: () => (/* reexport safe */ _collections_user_data_repository__WEBPACK_IMPORTED_MODULE_3__.USER_DATA_DEFAULTS),
+/* harmony export */   USER_DATA_RESET_FIELDS: () => (/* reexport safe */ _collections_user_data_repository__WEBPACK_IMPORTED_MODULE_3__.USER_DATA_RESET_FIELDS),
+/* harmony export */   USER_DATA_RESET_KEEPS: () => (/* reexport safe */ _collections_user_data_repository__WEBPACK_IMPORTED_MODULE_3__.USER_DATA_RESET_KEEPS),
 /* harmony export */   UserDataRepository: () => (/* reexport safe */ _collections_user_data_repository__WEBPACK_IMPORTED_MODULE_3__.UserDataRepository),
 /* harmony export */   UserIdentityRepository: () => (/* reexport safe */ _collections_user_identity_repository__WEBPACK_IMPORTED_MODULE_4__.UserIdentityRepository),
 /* harmony export */   activeChannelSetOnInsert: () => (/* reexport safe */ _collections_channels_repository__WEBPACK_IMPORTED_MODULE_6__.activeChannelSetOnInsert),
@@ -38569,6 +38609,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   ensureAllIndexes: () => (/* reexport safe */ _repositories__WEBPACK_IMPORTED_MODULE_18__.ensureAllIndexes),
 /* harmony export */   getPromoteRuntimeEligibilityFilter: () => (/* reexport safe */ _collections_promote_repository__WEBPACK_IMPORTED_MODULE_7__.getPromoteRuntimeEligibilityFilter),
 /* harmony export */   isDuplicateKeyError: () => (/* reexport safe */ _collections_account_leases_repository__WEBPACK_IMPORTED_MODULE_11__.isDuplicateKeyError),
+/* harmony export */   isPayerRow: () => (/* reexport safe */ _collections_user_data_repository__WEBPACK_IMPORTED_MODULE_3__.isPayerRow),
 /* harmony export */   leaseId: () => (/* reexport safe */ _collections_account_leases_repository__WEBPACK_IMPORTED_MODULE_11__.leaseId),
 /* harmony export */   mobileLookupForms: () => (/* reexport safe */ _collections_account_leases_repository__WEBPACK_IMPORTED_MODULE_11__.mobileLookupForms),
 /* harmony export */   normalizeActiveChannelWrite: () => (/* reexport safe */ _collections_channels_repository__WEBPACK_IMPORTED_MODULE_6__.normalizeActiveChannelWrite),
@@ -42475,7 +42516,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   LEASE_SAFETY_MS: () => (/* binding */ LEASE_SAFETY_MS),
 /* harmony export */   LEASE_WATCH_MS: () => (/* binding */ LEASE_WATCH_MS),
 /* harmony export */   LIMITED_GAP_MULTIPLIER: () => (/* binding */ LIMITED_GAP_MULTIPLIER),
-/* harmony export */   MAIN_TOTAL_COUNT_MAX: () => (/* binding */ MAIN_TOTAL_COUNT_MAX),
+/* harmony export */   MAIN_WINDOW_COUNT_MAX: () => (/* binding */ MAIN_WINDOW_COUNT_MAX),
 /* harmony export */   PARKED_CLIENT_PARAMS: () => (/* binding */ PARKED_CLIENT_PARAMS),
 /* harmony export */   PARK_MAX_AGE_MS: () => (/* binding */ PARK_MAX_AGE_MS),
 /* harmony export */   PEER_FLOOD_HOLD_MS: () => (/* binding */ PEER_FLOOD_HOLD_MS),
@@ -42494,7 +42535,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   TGAUT_PRE_SWAP_WINDOW_MS: () => (/* binding */ TGAUT_PRE_SWAP_WINDOW_MS),
 /* harmony export */   TRANSIENT_BACKOFF_FROM: () => (/* binding */ TRANSIENT_BACKOFF_FROM),
 /* harmony export */   TRANSIENT_BACKOFF_UNIT_MS: () => (/* binding */ TRANSIENT_BACKOFF_UNIT_MS),
-/* harmony export */   TRANSIENT_CAP: () => (/* binding */ TRANSIENT_CAP)
+/* harmony export */   TRANSIENT_CAP: () => (/* binding */ TRANSIENT_CAP),
+/* harmony export */   WINDOW_COUNT_ESTABLISHED: () => (/* binding */ WINDOW_COUNT_ESTABLISHED)
 /* harmony export */ });
 /**
  * Every number of design §6 as a named constant (owner may tune: D2, D3, D4).
@@ -42559,11 +42601,18 @@ const TGAUT_PRE_SWAP_WINDOW_MS = 48 * HOUR;
  */
 const CANREPLY_AUTO_UNBLOCK_MS = 5 * DAY;
 /**
- * Review M7: the main answers a (persona, chatId) only while userData.totalCount is below this; at or above it the
- * customer is ignored ('max-messages'). Shared with apps/tg-aut/src/conversation/inbound/existing-user-handler.ts,
- * which imports it, so the parked pass and the main can never disagree on the threshold.
+ * Review M7: the main answers a (persona, chatId) only while userData.windowCount (the reply-window counter that
+ * replaced totalCount, userData batch 2) is below this; at or above it the customer is ignored ('max-messages').
+ * Shared with apps/tg-aut/src/conversation/inbound/existing-user-handler.ts, which imports it, so the parked pass and
+ * the main can never disagree on the threshold.
  */
-const MAIN_TOTAL_COUNT_MAX = 100;
+const MAIN_WINDOW_COUNT_MAX = 100;
+/**
+ * windowCount after a reopen: a show completed, the 5-day unblock, the CMS daily reset (CommonTgService
+ * scheduled-jobs.service.ts, literal 10). The value totalCount was set to before batch 2, so every prompt threshold
+ * (>= 10, % 3, > 20) behaves as before.
+ */
+const WINDOW_COUNT_ESTABLISHED = 10;
 /** §6.4 caps and pacing (D3). */
 const CAP_PER_PASS = 20;
 const CAP_PER_DAY = 60;
@@ -42706,7 +42755,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   LEASE_WATCH_MS: () => (/* reexport safe */ _constants__WEBPACK_IMPORTED_MODULE_1__.LEASE_WATCH_MS),
 /* harmony export */   LIMITED_GAP_MULTIPLIER: () => (/* reexport safe */ _constants__WEBPACK_IMPORTED_MODULE_1__.LIMITED_GAP_MULTIPLIER),
 /* harmony export */   LeaseRenewer: () => (/* reexport safe */ _run_pass_guard__WEBPACK_IMPORTED_MODULE_18__.LeaseRenewer),
-/* harmony export */   MAIN_TOTAL_COUNT_MAX: () => (/* reexport safe */ _constants__WEBPACK_IMPORTED_MODULE_1__.MAIN_TOTAL_COUNT_MAX),
+/* harmony export */   MAIN_WINDOW_COUNT_MAX: () => (/* reexport safe */ _constants__WEBPACK_IMPORTED_MODULE_1__.MAIN_WINDOW_COUNT_MAX),
 /* harmony export */   MEMO_REASONS: () => (/* reexport safe */ _scan_scanner__WEBPACK_IMPORTED_MODULE_13__.MEMO_REASONS),
 /* harmony export */   PARKED_CLIENT_PARAMS: () => (/* reexport safe */ _constants__WEBPACK_IMPORTED_MODULE_1__.PARKED_CLIENT_PARAMS),
 /* harmony export */   PARKED_REPLY_TEMPLATES: () => (/* reexport safe */ _reply_templates__WEBPACK_IMPORTED_MODULE_9__.PARKED_REPLY_TEMPLATES),
@@ -42744,6 +42793,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   TRANSIENT_BACKOFF_UNIT_MS: () => (/* reexport safe */ _constants__WEBPACK_IMPORTED_MODULE_1__.TRANSIENT_BACKOFF_UNIT_MS),
 /* harmony export */   TRANSIENT_CAP: () => (/* reexport safe */ _constants__WEBPACK_IMPORTED_MODULE_1__.TRANSIENT_CAP),
 /* harmony export */   TUNING_BOUNDS: () => (/* reexport safe */ _run_tuning__WEBPACK_IMPORTED_MODULE_23__.TUNING_BOUNDS),
+/* harmony export */   WINDOW_COUNT_ESTABLISHED: () => (/* reexport safe */ _constants__WEBPACK_IMPORTED_MODULE_1__.WINDOW_COUNT_ESTABLISHED),
 /* harmony export */   canTransition: () => (/* reexport safe */ _registry_state_machine__WEBPACK_IMPORTED_MODULE_4__.canTransition),
 /* harmony export */   capSkip: () => (/* reexport safe */ _reply_pacing__WEBPACK_IMPORTED_MODULE_11__.capSkip),
 /* harmony export */   classifyParkedError: () => (/* reexport safe */ _errors_error_policy__WEBPACK_IMPORTED_MODULE_5__.classifyParkedError),
@@ -43238,7 +43288,7 @@ function endsChatLoop(reason) {
  *   CANREPLY_AUTO_UNBLOCK_MS (the main's 5-day auto-unblock answers such a customer again, so do we). An unknown
  *   timestamp stays blocked (the main's `lastMsgTimeStamp < now - 5 d` is false for undefined too);
  * - limitTime in the future (the main holds replies) → 'limited' (NOT memoised: re-checked next pass);
- * - review M7: totalCount + 1 ≥ MAIN_TOTAL_COUNT_MAX (the main, reading after its $inc, ignores the customer) → 'max_messages' (NOT memoised).
+ * - review M7: windowCount + 1 ≥ MAIN_WINDOW_COUNT_MAX (the main, reading after its $inc, ignores the customer) → 'max_messages' (NOT memoised).
  * No row → null (a new customer of this persona is answered).
  */
 /** P4 verification fix 5: epoch ms of a userData timestamp stored as a number OR a Date; anything else = unknown. */
@@ -43257,11 +43307,11 @@ function userDataSkip(row, nowMs) {
         // Lifted: the main resets limitTime with the block (existing-user-handler), so limitTime is not checked.
         return lifted ? null : 'blocked';
     }
-    // Round 3 (M7 off-by-one): the main reads totalCount AFTER recordInbound's $inc, then requires `< max`. This
+    // Round 3 (M7 off-by-one): the main reads windowCount AFTER recordInbound's $inc, then requires `< max`. This
     // pass reads the stored value and never increments, so decide as the main would on one more message:
-    // stored + 1 ≥ max. A missing (or non-numeric) totalCount counts as 0: the main's $inc creates it as 1 → answered.
-    const stored = typeof row.totalCount === 'number' && Number.isFinite(row.totalCount) ? row.totalCount : 0;
-    if (stored + 1 >= _constants__WEBPACK_IMPORTED_MODULE_0__.MAIN_TOTAL_COUNT_MAX)
+    // stored + 1 ≥ max. A missing (or non-numeric) windowCount counts as 0: the main's $inc creates it as 1 → answered.
+    const stored = typeof row.windowCount === 'number' && Number.isFinite(row.windowCount) ? row.windowCount : 0;
+    if (stored + 1 >= _constants__WEBPACK_IMPORTED_MODULE_0__.MAIN_WINDOW_COUNT_MAX)
         return 'max_messages';
     const limit = userDataMs(row.limitTime);
     if (limit !== undefined && limit > nowMs)
@@ -53055,8 +53105,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "3a11ce92082648d9088777c9dbbbdd9ebbc96696" : 0;
-    const builtAt =  true ? "2026-11-20T09:42:09.693Z" : 0;
+    const sha =  true ? "c1c701dce28044ee993f320ea5c534db0e4eb99b" : 0;
+    const builtAt =  true ? "2026-11-20T11:35:53.817Z" : 0;
     return { sha, builtAt };
 }
 
@@ -53867,7 +53917,7 @@ class UserDataDtoCrud {
         return pool;
     }
     /**
-     * Returns which routed chatIds reached the main account (userData.totalCount > 0) for this
+     * Returns which routed chatIds reached the main account (lifetime userData.msgCount > 0) for this
      * client's profile. The caller only checks its own pending routes, never all userData history.
      * Returns null when the lookup could not run. Callers must keep pending routes in that case:
      * an unavailable MongoDB is not evidence that no user converted.
@@ -61916,7 +61966,7 @@ class TelegramManager {
             this.deleteRouteState(chatId);
             logger.info(`[PromoteRoute] ${this.clientDetails.mobile}:${chatId} userData exists; skipping route push`, {
                 clientId: this.clientDetails.clientId,
-                totalCount: userData.totalCount ?? 0,
+                msgCount: userData.msgCount ?? 0,
                 username: userData.username ?? null,
             });
             // Existing users get one short pointer to the main account per 24 h instead of silence.
