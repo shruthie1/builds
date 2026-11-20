@@ -36653,6 +36653,7 @@ function normalizePromoteStatsData(data) {
 
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   CREDITED_PAYER_MIN_AMOUNT: () => (/* binding */ CREDITED_PAYER_MIN_AMOUNT),
 /* harmony export */   PERSONA_ASSIGNMENT_PROJECTION: () => (/* binding */ PERSONA_ASSIGNMENT_PROJECTION),
 /* harmony export */   PROMOTE_HARSH_REST_MS: () => (/* binding */ PROMOTE_HARSH_REST_MS),
 /* harmony export */   PROMOTE_RUNTIME_MIN_AGE_DAYS: () => (/* binding */ PROMOTE_RUNTIME_MIN_AGE_DAYS),
@@ -36662,6 +36663,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   emptyPromoteAvailability: () => (/* binding */ emptyPromoteAvailability),
 /* harmony export */   getPromoteRuntimeEligibilityFilter: () => (/* binding */ getPromoteRuntimeEligibilityFilter),
 /* harmony export */   personaAssignmentFilter: () => (/* binding */ personaAssignmentFilter),
+/* harmony export */   promoHealthPauseFilter: () => (/* binding */ promoHealthPauseFilter),
 /* harmony export */   promoteSpamSkipReason: () => (/* binding */ promoteSpamSkipReason)
 /* harmony export */ });
 /* harmony import */ var _tg_persona_persona_timestamps__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/persona/persona-timestamps */ "../../packages/tg-persona/src/persona-timestamps.ts");
@@ -36768,6 +36770,25 @@ const routedUserCountPipeline = (count) => [
     // Owner decision 2026-11-08: old fields are not removed from documents. The legacy convertedCount stays;
     // $ifNull above prefers routedUserCount once it exists, so the legacy value is folded in only once.
 ];
+/** Mongo filter fields that identify one stored cycle state (mobile, pausedAt, failedRetries, retriedAt). */
+function promoHealthPauseFilter(expect) {
+    const filter = expect.pause === null
+        ? { promoHealthPause: null }
+        : {
+            'promoHealthPause.mobile': expect.pause.mobile,
+            'promoHealthPause.pausedAt': expect.pause.pausedAt,
+            'promoHealthPause.failedRetries': expect.pause.failedRetries,
+            'promoHealthPause.retriedAt': expect.pause.retriedAt,
+        };
+    if (expect.isActive === true)
+        filter.isActive = true;
+    // A stored false and a missing flag both read as "not active".
+    if (expect.isActive === false)
+        filter.isActive = { $ne: true };
+    return filter;
+}
+/** A credited payer row: highestPayAmount >= 15, not fake-marked (the listPaidChatIds rule). */
+const CREDITED_PAYER_MIN_AMOUNT = 15;
 class PromoteRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_1__.BaseRepository {
     constructor() {
         super(...arguments);
@@ -37324,7 +37345,9 @@ class PromoteRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_1__.Ba
         await this.ensurePromoteStatsInitialized(client);
         const now = Date.now();
         await this.promoteStats.updateOne({ client }, {
-            $set: { releaseDay: now, lastUpdatedTimeStamp: now, isActive: true },
+            // A manual resume (/promote, SpamBot good news) also ends the promotion-health cycle (2026-11-20): its
+            // failed-retry count is gone, so the next failure pauses first and never swaps at once.
+            $set: { releaseDay: now, lastUpdatedTimeStamp: now, isActive: true, promoHealthPause: null },
             $setOnInsert: { client, count: 0, totalCount: 0, data: {}, uniqueChannels: 0 },
         }, { upsert: true });
     }
@@ -37338,16 +37361,46 @@ class PromoteRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_1__.Ba
     }
     /**
      * Writes the promotion-health pause cycle (null clears it, never $unset). `active` true/false also writes
-     * isActive in the same update, like activatePromotions/deactivatePromotions. Throws.
+     * isActive in the same update, like activatePromotions/deactivatePromotions. With `expect`, the write applies
+     * only while the stored cycle (and isActive, when given) still equals what the caller read; returns false when
+     * nothing matched (the caller skips its follow-up). Without `expect` it is unconditional and returns true. Throws.
      */
-    async setPromoHealthPause(client, pause, active, now = Date.now()) {
+    async setPromoHealthPause(client, pause, options = {}) {
+        const { active, now = Date.now(), expect } = options;
         await this.ensurePromoteStatsInitialized(client);
         const set = { promoHealthPause: pause };
         if (active === true)
             Object.assign(set, { releaseDay: now, lastUpdatedTimeStamp: now, isActive: true });
         if (active === false)
             Object.assign(set, { releaseDay: now, isActive: false });
-        await this.promoteStats.updateOne({ client }, { $set: set });
+        const filter = expect ? { client, ...promoHealthPauseFilter(expect) } : { client };
+        const result = await this.promoteStats.updateOne(filter, { $set: set });
+        return expect ? Number(result?.matchedCount ?? 0) > 0 : true;
+    }
+    /**
+     * The most recently active credited payer of this persona in userData since `since` (ms epoch), or null:
+     * highestPayAmount >= 15 and fakePaymentAt null (the listPaidChatIds rule), lastMsgTimeStamp >= since. With a
+     * clientId, rows stamped for another client of the persona are left out; rows without the stamp (legacy) count.
+     * Uses the profile_lastMsgTimeStamp index. Throws, also when the persona is unknown.
+     */
+    async findRecentCreditedPayer(identity, since) {
+        if (!identity.profile)
+            throw new Error('persona (dbcoll) unset; payer check unavailable');
+        const filter = {
+            profile: identity.profile,
+            highestPayAmount: { $gte: CREDITED_PAYER_MIN_AMOUNT },
+            fakePaymentAt: null,
+            lastMsgTimeStamp: { $gte: since },
+        };
+        if (identity.clientId)
+            filter.clientId = { $in: [identity.clientId, null] };
+        const row = await this.connection.collection('userData').findOne(filter, {
+            projection: { chatId: 1, lastMsgTimeStamp: 1 },
+            sort: { lastMsgTimeStamp: -1 },
+        });
+        if (!row)
+            return null;
+        return { chatId: String(row.chatId ?? ''), lastMsgTimeStamp: Number(row.lastMsgTimeStamp ?? 0) };
     }
     async readPromoteStats(client) {
         await this.ensurePromoteStatsInitialized(client);
@@ -38385,6 +38438,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   AccountRoleEventsRepository: () => (/* reexport safe */ _collections_account_role_events_repository__WEBPACK_IMPORTED_MODULE_15__.AccountRoleEventsRepository),
 /* harmony export */   AdoptedDbConnection: () => (/* reexport safe */ _adopt_connection__WEBPACK_IMPORTED_MODULE_1__.AdoptedDbConnection),
 /* harmony export */   BaseRepository: () => (/* reexport safe */ _base_repository__WEBPACK_IMPORTED_MODULE_2__.BaseRepository),
+/* harmony export */   CREDITED_PAYER_MIN_AMOUNT: () => (/* reexport safe */ _collections_promote_repository__WEBPACK_IMPORTED_MODULE_7__.CREDITED_PAYER_MIN_AMOUNT),
 /* harmony export */   CREDIT_KEY_HISTORY: () => (/* reexport safe */ _collections_user_data_repository__WEBPACK_IMPORTED_MODULE_3__.CREDIT_KEY_HISTORY),
 /* harmony export */   ChannelsRepository: () => (/* reexport safe */ _collections_channels_repository__WEBPACK_IMPORTED_MODULE_6__.ChannelsRepository),
 /* harmony export */   ClientsRepository: () => (/* reexport safe */ _collections_clients_repository__WEBPACK_IMPORTED_MODULE_8__.ClientsRepository),
@@ -38445,6 +38499,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   normalizeRoleEventMobile: () => (/* reexport safe */ _collections_account_role_events_repository__WEBPACK_IMPORTED_MODULE_15__.normalizeRoleEventMobile),
 /* harmony export */   parkedChatId: () => (/* reexport safe */ _collections_parked_chats_repository__WEBPACK_IMPORTED_MODULE_13__.parkedChatId),
 /* harmony export */   personaAssignmentFilter: () => (/* reexport safe */ _collections_promote_repository__WEBPACK_IMPORTED_MODULE_7__.personaAssignmentFilter),
+/* harmony export */   promoHealthPauseFilter: () => (/* reexport safe */ _collections_promote_repository__WEBPACK_IMPORTED_MODULE_7__.promoHealthPauseFilter),
 /* harmony export */   promoteSpamSkipReason: () => (/* reexport safe */ _collections_promote_repository__WEBPACK_IMPORTED_MODULE_7__.promoteSpamSkipReason),
 /* harmony export */   readDatabaseSize: () => (/* reexport safe */ _database_info__WEBPACK_IMPORTED_MODULE_17__.readDatabaseSize),
 /* harmony export */   recordDailyAnalytics: () => (/* reexport safe */ _collections_daily_stats_repository__WEBPACK_IMPORTED_MODULE_5__.recordDailyAnalytics),
@@ -52923,8 +52978,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "7a10e3b5348c586997f7da85cbc9b9b3df55d397" : 0;
-    const builtAt =  true ? "2026-11-20T03:55:40.989Z" : 0;
+    const sha =  true ? "f72948742595decf2cf759bd8aafa06fdaa5b9f3" : 0;
+    const builtAt =  true ? "2026-11-20T04:53:57.704Z" : 0;
     return { sha, builtAt };
 }
 
