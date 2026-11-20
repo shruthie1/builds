@@ -43123,14 +43123,18 @@ function idleNextMs(emptyStreak, random) {
 function stop(f, reason) {
     return { state: 'stopped', nextRunAtMs: f.nextRunAtMs, stopReason: reason, emptyStreak: f.emptyStreak, transientCount: f.transientCount };
 }
-function nextAfterPass(f, nowMs, random) {
+/**
+ * `relock`: the app's shorter-relock range (PassLimits.relockMs); absent = RELOCK_MIN_MS-RELOCK_MAX_MS (30-45 min).
+ * tg-aut passes 10-15 min (owner 2026-11-20: the old main's payers reach the new main fast).
+ */
+function nextAfterPass(f, nowMs, random, relock) {
     if (f.state === 'stopped')
         return { state: 'stopped', nextRunAtMs: f.nextRunAtMs, emptyStreak: f.emptyStreak, transientCount: f.transientCount };
     const activeState = 'active';
     switch (f.outcome) {
         case 'ok': {
             if (f.replied > 0 || f.sawRecentUnread) {
-                return { state: activeState, nextRunAtMs: nowMs + between(_constants__WEBPACK_IMPORTED_MODULE_0__.RELOCK_MIN_MS, _constants__WEBPACK_IMPORTED_MODULE_0__.RELOCK_MAX_MS, random), emptyStreak: 0, transientCount: 0 };
+                return { state: activeState, nextRunAtMs: nowMs + between(relock?.minMs ?? _constants__WEBPACK_IMPORTED_MODULE_0__.RELOCK_MIN_MS, relock?.maxMs ?? _constants__WEBPACK_IMPORTED_MODULE_0__.RELOCK_MAX_MS, random), emptyStreak: 0, transientCount: 0 };
             }
             const streak = f.emptyStreak + 1;
             return { state: activeState, nextRunAtMs: nowMs + idleNextMs(streak, random), emptyStreak: streak, transientCount: 0 };
@@ -43402,6 +43406,15 @@ __webpack_require__.r(__webpack_exports__);
 
 
 /**
+ * Why the next run lands when it does, for the `[parked] next` line: relock (replied or a recent unread), idle (an
+ * empty pass), else the pass outcome (flood_wait, lease_busy, transient, connect_cap, ...).
+ */
+function nextWhy(r) {
+    if (r.outcome !== 'ok')
+        return r.outcome;
+    return r.replied > 0 || r.sawRecentUnread ? 'relock' : 'idle';
+}
+/**
  * The scheduler's write after a pass (design §6.1, moved out of scheduler.ts in the P5 review, no behaviour change):
  * abandoned → release the runner; else the state machine's next state → stop (terminal) or CAS transition. A lost
  * CAS releases the runner.
@@ -43426,13 +43439,15 @@ async function applyPassResult(deps, ep, r) {
         floodUntilMs: r.floodUntilMs,
         stopReason: r.stopReason,
         waitUntilMs: r.waitUntilMs,
-    }, now, deps.random());
+    }, now, deps.random(), deps.limits?.relockMs);
     if (next.state === 'stopped' && r.floodPending) {
         // Re-review 2 nit: stop() would drop the unwritten flood (only this episode carries it). Keep the episode
         // open in backoff; its next pass writes the flood first (settlePendingFlood), then stops on eligibility.
         const retryAt = Math.max(now, Math.min(r.floodPending.untilMs, now + _constants__WEBPACK_IMPORTED_MODULE_0__.LEASE_BUSY_RETRY_MS));
         next = { ...next, state: 'backoff', nextRunAtMs: retryAt, stopReason: undefined };
     }
+    // One greppable line per scheduling decision (owner rule 2026-11-19).
+    logger.info(`[parked] next app=${ep.app} client=${ep.clientId} ep=${(0,_metrics_pass_log__WEBPACK_IMPORTED_MODULE_1__.episodeHash)(ep._id)} state=${next.state} why=${next.state === 'stopped' ? `stop:${next.stopReason ?? 'superseded'}` : nextWhy(r)} inMin=${Math.max(0, Math.round((next.nextRunAtMs - now) / 60000))}`);
     let ok;
     if (next.state === 'stopped') {
         ok = await stores.episodes.stop(ep._id, next.stopReason ?? 'superseded', r.version);
@@ -53110,8 +53125,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "4b8b0293b10eaacc91cd2080349b07c2af4cbdac" : 0;
-    const builtAt =  true ? "2026-11-20T14:50:48.842Z" : 0;
+    const sha =  true ? "abd45709d48f9389093427002978d200fa5daf71" : 0;
+    const builtAt =  true ? "2026-11-20T17:26:35.674Z" : 0;
     return { sha, builtAt };
 }
 
