@@ -48657,6 +48657,8 @@ var __metadata = (this && this.__metadata) || function (k, v) {
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.PromoteStatSchema = exports.PromoteStat = exports.TG_OWNED_PROMOTE_STAT_PATHS = void 0;
 exports.stripTgOwnedPaths = stripTgOwnedPaths;
+exports.stripTgOwnedFromDoc = stripTgOwnedFromDoc;
+exports.stripTgOwnedFromBulkOps = stripTgOwnedFromBulkOps;
 const mongoose_1 = __webpack_require__(/*! @nestjs/mongoose */ "@nestjs/mongoose");
 const swagger_1 = __webpack_require__(/*! @nestjs/swagger */ "@nestjs/swagger");
 const mongoose_2 = __webpack_require__(/*! mongoose */ "mongoose");
@@ -48741,11 +48743,55 @@ function stripTgOwnedPaths(update) {
         }
     }
 }
-for (const op of ['updateOne', 'updateMany', 'findOneAndUpdate']) {
+function stripTgOwnedFromDoc(doc) {
+    if (!doc || typeof doc !== 'object')
+        return;
+    for (const path of exports.TG_OWNED_PROMOTE_STAT_PATHS) {
+        const hydrated = doc;
+        if (hydrated.$__ && typeof hydrated.set === 'function')
+            hydrated.set(path, undefined);
+        else
+            delete doc[path];
+    }
+}
+function stripTgOwnedFromBulkOps(ops) {
+    if (!Array.isArray(ops))
+        return;
+    for (const op of ops) {
+        if (!op || typeof op !== 'object')
+            continue;
+        if (op.updateOne?.update)
+            stripTgOwnedPaths(op.updateOne.update);
+        if (op.updateMany?.update)
+            stripTgOwnedPaths(op.updateMany.update);
+        if (op.replaceOne?.replacement)
+            stripTgOwnedPaths(op.replaceOne.replacement);
+        if (op.insertOne?.document)
+            stripTgOwnedFromDoc(op.insertOne.document);
+    }
+}
+for (const op of ['updateOne', 'updateMany', 'findOneAndUpdate', 'replaceOne', 'findOneAndReplace']) {
     exports.PromoteStatSchema.pre(op, function stripTgOwned() {
         stripTgOwnedPaths(this.getUpdate());
     });
 }
+exports.PromoteStatSchema.pre('bulkWrite', function stripTgOwnedBulk(ops) {
+    stripTgOwnedFromBulkOps(ops);
+});
+exports.PromoteStatSchema.pre('insertMany', function stripTgOwnedInsertMany(docs) {
+    for (const doc of Array.isArray(docs) ? docs : [docs])
+        stripTgOwnedFromDoc(doc);
+});
+exports.PromoteStatSchema.pre('save', function stripTgOwnedSave() {
+    if (this.isNew) {
+        for (const path of exports.TG_OWNED_PROMOTE_STAT_PATHS)
+            this.set(path, undefined);
+        return;
+    }
+    for (const path of this.modifiedPaths())
+        if (isTgOwnedPath(path))
+            this.unmarkModified(path);
+});
 
 
 /***/ },
