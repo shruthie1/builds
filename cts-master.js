@@ -48655,10 +48655,12 @@ var __metadata = (this && this.__metadata) || function (k, v) {
     if (typeof Reflect === "object" && typeof Reflect.metadata === "function") return Reflect.metadata(k, v);
 };
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.PromoteStatSchema = exports.PromoteStat = void 0;
+exports.PromoteStatSchema = exports.PromoteStat = exports.TG_OWNED_PROMOTE_STAT_PATHS = void 0;
+exports.stripTgOwnedPaths = stripTgOwnedPaths;
 const mongoose_1 = __webpack_require__(/*! @nestjs/mongoose */ "@nestjs/mongoose");
 const swagger_1 = __webpack_require__(/*! @nestjs/swagger */ "@nestjs/swagger");
 const mongoose_2 = __webpack_require__(/*! mongoose */ "mongoose");
+exports.TG_OWNED_PROMOTE_STAT_PATHS = ['promoHealthPause'];
 let PromoteStat = class PromoteStat {
 };
 exports.PromoteStat = PromoteStat;
@@ -48710,10 +48712,40 @@ __decorate([
     (0, mongoose_1.Prop)({ type: String, required: false }),
     __metadata("design:type", String)
 ], PromoteStat.prototype, "mobile", void 0);
+__decorate([
+    (0, swagger_1.ApiProperty)({ description: 'tg-aut promotion-health pause cycle (read-only, written by tg-aut)', required: false, nullable: true, readOnly: true }),
+    (0, mongoose_1.Prop)({ type: mongoose_2.Schema.Types.Mixed, required: false }),
+    __metadata("design:type", Object)
+], PromoteStat.prototype, "promoHealthPause", void 0);
 exports.PromoteStat = PromoteStat = __decorate([
     (0, mongoose_1.Schema)()
 ], PromoteStat);
 exports.PromoteStatSchema = mongoose_1.SchemaFactory.createForClass(PromoteStat);
+function isTgOwnedPath(key) {
+    return exports.TG_OWNED_PROMOTE_STAT_PATHS.some((path) => key === path || key.startsWith(`${path}.`));
+}
+function stripTgOwnedPaths(update) {
+    if (!update || typeof update !== 'object' || Array.isArray(update))
+        return;
+    for (const key of Object.keys(update)) {
+        if (key.startsWith('$')) {
+            const operand = update[key];
+            if (operand && typeof operand === 'object' && !Array.isArray(operand)) {
+                for (const path of Object.keys(operand))
+                    if (isTgOwnedPath(path))
+                        delete operand[path];
+            }
+        }
+        else if (isTgOwnedPath(key)) {
+            delete update[key];
+        }
+    }
+}
+for (const op of ['updateOne', 'updateMany', 'findOneAndUpdate']) {
+    exports.PromoteStatSchema.pre(op, function stripTgOwned() {
+        stripTgOwnedPaths(this.getUpdate());
+    });
+}
 
 
 /***/ },
@@ -68652,7 +68684,7 @@ module.exports = require("util");
 /******/ 	// This entry module is referenced by other modules so it can't be inlined
 /******/ 	let __webpack_exports__ = __webpack_require__("./src/main.ts");
 /******/ 	const __webpack_export_target__ = exports;
-/******/ 	for(var __webpack_i__ in __webpack_exports__) __webpack_export_target__[__webpack_i__] = __webpack_exports__[__webpack_i__];
+/******/ 	for(var __webpack_i__ in __webpack_exports__) if(__webpack_i__ === "__proto__") Object.defineProperty(__webpack_export_target__, __webpack_i__, { enumerable: true, writable: true, configurable: true, value: __webpack_exports__[__webpack_i__] }); else __webpack_export_target__[__webpack_i__] = __webpack_exports__[__webpack_i__];
 /******/ 	if(__webpack_exports__.__esModule) Object.defineProperty(__webpack_export_target__, "__esModule", { value: true });
 /******/ 	
 /******/ })()
