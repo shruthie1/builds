@@ -36654,6 +36654,7 @@ function normalizePromoteStatsData(data) {
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   CREDITED_PAYER_MIN_AMOUNT: () => (/* binding */ CREDITED_PAYER_MIN_AMOUNT),
+/* harmony export */   CREDITED_PAYER_SCAN_LIMIT: () => (/* binding */ CREDITED_PAYER_SCAN_LIMIT),
 /* harmony export */   PERSONA_ASSIGNMENT_PROJECTION: () => (/* binding */ PERSONA_ASSIGNMENT_PROJECTION),
 /* harmony export */   PROMOTE_HARSH_REST_MS: () => (/* binding */ PROMOTE_HARSH_REST_MS),
 /* harmony export */   PROMOTE_RUNTIME_MIN_AGE_DAYS: () => (/* binding */ PROMOTE_RUNTIME_MIN_AGE_DAYS),
@@ -36789,6 +36790,8 @@ function promoHealthPauseFilter(expect) {
 }
 /** A credited payer row: highestPayAmount >= 15, not fake-marked (the listPaidChatIds rule). */
 const CREDITED_PAYER_MIN_AMOUNT = 15;
+/** Most userData rows the payer check reads (credited payers of one persona active in 6 h; far fewer in practice). */
+const CREDITED_PAYER_SCAN_LIMIT = 500;
 class PromoteRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_1__.BaseRepository {
     constructor() {
         super(...arguments);
@@ -37378,10 +37381,15 @@ class PromoteRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_1__.Ba
         return expect ? Number(result?.matchedCount ?? 0) > 0 : true;
     }
     /**
-     * The most recently active credited payer of this persona in userData since `since` (ms epoch), or null:
-     * highestPayAmount >= 15 and fakePaymentAt null (the listPaidChatIds rule), lastMsgTimeStamp >= since. With a
-     * clientId, rows stamped for another client of the persona are left out; rows without the stamp (legacy) count.
-     * Uses the profile_lastMsgTimeStamp index. Throws, also when the persona is unknown.
+     * The most recently active credited payer of this persona who talks to THIS client, since `since` (ms epoch), or
+     * null. userData rule (the listPaidChatIds rule): highestPayAmount >= 15, fakePaymentAt null, lastMsgTimeStamp >=
+     * since. userData has one row per (chatId, persona) and records no current main: `clientId` is only the client that
+     * inserted the row, and a swap or a parked reply never moves it. So a row counts when it is stamped for this
+     * client or unstamped (legacy), or, stamped for a sibling client, when this client has its own stats2 row for the
+     * chat (stats2 is keyed {chatId, profile, client} and upserted by this client on every inbound funnel event).
+     * Reads: userData by the profile_lastMsgTimeStamp index (at most CREDITED_PAYER_SCAN_LIMIT rows, newest first);
+     * stats2 by its unique {chatId, profile, client} index, only for sibling-stamped rows. Throws, also when the
+     * persona is unknown.
      */
     async findRecentCreditedPayer(identity, since) {
         if (!identity.profile)
@@ -37392,12 +37400,20 @@ class PromoteRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_1__.Ba
             fakePaymentAt: null,
             lastMsgTimeStamp: { $gte: since },
         };
-        if (identity.clientId)
-            filter.clientId = { $in: [identity.clientId, null] };
-        const row = await this.connection.collection('userData').findOne(filter, {
-            projection: { chatId: 1, lastMsgTimeStamp: 1 },
+        const rows = await this.connection.collection('userData').find(filter, {
+            projection: { chatId: 1, lastMsgTimeStamp: 1, clientId: 1 },
             sort: { lastMsgTimeStamp: -1 },
-        });
+            limit: CREDITED_PAYER_SCAN_LIMIT,
+        }).toArray();
+        const clientId = identity.clientId;
+        const isOwn = (row) => !clientId || row.clientId == null || row.clientId === clientId;
+        const siblingChatIds = rows.filter((row) => !isOwn(row)).map((row) => String(row.chatId ?? '')).filter(Boolean);
+        let talksHere = new Set();
+        if (clientId && siblingChatIds.length > 0) {
+            const stats = await this.connection.collection('stats2').find({ chatId: { $in: siblingChatIds }, profile: identity.profile, client: clientId }, { projection: { chatId: 1 } }).toArray();
+            talksHere = new Set(stats.map((row) => String(row.chatId ?? '')));
+        }
+        const row = rows.find((candidate) => isOwn(candidate) || talksHere.has(String(candidate.chatId ?? '')));
         if (!row)
             return null;
         return { chatId: String(row.chatId ?? ''), lastMsgTimeStamp: Number(row.lastMsgTimeStamp ?? 0) };
@@ -38439,6 +38455,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   AdoptedDbConnection: () => (/* reexport safe */ _adopt_connection__WEBPACK_IMPORTED_MODULE_1__.AdoptedDbConnection),
 /* harmony export */   BaseRepository: () => (/* reexport safe */ _base_repository__WEBPACK_IMPORTED_MODULE_2__.BaseRepository),
 /* harmony export */   CREDITED_PAYER_MIN_AMOUNT: () => (/* reexport safe */ _collections_promote_repository__WEBPACK_IMPORTED_MODULE_7__.CREDITED_PAYER_MIN_AMOUNT),
+/* harmony export */   CREDITED_PAYER_SCAN_LIMIT: () => (/* reexport safe */ _collections_promote_repository__WEBPACK_IMPORTED_MODULE_7__.CREDITED_PAYER_SCAN_LIMIT),
 /* harmony export */   CREDIT_KEY_HISTORY: () => (/* reexport safe */ _collections_user_data_repository__WEBPACK_IMPORTED_MODULE_3__.CREDIT_KEY_HISTORY),
 /* harmony export */   ChannelsRepository: () => (/* reexport safe */ _collections_channels_repository__WEBPACK_IMPORTED_MODULE_6__.ChannelsRepository),
 /* harmony export */   ClientsRepository: () => (/* reexport safe */ _collections_clients_repository__WEBPACK_IMPORTED_MODULE_8__.ClientsRepository),
@@ -52978,8 +52995,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "f72948742595decf2cf759bd8aafa06fdaa5b9f3" : 0;
-    const builtAt =  true ? "2026-11-20T04:53:57.704Z" : 0;
+    const sha =  true ? "bf3a81c284360b4189bf1bdf819ca35685edb76e" : 0;
+    const builtAt =  true ? "2026-11-20T05:54:44.816Z" : 0;
     return { sha, builtAt };
 }
 
