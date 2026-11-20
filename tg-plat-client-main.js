@@ -41531,7 +41531,9 @@ class ClientsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_0__.Ba
             return false;
         let matched = 0;
         const written = await this.guardWrite(`bufferClients.recordSpamStatus(${normalizedMobile})`, async () => {
-            const result = await this.bufferClients.updateOne({ mobile: normalizedMobile }, { $set: { ...update } }, { upsert: false });
+            const result = await this.bufferClients.updateOne({ mobile: normalizedMobile }, 
+            // updatedAt is bumped like every CMS (mongoose timestamps) write.
+            { $set: { ...update, updatedAt: new Date() } }, { upsert: false });
             matched = result?.matchedCount ?? 0;
         });
         // No upsert by design: a missing row is reported (false), not created.
@@ -42024,7 +42026,7 @@ class ParkedAccountsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE
             const bufferProjection = healthMode === 'off' ? POOL_PROJECTION : { ...POOL_PROJECTION, mobile: 1, limitedUntil: 1, spamCheckedAt: 1 };
             const [clients, promote, buffer] = await Promise.all([
                 this.connection.collection('clients').find({ mobile: { $in: forms } }, { projection: { clientId: 1 }, limit: 20, ...T }).toArray(),
-                this.connection.collection('promoteClients').find({ mobile: { $in: forms } }, { projection: POOL_PROJECTION, limit: 5, ...T }).toArray(),
+                this.connection.collection('promoteClients').find({ mobile: { $in: forms } }, { projection: PROMOTE_POOL_PROJECTION, limit: 5, ...T }).toArray(),
                 this.connection.collection('bufferClients').find({ mobile: { $in: forms } }, { projection: bufferProjection, limit: 5, ...T }).toArray(),
             ]);
             let bufferRows = buffer.map(poolRow);
@@ -42214,6 +42216,8 @@ function canonicalSeed(seed) {
     return { ...seed, _id, mobile };
 }
 const POOL_PROJECTION = { clientId: 1, status: 1, lastUsed: 1, session: 1, inUse: 1, spamStatus: 1, availableDate: 1 };
+/** promoteClients never carries spamStatus (promote spam lives in accountHealth), so it is not read: the row's spamStatus is null. */
+const PROMOTE_POOL_PROJECTION = { clientId: 1, status: 1, lastUsed: 1, session: 1, inUse: 1, availableDate: 1 };
 function poolRow(doc) {
     const lastUsed = doc.lastUsed instanceof Date ? doc.lastUsed.getTime() : typeof doc.lastUsed === 'number' ? doc.lastUsed : typeof doc.lastUsed === 'string' ? Date.parse(doc.lastUsed) : NaN;
     return {
@@ -43781,26 +43785,6 @@ class PromoteRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_1__.Ba
         if (!this.roleEventsRepository)
             this.roleEventsRepository = new _account_role_events_repository__WEBPACK_IMPORTED_MODULE_2__.AccountRoleEventsRepository(this.connection, this.logger);
         return this.roleEventsRepository;
-    }
-    async createPromoteClient(clientData) {
-        return this.guard('createPromoteClient', null, async () => {
-            const mobile = typeof clientData.mobile === 'string' ? clientData.mobile.trim() : '';
-            if (!mobile) {
-                this.logger.warn('Skipping promote client creation: a non-empty mobile identity is required');
-                return null;
-            }
-            const newClient = {
-                tgId: clientData.tgId,
-                mobile,
-                lastActive: clientData.lastActive,
-                availableDate: clientData.availableDate,
-                channels: clientData.channels,
-                createdAt: new Date(),
-                updatedAt: new Date(),
-            };
-            const result = await this.promoteClients.insertOne(newClient);
-            return { ...newClient, _id: result.insertedId };
-        });
     }
     /** THROWS on a read failure (the persona flow must see it); logs what was loaded. */
     async getPromoteClientDoc(mobile) {
@@ -63950,8 +63934,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "6c531e42b07f1fd23a137fa01e671a358cd54e9a" : 0;
-    const builtAt =  true ? "2026-11-20T18:06:55.979Z" : 0;
+    const sha =  true ? "7d7ce291ffc1819c400bc19ef3ae4e17a3b1a087" : 0;
+    const builtAt =  true ? "2026-11-20T18:56:41.499Z" : 0;
     return { sha, builtAt };
 }
 
