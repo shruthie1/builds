@@ -37977,6 +37977,25 @@ class UserDataRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_2__.B
         return this.collection.findOneAndUpdate(filter, { $set: { lastMsgTimeStamp: now, ...safeUpdates } }, { upsert: false, returnDocument: 'after' });
     }
     /**
+     * paidCount + 1 (+ lastMsgTimeStamp) in ONE atomic write on this persona's EXISTING row; never inserts.
+     * A missing, NaN or non-number paidCount counts as 0. NaN passes `$isNumber`, so it is excluded by `$ne` NaN:
+     * in MongoDB NaN equals NaN (a JS-style self-equality check passes NaN, measured on a real mongod). Returns the value written, or null when the persona holds no row.
+     * Replaces a read + 1 + setField (upsert) that wrote NaN for a missing field and lost concurrent claims. Throws.
+     */
+    async incrementPaidCount(chatId, identity, now = Date.now()) {
+        (0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.requireProfile)(identity);
+        const current = '$paidCount';
+        const row = await this.collection.findOneAndUpdate((0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.personaFilter)(chatId, identity), [{
+                $set: {
+                    paidCount: {
+                        $cond: [{ $and: [{ $isNumber: current }, { $ne: [current, { $literal: Number.NaN }] }] }, { $add: [current, 1] }, 1],
+                    },
+                    lastMsgTimeStamp: now,
+                },
+            }], { upsert: false, returnDocument: 'after', projection: { paidCount: 1 } });
+        return row ? Number(row.paidCount) : null;
+    }
+    /**
      * updateFields plus `$max` raises in the SAME atomic write: each `raise` key only ever goes up (never lowered by a
      * stale read). For entitlement bookkeeping that is not a payment credit (demo pictures' payAmount) — a read-compare-
      * write there lowered a balance another credit had raised in between.
@@ -53036,8 +53055,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "9eb6d6f0d102875bb858a0936ce37a27e68dd0b2" : 0;
-    const builtAt =  true ? "2026-11-20T06:37:43.998Z" : 0;
+    const sha =  true ? "3a11ce92082648d9088777c9dbbbdd9ebbc96696" : 0;
+    const builtAt =  true ? "2026-11-20T09:42:09.693Z" : 0;
     return { sha, builtAt };
 }
 
