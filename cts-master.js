@@ -59338,29 +59338,49 @@ exports.UserDataModule = UserDataModule = __decorate([
 
 
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.USER_DATA_WORKFLOW_OWNED_KEYS = void 0;
+exports.USER_DATA_INC_COUNTERS = exports.USER_DATA_IDENTITY_KEYS = exports.USER_DATA_WORKFLOW_OWNED_KEYS = void 0;
 exports.isWorkflowOwnedPath = isWorkflowOwnedPath;
 exports.stripWorkflowOwned = stripWorkflowOwned;
 exports.USER_DATA_WORKFLOW_OWNED_KEYS = [
     'showsPaidTo',
     'demoCompletions',
     'showCompletions',
+    'lifetimePaid',
+    'lifetimeCredits',
+    'creditKeys',
+    'firstPaidAt',
+    'lastPaidAt',
+    'fakePaymentAt',
+    'fakePaymentBy',
+    'fakePaymentReason',
+    'fakePaymentPrev',
     'fakePaymentHistory',
     'fakePaymentProofIds',
+    'msgCount',
 ];
+exports.USER_DATA_IDENTITY_KEYS = ['_id', 'chatId', 'profile'];
 function isWorkflowOwnedPath(path) {
     return exports.USER_DATA_WORKFLOW_OWNED_KEYS.some((k) => path === k || path.startsWith(`${k}.`));
+}
+exports.USER_DATA_INC_COUNTERS = ['windowCount'];
+function isInvalidCounterWrite(key, value) {
+    return exports.USER_DATA_INC_COUNTERS.some((k) => key.startsWith(`${k}.`) || (key === k && !(typeof value === 'number' && Number.isFinite(value))));
 }
 function stripWorkflowOwned(body) {
     const kept = { ...body };
     const stripped = [];
+    const invalid = [];
     for (const key of Object.keys(kept)) {
         if (isWorkflowOwnedPath(key)) {
             stripped.push(key);
             delete kept[key];
         }
+        else if (isInvalidCounterWrite(key, kept[key])) {
+            invalid.push(key);
+            delete kept[key];
+        }
     }
-    return { kept: kept, stripped };
+    return { kept: kept, stripped, invalid };
 }
 
 
@@ -59464,9 +59484,19 @@ let UserDataService = UserDataService_1 = class UserDataService {
         return currentCount;
     }
     withoutOwnedKeys(body, chatId) {
-        const { kept, stripped } = (0, user_data_owned_keys_1.stripWorkflowOwned)({ ...(body ?? {}) });
-        if (stripped.length) {
-            this.logger.warn(`user-data-update kind=stripped_owned keys=${stripped.join(',')} chat=****${String(chatId ?? '').slice(-4)}`);
+        const { kept, stripped, invalid } = (0, user_data_owned_keys_1.stripWorkflowOwned)({ ...(body ?? {}) });
+        const chat = `chat=****${String(chatId ?? '').slice(-4)}`;
+        if (stripped.length)
+            this.logger.warn(`user-data-update kind=stripped_owned keys=${stripped.join(',')} ${chat}`);
+        if (invalid.length)
+            this.logger.warn(`user-data-update kind=stripped_invalid_counter keys=${invalid.join(',')} ${chat}`);
+        return kept;
+    }
+    withoutIdentity(body) {
+        const kept = { ...body };
+        for (const key of Object.keys(kept)) {
+            if (user_data_owned_keys_1.USER_DATA_IDENTITY_KEYS.some((k) => key === k || key.startsWith(`${k}.`)))
+                delete kept[key];
         }
         return kept;
     }
@@ -59527,10 +59557,7 @@ let UserDataService = UserDataService_1 = class UserDataService {
         return owned ? { clientId: identifier, chatId } : { profile: resolvedProfile, chatId };
     }
     async update(profile, chatId, updateUserDataDto) {
-        const sanitizedDto = this.withoutOwnedKeys({ ...updateUserDataDto }, chatId);
-        delete sanitizedDto._id;
-        delete sanitizedDto.profile;
-        delete sanitizedDto.chatId;
+        const sanitizedDto = this.withoutIdentity(this.withoutOwnedKeys({ ...updateUserDataDto }, chatId));
         const updatedUser = await this.userDataModel
             .findOneAndUpdate(await this.userRowFilter(profile, chatId), { $set: sanitizedDto }, { returnDocument: 'after', upsert: false })
             .lean()
@@ -59541,8 +59568,7 @@ let UserDataService = UserDataService_1 = class UserDataService {
         return updatedUser;
     }
     async updateAll(chatId, updateUserDataDto) {
-        const sanitizedDto = this.withoutOwnedKeys({ ...updateUserDataDto }, chatId);
-        delete sanitizedDto._id;
+        const sanitizedDto = this.withoutIdentity(this.withoutOwnedKeys({ ...updateUserDataDto }, chatId));
         return this.userDataModel
             .updateMany({ chatId }, { $set: sanitizedDto })
             .exec();
