@@ -43957,6 +43957,19 @@ class PromoteRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_1__.Ba
             $setOnInsert: { client, count: 0, totalCount: 0, data: {}, uniqueChannels: 0, lastUpdatedTimeStamp: now },
         }, { upsert: true });
     }
+    /**
+     * Writes the promotion-health pause cycle (null clears it, never $unset). `active` true/false also writes
+     * isActive in the same update, like activatePromotions/deactivatePromotions. Throws.
+     */
+    async setPromoHealthPause(client, pause, active, now = Date.now()) {
+        await this.ensurePromoteStatsInitialized(client);
+        const set = { promoHealthPause: pause };
+        if (active === true)
+            Object.assign(set, { releaseDay: now, lastUpdatedTimeStamp: now, isActive: true });
+        if (active === false)
+            Object.assign(set, { releaseDay: now, isActive: false });
+        await this.promoteStats.updateOne({ client }, { $set: set });
+    }
     async readPromoteStats(client) {
         await this.ensurePromoteStatsInitialized(client);
         return this.promoteStats.findOne({ client });
@@ -63720,8 +63733,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "f802caccdca3ff4fa1d006036decacd0db503593" : 0;
-    const builtAt =  true ? "2026-11-20T03:47:41.226Z" : 0;
+    const sha =  true ? "7a10e3b5348c586997f7da85cbc9b9b3df55d397" : 0;
+    const builtAt =  true ? "2026-11-20T03:55:37.169Z" : 0;
     return { sha, builtAt };
 }
 
@@ -86706,7 +86719,8 @@ async function collectPromotionHealth() {
             issues.push("Promotion is paused after a verification durability failure");
         }
         // Ban-rate gate (BasePromotionEngine): most recent sends were banned, so the engine stopped its round.
-        // Unhealthy + recover = the promotion-health job requests the account swap now instead of after the stale clock.
+        // Unhealthy + recover = the promotion-health job pauses promotions now instead of after the stale clock
+        // (30 min pause, retry; job-manager swaps the main only after 3 failed retries with no payer active in 6 h).
         const banRateGate = promotor.getBanRateGateState?.() ?? null;
         if (banRateGate?.tripped) {
             status = "unhealthy";
@@ -91653,6 +91667,9 @@ function repingRecordId(chatId) {
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   JobManager: () => (/* binding */ JobManager),
+/* harmony export */   PROMO_HEALTH_MAX_FAILED_RETRIES: () => (/* binding */ PROMO_HEALTH_MAX_FAILED_RETRIES),
+/* harmony export */   PROMO_HEALTH_PAUSE_MS: () => (/* binding */ PROMO_HEALTH_PAUSE_MS),
+/* harmony export */   PROMO_HEALTH_PAYER_QUIET_MS: () => (/* binding */ PROMO_HEALTH_PAYER_QUIET_MS),
 /* harmony export */   runJobs: () => (/* binding */ runJobs),
 /* harmony export */   stopJobs: () => (/* binding */ stopJobs)
 /* harmony export */ });
@@ -91687,6 +91704,16 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_26__ = __webpack_require__(/*! @tg/core/utils/dc-ip-family */ "../../packages/tg-core/src/utils/dc-ip-family.ts");
 /* harmony import */ var _promotion_promo_health_log__WEBPACK_IMPORTED_MODULE_27__ = __webpack_require__(/*! ../promotion/promo-health-log */ "./src/promotion/promo-health-log.ts");
 /* harmony import */ var _tg_channel_state_channel_message_promotions_orchestrator_promo_health_ladder__WEBPACK_IMPORTED_MODULE_28__ = __webpack_require__(/*! @tg/channel-state/channel-message-promotions/orchestrator/promo-health-ladder */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/promo-health-ladder.ts");
+/* harmony import */ var _config_runtime_config__WEBPACK_IMPORTED_MODULE_29__ = __webpack_require__(/*! ../config/runtime-config */ "./src/config/runtime-config.ts");
+/* harmony import */ var _telegram_setup_client__WEBPACK_IMPORTED_MODULE_30__ = __webpack_require__(/*! ../telegram/setup-client */ "./src/telegram/setup-client.ts");
+/* harmony import */ var _telegram_spam_state__WEBPACK_IMPORTED_MODULE_31__ = __webpack_require__(/*! ../telegram/spam-state */ "./src/telegram/spam-state.ts");
+/* harmony import */ var _tg_core_utils_fetchWithTimeout__WEBPACK_IMPORTED_MODULE_32__ = __webpack_require__(/*! @tg/core/utils/fetchWithTimeout */ "../../packages/tg-core/src/utils/fetchWithTimeout.ts");
+/* harmony import */ var _tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_33__ = __webpack_require__(/*! @tg/core/utils/user-scope */ "../../packages/tg-core/src/utils/user-scope.ts");
+
+
+
+
+
 
 
 
@@ -91718,12 +91745,35 @@ __webpack_require__.r(__webpack_exports__);
 
 
 const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_18__.Logger("tg-aut:jobs");
+/** Owner rule 2026-11-20 (no env knobs): a promotion-health pause lasts 30 min, then promotions are retried. */
+const PROMO_HEALTH_PAUSE_MS = 30 * 60 * 1000;
+/** Consecutive failed retries before the main is swapped. */
+const PROMO_HEALTH_MAX_FAILED_RETRIES = 3;
+/** No swap while a credited payer was active on the main within this window. */
+const PROMO_HEALTH_PAYER_QUIET_MS = 6 * 60 * 60 * 1000;
+/** The stored pause cycle, or null when absent or malformed (a malformed one is treated as no cycle). */
+function readPromoHealthPause(value) {
+    if (!value || typeof value !== 'object')
+        return null;
+    const raw = value;
+    const until = Number(raw.until);
+    if (typeof raw.mobile !== 'string' || !raw.mobile || !Number.isFinite(until))
+        return null;
+    const failedRetries = Number(raw.failedRetries);
+    const pausedAt = Number(raw.pausedAt);
+    const retriedAt = raw.retriedAt == null ? null : Number(raw.retriedAt);
+    return {
+        mobile: raw.mobile,
+        pausedAt: Number.isFinite(pausedAt) ? pausedAt : until - PROMO_HEALTH_PAUSE_MS,
+        until,
+        failedRetries: Number.isFinite(failedRetries) && failedRetries > 0 ? Math.floor(failedRetries) : 0,
+        retriedAt: retriedAt !== null && Number.isFinite(retriedAt) ? retriedAt : null,
+    };
+}
 class JobManager {
     constructor() {
         this.jobs = new Map();
-        /** Promotion-health pauses in this process (a later one logs kind=repause). */
-        this.promoHealthPauses = 0;
-        /** IST day of the last "Promotions failing" alert: later pauses that day log kind=alert_suppressed. */
+        /** IST day of the last "Promotions failing" pause alert: later first pauses that day log kind=alert_suppressed. */
         this.promoPauseAlertDay = null;
         this.periodicInterval = null;
         this.initialSetupTimeout = null;
@@ -91927,10 +91977,10 @@ class JobManager {
                     await (0,_conversation_user_stats__WEBPACK_IMPORTED_MODULE_1__.getUserStats)(false);
                 }
                 finally {
-                    // Owner 2026-11-19: the daily re-activation (it lifts a promotion-health pause) never
-                    // depends on the steps above succeeding. There is no boot catch-up (promoteStats.releaseDay is
-                    // rewritten by other writers, so it is no pause timestamp): a pause missed while the process
-                    // was down lifts at the next 00:23 reset.
+                    // Owner 2026-11-19: the daily re-activation never depends on the steps above succeeding.
+                    // Owner 2026-11-20: it also clears the promotion-health pause cycle (failed-retry count to 0).
+                    // A pause cycle normally ends earlier: its retry deadline is in promoteStats.promoHealthPause
+                    // (releaseDay is rewritten by other writers), so the health check retries after a restart too.
                     await this.resumePromotions('daily_reset');
                 }
                 // Reset daily counters but preserve lastRun/lastSuccess for diagnostics
@@ -92295,15 +92345,21 @@ class JobManager {
         }
     }
     async stopPromotionsForPaidUserLimit(promotor) {
-        await this.haltPromotions(promotor, 'paidUserLimit', 'paid-user-limit promotion halt', 'paid-user limit');
+        await this.haltPromotions(promotor, 'paidUserLimit', 'paid-user-limit promotion halt', 'paid-user limit', () => _data_user_data_crud__WEBPACK_IMPORTED_MODULE_8__.UserDataDtoCrud.getInstance().deactivatePromotions());
     }
     /**
-     * Promotion-health pause for the main: the durable flag stops supervisor starts (assure, checkPromotions)
-     * until a resume (daily reset, SpamBot good news, /promote); the runner stop ends the current
-     * loop. Returns whether the durable flag was written.
+     * Promotion-health pause for the main: durable isActive=false plus the pause cycle (retry deadline, failed-retry
+     * count) in one promoteStats write, then the runner stop. The flag stops supervisor starts (assure,
+     * checkPromotions) until the retry, the daily reset, SpamBot good news or /promote. Returns whether it was written.
      */
-    async pausePromotionsForHealth(promotor) {
-        return this.haltPromotions(promotor, 'promoHealth', 'promotion-health pause', 'promotion-health failure');
+    async pausePromotionsForHealth(promotor, pause) {
+        return this.haltPromotions(promotor, 'promoHealth', 'promotion-health pause', 'promotion-health failure', () => this.promoteRepo().setPromoHealthPause(process.env.clientId, pause, false));
+    }
+    promoteRepo() {
+        const repositories = _data_user_data_crud__WEBPACK_IMPORTED_MODULE_8__.UserDataDtoCrud.getInstance().getRepositories();
+        if (!repositories)
+            throw new Error('Mongo client not connected; promoteStats unavailable');
+        return repositories.promote;
     }
     currentMobile() {
         try {
@@ -92314,10 +92370,11 @@ class JobManager {
         }
     }
     /**
-     * Re-activate promotions (durable isActive=true) and start the runner; one `promo-health kind=resume` line.
-     * The runner starts only when the flag was written (startPromotion refuses while it is off anyway).
+     * Re-activate promotions (durable isActive=true, and the pause cycle written in the same update) and start the
+     * runner; one `promo-health kind=<kind>` line. daily_reset clears the cycle (failed-retry count back to 0);
+     * a retry keeps it with retriedAt set. The runner starts only when the flag was written.
      */
-    async resumePromotions(source) {
+    async resumePromotions(source, pause = null, kind = 'resume', fields = {}) {
         const db = _data_user_data_crud__WEBPACK_IMPORTED_MODULE_8__.UserDataDtoCrud.getInstance();
         let wasPaused = null;
         try {
@@ -92329,13 +92386,13 @@ class JobManager {
         }
         let persisted = false;
         try {
-            await db.activatePromotions();
+            await this.promoteRepo().setPromoHealthPause(process.env.clientId, pause, true);
             persisted = true;
         }
         catch (error) {
             (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, `JobManager.${source}ActivatePromotions`);
         }
-        this.log('info', (0,_promotion_promo_health_log__WEBPACK_IMPORTED_MODULE_27__.promoHealthLine)('resume', this.currentMobile(), { source, wasPaused, persisted }));
+        this.log('info', (0,_promotion_promo_health_log__WEBPACK_IMPORTED_MODULE_27__.promoHealthLine)(kind, this.currentMobile(), { source, ...fields, wasPaused, persisted }));
         if (!persisted)
             return;
         if (await _telegram_client_access__WEBPACK_IMPORTED_MODULE_15__.TelegramManager.instanceExist()) {
@@ -92348,11 +92405,11 @@ class JobManager {
             }
         }
     }
-    /** Durable deactivate (isActive=false) + runner stop; each step's failure is logged and does not block the other. */
-    async haltPromotions(promotor, context, persistLabel, stopLabel) {
+    /** Durable deactivate + runner stop; each step's failure is logged and does not block the other. */
+    async haltPromotions(promotor, context, persistLabel, stopLabel, persist) {
         let persisted = false;
         try {
-            await _data_user_data_crud__WEBPACK_IMPORTED_MODULE_8__.UserDataDtoCrud.getInstance().deactivatePromotions();
+            await persist();
             persisted = true;
         }
         catch (error) {
@@ -92368,6 +92425,20 @@ class JobManager {
         }
         return persisted;
     }
+    /**
+     * Owner rule 2026-11-20 (this process runs the client's MAIN: it holds the user chats and takes payments):
+     * - a failed promotion health pauses promotions for PROMO_HEALTH_PAUSE_MS (kind=pause);
+     * - past the deadline the next health check retries (kind=retry); the deadline is in promoteStats.promoHealthPause,
+     *   so a restarted process retries too;
+     * - the health check after a retry: healthy clears the cycle (kind=resume source=retry), unhealthy pauses again
+     *   (kind=repause) and counts a failed retry;
+     * - at PROMO_HEALTH_MAX_FAILED_RETRIES failed retries in a row it asks CMS to swap the main (kind=swap) through
+     *   setupClient, inside the per-client ladder swap budget (2 per IST day), unless a credited payer was active on
+     *   the main in the last PROMO_HEALTH_PAYER_QUIET_MS (kind=swap_held, the 30 min cycle goes on);
+     * - the count resets on a healthy check, a swap (another mobile) and the daily reset.
+     * Real account problems keep their own swap paths: the permanent-failure handoff (ban, revoked session, frozen)
+     * and the SpamBot rule in system-message-handler (dated limit of MIN_LIMIT_DAYS_FOR_SWAP+ days, or harsh).
+     */
     async checkPromotionHealth() {
         try {
             if (!(await _telegram_client_access__WEBPACK_IMPORTED_MODULE_15__.TelegramManager.instanceExist()))
@@ -92381,44 +92452,207 @@ class JobManager {
                 this.log('debug', 'Promotion health skipped: promote stats not initialized yet');
                 return;
             }
+            const now = Date.now();
+            const mobile = this.currentMobile();
+            const pause = readPromoHealthPause(promotedStats.promoHealthPause);
+            if (pause && pause.mobile !== mobile) {
+                // The main changed (a swap through any path): the old main's cycle and count do not carry over.
+                await this.endPromoHealthCycleForNewMain(pause, promotedStats.isActive !== true);
+                return;
+            }
+            if (promotedStats.isActive !== true) {
+                // Paused. Without a cycle the pause is someone else's (paid-user limit, an older build): unchanged.
+                if (!pause || now < pause.until)
+                    return;
+                await this.retryPromotions(pause, now);
+                return;
+            }
             const messageStats = promotor.getStats();
             const daysLeft = (0,_conversation_reply_switch__WEBPACK_IMPORTED_MODULE_0__.daysLeftForRelease)();
             const healthSnapshot = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_21__.buildTgAutHealthSnapshot)();
             const recoveryPlan = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_17__.createHealthRecoveryPlan)(healthSnapshot);
             const promotionHealth = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_17__.findHealthCheck)(healthSnapshot, 'promotion.engine');
             // Flow v3 P7: metadata.promoHealth exists when the engine stats carry a runner snapshot.
-            if (promotedStats.isActive && await this.applyPromoHealthLadder(promotor, promotionHealth))
+            if (await this.applyPromoHealthLadder(promotor, promotionHealth))
                 return;
-            const shouldPause = promotedStats.isActive && recoveryPlan.actions.some((action) => (action.component === 'promotion.engine' && action.status === 'unhealthy'));
-            // Owner rule 2026-11-19: this process runs the client's MAIN (it holds the user chats and takes
-            // payments). Failed promotions pause its promotion sends until the daily reset re-activates them;
-            // they never ask CMS to swap the main. Real account problems still swap through their own paths:
-            // the permanent-failure handoff (ban, revoked session, frozen) and the SpamBot rule in
-            // system-message-handler (dated limit of MIN_LIMIT_DAYS_FOR_SWAP+ days, or harsh).
-            if (shouldPause) {
+            const unhealthy = recoveryPlan.actions.some((action) => (action.component === 'promotion.engine' && action.status === 'unhealthy'));
+            const ladderReason = promotionHealth?.metadata?.promoHealth?.reason;
+            const reason = (ladderReason ?? (promotionHealth?.issues ?? [])[0] ?? 'unhealthy').split(/\s+/)[0] || 'unhealthy';
+            if (pause) {
+                // Promotions run again after a retry (or a manual resume): this check is the retry's outcome.
+                if (unhealthy) {
+                    await this.handleFailedRetry(promotor, pause, { now, mobile, reason, messageStats, daysLeft, promotionHealth, promotedStats });
+                }
+                else if (promotionHealth?.status === 'healthy') {
+                    let persisted = false;
+                    try {
+                        await this.promoteRepo().setPromoHealthPause(process.env.clientId, null);
+                        persisted = true;
+                    }
+                    catch (error) {
+                        (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, 'JobManager.promoHealthClearPause');
+                    }
+                    this.log('info', (0,_promotion_promo_health_log__WEBPACK_IMPORTED_MODULE_27__.promoHealthLine)('resume', mobile, { source: 'retry', healthy: true, failedRetries: pause.failedRetries, persisted }));
+                }
+                // Degraded or recovering: no verdict yet, the next check decides.
+                return;
+            }
+            if (unhealthy) {
                 const lastUpdatedTimeStamp = Number(promotionHealth?.metadata?.durableLastUpdatedAt ?? promotedStats.lastUpdatedTimeStamp ?? 0);
-                const ladderReason = promotionHealth?.metadata?.promoHealth?.reason;
-                const reason = (ladderReason ?? (promotionHealth?.issues ?? [])[0] ?? 'unhealthy').split(/\s+/)[0] || 'unhealthy';
-                const persisted = await this.pausePromotionsForHealth(promotor);
-                const mobile = this.currentMobile();
-                const kind = this.promoHealthPauses > 0 ? 'repause' : 'pause';
-                this.log('warn', (0,_promotion_promo_health_log__WEBPACK_IMPORTED_MODULE_27__.promoHealthLine)(kind, mobile, { reason, failStreak: messageStats.failStreak, persisted }));
-                // Not persisted: the flag is still on, so the next tick resumes the runner; nothing to report as paused.
+                const persisted = await this.pausePromotionsForHealth(promotor, {
+                    mobile, pausedAt: now, until: now + PROMO_HEALTH_PAUSE_MS, failedRetries: 0, retriedAt: null,
+                });
+                this.log('warn', (0,_promotion_promo_health_log__WEBPACK_IMPORTED_MODULE_27__.promoHealthLine)('pause', mobile, { reason, failStreak: messageStats.failStreak, untilMin: PROMO_HEALTH_PAUSE_MS / 60000, persisted }));
+                // Not persisted: the flag is still on, so the next tick tries again; nothing to report as paused.
                 if (!persisted)
                     return;
-                this.promoHealthPauses += 1;
-                const today = (0,_tg_channel_state_channel_message_promotions_orchestrator_promo_health_ladder__WEBPACK_IMPORTED_MODULE_28__.promoIstDay)(Date.now());
+                const today = (0,_tg_channel_state_channel_message_promotions_orchestrator_promo_health_ladder__WEBPACK_IMPORTED_MODULE_28__.promoIstDay)(now);
                 if (this.promoPauseAlertDay === today) {
                     this.log('info', (0,_promotion_promo_health_log__WEBPACK_IMPORTED_MODULE_27__.promoHealthLine)('alert_suppressed', mobile, { reason: 'already_alerted_today' }));
                     return;
                 }
                 this.promoPauseAlertDay = today;
-                await this.notifyError(`Promotions failing! Promotions paused on this main, no swap ⏸️\n\nLast update: ${(0,_tg_core_utils_readbleTimeDifference__WEBPACK_IMPORTED_MODULE_19__.getReadableTimeDifference)(lastUpdatedTimeStamp)}\nHealth: ${promotionHealth?.summary ?? 'unhealthy'}\nIssues: ${(promotionHealth?.issues ?? []).join(', ') || 'none'}\nFailed streak: ${messageStats.failStreak}\nTotal Failed: ${messageStats.totalFailed}\nSuccess: ${messageStats.successCount}\nDeleted: ${messageStats.deletedCount}\nDaysLeft: ${daysLeft}`);
+                await this.notifyError(`Promotions failing! Promotions paused 30 min on this main, then retried; swap after ${PROMO_HEALTH_MAX_FAILED_RETRIES} failed retries when no payer is active ⏸️\n\nLast update: ${(0,_tg_core_utils_readbleTimeDifference__WEBPACK_IMPORTED_MODULE_19__.getReadableTimeDifference)(lastUpdatedTimeStamp)}\nHealth: ${promotionHealth?.summary ?? 'unhealthy'}\nIssues: ${(promotionHealth?.issues ?? []).join(', ') || 'none'}\nFailed streak: ${messageStats.failStreak}\nTotal Failed: ${messageStats.totalFailed}\nSuccess: ${messageStats.successCount}\nDeleted: ${messageStats.deletedCount}\nDaysLeft: ${daysLeft}`);
             }
         }
         catch (error) {
             (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, 'JobManager.promotionHealth');
             this.log('warn', `Promotion health check failed: ${error instanceof Error ? error.message : String(error)}`);
+        }
+    }
+    /** The retry deadline passed: promotions run again (kind=retry), unless the paid-user limit holds them. */
+    async retryPromotions(pause, now) {
+        const attempt = pause.failedRetries + 1;
+        let paidUserStats;
+        try {
+            paidUserStats = await _data_user_data_crud__WEBPACK_IMPORTED_MODULE_8__.UserDataDtoCrud.getInstance().getTodayPaidUsers();
+        }
+        catch (error) {
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, 'JobManager.promoHealthRetryPaidUsers', false);
+            paidUserStats = { count: 0 };
+        }
+        if ((0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_14__.isPaidUserLimitReached)(paidUserStats)) {
+            // checkPromotions would halt the runner again at once; the daily reset lifts both.
+            this.log('info', (0,_promotion_promo_health_log__WEBPACK_IMPORTED_MODULE_27__.promoHealthLine)('retry', this.currentMobile(), { source: 'retry', attempt, held: 'paid_user_limit' }));
+            return;
+        }
+        await this.resumePromotions('retry', { ...pause, retriedAt: now }, 'retry', {
+            attempt,
+            pausedMin: Math.round((now - pause.pausedAt) / 60000),
+        });
+    }
+    /** A cycle left by the previous main: clear it, and resume promotions if they are still paused by it. */
+    async endPromoHealthCycleForNewMain(pause, paused) {
+        const fields = { reason: 'main_changed', previous: (0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_26__.maskMobile)(pause.mobile), failedRetries: pause.failedRetries };
+        if (paused) {
+            await this.resumePromotions('retry', null, 'resume', fields);
+            return;
+        }
+        let persisted = false;
+        try {
+            await this.promoteRepo().setPromoHealthPause(process.env.clientId, null);
+            persisted = true;
+        }
+        catch (error) {
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, 'JobManager.promoHealthClearPause');
+        }
+        this.log('info', (0,_promotion_promo_health_log__WEBPACK_IMPORTED_MODULE_27__.promoHealthLine)('resume', this.currentMobile(), { source: 'retry', ...fields, wasPaused: false, persisted }));
+    }
+    /**
+     * The health check after a retry failed. Below PROMO_HEALTH_MAX_FAILED_RETRIES: pause again. At or past it: swap
+     * through setupClient (the pre-2026-11-19 path) when no credited payer was active in the last 6 h and the
+     * ladder swap budget allows; otherwise hold the swap and pause again.
+     */
+    async handleFailedRetry(promotor, pause, ctx) {
+        const { now, mobile, reason, messageStats } = ctx;
+        const failedRetries = pause.failedRetries + 1;
+        const repause = async () => {
+            const persisted = await this.pausePromotionsForHealth(promotor, {
+                mobile, pausedAt: now, until: now + PROMO_HEALTH_PAUSE_MS, failedRetries, retriedAt: null,
+            });
+            this.log('warn', (0,_promotion_promo_health_log__WEBPACK_IMPORTED_MODULE_27__.promoHealthLine)('repause', mobile, { reason, failedRetries, failStreak: messageStats.failStreak, untilMin: PROMO_HEALTH_PAUSE_MS / 60000, persisted }));
+        };
+        if (failedRetries < PROMO_HEALTH_MAX_FAILED_RETRIES) {
+            await repause();
+            return;
+        }
+        const payer = await this.creditedPayerActive(now);
+        if (payer.active) {
+            this.log('warn', (0,_promotion_promo_health_log__WEBPACK_IMPORTED_MODULE_27__.promoHealthLine)('swap_held', mobile, {
+                reason: payer.error ? 'payer_check_failed' : 'payer_active',
+                failedRetries,
+                payerAgoMin: payer.lastAt ? Math.floor((now - payer.lastAt) / 60000) : null,
+                ...(payer.error ? { error: payer.error } : {}),
+            }));
+            await repause();
+            return;
+        }
+        const clientId = process.env.clientId || 'unknown';
+        const budget = await (0,_tg_channel_state_channel_message_promotions_orchestrator_promo_health_ladder__WEBPACK_IMPORTED_MODULE_28__.readPromoSwapBudget)(_tg_core_utils_Redis_Redis_Client__WEBPACK_IMPORTED_MODULE_22__.RedisClient, 'tgaut', clientId, now);
+        if ('reason' in budget) {
+            this.log('warn', (0,_promotion_promo_health_log__WEBPACK_IMPORTED_MODULE_27__.promoHealthLine)('swap_held', mobile, { reason: budget.reason, failedRetries, detail: budget.detail }));
+            await repause();
+            return;
+        }
+        const runtimeBase = (0,_config_runtime_config__WEBPACK_IMPORTED_MODULE_29__.getRuntimeConfigBaseOrNull)();
+        if (!runtimeBase) {
+            this.log('error', 'Cannot trigger setupClient rotation: runtime config base is missing');
+            this.log('warn', (0,_promotion_promo_health_log__WEBPACK_IMPORTED_MODULE_27__.promoHealthLine)('swap', mobile, { swapped: false, status: 'no_runtime_base', failedRetries }));
+            await repause();
+            return;
+        }
+        const swapReason = `Promotion health check failed: failStreak=${messageStats.failStreak}, totalFailed=${messageStats.totalFailed}, failedRetries=${failedRetries}`;
+        const url = `${runtimeBase}/setupClient/${process.env.clientId}?archiveOld=true&days=${(0,_telegram_spam_state__WEBPACK_IMPORTED_MODULE_31__.clampSwapRestDays)((0,_telegram_spam_state__WEBPACK_IMPORTED_MODULE_31__.swapDaysForCurrentSpamState)())}&formalities=true&reason=${encodeURIComponent(swapReason)}`;
+        const setupResult = await (0,_telegram_setup_client__WEBPACK_IMPORTED_MODULE_30__.requestClientSetup)(url, _tg_core_utils_fetchWithTimeout__WEBPACK_IMPORTED_MODULE_32__.fetchWithTimeout, process.env.clientId);
+        this.log('warn', (0,_promotion_promo_health_log__WEBPACK_IMPORTED_MODULE_27__.promoHealthLine)('swap', mobile, {
+            swapped: setupResult.swapped,
+            status: setupResult.status,
+            failedRetries,
+            newMobile: setupResult.swapped ? (0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_26__.maskMobile)(setupResult.newMobile) : undefined,
+        }));
+        const lastUpdatedTimeStamp = Number(ctx.promotionHealth?.metadata?.durableLastUpdatedAt ?? ctx.promotedStats.lastUpdatedTimeStamp ?? 0);
+        const alertMsg = `Promotions failing! Rotating user after ${failedRetries} failed retries, no payer active in 6 h 🔄\n\nLast update: ${(0,_tg_core_utils_readbleTimeDifference__WEBPACK_IMPORTED_MODULE_19__.getReadableTimeDifference)(lastUpdatedTimeStamp)}\nHealth: ${ctx.promotionHealth?.summary ?? 'unhealthy'}\nIssues: ${(ctx.promotionHealth?.issues ?? []).join(', ') || 'none'}\nFailed streak: ${messageStats.failStreak}\nTotal Failed: ${messageStats.totalFailed}\nSuccess: ${messageStats.successCount}\nDeleted: ${messageStats.deletedCount}\nDaysLeft: ${ctx.daysLeft}`;
+        // Alert only when a rotation request actually went out.
+        if (!setupResult.suppressedLocally)
+            await this.notifyError(`${alertMsg}\n\nResult: ${setupResult.status}`);
+        if (!setupResult.swapped) {
+            this.log('warn', `Promotion rotation not performed: ${setupResult.status} — ${setupResult.message}`);
+            await repause();
+            return;
+        }
+        this.log('info', `Promotion rotation completed 🔄 ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_26__.maskMobile)(setupResult.existingMobile)} → ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_26__.maskMobile)(setupResult.newMobile)}`);
+        try {
+            await (0,_tg_channel_state_channel_message_promotions_orchestrator_promo_health_ladder__WEBPACK_IMPORTED_MODULE_28__.notePromoSwap)(_tg_core_utils_Redis_Redis_Client__WEBPACK_IMPORTED_MODULE_22__.RedisClient, budget);
+        }
+        catch (error) {
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, 'JobManager.promoLadderSwapBudget', false);
+        }
+        try {
+            // A swap resets the count. promotions stay active, as before 2026-11-19, so the new main starts sending.
+            await this.promoteRepo().setPromoHealthPause(process.env.clientId, null);
+        }
+        catch (error) {
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, 'JobManager.promoHealthClearPause', false);
+        }
+    }
+    /**
+     * Was a credited payer active on this main within PROMO_HEALTH_PAYER_QUIET_MS? Signal: the persona's most
+     * recently active userData row with payAmount > 26 (UserDataRepository.listTopPayers, 1 row on the
+     * profile_lastMsgTimeStamp index). lastMsgTimeStamp moves on every userData write, so a message either way and a
+     * payment credit both count. A failed read counts as active (no swap on unknown).
+     */
+    async creditedPayerActive(now) {
+        try {
+            const repositories = _data_user_data_crud__WEBPACK_IMPORTED_MODULE_8__.UserDataDtoCrud.getInstance().getRepositories();
+            if (!repositories)
+                throw new Error('Mongo client not connected; userData unavailable');
+            const [row] = await repositories.userData.listTopPayers((0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_33__.currentScopeIdentity)(), 1);
+            const lastAt = Number(row?.lastMsgTimeStamp ?? 0) || null;
+            return { active: lastAt !== null && now - lastAt < PROMO_HEALTH_PAYER_QUIET_MS, lastAt };
+        }
+        catch (error) {
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, 'JobManager.promoHealthPayerCheck', false);
+            return { active: true, lastAt: null, error: error instanceof Error ? error.message : String(error) };
         }
     }
     /**
@@ -111956,7 +112190,10 @@ __webpack_require__.r(__webpack_exports__);
 /**
  * Owner rule 2026-11-19: every promotion-health decision on the tg-aut main writes one greppable line,
  * `promo-health kind=<kind> client=<clientId> mobile=***1234 key=value ...`. A value with spaces is quoted.
- * Kinds: pause, repause, alert_suppressed, resume (source=daily_reset|spambot_good_news|route), paused_fault.
+ * Kinds: pause, retry, repause, swap, swap_held, alert_suppressed, paused_fault,
+ * resume (source=daily_reset|spambot_good_news|route|retry).
+ * Cycle (owner 2026-11-20): pause 30 min, retry, repause on a failed retry, swap after 3 failed retries in a row
+ * unless a credited payer was active on the main in the last 6 h (swap_held).
  */
 
 function pair(key, value) {
