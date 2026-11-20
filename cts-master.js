@@ -55921,6 +55921,12 @@ const swagger_1 = __webpack_require__(/*! @nestjs/swagger */ "@nestjs/swagger");
 const stat_service_1 = __webpack_require__(/*! ./stat.service */ "./src/components/stats/stat.service.ts");
 const create_stat_dto_1 = __webpack_require__(/*! ./create-stat.dto */ "./src/components/stats/create-stat.dto.ts");
 const update_stat_dto_1 = __webpack_require__(/*! ./update-stat.dto */ "./src/components/stats/update-stat.dto.ts");
+function requireClient(client) {
+    const value = typeof client === 'string' ? client.trim() : '';
+    if (!value)
+        throw new common_1.BadRequestException('client query parameter is required (?client=<clientId>)');
+    return value;
+}
 let StatController = class StatController {
     constructor(statService) {
         this.statService = statService;
@@ -55928,14 +55934,14 @@ let StatController = class StatController {
     async create(createStatDto) {
         return this.statService.create(createStatDto);
     }
-    async findByChatIdAndProfile(chatId, profile) {
-        return this.statService.findByChatIdAndProfile(chatId, profile);
+    async findByChatIdAndProfile(chatId, profile, client) {
+        return this.statService.findByChatIdAndProfile(chatId, profile, requireClient(client));
     }
-    async update(chatId, profile, updateStatDto) {
-        return this.statService.update(chatId, profile, updateStatDto);
+    async update(chatId, profile, client, updateStatDto) {
+        return this.statService.update(chatId, profile, requireClient(client), updateStatDto);
     }
-    async deleteOne(chatId, profile) {
-        return this.statService.deleteOne(chatId, profile);
+    async deleteOne(chatId, profile, client) {
+        return this.statService.deleteOne(chatId, profile, requireClient(client));
     }
     async deleteAll() {
         return this.statService.deleteAll();
@@ -55951,27 +55957,33 @@ __decorate([
 ], StatController.prototype, "create", null);
 __decorate([
     (0, common_1.Get)(':chatId/:profile'),
+    (0, swagger_1.ApiQuery)({ name: 'client', required: true, description: 'clientId of the row (sibling clients share a persona)' }),
     __param(0, (0, common_1.Param)('chatId')),
     __param(1, (0, common_1.Param)('profile')),
+    __param(2, (0, common_1.Query)('client')),
     __metadata("design:type", Function),
-    __metadata("design:paramtypes", [String, String]),
+    __metadata("design:paramtypes", [String, String, String]),
     __metadata("design:returntype", Promise)
 ], StatController.prototype, "findByChatIdAndProfile", null);
 __decorate([
     (0, common_1.Put)(':chatId/:profile'),
+    (0, swagger_1.ApiQuery)({ name: 'client', required: true, description: 'clientId of the row (sibling clients share a persona)' }),
     __param(0, (0, common_1.Param)('chatId')),
     __param(1, (0, common_1.Param)('profile')),
-    __param(2, (0, common_1.Body)()),
+    __param(2, (0, common_1.Query)('client')),
+    __param(3, (0, common_1.Body)()),
     __metadata("design:type", Function),
-    __metadata("design:paramtypes", [String, String, update_stat_dto_1.UpdateStatDto]),
+    __metadata("design:paramtypes", [String, String, String, update_stat_dto_1.UpdateStatDto]),
     __metadata("design:returntype", Promise)
 ], StatController.prototype, "update", null);
 __decorate([
     (0, common_1.Delete)(':chatId/:profile'),
+    (0, swagger_1.ApiQuery)({ name: 'client', required: true, description: 'clientId of the row (sibling clients share a persona)' }),
     __param(0, (0, common_1.Param)('chatId')),
     __param(1, (0, common_1.Param)('profile')),
+    __param(2, (0, common_1.Query)('client')),
     __metadata("design:type", Function),
-    __metadata("design:paramtypes", [String, String]),
+    __metadata("design:paramtypes", [String, String, String]),
     __metadata("design:returntype", Promise)
 ], StatController.prototype, "deleteOne", null);
 __decorate([
@@ -56151,24 +56163,24 @@ let StatService = class StatService {
         const stats = await this.statModel.find().exec();
         return stats;
     }
-    async findByChatIdAndProfile(chatId, profile) {
-        const stat = await this.statModel.findOne({ chatId, profile }).exec();
+    async findByChatIdAndProfile(chatId, profile, client) {
+        const stat = await this.statModel.findOne({ chatId, profile, client }).exec();
         if (!stat) {
-            throw new common_1.NotFoundException(`Stat not found for chatId ${chatId} and profile ${profile}`);
+            throw new common_1.NotFoundException(`Stat not found for chatId ${chatId}, profile ${profile} and client ${client}`);
         }
         return stat;
     }
-    async update(chatId, profile, updateStatDto) {
-        const stat = await this.statModel.findOneAndUpdate({ chatId, profile }, updateStatDto, { returnDocument: 'after' }).exec();
+    async update(chatId, profile, client, updateStatDto) {
+        const stat = await this.statModel.findOneAndUpdate({ chatId, profile, client }, updateStatDto, { returnDocument: 'after' }).exec();
         if (!stat) {
-            throw new common_1.NotFoundException(`Stat not found for chatId ${chatId} and profile ${profile}`);
+            throw new common_1.NotFoundException(`Stat not found for chatId ${chatId}, profile ${profile} and client ${client}`);
         }
         return stat;
     }
-    async deleteOne(chatId, profile) {
-        const result = await this.statModel.deleteOne({ chatId, profile }).exec();
+    async deleteOne(chatId, profile, client) {
+        const result = await this.statModel.deleteOne({ chatId, profile, client }).exec();
         if (result.deletedCount === 0) {
-            throw new common_1.NotFoundException(`Stat not found for chatId ${chatId} and profile ${profile}`);
+            throw new common_1.NotFoundException(`Stat not found for chatId ${chatId}, profile ${profile} and client ${client}`);
         }
     }
     async deleteAll() {
@@ -56234,7 +56246,7 @@ __decorate([
     __metadata("design:type", Number)
 ], CreateStat2Dto.prototype, "count", void 0);
 __decorate([
-    (0, swagger_1.ApiProperty)({ description: 'Pay Amount' }),
+    (0, swagger_1.ApiProperty)({ description: 'Paid today: must be 0 on create and cannot be updated (set only by a tg-aut credit)' }),
     __metadata("design:type", Number)
 ], CreateStat2Dto.prototype, "payAmount", void 0);
 __decorate([
@@ -56329,6 +56341,12 @@ const swagger_1 = __webpack_require__(/*! @nestjs/swagger */ "@nestjs/swagger");
 const stat2_service_1 = __webpack_require__(/*! ./stat2.service */ "./src/components/stats2/stat2.service.ts");
 const create_stat2_dto_1 = __webpack_require__(/*! ./create-stat2.dto */ "./src/components/stats2/create-stat2.dto.ts");
 const update_stat2_dto_1 = __webpack_require__(/*! ./update-stat2.dto */ "./src/components/stats2/update-stat2.dto.ts");
+function requireClient(client) {
+    const value = typeof client === 'string' ? client.trim() : '';
+    if (!value)
+        throw new common_1.BadRequestException('client query parameter is required (?client=<clientId>)');
+    return value;
+}
 let Stat2Controller = class Stat2Controller {
     constructor(statService) {
         this.statService = statService;
@@ -56336,14 +56354,14 @@ let Stat2Controller = class Stat2Controller {
     async create(createStatDto) {
         return this.statService.create(createStatDto);
     }
-    async findByChatIdAndProfile(chatId, profile) {
-        return this.statService.findByChatIdAndProfile(chatId, profile);
+    async findByChatIdAndProfile(chatId, profile, client) {
+        return this.statService.findByChatIdAndProfile(chatId, profile, requireClient(client));
     }
-    async update(chatId, profile, updateStatDto) {
-        return this.statService.update(chatId, profile, updateStatDto);
+    async update(chatId, profile, client, updateStatDto) {
+        return this.statService.update(chatId, profile, requireClient(client), updateStatDto);
     }
-    async deleteOne(chatId, profile) {
-        return this.statService.deleteOne(chatId, profile);
+    async deleteOne(chatId, profile, client) {
+        return this.statService.deleteOne(chatId, profile, requireClient(client));
     }
     async deleteAll() {
         return this.statService.deleteAll();
@@ -56359,27 +56377,33 @@ __decorate([
 ], Stat2Controller.prototype, "create", null);
 __decorate([
     (0, common_1.Get)(':chatId/:profile'),
+    (0, swagger_1.ApiQuery)({ name: 'client', required: true, description: 'clientId of the row (sibling clients share a persona)' }),
     __param(0, (0, common_1.Param)('chatId')),
     __param(1, (0, common_1.Param)('profile')),
+    __param(2, (0, common_1.Query)('client')),
     __metadata("design:type", Function),
-    __metadata("design:paramtypes", [String, String]),
+    __metadata("design:paramtypes", [String, String, String]),
     __metadata("design:returntype", Promise)
 ], Stat2Controller.prototype, "findByChatIdAndProfile", null);
 __decorate([
     (0, common_1.Put)(':chatId/:profile'),
+    (0, swagger_1.ApiQuery)({ name: 'client', required: true, description: 'clientId of the row (sibling clients share a persona)' }),
     __param(0, (0, common_1.Param)('chatId')),
     __param(1, (0, common_1.Param)('profile')),
-    __param(2, (0, common_1.Body)()),
+    __param(2, (0, common_1.Query)('client')),
+    __param(3, (0, common_1.Body)()),
     __metadata("design:type", Function),
-    __metadata("design:paramtypes", [String, String, update_stat2_dto_1.UpdateStat2Dto]),
+    __metadata("design:paramtypes", [String, String, String, update_stat2_dto_1.UpdateStat2Dto]),
     __metadata("design:returntype", Promise)
 ], Stat2Controller.prototype, "update", null);
 __decorate([
     (0, common_1.Delete)(':chatId/:profile'),
+    (0, swagger_1.ApiQuery)({ name: 'client', required: true, description: 'clientId of the row (sibling clients share a persona)' }),
     __param(0, (0, common_1.Param)('chatId')),
     __param(1, (0, common_1.Param)('profile')),
+    __param(2, (0, common_1.Query)('client')),
     __metadata("design:type", Function),
-    __metadata("design:paramtypes", [String, String]),
+    __metadata("design:paramtypes", [String, String, String]),
     __metadata("design:returntype", Promise)
 ], Stat2Controller.prototype, "deleteOne", null);
 __decorate([
@@ -56556,30 +56580,52 @@ var __metadata = (this && this.__metadata) || function (k, v) {
 var __param = (this && this.__param) || function (paramIndex, decorator) {
     return function (target, key) { decorator(target, key, paramIndex); }
 };
+var Stat2Service_1;
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.Stat2Service = void 0;
 const common_1 = __webpack_require__(/*! @nestjs/common */ "@nestjs/common");
 const mongoose_1 = __webpack_require__(/*! @nestjs/mongoose */ "@nestjs/mongoose");
 const mongoose_2 = __webpack_require__(/*! mongoose */ "mongoose");
-let Stat2Service = class Stat2Service {
+let Stat2Service = Stat2Service_1 = class Stat2Service {
     constructor(statModel) {
         this.statModel = statModel;
+        this.logger = new common_1.Logger(Stat2Service_1.name);
+    }
+    writableFields(op, dto) {
+        const body = dto ?? {};
+        const operator = Object.keys(body).find((key) => key.startsWith('$'));
+        if (operator) {
+            this.logger.warn(`stats2-payamount kind=cms-write-refused op=${op} reason=operator`);
+            throw new common_1.BadRequestException(`update operators are not accepted (${operator})`);
+        }
+        if (Object.prototype.hasOwnProperty.call(body, 'payAmount') && !(op === 'create' && Number(body.payAmount) === 0)) {
+            this.logger.warn(`stats2-payamount kind=cms-write-refused op=${op}`);
+            throw new common_1.BadRequestException('stats2.payAmount is paid-today and is set only by a credit');
+        }
+        const fields = {};
+        for (const key of Stat2Service_1.WRITABLE) {
+            if (body[key] !== undefined)
+                fields[key] = body[key];
+        }
+        return fields;
     }
     async create(createStatDto) {
-        const createdStat = new this.statModel(createStatDto);
+        const fields = this.writableFields('create', createStatDto);
+        const createdStat = new this.statModel({ ...fields, payAmount: 0 });
         return createdStat.save();
     }
-    async findByChatIdAndProfile(chatId, profile) {
-        const stat = await this.statModel.findOne({ chatId, profile }).exec();
+    async findByChatIdAndProfile(chatId, profile, client) {
+        const stat = await this.statModel.findOne({ chatId, profile, client }).exec();
         if (!stat) {
-            throw new common_1.NotFoundException(`Stat not found for chatId ${chatId} and profile ${profile}`);
+            throw new common_1.NotFoundException(`Stat not found for chatId ${chatId}, profile ${profile} and client ${client}`);
         }
         return stat;
     }
-    async update(chatId, profile, updateStatDto) {
-        const stat = await this.statModel.findOneAndUpdate({ chatId, profile }, updateStatDto, { returnDocument: 'after' }).exec();
+    async update(chatId, profile, client, updateStatDto) {
+        const fields = this.writableFields('update', updateStatDto);
+        const stat = await this.statModel.findOneAndUpdate({ chatId, profile, client }, { $set: fields }, { returnDocument: 'after' }).exec();
         if (!stat) {
-            throw new common_1.NotFoundException(`Stat not found for chatId ${chatId} and profile ${profile}`);
+            throw new common_1.NotFoundException(`Stat not found for chatId ${chatId}, profile ${profile} and client ${client}`);
         }
         return stat;
     }
@@ -56587,10 +56633,10 @@ let Stat2Service = class Stat2Service {
         const stats = await this.statModel.find().exec();
         return stats;
     }
-    async deleteOne(chatId, profile) {
-        const result = await this.statModel.deleteOne({ chatId, profile }).exec();
+    async deleteOne(chatId, profile, client) {
+        const result = await this.statModel.deleteOne({ chatId, profile, client }).exec();
         if (result.deletedCount === 0) {
-            throw new common_1.NotFoundException(`Stat not found for chatId ${chatId} and profile ${profile}`);
+            throw new common_1.NotFoundException(`Stat not found for chatId ${chatId}, profile ${profile} and client ${client}`);
         }
     }
     async deleteAll() {
@@ -56598,7 +56644,11 @@ let Stat2Service = class Stat2Service {
     }
 };
 exports.Stat2Service = Stat2Service;
-exports.Stat2Service = Stat2Service = __decorate([
+Stat2Service.WRITABLE = [
+    'chatId', 'count', 'demoGiven', 'demoGivenToday', 'newUser', 'paidReply', 'name', 'secondShow',
+    'client', 'profile', 'paymentAttributionCreditedAt',
+];
+exports.Stat2Service = Stat2Service = Stat2Service_1 = __decorate([
     (0, common_1.Injectable)(),
     __param(0, (0, mongoose_1.InjectModel)("Stats2Module")),
     __metadata("design:paramtypes", [mongoose_2.Model])
@@ -63101,6 +63151,7 @@ Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.ScheduledJobsService = exports.DAILY_RESET_WINDOW_VALUE = exports.DAILY_RESET_WINDOW_ABOVE = exports.SWAP_MAINTENANCE_CLAIM_TTL_MS = void 0;
 const common_1 = __webpack_require__(/*! @nestjs/common */ "@nestjs/common");
 const mongoose_1 = __webpack_require__(/*! @nestjs/mongoose */ "@nestjs/mongoose");
+const mongoose_2 = __webpack_require__(/*! mongoose */ "mongoose");
 const schedule = __importStar(__webpack_require__(/*! node-schedule-tz */ "node-schedule-tz"));
 const components_1 = __webpack_require__(/*! ../../components */ "./src/components/index.ts");
 const bot_notice_1 = __webpack_require__(/*! ../../utils/bot-notice */ "./src/utils/bot-notice.ts");
@@ -63266,14 +63317,14 @@ let ScheduledJobsService = ScheduledJobsService_1 = class ScheduledJobsService {
     enabled(name) {
         return ['1', 'true', 'yes', 'on'].includes((process.env[name] || '').trim().toLowerCase());
     }
-    istDateKey() {
+    istDateKey(now = new Date()) {
         return new Intl.DateTimeFormat('en-CA', {
             timeZone: IST,
             year: 'numeric',
             month: '2-digit',
             day: '2-digit',
         })
-            .format(new Date())
+            .format(now)
             .replace(/\//g, '-');
     }
     isDailyResetRecoveryWindow() {
@@ -63418,13 +63469,15 @@ let ScheduledJobsService = ScheduledJobsService_1 = class ScheduledJobsService {
     }
     async runDailyUserStatsReset() {
         const db = this.requireDatabase('daily user stats reset');
-        const jobId = `daily-user-stats-reset:${this.istDateKey()}`;
+        const now = new Date();
+        const dayKey = this.istDateKey(now);
+        const jobId = `daily-user-stats-reset:${dayKey}`;
         if (!(await this.claimJob(db.collection('controlPlaneJobRuns'), jobId))) {
             this.logger.warn(`Daily user stats reset already claimed or completed: ${jobId}`);
             return;
         }
         try {
-            const result = await this.resetUserStatsWithRetries(db.collection('stats2'), db.collection('userData'));
+            const result = await this.resetUserStatsWithRetries(db.collection('stats2'), db.collection('userData'), new Date(`${dayKey}T00:00:00+05:30`));
             await db.collection('controlPlaneJobRuns').updateOne({ _id: jobId }, {
                 $set: {
                     completedAt: new Date(),
@@ -63471,24 +63524,27 @@ let ScheduledJobsService = ScheduledJobsService_1 = class ScheduledJobsService {
         }
         throw lastError instanceof Error ? lastError : new Error(String(lastError));
     }
-    async resetUserStatsWithRetries(stats2, userData) {
+    async resetUserStatsWithRetries(stats2, userData, cutoff) {
         let lastError;
+        let stats2DeletedCount = 0;
         for (let attempt = 1; attempt <= 3; attempt += 1) {
             try {
                 const now = Date.now();
-                const [stats2Result, paidUsersResult] = await Promise.all([
-                    stats2.deleteMany({}),
-                    userData.updateMany({ payAmount: { $gt: 10 }, windowCount: { $gt: exports.DAILY_RESET_WINDOW_ABOVE } }, {
-                        $set: {
-                            windowCount: exports.DAILY_RESET_WINDOW_VALUE,
-                            limitTime: now,
-                            paidReply: true,
-                        },
-                    }),
-                ]);
+                const stats2Result = await stats2.deleteMany({
+                    _id: { $lt: mongoose_2.Types.ObjectId.createFromTime(Math.floor(cutoff.getTime() / 1000)) },
+                });
+                stats2DeletedCount += stats2Result.deletedCount ?? 0;
+                this.logger.log(`stats2-reset kind=deleted count=${stats2Result.deletedCount ?? 0} cutoff=${cutoff.toISOString()} attempt=${attempt}`);
+                const paidUsersResult = await userData.updateMany({ payAmount: { $gt: 10 }, windowCount: { $gt: exports.DAILY_RESET_WINDOW_ABOVE } }, {
+                    $set: {
+                        windowCount: exports.DAILY_RESET_WINDOW_VALUE,
+                        limitTime: now,
+                        paidReply: true,
+                    },
+                });
                 this.logger.log(`window-count kind=daily-reset selector=payAmount>10,windowCount>${exports.DAILY_RESET_WINDOW_ABOVE} value=${exports.DAILY_RESET_WINDOW_VALUE} matched=${paidUsersResult.matchedCount ?? 0} modified=${paidUsersResult.modifiedCount ?? 0}`);
                 return {
-                    stats2DeletedCount: stats2Result.deletedCount ?? 0,
+                    stats2DeletedCount,
                     paidUsersMatchedCount: paidUsersResult.matchedCount ?? 0,
                     paidUsersModifiedCount: paidUsersResult.modifiedCount ?? 0,
                 };
