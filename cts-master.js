@@ -22422,6 +22422,7 @@ const candidate_source_1 = __webpack_require__(/*! ../shared/onboarding/candidat
 const account_facet_read_1 = __webpack_require__(/*! ../shared/account-facet-read */ "./src/components/shared/account-facet-read.ts");
 const buffer_supply_1 = __webpack_require__(/*! ./buffer-supply */ "./src/components/buffer-clients/buffer-supply.ts");
 const monitor_util_1 = __webpack_require__(/*! ../monitor/monitor-util */ "./src/components/monitor/monitor-util.ts");
+const pool_client_delete_log_1 = __webpack_require__(/*! ../shared/pool-client-delete-log */ "./src/components/shared/pool-client-delete-log.ts");
 class CandidateChangedException extends common_1.ConflictException {
 }
 exports.CandidateChangedException = CandidateChangedException;
@@ -22818,10 +22819,13 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
         }
     }
     async remove(mobile, message) {
+        const reason = message || 'manual removal';
+        let deleted = false;
         try {
             const canonicalMobile = this.canonicalMobile(mobile);
             const bufferClient = await this.findOne(canonicalMobile, false);
             if (!bufferClient) {
+                this.logger.log((0, pool_client_delete_log_1.poolClientDeleteLine)('buffer', 'no_row', canonicalMobile, reason));
                 throw new common_1.NotFoundException(`BufferClient with mobile ${mobile} not found`);
             }
             this.logger.log(`Removing BufferClient with mobile: ${(0, monitor_util_1.maskMobile)(canonicalMobile)}`);
@@ -22833,14 +22837,19 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
                     { label: 'Reason', value: message || 'manual removal', code: false },
                 ],
             });
-            await this.bufferClientModel.deleteOne({ mobile: canonicalMobile }).exec();
+            const deleteResult = await this.bufferClientModel.deleteOne({ mobile: canonicalMobile }).exec();
+            deleted = !!deleteResult?.deletedCount;
+            this.logger.log((0, pool_client_delete_log_1.poolClientDeleteLine)('buffer', deleted ? 'deleted' : 'no_row', canonicalMobile, reason));
         }
         catch (error) {
+            if (!(error instanceof common_1.NotFoundException))
+                this.logger.error((0, pool_client_delete_log_1.poolClientDeleteLine)('buffer', 'error', mobile, reason));
             const errorDetails = (0, parseError_1.parseError)(error, `failed to delete BufferClient: ${mobile}`);
             this.logger.error(`Error removing BufferClient with mobile ${(0, monitor_util_1.maskMobile)(mobile)}: ${errorDetails.message}`);
             throw new common_1.HttpException(errorDetails.message, errorDetails.status);
         }
-        this.logger.log(`BufferClient with mobile ${(0, monitor_util_1.maskMobile)(mobile)} removed successfully`);
+        if (deleted)
+            this.logger.log(`BufferClient with mobile ${(0, monitor_util_1.maskMobile)(mobile)} removed successfully`);
     }
     async search(filter) {
         const query = { ...filter };
@@ -23363,7 +23372,6 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
             sendAccountNotice: (input) => this.sendAccountNotice(input),
             handleError: (error, context, mobile) => this.handleError(error, context, mobile),
             safeUnregisterClient: (mobile) => this.safeUnregisterClient(mobile),
-            docExtras: () => ({}),
         };
     }
     async addNewUserstoBufferClients(badIds, goodIds, clientsNeedingBufferClients = [], _bufferClientsPerClient) {
@@ -46240,9 +46248,10 @@ __decorate([
     __metadata("design:type", String)
 ], CreatePromoteClientDto.prototype, "availableDate", void 0);
 __decorate([
-    (0, swagger_1.ApiProperty)({
-        description: 'lastActive identifier'
+    (0, swagger_1.ApiPropertyOptional)({
+        description: 'Retired 2026-11-20: no code writes or reads promoteClients.lastActive. Accepted for old callers only.'
     }),
+    (0, class_validator_1.IsOptional)(),
     (0, class_validator_1.IsString)(),
     __metadata("design:type", String)
 ], CreatePromoteClientDto.prototype, "lastActive", void 0);
@@ -47158,6 +47167,11 @@ const set_as_1 = __webpack_require__(/*! ../shared/onboarding/set-as */ "./src/c
 const candidate_source_1 = __webpack_require__(/*! ../shared/onboarding/candidate-source */ "./src/components/shared/onboarding/candidate-source.ts");
 const buffer_supply_1 = __webpack_require__(/*! ../buffer-clients/buffer-supply */ "./src/components/buffer-clients/buffer-supply.ts");
 const monitor_util_1 = __webpack_require__(/*! ../monitor/monitor-util */ "./src/components/monitor/monitor-util.ts");
+const pool_client_delete_log_1 = __webpack_require__(/*! ../shared/pool-client-delete-log */ "./src/components/shared/pool-client-delete-log.ts");
+function withoutRetiredFields(input) {
+    const { lastActive: _retired, ...rest } = (input ?? {});
+    return rest;
+}
 const PROMOTE_ENROLMENT_LEAD_TIME_DAYS = 30;
 let PromoteClientService = PromoteClientService_1 = class PromoteClientService extends base_client_service_1.BaseClientService {
     get checkingPromoteClientsSince() {
@@ -47265,7 +47279,7 @@ let PromoteClientService = PromoteClientService_1 = class PromoteClientService e
                 throw new common_1.BadRequestException(`Mobile ${canonicalMobile} is already enrolled in ${enrolledIn}; refusing to create a cross-pool PromoteClient`);
             }
             const promoteClientData = {
-                ...promoteClient,
+                ...withoutRetiredFields(promoteClient),
                 mobile: canonicalMobile,
                 ...(session ? { session } : {}),
                 status,
@@ -47314,7 +47328,7 @@ let PromoteClientService = PromoteClientService_1 = class PromoteClientService e
     }
     async update(mobile, updateClientDto) {
         const canonicalMobile = this.canonicalMobile(mobile);
-        const updateData = { ...updateClientDto };
+        const updateData = withoutRetiredFields(updateClientDto);
         if (typeof updateData.channels === 'number') {
             updateData.channels = Number.isFinite(updateData.channels) ? Math.max(0, Math.floor(updateData.channels)) : 0;
         }
@@ -47357,12 +47371,22 @@ let PromoteClientService = PromoteClientService_1 = class PromoteClientService e
         }
     }
     async remove(mobile, message) {
-        const canonicalMobile = this.canonicalMobile(mobile);
+        const reason = message || 'manual removal';
+        let canonicalMobile;
+        try {
+            canonicalMobile = this.canonicalMobile(mobile);
+        }
+        catch (error) {
+            this.logger.error((0, pool_client_delete_log_1.poolClientDeleteLine)('promote', 'error', mobile, reason));
+            throw error;
+        }
         try {
             const deleteResult = await this.promoteClientModel.deleteOne({ mobile: canonicalMobile }).exec();
             if (deleteResult.deletedCount === 0) {
+                this.logger.log((0, pool_client_delete_log_1.poolClientDeleteLine)('promote', 'no_row', canonicalMobile, reason));
                 throw new common_1.NotFoundException(`PromoteClient with mobile ${mobile} not found`);
             }
+            this.logger.log((0, pool_client_delete_log_1.poolClientDeleteLine)('promote', 'deleted', canonicalMobile, reason));
             await (0, bot_notice_1.sendBotNotice)('notif', {
                 severity: 'warning',
                 title: 'Deleting promote',
@@ -47376,6 +47400,7 @@ let PromoteClientService = PromoteClientService_1 = class PromoteClientService e
         catch (error) {
             if (error instanceof common_1.NotFoundException)
                 throw error;
+            this.logger.error((0, pool_client_delete_log_1.poolClientDeleteLine)('promote', 'error', canonicalMobile, reason));
             const errorDetails = (0, parseError_1.parseError)(error);
             throw new common_1.HttpException(errorDetails.message, errorDetails.status);
         }
@@ -47584,7 +47609,6 @@ let PromoteClientService = PromoteClientService_1 = class PromoteClientService e
             sendAccountNotice: (input) => this.sendAccountNotice(input),
             handleError: (error, context, mobile) => this.handleError(error, context, mobile),
             safeUnregisterClient: (mobile) => this.safeUnregisterClient(mobile),
-            docExtras: () => ({ lastActive: new Date().toISOString() }),
         };
     }
     async addNewUserstoPromoteClients(badIds, goodIds, clientsNeedingPromoteClients = [], _promoteClientsPerClient) {
@@ -47869,8 +47893,8 @@ __decorate([
     __metadata("design:type", String)
 ], PromoteClient.prototype, "mobile", void 0);
 __decorate([
-    (0, swagger_1.ApiProperty)({ description: 'Provider-specific last-active indicator recorded for the source user.' }),
-    (0, mongoose_1.Prop)({ required: true }),
+    (0, swagger_1.ApiPropertyOptional)({ description: 'Retired 2026-11-20: no CMS or tg code writes or reads it. Optional so old rows and old callers still validate.' }),
+    (0, mongoose_1.Prop)({ required: false }),
     __metadata("design:type", String)
 ], PromoteClient.prototype, "lastActive", void 0);
 __decorate([
@@ -53794,9 +53818,7 @@ class BaseClientService {
             twoFASetAt: 1,
             privacyUpdatedAt: 1,
             channels: 1,
-            spamStatus: 1,
-            limitedUntil: 1,
-            spamCheckedAt: 1,
+            ...(this.clientType === 'buffer' ? { spamStatus: 1, limitedUntil: 1, spamCheckedAt: 1 } : {}),
         }).exec();
         const readyOperationalDates = [];
         const pipelineOperationalDates = [];
@@ -55012,10 +55034,8 @@ async function enrolPoolClientFromUser(port, document, targetClientId, available
             return false;
         }
         const targetAvailableDate = availableDate || client_helper_utils_1.ClientHelperUtils.getTodayDateString();
-        const extras = port.docExtras();
         const poolDoc = {
             tgId: document.tgId,
-            ...extras,
             session: user.session.trim(),
             mobile: document.mobile,
             lastUsed: null,
@@ -55213,7 +55233,6 @@ exports.BUFFER_PROFILE = Object.freeze({
         userNotFoundMessage: 'user not found',
         alreadyExistsMessage: 'BufferClient already exist',
         successMessage: 'Client enrolled as buffer successfully',
-        stampLastActive: false,
         errorContext: 'Failed to set as Buffer Client',
         permanentErrorReason: 'Permanent error during buffer enrollment',
     }),
@@ -55246,7 +55265,6 @@ exports.PROMOTE_PROFILE = Object.freeze({
         userNotFoundMessage: 'User not found',
         alreadyExistsMessage: 'PromoteClient already exists',
         successMessage: 'Client enrolled as promote successfully',
-        stampLastActive: true,
         errorContext: null,
         permanentErrorReason: 'Permanent error during promote enrollment',
     }),
@@ -55349,7 +55367,6 @@ async function setAsPoolClient(port, mobile, clientId, availableDate) {
         await (0, Helpers_1.sleep)(client_helper_utils_1.ClientHelperUtils.gaussianRandom(p.mean, p.sd, p.min, p.max));
         const poolDoc = {
             tgId: user.tgId,
-            ...(cfg.stampLastActive ? { lastActive: new Date().toISOString() } : {}),
             session: sourceSession,
             mobile: canonicalMobile,
             availableDate,
@@ -55514,6 +55531,25 @@ async function performFullActivity(client) {
     catch {
     }
     await randomPause(10000, 20000);
+}
+
+
+/***/ },
+
+/***/ "./src/components/shared/pool-client-delete-log.ts"
+/*!*********************************************************!*\
+  !*** ./src/components/shared/pool-client-delete-log.ts ***!
+  \*********************************************************/
+(__unused_webpack_module, exports) {
+
+
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.poolClientDeleteLine = poolClientDeleteLine;
+function poolClientDeleteLine(pool, kind, mobile, reason) {
+    const digits = String(mobile ?? '').replace(/\D/g, '');
+    const masked = digits ? `****${digits.slice(-4)}` : 'none';
+    const oneLine = String(reason ?? '').replace(/\s+/g, ' ').trim() || 'none';
+    return `pool-client-delete kind=${kind} pool=${pool} mobile=${masked} reason=${oneLine}`;
 }
 
 
