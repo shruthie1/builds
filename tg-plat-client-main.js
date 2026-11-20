@@ -50350,14 +50350,18 @@ function idleNextMs(emptyStreak, random) {
 function stop(f, reason) {
     return { state: 'stopped', nextRunAtMs: f.nextRunAtMs, stopReason: reason, emptyStreak: f.emptyStreak, transientCount: f.transientCount };
 }
-function nextAfterPass(f, nowMs, random) {
+/**
+ * `relock`: the app's shorter-relock range (PassLimits.relockMs); absent = RELOCK_MIN_MS-RELOCK_MAX_MS (30-45 min).
+ * tg-aut passes 10-15 min (owner 2026-11-20: the old main's payers reach the new main fast).
+ */
+function nextAfterPass(f, nowMs, random, relock) {
     if (f.state === 'stopped')
         return { state: 'stopped', nextRunAtMs: f.nextRunAtMs, emptyStreak: f.emptyStreak, transientCount: f.transientCount };
     const activeState = 'active';
     switch (f.outcome) {
         case 'ok': {
             if (f.replied > 0 || f.sawRecentUnread) {
-                return { state: activeState, nextRunAtMs: nowMs + between(_constants__WEBPACK_IMPORTED_MODULE_0__.RELOCK_MIN_MS, _constants__WEBPACK_IMPORTED_MODULE_0__.RELOCK_MAX_MS, random), emptyStreak: 0, transientCount: 0 };
+                return { state: activeState, nextRunAtMs: nowMs + between(relock?.minMs ?? _constants__WEBPACK_IMPORTED_MODULE_0__.RELOCK_MIN_MS, relock?.maxMs ?? _constants__WEBPACK_IMPORTED_MODULE_0__.RELOCK_MAX_MS, random), emptyStreak: 0, transientCount: 0 };
             }
             const streak = f.emptyStreak + 1;
             return { state: activeState, nextRunAtMs: nowMs + idleNextMs(streak, random), emptyStreak: streak, transientCount: 0 };
@@ -50634,6 +50638,15 @@ __webpack_require__.r(__webpack_exports__);
 
 
 /**
+ * Why the next run lands when it does, for the `[parked] next` line: relock (replied or a recent unread), idle (an
+ * empty pass), else the pass outcome (flood_wait, lease_busy, transient, connect_cap, ...).
+ */
+function nextWhy(r) {
+    if (r.outcome !== 'ok')
+        return r.outcome;
+    return r.replied > 0 || r.sawRecentUnread ? 'relock' : 'idle';
+}
+/**
  * The scheduler's write after a pass (design §6.1, moved out of scheduler.ts in the P5 review, no behaviour change):
  * abandoned → release the runner; else the state machine's next state → stop (terminal) or CAS transition. A lost
  * CAS releases the runner.
@@ -50658,13 +50671,15 @@ async function applyPassResult(deps, ep, r) {
         floodUntilMs: r.floodUntilMs,
         stopReason: r.stopReason,
         waitUntilMs: r.waitUntilMs,
-    }, now, deps.random());
+    }, now, deps.random(), deps.limits?.relockMs);
     if (next.state === 'stopped' && r.floodPending) {
         // Re-review 2 nit: stop() would drop the unwritten flood (only this episode carries it). Keep the episode
         // open in backoff; its next pass writes the flood first (settlePendingFlood), then stops on eligibility.
         const retryAt = Math.max(now, Math.min(r.floodPending.untilMs, now + _constants__WEBPACK_IMPORTED_MODULE_0__.LEASE_BUSY_RETRY_MS));
         next = { ...next, state: 'backoff', nextRunAtMs: retryAt, stopReason: undefined };
     }
+    // One greppable line per scheduling decision (owner rule 2026-11-19).
+    logger.info(`[parked] next app=${ep.app} client=${ep.clientId} ep=${(0,_metrics_pass_log__WEBPACK_IMPORTED_MODULE_1__.episodeHash)(ep._id)} state=${next.state} why=${next.state === 'stopped' ? `stop:${next.stopReason ?? 'superseded'}` : nextWhy(r)} inMin=${Math.max(0, Math.round((next.nextRunAtMs - now) / 60000))}`);
     let ok;
     if (next.state === 'stopped') {
         ok = await stores.episodes.stop(ep._id, next.stopReason ?? 'superseded', r.version);
@@ -63920,8 +63935,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "4b8b0293b10eaacc91cd2080349b07c2af4cbdac" : 0;
-    const builtAt =  true ? "2026-11-20T14:50:49.143Z" : 0;
+    const sha =  true ? "abd45709d48f9389093427002978d200fa5daf71" : 0;
+    const builtAt =  true ? "2026-11-20T17:26:26.101Z" : 0;
     return { sha, builtAt };
 }
 
@@ -91958,7 +91973,10 @@ const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_18__.Logger("t
 const PROMO_HEALTH_PAUSE_MS = 30 * 60 * 1000;
 /** Consecutive failed retries before the main is swapped. */
 const PROMO_HEALTH_MAX_FAILED_RETRIES = 3;
-/** No swap while a credited payer was active on the main within this window. */
+/**
+ * No swap while a credited payer was active on the main within this window. Not for a gate-only hold (owner
+ * 2026-11-20 "6hrs is huge"): there the swap is asked at once and the parked responder sends payers to the new main.
+ */
 const PROMO_HEALTH_PAYER_QUIET_MS = 6 * 60 * 60 * 1000;
 /**
  * The verdict on a retry closes this long after it. With no landed send and no failure by then, the retry is held
@@ -91977,9 +91995,9 @@ const PROMO_HEALTH_RETRY_FAILED_SENDS = 3;
 const PROMO_HEALTH_TICK_SLACK_MS = 30 * 1000;
 /**
  * Owner 2026-11-20 (review H1): a main whose only cause is the ban gate is not paused; the gate already throttles it to
- * one probe per 10 min, and a landed probe is how the gate clears. Gate-held time counts toward the swap instead: one
- * window = one pause (30 min) plus the health check that judged its retry (10 min), so the 3rd failed window asks for
- * the swap at the same point the pause/retry cycle did (about 120 min after the first unhealthy check).
+ * one probe per 10 min, and a landed probe is how the gate clears. Owner 2026-11-20 later ("6hrs is huge, swap
+ * immediately"): the swap is asked when the gate hold starts. A hold whose swap was held (budget) re-asks when a window
+ * with a banned probe and nothing landed ends: one window = one pause (30 min) plus one health check (10 min).
  */
 const PROMO_HEALTH_GATE_WINDOW_MS = PROMO_HEALTH_PAUSE_MS + 10 * 60 * 1000;
 /** A no-pause hold logs one hold_summary line per hour while it lasts (state changes log their own line). */
@@ -92804,8 +92822,9 @@ class JobManager {
      *   setupClient, inside the per-client ladder swap budget (2 per IST day, charged before the request), unless a
      *   credited payer was active on the main in the last PROMO_HEALTH_PAYER_QUIET_MS (kind=swap_held, the cycle goes on);
      * - the ban gate as the only cause never pauses (review H1): a gate hold (kind=gate_hold) lets the gate's 10 min
-     *   probes run; each PROMO_HEALTH_GATE_WINDOW_MS window with nothing landed is a failed retry, so the swap is asked
-     *   at the same point as the pause cycle; the payer hold and the budget keep the hold going, never a pause;
+     *   probes run, and the swap is asked when the hold starts (owner 2026-11-20, reason=gate_start, also for a
+     *   retried pause cycle that turns gate-only), with no failed-retry threshold and no payer hold; a swap the budget
+     *   holds is asked again when a PROMO_HEALTH_GATE_WINDOW_MS window with nothing landed ends, never a pause;
      * - gate only: a swap request that ends without a swap (no_candidate, cooldown, failed, stale_report) or throws
      *   leaves the pause loop (review H2): promotions stay on, kind=swap_held reason=<status> paused=false, and the
      *   swap is asked again after the CMS cooldown or SETUP_CLIENT_BACKOFF_MS; any other cause pauses again as before;
@@ -92876,7 +92895,7 @@ class JobManager {
             const gate = readBanRateGate(promotor);
             if (gateOnlyCause(promotionHealth, messageStats, gate)) {
                 // The ban gate is the only cause: no pause, its 10 min probes run; windows count toward the swap.
-                await this.startGateHold(mobile, now, gate);
+                await this.startGateHold(promotor, gate, { now, mobile, messageStats, daysLeft, promotionHealth, promotedStats });
                 return;
             }
             const reason = promoHealthCause(promotionHealth, messageStats, gate);
@@ -93067,9 +93086,19 @@ class JobManager {
             // swap comes at the same point as the pause cycle (+120 min), not one window later.
             const windowStart = pause.hold === 'gate' ? (pause.retriedAt ?? retriedAt) : pause.pausedAt;
             const due = pause.hold === 'swap_wait' || now + PROMO_HEALTH_TICK_SLACK_MS >= windowStart + PROMO_HEALTH_GATE_WINDOW_MS;
+            // A probe judged after the retry (banned, or the gate re-checked since): a latched gate from before the
+            // retry is no evidence on its own (review HIGH 1).
+            const probedSinceRetry = evidence.failed >= 1 || Number(gate?.checkedAt) >= retriedAt;
+            if (pause.hold !== 'gate' && pause.hold !== 'swap_wait' && probedSinceRetry) {
+                // A retried pause cycle whose only cause is now the gate: a gate hold starts, so the swap is asked at
+                // once (owner 2026-11-20), no window wait and no payer hold.
+                this.logGateHoldFromRetry(pause, mobile, gate, fields, 'now');
+                await this.handleFailedRetry(promotor, pause, { ...ctx, reason: 'gate_start', evidence: fields, noPause: true });
+                return 'failed';
+            }
             if (!due) {
                 if (pause.hold !== 'gate')
-                    this.logGateHoldFromRetry(pause, mobile, now, gate, fields);
+                    this.logGateHoldFromRetry(pause, mobile, gate, fields, 'wait_probe');
                 else
                     this.logPromoHoldSummary(pause, mobile, now, { hold: 'gate', failedRetries: pause.failedRetries, ...fields, nextMin: Math.ceil((windowStart + PROMO_HEALTH_GATE_WINDOW_MS - now) / 60000) });
                 return 'wait';
@@ -93218,8 +93247,14 @@ class JobManager {
             return 'failed';
         }
     }
-    /** First unhealthy check whose only cause is the ban gate: a gate hold starts at count 0, no pause (kind=gate_hold state=start). */
-    async startGateHold(mobile, now, gate) {
+    /**
+     * First unhealthy check whose only cause is the ban gate: a gate hold starts at count 0, no pause (kind=gate_hold
+     * state=start), and the swap is asked at once (owner 2026-11-20: no +120 min wait, no payer hold; the parked
+     * responder sends the old main's payers to the new main). swap=now when the hold was stored; swap=next_check when
+     * the write failed (no cycle stored, so the next check starts the hold again).
+     */
+    async startGateHold(promotor, gate, ctx) {
+        const { now, mobile } = ctx;
         const next = {
             mobile, pausedAt: now, until: now + PROMO_HEALTH_GATE_WINDOW_MS, failedRetries: 0, retriedAt: now, retryBase: this.promoRetryBase(), hold: 'gate',
         };
@@ -93228,24 +93263,27 @@ class JobManager {
             return;
         this.log('warn', (0,_promotion_promo_health_log__WEBPACK_IMPORTED_MODULE_27__.promoHealthLine)('gate_hold', mobile, {
             state: 'start', reason: 'ban_rate', failedRetries: 0, gateFailed: gate?.failed, gateTotal: gate?.total,
-            windowMin: PROMO_HEALTH_GATE_WINDOW_MS / 60000, persisted: outcome === 'written',
+            windowMin: PROMO_HEALTH_GATE_WINDOW_MS / 60000, persisted: outcome === 'written', swap: outcome === 'written' ? 'now' : 'next_check',
         }));
+        if (outcome !== 'written')
+            return;
+        await this.handleFailedRetry(promotor, next, { ...ctx, reason: 'gate_start', evidence: { landed: 0, failed: 0 }, noPause: true });
     }
     /**
      * A retried pause cycle (an old pause retried after a restart, a no-cycle pause from an older build, a cycle that
-     * paused for another cause) whose only cause is now the ban gate: no repause; its window counts from the pause
-     * start, and the window's end writes the gate hold (kind=gate_hold state=window_failed). Nothing is written here;
-     * one kind=gate_hold state=start from=retry line per cycle (again once after a restart).
+     * paused for another cause) whose only cause is now the ban gate: no repause. swap=now: a probe was judged after
+     * the retry, so the swap is asked right after this line (handleFailedRetry reason=gate_start). swap=wait_probe: only
+     * a gate latched before the retry so far; the swap waits for the first probe after it. Nothing is written here; one
+     * kind=gate_hold state=start from=retry line per cycle and swap value (again once after a restart).
      */
-    logGateHoldFromRetry(pause, mobile, now, gate, fields) {
-        const key = `gate:${pause.mobile}:${pause.pausedAt}:${pause.failedRetries}:${pause.retriedAt}`;
+    logGateHoldFromRetry(pause, mobile, gate, fields, swap) {
+        const key = `gate:${pause.mobile}:${pause.pausedAt}:${pause.failedRetries}:${pause.retriedAt}:${swap}`;
         if (this.promoGateStartLogged === key)
             return;
         this.promoGateStartLogged = key;
         this.log('warn', (0,_promotion_promo_health_log__WEBPACK_IMPORTED_MODULE_27__.promoHealthLine)('gate_hold', mobile, {
             state: 'start', from: 'retry', reason: 'ban_rate', failedRetries: pause.failedRetries, ...fields,
-            gateFailed: gate?.failed, gateTotal: gate?.total,
-            nextMin: Math.ceil((pause.pausedAt + PROMO_HEALTH_GATE_WINDOW_MS - now) / 60000),
+            gateFailed: gate?.failed, gateTotal: gate?.total, swap,
         }));
     }
     /**
@@ -93265,7 +93303,9 @@ class JobManager {
     /**
      * The retry failed (judgeRetry). Below PROMO_HEALTH_MAX_FAILED_RETRIES: pause again. At or past it: swap through
      * setupClient (the pre-2026-11-19 path) when no credited payer was active in the last 6 h and the ladder swap
-     * budget allows; otherwise hold the swap and pause again. Before the swap the cycle is re-read (it must be the one
+     * budget allows; otherwise hold the swap and pause again. Gate only (`noPause`, owner 2026-11-20): every call asks
+     * for the swap, with no failed-retry threshold and no payer hold (kind=swap ... cause=ban_gate); the budget still
+     * holds it (a new gate window, no pause). Before the swap the cycle is re-read (it must be the one
      * judged) and one swap is charged to the budget; it is refunded only when a request returns without a swap (a
      * clear answer), never on a timeout or error (CMS may have swapped and restarted this process).
      */
@@ -93305,11 +93345,12 @@ class JobManager {
                 return;
             this.log('warn', (0,_promotion_promo_health_log__WEBPACK_IMPORTED_MODULE_27__.promoHealthLine)('swap_held', mobile, { reason: status, failedRetries, paused: false, retryMin: Math.ceil(retryMs / 60000), persisted: outcome === 'written' }));
         };
-        if (failedRetries < PROMO_HEALTH_MAX_FAILED_RETRIES) {
+        if (!ctx.noPause && failedRetries < PROMO_HEALTH_MAX_FAILED_RETRIES) {
             await repause();
             return;
         }
-        const payer = await this.creditedPayerActive(now);
+        // Gate only: no payer hold (owner 2026-11-20); the old main's payers get the new main from the parked responder.
+        const payer = ctx.noPause ? { active: false, lastAt: null } : await this.creditedPayerActive(now);
         if (payer.active) {
             this.log('warn', (0,_promotion_promo_health_log__WEBPACK_IMPORTED_MODULE_27__.promoHealthLine)('swap_held', mobile, {
                 reason: payer.error ? 'payer_check_failed' : 'payer_active',
@@ -93383,7 +93424,7 @@ class JobManager {
         catch (error) {
             // No clear answer (timeout, no response, invalid contract): CMS may have swapped; the charge stays.
             (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, 'JobManager.promoHealthSwapRequest', false);
-            this.log('warn', (0,_promotion_promo_health_log__WEBPACK_IMPORTED_MODULE_27__.promoHealthLine)('swap', mobile, { swapped: false, status: 'request_error', failedRetries, budget: 'charged', error: error instanceof Error ? error.message : String(error) }));
+            this.log('warn', (0,_promotion_promo_health_log__WEBPACK_IMPORTED_MODULE_27__.promoHealthLine)('swap', mobile, { swapped: false, status: 'request_error', failedRetries, budget: 'charged', cause: ctx.noPause ? 'ban_gate' : undefined, error: error instanceof Error ? error.message : String(error) }));
             // Gate only: no pause loop, no swap storm (the next request waits SETUP_CLIENT_BACKOFF_MS and the shared
             // backoff). Any other cause pauses again, as before.
             if (ctx.noPause)
@@ -93400,9 +93441,11 @@ class JobManager {
             failedRetries,
             newMobile: setupResult.swapped ? (0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_26__.maskMobile)(setupResult.newMobile) : undefined,
             budget: setupResult.swapped ? 'charged' : 'refunded',
+            cause: ctx.noPause ? 'ban_gate' : undefined,
         }));
         const lastUpdatedTimeStamp = Number(ctx.promotionHealth?.metadata?.durableLastUpdatedAt ?? ctx.promotedStats.lastUpdatedTimeStamp ?? 0);
-        const alertMsg = `Promotions failing! Rotating user after ${failedRetries} failed retries, no payer active in 6 h 🔄\n\nLast update: ${(0,_tg_core_utils_readbleTimeDifference__WEBPACK_IMPORTED_MODULE_19__.getReadableTimeDifference)(lastUpdatedTimeStamp)}\nHealth: ${ctx.promotionHealth?.summary ?? 'unhealthy'}\nIssues: ${(ctx.promotionHealth?.issues ?? []).join(', ') || 'none'}\nRetry: ${reason}, landed ${evidence.landed}, failed ${evidence.failed} since the retry\nFailed streak: ${messageStats.failStreak}\nTotal Failed: ${messageStats.totalFailed}\nSuccess: ${messageStats.successCount}\nDeleted: ${messageStats.deletedCount}\nDaysLeft: ${ctx.daysLeft}`;
+        const why = ctx.noPause ? 'at once, ban gate tripped (no payer hold)' : `after ${failedRetries} failed retries, no payer active in 6 h`;
+        const alertMsg = `Promotions failing! Rotating user ${why} 🔄\n\nLast update: ${(0,_tg_core_utils_readbleTimeDifference__WEBPACK_IMPORTED_MODULE_19__.getReadableTimeDifference)(lastUpdatedTimeStamp)}\nHealth: ${ctx.promotionHealth?.summary ?? 'unhealthy'}\nIssues: ${(ctx.promotionHealth?.issues ?? []).join(', ') || 'none'}\nRetry: ${reason}, landed ${evidence.landed}, failed ${evidence.failed} since the retry\nFailed streak: ${messageStats.failStreak}\nTotal Failed: ${messageStats.totalFailed}\nSuccess: ${messageStats.successCount}\nDeleted: ${messageStats.deletedCount}\nDaysLeft: ${ctx.daysLeft}`;
         // Alert only when a rotation request actually went out.
         if (!setupResult.suppressedLocally)
             await this.notifyError(`${alertMsg}\n\nResult: ${setupResult.status}`);
@@ -93851,6 +93894,8 @@ async function stopJobs() {
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   TGAUT_CONNECTS_PER_DAY: () => (/* binding */ TGAUT_CONNECTS_PER_DAY),
+/* harmony export */   TGAUT_RELOCK_MS: () => (/* binding */ TGAUT_RELOCK_MS),
 /* harmony export */   connectsPerDay: () => (/* binding */ connectsPerDay),
 /* harmony export */   dialogPort: () => (/* binding */ dialogPort),
 /* harmony export */   parkedAccountsStatus: () => (/* binding */ parkedAccountsStatus),
@@ -93901,15 +93946,24 @@ __webpack_require__.r(__webpack_exports__);
  * Nothing connects unless parkedControl `global` AND `tg-aut` are enabled (absent = disabled) and the tg-aut doc's
  * optional `clientIds` includes this client (canary), AND the live-build gate is open (adapters/parked.ts).
  * Window: chats with activity since parkedAt − 48 h (the swap anchor), per episode; episodes expire 2 d after the
- * swap (D2; 7 d before 2026-11-17). Copy: the same 3 templates as promote (D1). Connect cap: PARKED_CONNECTS_PER_DAY, default 4.
+ * swap (D2; 7 d before 2026-11-17). Copy: the same 3 templates as promote (D1). Connect cap: PARKED_CONNECTS_PER_DAY,
+ * default TGAUT_CONNECTS_PER_DAY (12).
+ *
+ * Owner 2026-11-20 ("trigger parked account fast to route payers to new mains"): a gate-only main is swapped at once,
+ * so its payers reach the old main; tg-aut relocks 10-15 min after a pass that replied or saw an unread inbound < 2 h
+ * old (promote keeps 30-45 min), and its connect-cap default is the D3 post-canary ceiling, 12 (was the canary 4).
  */
+/** tg-aut connect-cap default (D3 post-canary ceiling = TUNING_BOUNDS.connectsPerDay.max). Remote config and parkedControl still override. */
+const TGAUT_CONNECTS_PER_DAY = 12;
+/** tg-aut shorter relock (PassLimits.relockMs). */
+const TGAUT_RELOCK_MS = { minMs: 10 * 60000, maxMs: 15 * 60000 };
 const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_10__.Logger("tg-aut-parked");
 /** Process start (ms), for the P4 review S2 check "this process booted after the swap". */
 const PROCESS_BOOT_MS = Date.now() - Math.round(process.uptime() * 1000);
-/** Positive integer from the remote config, else the canary default (4). Read per pass. */
+/** Positive integer from the remote config, else TGAUT_CONNECTS_PER_DAY (12). Read per pass. */
 function connectsPerDay(env = process.env) {
     const raw = Number((env[_tg_parked__WEBPACK_IMPORTED_MODULE_11__.CONNECTS_PER_DAY_ENV] ?? "").toString().trim());
-    return Number.isInteger(raw) && raw > 0 ? raw : _tg_parked__WEBPACK_IMPORTED_MODULE_11__.CONNECTS_PER_DAY_CANARY;
+    return Number.isInteger(raw) && raw > 0 ? raw : TGAUT_CONNECTS_PER_DAY;
 }
 /**
  * Code defaults of the tg-aut pass (P5: the scheduler resolves parkedControl `windowHours` / `maxAgeHours` /
@@ -93924,6 +93978,7 @@ function tgAutParkedLimits() {
         windowMsFor: (ep, nowMs, windowMs) => tgAutWindowMs(ep, nowMs, windowMs),
         maxAgeMs: _tg_parked__WEBPACK_IMPORTED_MODULE_11__.PARK_MAX_AGE_MS['tg-aut'],
         expiresAtFor: (ep, maxAgeMs) => tgAutExpiresAtMs(ep, maxAgeMs),
+        relockMs: TGAUT_RELOCK_MS,
         get connectsPerDay() { return connectsPerDay(); },
     };
 }
@@ -113002,12 +113057,14 @@ __webpack_require__.r(__webpack_exports__);
  * Kinds: pause, retry, retry_wait, retry_rebase, repause, swap, swap_held, alert_suppressed, paused_fault, stale_write_skipped,
  * gate_hold, hold_summary, resume (source=daily_reset|spambot_good_news|route|retry|main_changed|external).
  * No-pause holds (owner 2026-11-20 fix): a main whose only cause is the ban gate is not paused; the gate's 10 min probes
- * run and each 40 min window with nothing landed counts as a failed retry (gate_hold state=start|window_failed). For
- * such a main, a swap CMS answers without swapping (no_candidate, cooldown, ...) or a request that throws leaves
- * promotions running and asks again after the CMS cooldown, else SETUP_CLIENT_BACKOFF_MS (swap_held reason=<status>
- * paused=false); other causes pause again. While a hold lasts, one hold_summary line per hour.
+ * run. Owner 2026-11-20 ("6hrs is huge"): the swap is asked when the gate hold starts (gate_hold state=start swap=now,
+ * then kind=swap ... cause=ban_gate; swap=next_check when the hold was not stored), with no failed-retry threshold and
+ * no payer hold. A swap the budget holds is asked again when a 40 min window with nothing landed ends
+ * (gate_hold state=window_failed). A swap CMS answers without swapping (no_candidate, cooldown, ...) or a request that
+ * throws leaves promotions running and asks again after the CMS cooldown, else SETUP_CLIENT_BACKOFF_MS
+ * (swap_held reason=<status> paused=false); other causes pause again. While a hold lasts, one hold_summary per hour.
  * Cycle (owner 2026-11-20): pause 30 min, retry, repause on a failed retry, swap after 3 failed retries in a row
- * unless a credited payer was active on the main in the last 6 h (swap_held). A retry is judged only on sends made
+ * unless a credited payer was active on the main in the last 6 h (swap_held reason=payer_active; never for a gate-only hold). A retry is judged only on sends made
  * after it, within 20 min of it (retry_wait while that evidence is short). Nothing landed and no failure by then:
  * a known legitimate block holds the verdict (retry_wait held=<block>), anything else is a dead runner (repause
  * reason=runner_dead, counted like any failed retry). retry_rebase: the stored counter base no longer applies
