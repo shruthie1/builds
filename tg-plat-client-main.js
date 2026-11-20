@@ -43274,6 +43274,8 @@ function normalizePromoteStatsData(data) {
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   CREDITED_PAYER_MAX_PAGES: () => (/* binding */ CREDITED_PAYER_MAX_PAGES),
+/* harmony export */   CREDITED_PAYER_MAX_TIME_MS: () => (/* binding */ CREDITED_PAYER_MAX_TIME_MS),
 /* harmony export */   CREDITED_PAYER_MIN_AMOUNT: () => (/* binding */ CREDITED_PAYER_MIN_AMOUNT),
 /* harmony export */   CREDITED_PAYER_SCAN_LIMIT: () => (/* binding */ CREDITED_PAYER_SCAN_LIMIT),
 /* harmony export */   PERSONA_ASSIGNMENT_PROJECTION: () => (/* binding */ PERSONA_ASSIGNMENT_PROJECTION),
@@ -43411,8 +43413,12 @@ function promoHealthPauseFilter(expect) {
 }
 /** A credited payer row: highestPayAmount >= 15, not fake-marked (the listPaidChatIds rule). */
 const CREDITED_PAYER_MIN_AMOUNT = 15;
-/** Most userData rows the payer check reads (credited payers of one persona active in 6 h; far fewer in practice). */
+/** userData rows per page of the payer check (newest first; the check stops at the first row that counts). */
 const CREDITED_PAYER_SCAN_LIMIT = 500;
+/** Pages the payer check reads at most; past them it throws (the caller holds the swap as payer_check_failed). */
+const CREDITED_PAYER_MAX_PAGES = 20;
+/** Server time limit of each payer-check query (a slow read throws: payer_check_failed, swap held). */
+const CREDITED_PAYER_MAX_TIME_MS = 5000;
 class PromoteRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_1__.BaseRepository {
     constructor() {
         super(...arguments);
@@ -44008,36 +44014,69 @@ class PromoteRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_1__.Ba
      * inserted the row, and a swap or a parked reply never moves it. So a row counts when it is stamped for this
      * client or unstamped (legacy), or, stamped for a sibling client, when this client has its own stats2 row for the
      * chat (stats2 is keyed {chatId, profile, client} and upserted by this client on every inbound funnel event).
-     * Reads: userData by the profile_lastMsgTimeStamp index (at most CREDITED_PAYER_SCAN_LIMIT rows, newest first);
-     * stats2 by its unique {chatId, profile, client} index, only for sibling-stamped rows. Throws, also when the
-     * persona is unknown.
+     * Reads: userData by the profile_lastMsgTimeStamp index, newest first, in pages of CREDITED_PAYER_SCAN_LIMIT
+     * (keyset on lastMsgTimeStamp; a page's last stamp is read in full by equality, then the next page continues
+     * strictly below it), stopping at the first page with a row that counts, so
+     * sibling clients' payers can never push this client's payer past a cap; stats2 by its unique {chatId, profile,
+     * client} index, only for a page's sibling-stamped rows. Each query has maxTimeMS CREDITED_PAYER_MAX_TIME_MS.
+     * Throws, also when the persona is unknown, a query times out, or CREDITED_PAYER_MAX_PAGES pages were read
+     * without an answer.
      */
     async findRecentCreditedPayer(identity, since) {
         if (!identity.profile)
             throw new Error('persona (dbcoll) unset; payer check unavailable');
-        const filter = {
+        const clientId = identity.clientId;
+        const isOwn = (row) => !clientId || row.clientId == null || row.clientId === clientId;
+        const seen = new Set();
+        const base = {
             profile: identity.profile,
             highestPayAmount: { $gte: CREDITED_PAYER_MIN_AMOUNT },
             fakePaymentAt: null,
-            lastMsgTimeStamp: { $gte: since },
         };
-        const rows = await this.connection.collection('userData').find(filter, {
+        const readUserData = (lastMsgTimeStamp, limit) => this.connection
+            .collection('userData')
+            .find({ ...base, lastMsgTimeStamp }, {
             projection: { chatId: 1, lastMsgTimeStamp: 1, clientId: 1 },
             sort: { lastMsgTimeStamp: -1 },
-            limit: CREDITED_PAYER_SCAN_LIMIT,
-        }).toArray();
-        const clientId = identity.clientId;
-        const isOwn = (row) => !clientId || row.clientId == null || row.clientId === clientId;
-        const siblingChatIds = rows.filter((row) => !isOwn(row)).map((row) => String(row.chatId ?? '')).filter(Boolean);
-        let talksHere = new Set();
-        if (clientId && siblingChatIds.length > 0) {
-            const stats = await this.connection.collection('stats2').find({ chatId: { $in: siblingChatIds }, profile: identity.profile, client: clientId }, { projection: { chatId: 1 } }).toArray();
-            talksHere = new Set(stats.map((row) => String(row.chatId ?? '')));
+            ...(limit === undefined ? {} : { limit }),
+            maxTimeMS: CREDITED_PAYER_MAX_TIME_MS,
+        })
+            .toArray();
+        /** The first row of `candidates` (newest first) that counts for this client; rows already judged are skipped. */
+        const firstCounting = async (candidates) => {
+            const rows = candidates.filter((row) => {
+                const key = String(row._id ?? `${row.chatId}:${row.lastMsgTimeStamp}`);
+                if (seen.has(key))
+                    return false;
+                seen.add(key);
+                return true;
+            });
+            const siblingChatIds = rows.filter((row) => !isOwn(row)).map((row) => String(row.chatId ?? '')).filter(Boolean);
+            let talksHere = new Set();
+            if (clientId && siblingChatIds.length > 0) {
+                const stats = await this.connection.collection('stats2').find({ chatId: { $in: siblingChatIds }, profile: identity.profile, client: clientId }, { projection: { chatId: 1 }, maxTimeMS: CREDITED_PAYER_MAX_TIME_MS }).toArray();
+                talksHere = new Set(stats.map((row) => String(row.chatId ?? '')));
+            }
+            return rows.find((candidate) => isOwn(candidate) || talksHere.has(String(candidate.chatId ?? ''))) ?? null;
+        };
+        const answer = (row) => ({ chatId: String(row.chatId ?? ''), lastMsgTimeStamp: Number(row.lastMsgTimeStamp ?? 0) });
+        let below = null;
+        for (let page = 0; page < CREDITED_PAYER_MAX_PAGES; page += 1) {
+            const fetched = await readUserData(below === null ? { $gte: since } : { $gte: since, $lt: below }, CREDITED_PAYER_SCAN_LIMIT);
+            const row = await firstCounting(fetched);
+            if (row)
+                return answer(row);
+            if (fetched.length < CREDITED_PAYER_SCAN_LIMIT)
+                return null;
+            // Keyset on lastMsgTimeStamp: the page may end inside rows sharing its last stamp, so read that stamp's
+            // rows in full (an equality read on the index) before the next page continues strictly below it.
+            const boundary = Number(fetched[fetched.length - 1].lastMsgTimeStamp ?? 0);
+            const tied = await firstCounting(await readUserData(boundary));
+            if (tied)
+                return answer(tied);
+            below = boundary;
         }
-        const row = rows.find((candidate) => isOwn(candidate) || talksHere.has(String(candidate.chatId ?? '')));
-        if (!row)
-            return null;
-        return { chatId: String(row.chatId ?? ''), lastMsgTimeStamp: Number(row.lastMsgTimeStamp ?? 0) };
+        throw new Error(`payer check: no answer within ${CREDITED_PAYER_MAX_PAGES} pages of ${CREDITED_PAYER_SCAN_LIMIT} rows`);
     }
     async readPromoteStats(client) {
         await this.ensurePromoteStatsInitialized(client);
@@ -45083,6 +45122,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   AccountRoleEventsRepository: () => (/* reexport safe */ _collections_account_role_events_repository__WEBPACK_IMPORTED_MODULE_15__.AccountRoleEventsRepository),
 /* harmony export */   AdoptedDbConnection: () => (/* reexport safe */ _adopt_connection__WEBPACK_IMPORTED_MODULE_1__.AdoptedDbConnection),
 /* harmony export */   BaseRepository: () => (/* reexport safe */ _base_repository__WEBPACK_IMPORTED_MODULE_2__.BaseRepository),
+/* harmony export */   CREDITED_PAYER_MAX_PAGES: () => (/* reexport safe */ _collections_promote_repository__WEBPACK_IMPORTED_MODULE_7__.CREDITED_PAYER_MAX_PAGES),
+/* harmony export */   CREDITED_PAYER_MAX_TIME_MS: () => (/* reexport safe */ _collections_promote_repository__WEBPACK_IMPORTED_MODULE_7__.CREDITED_PAYER_MAX_TIME_MS),
 /* harmony export */   CREDITED_PAYER_MIN_AMOUNT: () => (/* reexport safe */ _collections_promote_repository__WEBPACK_IMPORTED_MODULE_7__.CREDITED_PAYER_MIN_AMOUNT),
 /* harmony export */   CREDITED_PAYER_SCAN_LIMIT: () => (/* reexport safe */ _collections_promote_repository__WEBPACK_IMPORTED_MODULE_7__.CREDITED_PAYER_SCAN_LIMIT),
 /* harmony export */   CREDIT_KEY_HISTORY: () => (/* reexport safe */ _collections_user_data_repository__WEBPACK_IMPORTED_MODULE_3__.CREDIT_KEY_HISTORY),
@@ -63805,8 +63846,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "bf3a81c284360b4189bf1bdf819ca35685edb76e" : 0;
-    const builtAt =  true ? "2026-11-20T05:54:51.091Z" : 0;
+    const sha =  true ? "9eb6d6f0d102875bb858a0936ce37a27e68dd0b2" : 0;
+    const builtAt =  true ? "2026-11-20T06:37:49.635Z" : 0;
     return { sha, builtAt };
 }
 
@@ -91854,7 +91895,12 @@ function readPromoHealthPause(value) {
     const retriedAt = raw.retriedAt == null ? null : Number(raw.retriedAt);
     const base = raw.retryBase && typeof raw.retryBase === 'object' ? raw.retryBase : null;
     const retryBase = base && typeof base.proc === 'string' && Number.isFinite(Number(base.success)) && Number.isFinite(Number(base.failed))
-        ? { proc: base.proc, success: Number(base.success), failed: Number(base.failed) }
+        ? {
+            proc: base.proc,
+            success: Number(base.success),
+            failed: Number(base.failed),
+            ...(Number.isFinite(Number(base.at)) && base.at != null ? { at: Number(base.at) } : {}),
+        }
         : null;
     return {
         // pausedAt, failedRetries and retriedAt are kept as stored: conditional writes match on them.
@@ -91865,6 +91911,25 @@ function readPromoHealthPause(value) {
         retriedAt: retriedAt !== null && Number.isFinite(retriedAt) ? retriedAt : null,
         retryBase,
     };
+}
+/**
+ * Quiet reasons that hold a retry's verdict on the tg-aut main (job-manager only; the ladder's KNOWN_QUIET set keeps
+ * its meaning for promote-clients): blocks that lift on their own (the ban gate self-recovers by probes; a banned
+ * probe fails the retry as ban_probe_failed), and chstate_unavailable (a swap cannot fix Redis).
+ */
+const PROMO_RETRY_HOLD_QUIET = new Set(['budget', 'explore_budget', 'hourly_cap', 'cooldown', 'ban_gate', 'chstate_unavailable']);
+/**
+ * True when a runner cycle-end record holds the retry verdict. no_eligible_channel holds only while channels are
+ * cooling (they lift on their own); with 0 cooling the mobile's own joined channels are dry and a swap gives another
+ * pool, so it fails the retry like no_eligible_mobile and the ban gate.
+ */
+function promoRetryHoldsQuiet(record) {
+    const quiet = typeof record.quiet === 'string' ? record.quiet : '';
+    if (PROMO_RETRY_HOLD_QUIET.has(quiet))
+        return true;
+    if (quiet === 'no_eligible_channel')
+        return Number(record.cooling) > 0;
+    return false;
 }
 /** True when both are the same stored cycle state (the fields conditional writes match on). */
 function samePromoHealthCycle(a, b) {
@@ -92602,8 +92667,10 @@ class JobManager {
      * - the retry is judged only on sends made after it (judgeRetry): one landed send clears the cycle (kind=resume
      *   reason=send_landed); PROMO_HEALTH_RETRY_FAILED_SENDS failed sends and none landed, or a ban-gate probe banned
      *   after it, pause again (kind=repause) and count a failed retry; at PROMO_HEALTH_RETRY_VERDICT_MS with nothing
-     *   landed and no failure, a known legitimate block holds the verdict (kind=retry_wait held=<block>) and anything
-     *   else is a dead runner, a failed retry (kind=repause reason=runner_dead); in between, kind=retry_wait;
+     *   landed and no failure, a block that lifts on its own holds the verdict (kind=retry_wait held=<block>), a
+     *   mobile-side block fails it (reason=quiet_no_eligible_*) and anything else is a dead runner, a failed retry
+     *   (kind=repause reason=runner_dead); in between, kind=retry_wait. A restart or an engine with restored counters
+     *   re-takes the counter base (kind=retry_rebase) and evidence counts from then;
      * - at PROMO_HEALTH_MAX_FAILED_RETRIES failed retries in a row it asks CMS to swap the main (kind=swap) through
      *   setupClient, inside the per-client ladder swap budget (2 per IST day, charged before the request), unless a
      *   credited payer was active on the main in the last PROMO_HEALTH_PAYER_QUIET_MS (kind=swap_held, the cycle goes on);
@@ -92746,22 +92813,75 @@ class JobManager {
         }
     }
     /**
-     * Sends made since the retry. Same process and engine: counters minus retryBase. Otherwise the counters count
-     * only when this process started after the retry (a restart); else there is no counter evidence (0/0).
+     * Sends made since the retry (or since a re-taken base), and the time that evidence counts from.
+     * - `diff`: the stored base is this process's and the counters did not drop: counters minus the base.
+     * - `own`: the engine's counters are its own (the restore read found no recent promote::state: new-run or
+     *   unknown) and the engine started after the base was taken (a new process started after the retry, or an
+     *   engine rebuilt in this process, its counters below the base): every counted send is newer than the retry.
+     * - `pending`: the engine has not applied its promote::state read yet; its counters may still jump.
+     * - `rebase`: the counters do not continue the base (another process's base, a missing base, or an engine whose
+     *   counters BasePromotionEngine.applyPromoteRestartState restored from promote::state, which may hold sends
+     *   older than the retry). A fresh base for this process is stored and judged from (judgeRetry).
      */
-    promoRetryEvidence(pause, stats) {
+    promoRetryEvidence(pause, stats, restartMode) {
         const success = Number(stats?.successCount) || 0;
         const failed = Number(stats?.totalFailed) || 0;
+        const retriedAt = pause.retriedAt ?? 0;
         const base = pause.retryBase;
-        if (base && base.proc === this.promoHealthProc) {
-            // A lower counter means the engine was rebuilt after the retry: all of its sends are newer.
-            if (success < base.success || failed < base.failed)
-                return { landed: success, failed };
-            return { landed: success - base.success, failed: failed - base.failed };
+        const ownProc = !!base && base.proc === this.promoHealthProc;
+        if (base && ownProc && success >= base.success && failed >= base.failed) {
+            return { kind: 'diff', landed: success - base.success, failed: failed - base.failed, since: base.at ?? retriedAt };
         }
-        if (pause.retriedAt !== null && this.promoHealthStartedAt >= pause.retriedAt)
-            return { landed: success, failed };
-        return { landed: 0, failed: 0 };
+        // An engine without the accessor (never in this app) is treated as restored: re-base, never trust its counters.
+        if (restartMode === null)
+            return { kind: 'pending' };
+        const ownCounters = restartMode === 'new-run' || restartMode === 'unknown';
+        const startedAfterBase = ownProc
+            ? true // same process, counters below its base: the engine was rebuilt after the base was taken
+            : this.promoHealthStartedAt >= (base?.at ?? retriedAt);
+        if (ownCounters && startedAfterBase)
+            return { kind: 'own', landed: success, failed, since: base?.at ?? retriedAt };
+        return { kind: 'rebase', reason: !base ? 'no_base' : ownProc ? 'counters_restored' : 'other_process' };
+    }
+    /** The engine's promote::state restore outcome: null while the boot read is still pending. */
+    promoRestartMode(promotor) {
+        try {
+            if (typeof promotor.getRestartMode !== 'function')
+                return 'restart';
+            const mode = promotor.getRestartMode();
+            return typeof mode === 'string' ? mode : null;
+        }
+        catch (error) {
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, 'JobManager.promoHealthRestartMode', false);
+            return 'restart';
+        }
+    }
+    /**
+     * Stores a fresh retry base for this process (the old one no longer applies, see promoRetryEvidence); evidence
+     * then counts from `now`. Conditional on the cycle read; one `kind=retry_rebase` line.
+     */
+    async rebasePromoRetry(pause, mobile, now, reason, stats) {
+        const retryBase = {
+            proc: this.promoHealthProc,
+            success: Number(stats?.successCount) || 0,
+            failed: Number(stats?.totalFailed) || 0,
+            at: now,
+        };
+        let persisted = false;
+        try {
+            if (!(await this.promoteRepo().setPromoHealthPause(process.env.clientId, { ...pause, retryBase }, { expect: { pause } }))) {
+                this.logStalePromoWrite('retry_rebase', mobile, pause);
+                return;
+            }
+            persisted = true;
+        }
+        catch (error) {
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, 'JobManager.promoHealthRetryRebase', false);
+        }
+        this.log('info', (0,_promotion_promo_health_log__WEBPACK_IMPORTED_MODULE_27__.promoHealthLine)('retry_rebase', mobile, {
+            reason, failedRetries: pause.failedRetries, success: retryBase.success, failed: retryBase.failed,
+            sinceRetryMin: pause.retriedAt === null ? undefined : Math.floor((now - pause.retriedAt) / 60000), persisted,
+        }));
     }
     /**
      * The verdict on a retry, from sends made after it only (the fail streak and the ban gate's in-memory latch are
@@ -92769,13 +92889,25 @@ class JobManager {
      * landed fail it. A tripped ban gate lets one probe through per 10 min (the 30 min pause makes the first one due
      * at once), so a probe banned after the retry (the gate re-read after it, still tripped) also fails it.
      * At PROMO_HEALTH_RETRY_VERDICT_MS after the retry with nothing landed and no failure: a known legitimate block
-     * (promoRetryBlock) holds the verdict (kind=retry_wait held=<block>, every check while it lasts); anything else
-     * means the runner is dead, a failed retry (reason=runner_dead), so 3 of them swap. Before that, wait.
+     * (promoRetryBlock) holds the verdict (kind=retry_wait held=<block>, every check while it lasts); a fresh
+     * mobile-side block a swap fixes is a failed retry (reason=quiet_no_eligible_mobile or quiet_no_eligible_channel);
+     * anything else means the runner is dead, a failed retry (reason=runner_dead), so 3 of them swap. Before that,
+     * wait. Evidence and the window count from the retry, or from a base re-taken after it (kind=retry_rebase).
      */
     async judgeRetry(promotor, pause, ctx) {
         const { now, mobile } = ctx;
-        const retriedAt = pause.retriedAt ?? now;
-        const evidence = this.promoRetryEvidence(pause, ctx.messageStats);
+        const result = this.promoRetryEvidence(pause, ctx.messageStats, this.promoRestartMode(promotor));
+        if (result.kind === 'pending') {
+            this.log('info', (0,_promotion_promo_health_log__WEBPACK_IMPORTED_MODULE_27__.promoHealthLine)('retry_wait', mobile, { failedRetries: pause.failedRetries, evidence: 'restore_pending' }));
+            return 'wait';
+        }
+        if (result.kind === 'rebase') {
+            await this.rebasePromoRetry(pause, mobile, now, result.reason, ctx.messageStats);
+            return 'wait';
+        }
+        const evidence = result;
+        // Evidence counts from the retry, or from a base re-taken after it (the verdict window starts there too).
+        const retriedAt = result.since || (pause.retriedAt ?? now);
         const fields = { landed: evidence.landed, failed: evidence.failed, sinceRetryMin: Math.floor((now - retriedAt) / 60000) };
         if (evidence.landed >= 1) {
             await this.clearCycleAfterRetry(pause, mobile, 'send_landed', fields);
@@ -92794,11 +92926,11 @@ class JobManager {
                 this.log('info', (0,_promotion_promo_health_log__WEBPACK_IMPORTED_MODULE_27__.promoHealthLine)('retry_wait', mobile, { failedRetries: pause.failedRetries, ...fields, held: block.held, quiet: block.quiet }));
                 return 'wait';
             }
-            failure = 'runner_dead';
+            failure = block.blocked ?? 'runner_dead';
             quiet = block.quiet;
         }
         if (failure) {
-            await this.handleFailedRetry(promotor, pause, { ...ctx, reason: failure, evidence: failure === 'runner_dead' ? { ...fields, quiet } : fields });
+            await this.handleFailedRetry(promotor, pause, { ...ctx, reason: failure, evidence: quiet !== null || failure === 'runner_dead' ? { ...fields, quiet } : fields });
             return 'failed';
         }
         this.log('info', (0,_promotion_promo_health_log__WEBPACK_IMPORTED_MODULE_27__.promoHealthLine)('retry_wait', mobile, {
@@ -92811,12 +92943,17 @@ class JobManager {
     /**
      * Why a runner sent nothing since the retry, from the engine's own runner state (no new signal):
      * - `quiet_<reason>`: the runner's last finished cycle, ended after the retry and at most PROMO_LADDER.quietMaxAgeMs
-     *   ago, has a known quiet reason (isKnownQuiet, the ladder's never-restart set): daily send budget, exploration
-     *   budget, hourly cap, ban gate, every channel cooling, no eligible channel or mobile, chstate unavailable.
-     *   A swap cannot fix these, or they lift on their own.
+     *   ago, has a quiet reason that holds a retry (promoRetryHoldsQuiet): a block that lifts on its own (daily send
+     *   budget, exploration budget, hourly cap, every channel cooling, a no_eligible_channel pool with channels
+     *   cooling, the ban gate, which lets a probe through every 10 min and fails the retry as ban_probe_failed when
+     *   one is banned) or one a swap cannot fix (chstate unavailable: Redis). The other ladder known-quiet reasons
+     *   are a failed retry here, because a swap fixes them: no_eligible_mobile (mobile-side exclusions) and a
+     *   no_eligible_channel pool with nothing cooling (the pool is the mobile's own joined channels, so another
+     *   mobile has another pool).
      * - `rest`: a runner started after the retry is inside a declared rest (sleepUntil ahead: an hourly-cap wait or a
      *   cooldown rest, the runner's quiet window).
      * - `paid_user_limit` / `paid_users_unreadable`: the paid-user limit stops promotions (the same hold as the retry).
+     * `blocked` names a fresh no_eligible_mobile or dry no_eligible_channel cycle (not held: a swap fixes it).
      * Otherwise `held` is null: no runner, a runner that never finished a cycle, a cycle that ended with
      * `quiet=unknown` or `none` (sent but nothing landed), or a known reason older than 60 min (the block lifted and
      * the runner went silent). `quiet` is the last own quiet reason, for the log.
@@ -92826,8 +92963,12 @@ class JobManager {
         const last = runner?.lastQuiet ?? null;
         const own = last && Number(last.at) >= retriedAt ? last : null;
         const quiet = own && typeof own.quiet === 'string' ? own.quiet : null;
-        if (own && now - Number(own.at) <= _tg_channel_state_channel_message_promotions_orchestrator_promo_health_ladder__WEBPACK_IMPORTED_MODULE_28__.PROMO_LADDER.quietMaxAgeMs && (0,_tg_channel_state_channel_message_promotions_orchestrator_promo_health_ladder__WEBPACK_IMPORTED_MODULE_28__.isKnownQuiet)(own.quiet))
+        const fresh = !!own && now - Number(own.at) <= _tg_channel_state_channel_message_promotions_orchestrator_promo_health_ladder__WEBPACK_IMPORTED_MODULE_28__.PROMO_LADDER.quietMaxAgeMs;
+        if (fresh && promoRetryHoldsQuiet(own))
             return { held: `quiet_${own.quiet}`, quiet };
+        // A fresh mobile-side block (no_eligible_mobile, a dry no_eligible_channel pool): a failed retry, named so.
+        if (fresh && (quiet === 'no_eligible_mobile' || quiet === 'no_eligible_channel'))
+            return { held: null, quiet, blocked: `quiet_${quiet}` };
         const startedAt = Number(runner?.startedAt);
         const sleepUntil = Number(runner?.sleepUntil);
         if (runner?.running === true && Number.isFinite(startedAt) && startedAt >= retriedAt && Number.isFinite(sleepUntil) && sleepUntil > now) {
@@ -92947,13 +93088,29 @@ class JobManager {
             return;
         }
         // Charge before the request: CMS may restart this process before the request returns.
+        // notePromoSwap is INCR then EXPIRE: when the INCR applied and the EXPIRE failed, the slot is given back
+        // (no swap ran), so a Redis error never spends the day's budget.
         let charged;
+        let incremented = false;
         try {
-            charged = await (0,_tg_channel_state_channel_message_promotions_orchestrator_promo_health_ladder__WEBPACK_IMPORTED_MODULE_28__.notePromoSwap)(_tg_core_utils_Redis_Redis_Client__WEBPACK_IMPORTED_MODULE_22__.RedisClient, budget);
+            charged = await (0,_tg_channel_state_channel_message_promotions_orchestrator_promo_health_ladder__WEBPACK_IMPORTED_MODULE_28__.notePromoSwap)({
+                get: (key) => _tg_core_utils_Redis_Redis_Client__WEBPACK_IMPORTED_MODULE_22__.RedisClient.get(key),
+                incr: async (key) => {
+                    const count = await _tg_core_utils_Redis_Redis_Client__WEBPACK_IMPORTED_MODULE_22__.RedisClient.incr(key);
+                    incremented = true;
+                    return count;
+                },
+                expire: (key, seconds) => _tg_core_utils_Redis_Redis_Client__WEBPACK_IMPORTED_MODULE_22__.RedisClient.expire(key, seconds),
+            }, budget);
         }
         catch (error) {
             (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, 'JobManager.promoLadderSwapBudget', false);
-            this.log('warn', (0,_promotion_promo_health_log__WEBPACK_IMPORTED_MODULE_27__.promoHealthLine)('swap_held', mobile, { reason: 'budget_unavailable', failedRetries, detail: error instanceof Error ? error.message : String(error) }));
+            if (incremented)
+                await this.refundPromoSwap(budget.key);
+            this.log('warn', (0,_promotion_promo_health_log__WEBPACK_IMPORTED_MODULE_27__.promoHealthLine)('swap_held', mobile, {
+                reason: 'budget_unavailable', failedRetries, budget: incremented ? 'refunded' : undefined,
+                detail: error instanceof Error ? error.message : String(error),
+            }));
             await repause();
             return;
         }
@@ -112569,13 +112726,15 @@ __webpack_require__.r(__webpack_exports__);
 /**
  * Owner rule 2026-11-19: every promotion-health decision on the tg-aut main writes one greppable line,
  * `promo-health kind=<kind> client=<clientId> mobile=***1234 key=value ...`. A value with spaces is quoted.
- * Kinds: pause, retry, retry_wait, repause, swap, swap_held, alert_suppressed, paused_fault, stale_write_skipped,
+ * Kinds: pause, retry, retry_wait, retry_rebase, repause, swap, swap_held, alert_suppressed, paused_fault, stale_write_skipped,
  * resume (source=daily_reset|spambot_good_news|route|retry|main_changed|external).
  * Cycle (owner 2026-11-20): pause 30 min, retry, repause on a failed retry, swap after 3 failed retries in a row
  * unless a credited payer was active on the main in the last 6 h (swap_held). A retry is judged only on sends made
  * after it, within 20 min of it (retry_wait while that evidence is short). Nothing landed and no failure by then:
  * a known legitimate block holds the verdict (retry_wait held=<block>), anything else is a dead runner (repause
- * reason=runner_dead, counted like any failed retry).
+ * reason=runner_dead, counted like any failed retry). retry_rebase: the stored counter base no longer applies
+ * (another process, or an engine rebuilt with counters restored from promote::state), so a fresh base is stored and
+ * evidence counts from then.
  */
 
 function pair(key, value) {
