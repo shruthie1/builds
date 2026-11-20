@@ -37842,6 +37842,20 @@ class UserDataRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_2__.B
         return this.upsert(chatId, identity, { $set: setFields, $setOnInsert: setOnInsert });
     }
     /**
+     * $set `updates` (+ lastMsgTimeStamp) only while `guard` still holds on this persona's row; never inserts.
+     * Null when no row matched: another write changed the guarded fields first. For one-shot transitions that
+     * must apply once even when two callers read the row before either wrote (service completion).
+     */
+    async updateFieldsIf(chatId, identity, guard, updates, now = Date.now()) {
+        (0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.requireProfile)(identity);
+        const safeUpdates = { ...updates };
+        delete safeUpdates.chatId;
+        delete safeUpdates.profile;
+        // Persona pair last, so a guard key can never widen the write to another row.
+        const filter = { ...guard, ...(0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.personaFilter)(chatId, identity) };
+        return this.collection.findOneAndUpdate(filter, { $set: { lastMsgTimeStamp: now, ...safeUpdates } }, { upsert: false, returnDocument: 'after' });
+    }
+    /**
      * updateFields plus `$max` raises in the SAME atomic write: each `raise` key only ever goes up (never lowered by a
      * stale read). For entitlement bookkeeping that is not a payment credit (demo pictures' payAmount) — a read-compare-
      * write there lowered a balance another credit had raised in between.
@@ -52896,8 +52910,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "c61f51d804e237902b8337771d0278232b33a09e" : 0;
-    const builtAt =  true ? "2026-11-19T18:16:05.430Z" : 0;
+    const sha =  true ? "f802caccdca3ff4fa1d006036decacd0db503593" : 0;
+    const builtAt =  true ? "2026-11-20T03:47:40.774Z" : 0;
     return { sha, builtAt };
 }
 
