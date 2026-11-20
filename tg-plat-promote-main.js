@@ -34000,11 +34000,11 @@ __webpack_require__.r(__webpack_exports__);
  *   - CMS (CommonTgService src/components/clients/account-role-events.ts): enrolled, ready, became_main,
  *     swapped_out, returned, retired, reactivated;
  *   - tg-platform: promoteClients status changes made through PromoteRepository.updatePromoteClient (retired /
- *     reactivated, by 'tg-platform:promote-update'); a clients.mobile rewrite through ClientsRepository.updateProfile
- *     (tg-aut connect sanity write) that really changed the stored main (became_main / swapped_out,
- *     by 'tg-platform:client-profile'); parkedAccounts episodes through ParkedAccountsRepository: `parked` when
+ *     reactivated, by 'tg-platform:promote-update'); parkedAccounts episodes through ParkedAccountsRepository: `parked` when
  *     openEpisode inserted one, `unparked` when stop / stopOpenForMobile / an openEpisode supersede really closed one
  *     (by 'tg-platform:parked-open' / 'tg-platform:parked-stop' / 'tg-platform:parked-supersede', opId = episode _id).
+ *     ClientsRepository.updateProfile no longer writes clients.mobile, so 'tg-platform:client-profile' events
+ *     stopped (owner 2026-11-20); old rows keep that `by`.
  * Nothing reads it for a decision yet (the read API below is for reports and swap reviews).
  *
  * append() NEVER throws and is bounded by a CLIENT-SIDE deadline (insertOne ignores maxTimeMS). appendSoon() is the
@@ -34789,15 +34789,13 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   ClientsRepository: () => (/* binding */ ClientsRepository)
 /* harmony export */ });
-/* harmony import */ var node_crypto__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! node:crypto */ "node:crypto");
-/* harmony import */ var node_crypto__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(node_crypto__WEBPACK_IMPORTED_MODULE_0__);
-/* harmony import */ var _base_repository__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../base-repository */ "../../packages/tg-db/src/base-repository.ts");
-/* harmony import */ var _promote_repository__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./promote.repository */ "../../packages/tg-db/src/collections/promote.repository.ts");
-/* harmony import */ var _account_role_events_repository__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ./account-role-events.repository */ "../../packages/tg-db/src/collections/account-role-events.repository.ts");
+/* harmony import */ var _base_repository__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../base-repository */ "../../packages/tg-db/src/base-repository.ts");
+/* harmony import */ var _promote_repository__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./promote.repository */ "../../packages/tg-db/src/collections/promote.repository.ts");
+/* harmony import */ var _tg_core_account_lease__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! @tg/core/account-lease */ "../../packages/tg-core/src/account-lease/index.ts");
 
 
 
-
+const CLIENT_PROFILE_FIELDS = ['name', 'username'];
 /** Fields stripped from every masked read. */
 const SECRET_FIELDS = ['session', 'password'];
 function maskClient(client) {
@@ -34806,11 +34804,10 @@ function maskClient(client) {
         delete masked[field];
     return masked;
 }
-class ClientsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_1__.BaseRepository {
+class ClientsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_0__.BaseRepository {
     constructor() {
         super(...arguments);
         this.collectionName = 'clients';
-        this.roleEventsRepository = null;
     }
     /** Secret-free client read. Use this unless a Telegram connection is genuinely being opened. */
     async findMasked(clientId) {
@@ -34829,43 +34826,51 @@ class ClientsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_1__.Ba
         const run = async () => (await this.collection.find({}).toArray()).map(maskClient);
         return options.strict ? this.guardStrict('listMasked', run) : this.guard('listMasked', [], run);
     }
-    /** $set display fields on one client. Returns false on failure; never throws. */
-    async updateProfile(clientId, update) {
+    /**
+     * $set display fields (name, username) on one client, ONLY while clients.mobile is still `ownMobile` (the account
+     * the calling process is logged into). A process left on an old main after a CMS cutover matches nothing, so it
+     * can never overwrite the new main's profile; clients.mobile itself is never written here (owner 2026-11-20).
+     * Missing / null / blank values are dropped, never written. Every outcome logs one `client-profile kind=...` line.
+     * Returns false on a failed write or a blank clientId; a skip is not a failure. Never throws.
+     */
+    async updateProfile(clientId, ownMobile, update) {
         if (!clientId?.trim())
             return false;
-        return this.guardWrite(`updateProfile(${clientId})`, async () => {
-            // findOneAndUpdate (one round trip, like the updateOne it replaces) returns the BEFORE mobile, so a real
-            // change of the stored main can be recorded without an extra read on tg-aut's connect path.
-            const before = await this.collection.findOneAndUpdate({ clientId }, { $set: update }, { returnDocument: 'before', projection: { mobile: 1 } });
-            this.recordMainRewrite(clientId, before?.mobile, update.mobile);
-        });
-    }
-    /**
-     * accountRoleEvents (design 2026-11-07-account-collection-split S1, additive): tg-aut's connect sanity write
-     * (apps/tg-aut/src/telegram/telegram-manager.ts, `updateClient(clientId, {mobile: me.phone, ...})`) rewrites
-     * clients.mobile. Only when the stored mobile (from the write's own before-doc) really differs: became_main for the
-     * logged-in account + swapped_out for the stored one, one opId. No before-doc / no stored mobile / same account:
-     * nothing. Fire-and-forget: never throws, never delays connect.
-     */
-    recordMainRewrite(clientId, storedMobile, newMobile) {
-        try {
-            const oldMobile = (0,_account_role_events_repository__WEBPACK_IMPORTED_MODULE_3__.normalizeRoleEventMobile)(storedMobile);
-            const mobile = (0,_account_role_events_repository__WEBPACK_IMPORTED_MODULE_3__.normalizeRoleEventMobile)(newMobile);
-            if (!oldMobile || !mobile || oldMobile === mobile)
-                return;
-            const common = {
-                clientId, pool: 'main', by: 'tg-platform:client-profile', opId: (0,node_crypto__WEBPACK_IMPORTED_MODULE_0__.randomUUID)(), reasonCode: 'other',
-                reason: 'clients.mobile rewritten to the logged-in account (tg-aut connect)',
-            };
-            this.roleEvents.appendSoon({ ...common, mobile, event: 'became_main', fromMobile: oldMobile });
-            this.roleEvents.appendSoon({ ...common, mobile: oldMobile, event: 'swapped_out', toMobile: mobile });
+        const log = (line) => (this.logger.info ?? this.logger.log).call(this.logger, line);
+        const mobile = (0,_tg_core_account_lease__WEBPACK_IMPORTED_MODULE_2__.canonicalMobile)(ownMobile);
+        if (!mobile) {
+            log(`client-profile kind=skip reason=no_own_mobile client=${clientId}`);
+            return true;
         }
-        catch { /* history is best-effort */ }
-    }
-    get roleEvents() {
-        if (!this.roleEventsRepository)
-            this.roleEventsRepository = new _account_role_events_repository__WEBPACK_IMPORTED_MODULE_3__.AccountRoleEventsRepository(this.connection, this.logger);
-        return this.roleEventsRepository;
+        const set = {};
+        for (const field of CLIENT_PROFILE_FIELDS) {
+            const value = update?.[field];
+            if (typeof value === 'string' && value.trim())
+                set[field] = value;
+        }
+        const fields = Object.keys(set);
+        if (!fields.length) {
+            log(`client-profile kind=skip reason=no_fields client=${clientId}`);
+            return true;
+        }
+        let matched = 0;
+        let modified = 0;
+        const ok = await this.guardWrite(`updateProfile(${clientId})`, async () => {
+            const result = await this.collection.updateOne({ clientId, mobile }, { $set: set });
+            matched = result?.matchedCount ?? 0;
+            modified = result?.modifiedCount ?? 0;
+        });
+        if (!ok) {
+            log(`client-profile kind=failed client=${clientId}`);
+            return false;
+        }
+        if (matched !== 1)
+            log(`client-profile kind=skip reason=mobile_mismatch client=${clientId}`);
+        else if (modified === 0)
+            log(`client-profile kind=skip reason=no_change client=${clientId}`);
+        else
+            log(`client-profile kind=updated fields=${fields.join(',')} client=${clientId}`);
+        return true;
     }
     /**
      * The client's persona pool for one fleet, or null when the client is missing, every list is
@@ -34924,7 +34929,7 @@ class ClientsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_1__.Ba
      */
     async findBufferPersonaAssignments(clientId) {
         return this.guardStrict('bufferClients.findPersonaAssignments', () => this.bufferClients
-            .find((0,_promote_repository__WEBPACK_IMPORTED_MODULE_2__.personaAssignmentFilter)(clientId), { projection: _promote_repository__WEBPACK_IMPORTED_MODULE_2__.PERSONA_ASSIGNMENT_PROJECTION })
+            .find((0,_promote_repository__WEBPACK_IMPORTED_MODULE_1__.personaAssignmentFilter)(clientId), { projection: _promote_repository__WEBPACK_IMPORTED_MODULE_1__.PERSONA_ASSIGNMENT_PROJECTION })
             .toArray());
     }
     // ── timestamps ──────────────────────────────────────────────────────────────────────────
@@ -53105,8 +53110,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "c1c701dce28044ee993f320ea5c534db0e4eb99b" : 0;
-    const builtAt =  true ? "2026-11-20T11:35:53.817Z" : 0;
+    const sha =  true ? "4b8b0293b10eaacc91cd2080349b07c2af4cbdac" : 0;
+    const builtAt =  true ? "2026-11-20T14:50:48.842Z" : 0;
     return { sha, builtAt };
 }
 
