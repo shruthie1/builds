@@ -37336,6 +37336,19 @@ class PromoteRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_1__.Ba
             $setOnInsert: { client, count: 0, totalCount: 0, data: {}, uniqueChannels: 0, lastUpdatedTimeStamp: now },
         }, { upsert: true });
     }
+    /**
+     * Writes the promotion-health pause cycle (null clears it, never $unset). `active` true/false also writes
+     * isActive in the same update, like activatePromotions/deactivatePromotions. Throws.
+     */
+    async setPromoHealthPause(client, pause, active, now = Date.now()) {
+        await this.ensurePromoteStatsInitialized(client);
+        const set = { promoHealthPause: pause };
+        if (active === true)
+            Object.assign(set, { releaseDay: now, lastUpdatedTimeStamp: now, isActive: true });
+        if (active === false)
+            Object.assign(set, { releaseDay: now, isActive: false });
+        await this.promoteStats.updateOne({ client }, { $set: set });
+    }
     async readPromoteStats(client) {
         await this.ensurePromoteStatsInitialized(client);
         return this.promoteStats.findOne({ client });
@@ -52910,8 +52923,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "f802caccdca3ff4fa1d006036decacd0db503593" : 0;
-    const builtAt =  true ? "2026-11-20T03:47:40.774Z" : 0;
+    const sha =  true ? "7a10e3b5348c586997f7da85cbc9b9b3df55d397" : 0;
+    const builtAt =  true ? "2026-11-20T03:55:40.989Z" : 0;
     return { sha, builtAt };
 }
 
