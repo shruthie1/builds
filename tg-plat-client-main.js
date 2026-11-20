@@ -44221,6 +44221,9 @@ class StatsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_1__.Base
      * else insert a fresh row. Find-then-insert is not atomic; the unique
      * chatId_1_profile_1_client_1 index rejects the losing insert. Returns whether the stats2 row
      * was inserted (the caller runs first-contact side effects only then).
+     *
+     * payAmount goes to `stats` only. stats2.payAmount is paid today: inserted as 0, never $set here
+     * (only markDailyPaid raises it).
      */
     async recordFunnelEvent(chatId, scope, fields) {
         const filter = { chatId, client: scope.client, profile: scope.profile };
@@ -44228,34 +44231,36 @@ class StatsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_1__.Base
         const legacy = this.legacyCollection();
         const chat = await legacy.findOne(filter);
         const chat2 = await this.collection.findOne(filter);
-        const existingUpdate = { $inc: { count: 1 }, $set: { payAmount, demoGiven, paidReply, secondShow } };
+        const funnelSet = { demoGiven, paidReply, secondShow };
+        const legacyUpdate = { $inc: { count: 1 }, $set: payAmount === undefined ? funnelSet : { payAmount, ...funnelSet } };
+        const primaryUpdate = { $inc: { count: 1 }, $set: funnelSet };
         // A duplicate-key on insert means a concurrent event created the row between our find and
         // insert; fall back to the same update the "row exists" branch performs. Legacy and stats2
         // are handled independently so a duplicate on one never skips the other.
         if (chat) {
-            await legacy.updateOne(filter, existingUpdate);
+            await legacy.updateOne(filter, legacyUpdate);
         }
         else {
             try {
-                await legacy.insertOne({ chatId, count: 1, payAmount, demoGiven, demoGivenToday: false, newUser, name, secondShow, paidReply, client: scope.client, profile: scope.profile });
+                await legacy.insertOne({ chatId, count: 1, payAmount: payAmount ?? 0, demoGiven, demoGivenToday: false, newUser, name, secondShow, paidReply, client: scope.client, profile: scope.profile });
             }
             catch (error) {
                 if (!(0,_tg_core_utils_mongo_errors__WEBPACK_IMPORTED_MODULE_0__.isDuplicateKeyError)(error))
                     throw error;
-                await legacy.updateOne(filter, existingUpdate);
+                await legacy.updateOne(filter, legacyUpdate);
             }
         }
         if (chat2) {
-            await this.collection.updateOne(filter, existingUpdate);
+            await this.collection.updateOne(filter, primaryUpdate);
             return { insertedPrimary: false };
         }
         try {
-            await this.collection.insertOne({ chatId, count: 1, payAmount, demoGiven, demoGivenToday: false, newUser, paidReply, name, secondShow, client: scope.client, profile: scope.profile });
+            await this.collection.insertOne({ chatId, count: 1, payAmount: 0, demoGiven, demoGivenToday: false, newUser, paidReply, name, secondShow, client: scope.client, profile: scope.profile });
         }
         catch (error) {
             if (!(0,_tg_core_utils_mongo_errors__WEBPACK_IMPORTED_MODULE_0__.isDuplicateKeyError)(error))
                 throw error;
-            await this.collection.updateOne(filter, existingUpdate);
+            await this.collection.updateOne(filter, primaryUpdate);
             return { insertedPrimary: false };
         }
         return { insertedPrimary: true };
@@ -44314,7 +44319,7 @@ class StatsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_1__.Base
         }
         return this.collection.find({ client, payAmount: { $gte: 15 } }).toArray();
     }
-    /** stats2 rows with payAmount > 10: total and newUser count. Never throws: {0,0} on failure. */
+    /** stats2 rows paid today (credits only) with payAmount > 10: total and newUser count. Never throws: {0,0} on failure. */
     async countPaidUsers(client) {
         return this.guard('countPaidUsers', { total: 0, new: 0 }, async () => {
             const rows = await this.collection.find({ client, payAmount: { $gt: 10 } }).toArray();
@@ -44822,6 +44827,16 @@ class UserDataRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_2__.B
             .limit(limit)
             .toArray();
         return rows.map((row) => String(row.chatId)).filter(Boolean);
+    }
+    /**
+     * chatIds (of `chatIds`) whose persona row holds a balance (payAmount) >= `min`. One read, chatId only. Same persona
+     * filter as findForClient, so it judges the row the campaigns read next. Throws.
+     */
+    async findWithBalanceAtLeast(chatIds, identity, min) {
+        if (chatIds.length === 0)
+            return new Set();
+        const rows = await this.collection.find({ ...(0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.mineFilter)(identity), chatId: { $in: chatIds }, payAmount: { $gte: min } }, { projection: { chatId: 1 } }).toArray();
+        return new Set(rows.map((row) => String(row.chatId)));
     }
     /** Rows of `profile` among chatIds that have messaged at least once (lifetime msgCount > 0). Throws. */
     async findReachedRecords(profile, chatIds) {
@@ -63935,8 +63950,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "abd45709d48f9389093427002978d200fa5daf71" : 0;
-    const builtAt =  true ? "2026-11-20T17:26:26.101Z" : 0;
+    const sha =  true ? "6c531e42b07f1fd23a137fa01e671a358cd54e9a" : 0;
+    const builtAt =  true ? "2026-11-20T18:06:55.979Z" : 0;
     return { sha, builtAt };
 }
 
@@ -83439,6 +83454,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _calls_call_pause__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ../calls/call-pause */ "./src/calls/call-pause.ts");
 /* harmony import */ var _tg_persona_persona_timestamps__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! @tg/persona/persona-timestamps */ "../../packages/tg-persona/src/persona-timestamps.ts");
 /* harmony import */ var _tg_channel_state__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! @tg/channel-state */ "../../packages/tg-channel-state/src/index.ts");
+/* harmony import */ var _payments_ladder__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ../payments/ladder */ "./src/payments/ladder.ts");
+
 
 
 
@@ -83990,6 +84007,7 @@ class UserDataDtoCrud {
         if (Object.keys(inc).length)
             await this.recordDaily('reactionStatsDaily', mobile, inc);
     }
+    /** payAmount: the userData balance, copied into `stats` only (stats2.payAmount is paid today); undefined keeps the copy. */
     async createOrUpdateStats(chatId, name, payAmount, newUser, demoGiven, paidReply, secondShow) {
         // Daily funnel analytics (best-effort, bounded via TTL). active on every stat write;
         // newUsers on first contact.
@@ -84042,13 +84060,18 @@ class UserDataDtoCrud {
     async recordExistingUserActivity(chatId, name, state) {
         await this.createOrUpdateStats(chatId, name, state.payAmount ?? 0, false, !!state.demoGiven, !!state.paidReply, !!state.secondShow);
     }
-    /** Demo given (₹10 tier): demoGiven+paidReply, secondShow=false. */
-    async recordDemoGiven(chatId, name = 'any', payAmount = 10) {
-        await this.createOrUpdateStats(chatId, name, payAmount, false, true, true, false);
+    /**
+     * Demo given: demoGiven+paidReply, secondShow=false. Books no amount (owner 2026-11-20): it booked 10
+     * with no payment behind it. stats2.payAmount is paid today and only a credit raises it.
+     */
+    async recordDemoGiven(chatId, name = 'any') {
+        logger.log(`stats2-payamount kind=no-book event=demo chat=****${String(chatId).slice(-4)}`);
+        await this.createOrUpdateStats(chatId, name, undefined, false, true, true, false);
     }
-    /** Full / second show (₹150 tier): demoGiven+paidReply+secondShow set. */
-    async recordFullShow(chatId, name = 'any', payAmount = 150) {
-        await this.createOrUpdateStats(chatId, name, payAmount, false, true, true, true);
+    /** Full / second show: demoGiven+paidReply+secondShow set. Books no amount (it booked 150; see recordDemoGiven). */
+    async recordFullShow(chatId, name = 'any') {
+        logger.log(`stats2-payamount kind=no-book event=full-show chat=****${String(chatId).slice(-4)}`);
+        await this.createOrUpdateStats(chatId, name, undefined, false, true, true, true);
     }
     /** Call initiated for an existing paying user (never a new user). */
     async recordCallInitiated(chatId, payAmount, state) {
@@ -84246,6 +84269,11 @@ class UserDataDtoCrud {
             }
             const statsOk = pre !== undefined;
             const countedToday = pre?.dailyPaidCountedAt === dayKey;
+            if (pre === null) {
+                // No stats2 row (upsert false, rows are created only by funnel events): this credit is not in
+                // stats2.payAmount (paid today), so the promotion cap misses this payer. Known residual (2026-11-20).
+                logger.log(`stats2-credit kind=row-missing chat=****${normalizedChatId.slice(-4)} client=${clientId} day=${dayKey} amount=${floorAmount}`);
+            }
             // Amount this call newly credited; 0 means a re-entry for an already-counted payment (repeat screenshot /
             // full-show), which must not write another payment_event.
             let creditedNow = 0;
@@ -84411,8 +84439,17 @@ class UserDataDtoCrud {
     async readRecentPaidPpl() {
         return this.statsRepository().listRecentPayers(process.env.clientId, { legacy: true });
     }
+    /**
+     * Users of this client active today (a stats2 row) whose userData balance is >= 15: the ask-to-pay, auto-call and
+     * paid-campaign 'all' audience. The balance comes from userData: stats2.payAmount is paid today (owner
+     * 2026-11-20), and until then the funnel copied this same balance into it on every message.
+     */
     async readRecentPaidPpl2() {
-        return this.statsRepository().listRecentPayers(process.env.clientId);
+        const rows = await this.statsRepository().listByClient(process.env.clientId);
+        const holders = await this.userDataRepository().findWithBalanceAtLeast([...new Set(rows.map((row) => String(row.chatId)))], (0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_1__.currentScopeIdentity)(), _payments_ladder__WEBPACK_IMPORTED_MODULE_11__.DEMO_GRANT_MIN);
+        const out = rows.filter((row) => holders.has(String(row.chatId)));
+        logger.log(`stats2-payers kind=balance-holders active=${rows.length} holders=${out.length} min=${_payments_ladder__WEBPACK_IMPORTED_MODULE_11__.DEMO_GRANT_MIN}`);
+        return out;
     }
     async getPaidList() {
         let ppl = '';
@@ -95784,7 +95821,8 @@ async function respToPaidPplfn(client, time, msg, canReplyOthers = true, longlim
                                                     const { payAmount } = (0,_payments_ladder__WEBPACK_IMPORTED_MODULE_10__.paidCampaignBalanceUpdate)(user);
                                                     if (payAmount !== undefined) {
                                                         await db.updateSingleKey(user.chatId, 'payAmount', payAmount);
-                                                        await db.updateStatSingleKey(user.chatId, 'payAmount', payAmount);
+                                                        // userData only: stats2.payAmount is paid today, raised only by a credit (owner 2026-11-20).
+                                                        logger.log(`paid-campaign kind=balance-set chat=****${String(user.chatId).slice(-4)} payAmount=${payAmount} stats2=untouched`);
                                                     }
                                                     await (0,_telegram_send_message__WEBPACK_IMPORTED_MODULE_4__.trySendingMsg)(user, client, { message: (0,_greetings_generate_init_msg__WEBPACK_IMPORTED_MODULE_6__.initMsg)({ tempters: true }) }, undefined, undefined, 'paidCampaign');
                                                 }
