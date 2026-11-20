@@ -44466,6 +44466,20 @@ class UserDataRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_2__.B
         return this.upsert(chatId, identity, { $set: setFields, $setOnInsert: setOnInsert });
     }
     /**
+     * $set `updates` (+ lastMsgTimeStamp) only while `guard` still holds on this persona's row; never inserts.
+     * Null when no row matched: another write changed the guarded fields first. For one-shot transitions that
+     * must apply once even when two callers read the row before either wrote (service completion).
+     */
+    async updateFieldsIf(chatId, identity, guard, updates, now = Date.now()) {
+        (0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.requireProfile)(identity);
+        const safeUpdates = { ...updates };
+        delete safeUpdates.chatId;
+        delete safeUpdates.profile;
+        // Persona pair last, so a guard key can never widen the write to another row.
+        const filter = { ...guard, ...(0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.personaFilter)(chatId, identity) };
+        return this.collection.findOneAndUpdate(filter, { $set: { lastMsgTimeStamp: now, ...safeUpdates } }, { upsert: false, returnDocument: 'after' });
+    }
+    /**
      * updateFields plus `$max` raises in the SAME atomic write: each `raise` key only ever goes up (never lowered by a
      * stale read). For entitlement bookkeeping that is not a payment credit (demo pictures' payAmount) — a read-compare-
      * write there lowered a balance another credit had raised in between.
@@ -63706,8 +63720,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "3fec5484e4f71af11f9441c8b0c9e3498c593e3b" : 0;
-    const builtAt =  true ? "2026-11-19T18:35:03.273Z" : 0;
+    const sha =  true ? "f802caccdca3ff4fa1d006036decacd0db503593" : 0;
+    const builtAt =  true ? "2026-11-20T03:47:41.226Z" : 0;
     return { sha, builtAt };
 }
 
@@ -70762,6 +70776,9 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _jobs_delayed__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ../jobs/delayed */ "./src/jobs/delayed.ts");
 /* harmony import */ var _telegram_client_access__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ../telegram/client-access */ "./src/telegram/client-access.ts");
 /* harmony import */ var _telegram_typing__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ../telegram/typing */ "./src/telegram/typing.ts");
+/* harmony import */ var telegram_Helpers__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! telegram/Helpers */ "telegram/Helpers");
+/* harmony import */ var telegram_Helpers__WEBPACK_IMPORTED_MODULE_10___default = /*#__PURE__*/__webpack_require__.n(telegram_Helpers__WEBPACK_IMPORTED_MODULE_10__);
+
 
 
 
@@ -70849,8 +70866,9 @@ async function executehs(client, chatId, data) {
     if (userDetails?.demoGiven === true) {
         return blockRepeatDemo(chatId, userDetails, data);
     }
-    await (0,_telegram_typing__WEBPACK_IMPORTED_MODULE_9__.setAudioRecord)(chatId);
-    schedulePostShow(chatId, { kind: 'hs', step: 'feedback' }, POST_SHOW_FEEDBACK_MS);
+    if (!userDetails)
+        return skipNoRow('demo', chatId);
+    await showIndicator('record_audio', chatId);
     const noticeFields = serviceNoticeFields(userDetails, data);
     const updatedData = {
         paidReply: true,
@@ -70864,14 +70882,23 @@ async function executehs(client, chatId, data) {
         // promo). windowCount carries the intent; totalCount is kept only until readers move.
         windowCount: 1,
         ...(0,_payments_ladder__WEBPACK_IMPORTED_MODULE_6__.demoDeliveredUpdate)(userDetails),
+        ...completionToken('demo', userDetails).next,
     };
-    userDetails = await db.update(chatId, updatedData); // Reset states after demo given
-    (0,_conversation_state_state_reset__WEBPACK_IMPORTED_MODULE_3__.resetStatesOnDemoGiven)(chatId, userDetails);
+    // Also guarded on showCompletions: a full show recorded since the read set the balance and reply hold this write
+    // would overwrite (writeDemoAfterFullShow).
+    const guard = { ...completionToken('demo', userDetails).guard, ...completionToken('full', userDetails).guard };
+    const written = await db.updateIf(chatId, guard, updatedData)
+        ?? await writeDemoAfterFullShow(db, chatId, userDetails, updatedData);
+    if (!written)
+        return skipRacedRepeat('demo', chatId);
+    userDetails = written;
+    schedulePostShow(chatId, { kind: 'hs', step: 'feedback' }, POST_SHOW_FEEDBACK_MS);
+    (0,_conversation_state_state_reset__WEBPACK_IMPORTED_MODULE_3__.resetStatesOnDemoGiven)(chatId, userDetails); // Reset states after demo given
     await db.recordDemoGiven(chatId);
     await db.updateStatSingleKey(chatId, 'demoGivenToday', true);
     await db.updateVideos(chatId, data.video);
     await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_1__.notifyChat)(String(userDetails.chatId), { title: 'Demo given', fieldLayout: 'lines', fields: noticeFields });
-    await (0,_telegram_typing__WEBPACK_IMPORTED_MODULE_9__.setTyping)(chatId);
+    await showIndicator('typing', chatId);
     (0,_payments_ask_to_pay_by_event__WEBPACK_IMPORTED_MODULE_4__.noteDemoGiven)(chatId);
     return playback;
 }
@@ -70898,6 +70925,57 @@ async function blockRepeatDemo(chatId, userDetails, data) {
         ],
     });
     return { recorded: false, reason: 'repeat-demo' };
+}
+/**
+ * The chat-action indicators (telegram/typing.ts: one RPC, then a 2 s sleep) are cosmetic and can hang or fail. Start
+ * the RPC without waiting on it and wait out the same 2 s on a plain timer: the show's timing stays as it was (the
+ * write, post-show and callTime land after the record-audio pause) and nothing after it can wait behind the RPC.
+ */
+async function showIndicator(action, chatId) {
+    const rpc = action === 'record_audio' ? (0,_telegram_typing__WEBPACK_IMPORTED_MODULE_9__.setAudioRecord)(chatId) : (0,_telegram_typing__WEBPACK_IMPORTED_MODULE_9__.setTyping)(chatId);
+    rpc.catch((error) => {
+        logger.warn(`service-completion kind=indicator_failed action=${action} chat=****${String(chatId).slice(-4)} error=${String(error)}`);
+    });
+    await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_10__.sleep)(CHAT_ACTION_INDICATOR_MS);
+}
+/**
+ * The completion write is conditional on this kind's counter (demoCompletions / showCompletions) still being the value
+ * this report read, and raises it by one. Only a recorded completion of the same kind changes it (a new payment cycle
+ * resets fullShow/demoGiven, never these; a demo never moves the show counter), so when two reports of one kind read
+ * the row before either wrote, the second matches nothing: a miss means another completion of that kind was recorded.
+ */
+function completionToken(type, user) {
+    const key = type === 'demo' ? 'demoCompletions' : 'showCompletions';
+    const read = user[key];
+    return { guard: { [key]: read ?? null }, next: { [key]: (Number(read) || 0) + 1 } };
+}
+/**
+ * Two reports for one show read the row before either wrote (two HTTP requests, or route + in-house landing together):
+ * the conditional write let only the first through. Nothing recorded, no post-show, no notice (the first one sent it).
+ */
+function skipRacedRepeat(type, chatId) {
+    logger.warn(`service-completion kind=repeat_skipped type=${type} chat=****${String(chatId).slice(-4)}`);
+    return { recorded: false, reason: type === 'demo' ? 'repeat-demo' : 'repeat-full-show' };
+}
+/**
+ * The demo's guarded write missed. Re-read once: if only showCompletions moved, a full show landed between this
+ * report's read and its write. The demo still counts, but keeps that show's balance and reply hold (no payAmount /
+ * limitTime). Null when a demo was recorded meanwhile (a repeat) or nothing explains the miss.
+ */
+async function writeDemoAfterFullShow(db, chatId, read, updatedData) {
+    const now = await db.read(chatId);
+    if (!now || (now.demoCompletions ?? null) !== (read.demoCompletions ?? null))
+        return null;
+    if ((now.showCompletions ?? null) === (read.showCompletions ?? null))
+        return null;
+    logger.warn(`service-completion kind=demo_after_full chat=****${String(chatId).slice(-4)}`);
+    const { payAmount: _payAmount, limitTime: _limitTime, ...rest } = updatedData;
+    return db.updateIf(chatId, completionToken('demo', read).guard, rest);
+}
+/** No userData row for this chat: nothing to record against (the guarded write never inserts). */
+function skipNoRow(type, chatId) {
+    logger.warn(`service-completion kind=no_row type=${type} chat=****${String(chatId).slice(-4)}`);
+    return { recorded: false, reason: 'no-user-row' };
 }
 /**
  * Second / full show completion whose start snapshot is behind (owner 2026-10-21). The caller sends
@@ -70936,12 +71014,10 @@ async function executehsl(client, chatId, data) {
     if (isStaleFullShow(userDetails, data)) {
         return blockRepeatFullShow(chatId, userDetails, data);
     }
-    await (0,_telegram_typing__WEBPACK_IMPORTED_MODULE_9__.setAudioRecord)(chatId);
-    schedulePostShow(chatId, { kind: 'hsl', step: 'feedback' }, POST_SHOW_FEEDBACK_MS);
+    if (!userDetails)
+        return skipNoRow('full', chatId);
+    await showIndicator('record_audio', chatId);
     const before = { ...userDetails };
-    // ₹200+ at completion (read before this show's update, which may drop highestPayAmount to 50; not callTime, which
-    // is reset/backdated elsewhere): 30 min with no upsell (conversation/state/upsell-quiet).
-    (0,_conversation_state_upsell_quiet__WEBPACK_IMPORTED_MODULE_5__.noteShowCompleted)(chatId, before.highestPayAmount);
     const updatedData = {
         // The show settles accusations made while it was owed (failed calls); the cheat ban counts only later ones.
         // Written only when it changes (an unchanged write is a wasted Mongo write).
@@ -70951,8 +71027,16 @@ async function executehsl(client, chatId, data) {
         totalCount: 10,
         windowCount: 1, // D3 — see the demo path above.
         ...(0,_payments_ladder__WEBPACK_IMPORTED_MODULE_6__.showDeliveredUpdate)(userDetails),
+        ...completionToken('full', userDetails).next,
     };
-    userDetails = await db.update(chatId, updatedData);
+    const written = await db.updateIf(chatId, completionToken('full', userDetails).guard, updatedData);
+    if (!written)
+        return skipRacedRepeat('full', chatId);
+    userDetails = written;
+    schedulePostShow(chatId, { kind: 'hsl', step: 'feedback' }, POST_SHOW_FEEDBACK_MS);
+    // ₹200+ at completion (read before this show's update, which may drop highestPayAmount to 50; not callTime, which
+    // is reset/backdated elsewhere): 30 min with no upsell (conversation/state/upsell-quiet).
+    (0,_conversation_state_upsell_quiet__WEBPACK_IMPORTED_MODULE_5__.noteShowCompleted)(chatId, before.highestPayAmount);
     // Snapshot before updateVideos ($addToSet) runs: Videos watched counts the new video once.
     const noticeFields = serviceNoticeFields(before, data, { fullShow: userDetails.fullShow, videos: [...(userDetails.videos ?? [])] });
     (0,_conversation_state_state_reset__WEBPACK_IMPORTED_MODULE_3__.resetStatesOnFullShow)(chatId, userDetails);
@@ -70964,7 +71048,7 @@ async function executehsl(client, chatId, data) {
     if ((0,_payments_ladder__WEBPACK_IMPORTED_MODULE_6__.reengagesAfterShow)(userDetails.highestPayAmount) && !_telegram_client_access__WEBPACK_IMPORTED_MODULE_8__.TelegramManager.getInstance()?.callManager?.hasAfterCall?.(chatId)) {
         schedulePostShow(chatId, { kind: 'hsl', step: 'reengage', videos: userDetails.videos.length }, POST_SHOW_REENGAGE_MS);
     }
-    await (0,_telegram_typing__WEBPACK_IMPORTED_MODULE_9__.setTyping)(chatId);
+    await showIndicator('typing', chatId);
     (0,_payments_ask_to_pay_by_event__WEBPACK_IMPORTED_MODULE_4__.noteDemoGiven)(chatId);
     return playback;
 }
@@ -70974,6 +71058,8 @@ async function executehsl(client, chatId, data) {
 //                         re-engage +60s (highest > 200) -> recall call +8 min (plain timer, not restart-safe)
 // Every text step waits out an in-house call first (deferWhileOnCall); the recall step never did (unchanged).
 const POST_SHOW_FEEDBACK_MS = 8000;
+/** The pause setAudioRecord / setTyping hold after their RPC (telegram/typing.ts). */
+const CHAT_ACTION_INDICATOR_MS = 2000;
 const POST_SHOW_OFFER_MS = 45000;
 const POST_SHOW_UPSELL_MS = 180000;
 const POST_SHOW_REENGAGE_MS = 60000;
@@ -84127,6 +84213,23 @@ class UserDataDtoCrud {
         }
         catch (error) {
             (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, "Error updating UserDataDto", true);
+            throw error;
+        }
+    }
+    /**
+     * update() only while `guard` still holds on the row (UserDataRepository.updateFieldsIf). Null when no row matched:
+     * another write got there first. Never inserts. Rethrows a failed write like update().
+     */
+    async updateIf(chatId, guard, updates) {
+        if (!chatId || !updates) {
+            throw new Error("ChatId or updates are undefined");
+        }
+        (0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_1__.requireProfile)();
+        try {
+            return await this.userDataRepository().updateFieldsIf(chatId, (0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_1__.currentScopeIdentity)(), guard, updates);
+        }
+        catch (error) {
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, "Error updating UserDataDto (conditional)", true);
             throw error;
         }
     }
