@@ -32986,7 +32986,7 @@ let FakePaymentService = FakePaymentService_1 = class FakePaymentService {
         if (!ops.length)
             return;
         try {
-            await this.userDataModel.bulkWrite(ops, { ordered: true, strict: false });
+            await this.userDataModel.bulkWrite(ops, { ordered: true });
         }
         finally {
             await this.paymentProofs?.chatChanged(chatId);
@@ -58579,6 +58579,54 @@ __decorate([
     (0, swagger_1.ApiPropertyOptional)({ description: 'payAmount / canReply before the mark; restored and unset by the unmark (set by /fake-payment only)' }),
     __metadata("design:type", Object)
 ], CreateUserDataDto.prototype, "fakePaymentPrev", void 0);
+__decorate([
+    (0, swagger_1.ApiPropertyOptional)({ description: 'Client id (e.g. shruthi2) that owns the row; absent on rows created before 2026-08-15' }),
+    __metadata("design:type", String)
+], CreateUserDataDto.prototype, "clientId", void 0);
+__decorate([
+    (0, swagger_1.ApiPropertyOptional)({ description: 'Lifetime payment total or peak (tg-aut creditPayment)' }),
+    __metadata("design:type", Number)
+], CreateUserDataDto.prototype, "lifetimePaid", void 0);
+__decorate([
+    (0, swagger_1.ApiPropertyOptional)({ description: 'Count of accepted credits (tg-aut creditPayment)' }),
+    __metadata("design:type", Number)
+], CreateUserDataDto.prototype, "lifetimeCredits", void 0);
+__decorate([
+    (0, swagger_1.ApiPropertyOptional)({ description: 'Idempotency keys of accepted payments', type: [String] }),
+    __metadata("design:type", Array)
+], CreateUserDataDto.prototype, "creditKeys", void 0);
+__decorate([
+    (0, swagger_1.ApiPropertyOptional)({ description: 'Epoch ms of the first accepted payment' }),
+    __metadata("design:type", Number)
+], CreateUserDataDto.prototype, "firstPaidAt", void 0);
+__decorate([
+    (0, swagger_1.ApiPropertyOptional)({ description: 'Epoch ms of the most recent accepted payment' }),
+    __metadata("design:type", Number)
+], CreateUserDataDto.prototype, "lastPaidAt", void 0);
+__decorate([
+    (0, swagger_1.ApiPropertyOptional)({ description: 'True inbound-message count' }),
+    __metadata("design:type", Number)
+], CreateUserDataDto.prototype, "msgCount", void 0);
+__decorate([
+    (0, swagger_1.ApiPropertyOptional)({ description: '"Treat as established" marker set by tg-aut' }),
+    __metadata("design:type", Number)
+], CreateUserDataDto.prototype, "windowCount", void 0);
+__decorate([
+    (0, swagger_1.ApiPropertyOptional)({ description: 'Grace granted' }),
+    __metadata("design:type", Boolean)
+], CreateUserDataDto.prototype, "graceFlag", void 0);
+__decorate([
+    (0, swagger_1.ApiPropertyOptional)({ description: 'videos.length when the current service cycle started' }),
+    __metadata("design:type", Number)
+], CreateUserDataDto.prototype, "cycleVideoBase", void 0);
+__decorate([
+    (0, swagger_1.ApiPropertyOptional)({ description: 'Paid level of the current service cycle' }),
+    __metadata("design:type", Number)
+], CreateUserDataDto.prototype, "cyclePaid", void 0);
+__decorate([
+    (0, swagger_1.ApiPropertyOptional)({ description: 'In-house call resume state per video id: { positionSec, durationSec, updatedAt, completed, attempts?, endedAt?, endReason? }', type: Object }),
+    __metadata("design:type", Object)
+], CreateUserDataDto.prototype, "callProgress", void 0);
 
 
 /***/ },
@@ -58988,6 +59036,18 @@ __decorate([
     __metadata("design:type", Object)
 ], UserData.prototype, "callProgress", void 0);
 __decorate([
+    (0, mongoose_1.Prop)({ type: Number, required: false }),
+    __metadata("design:type", Number)
+], UserData.prototype, "showsPaidTo", void 0);
+__decorate([
+    (0, mongoose_1.Prop)({ type: Number, required: false }),
+    __metadata("design:type", Number)
+], UserData.prototype, "demoCompletions", void 0);
+__decorate([
+    (0, mongoose_1.Prop)({ type: Number, required: false }),
+    __metadata("design:type", Number)
+], UserData.prototype, "showCompletions", void 0);
+__decorate([
     (0, mongoose_1.Prop)({ type: Date, required: false, default: undefined }),
     __metadata("design:type", Date)
 ], UserData.prototype, "fakePaymentAt", void 0);
@@ -59003,6 +59063,14 @@ __decorate([
     (0, mongoose_1.Prop)({ type: mongoose.Schema.Types.Mixed, required: false, default: undefined }),
     __metadata("design:type", Object)
 ], UserData.prototype, "fakePaymentPrev", void 0);
+__decorate([
+    (0, mongoose_1.Prop)({ type: [String], required: false, default: undefined }),
+    __metadata("design:type", Array)
+], UserData.prototype, "fakePaymentProofIds", void 0);
+__decorate([
+    (0, mongoose_1.Prop)({ type: [mongoose.Schema.Types.Mixed], required: false, default: undefined }),
+    __metadata("design:type", Array)
+], UserData.prototype, "fakePaymentHistory", void 0);
 exports.UserData = UserData = __decorate([
     (0, mongoose_1.Schema)({
         collection: 'userData', versionKey: false, autoIndex: true, timestamps: true,
@@ -59270,6 +59338,42 @@ exports.UserDataModule = UserDataModule = __decorate([
 
 /***/ },
 
+/***/ "./src/components/user-data/user-data.owned-keys.ts"
+/*!**********************************************************!*\
+  !*** ./src/components/user-data/user-data.owned-keys.ts ***!
+  \**********************************************************/
+(__unused_webpack_module, exports) {
+
+
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.USER_DATA_WORKFLOW_OWNED_KEYS = void 0;
+exports.isWorkflowOwnedPath = isWorkflowOwnedPath;
+exports.stripWorkflowOwned = stripWorkflowOwned;
+exports.USER_DATA_WORKFLOW_OWNED_KEYS = [
+    'showsPaidTo',
+    'demoCompletions',
+    'showCompletions',
+    'fakePaymentHistory',
+    'fakePaymentProofIds',
+];
+function isWorkflowOwnedPath(path) {
+    return exports.USER_DATA_WORKFLOW_OWNED_KEYS.some((k) => path === k || path.startsWith(`${k}.`));
+}
+function stripWorkflowOwned(body) {
+    const kept = { ...body };
+    const stripped = [];
+    for (const key of Object.keys(kept)) {
+        if (isWorkflowOwnedPath(key)) {
+            stripped.push(key);
+            delete kept[key];
+        }
+    }
+    return { kept: kept, stripped };
+}
+
+
+/***/ },
+
 /***/ "./src/components/user-data/user-data.service.ts"
 /*!*******************************************************!*\
   !*** ./src/components/user-data/user-data.service.ts ***!
@@ -59299,6 +59403,7 @@ const user_data_schema_1 = __webpack_require__(/*! ./schemas/user-data.schema */
 const parseError_1 = __webpack_require__(/*! ../../utils/parseError */ "./src/utils/parseError.ts");
 const utils_1 = __webpack_require__(/*! ../../utils */ "./src/utils/index.ts");
 const bots_1 = __webpack_require__(/*! ../bots */ "./src/components/bots/index.ts");
+const user_data_owned_keys_1 = __webpack_require__(/*! ./user-data.owned-keys */ "./src/components/user-data/user-data.owned-keys.ts");
 let UserDataService = UserDataService_1 = class UserDataService {
     constructor(userDataModel) {
         this.userDataModel = userDataModel;
@@ -59318,9 +59423,16 @@ let UserDataService = UserDataService_1 = class UserDataService {
         }
         return currentCount;
     }
+    withoutOwnedKeys(body, chatId) {
+        const { kept, stripped } = (0, user_data_owned_keys_1.stripWorkflowOwned)({ ...(body ?? {}) });
+        if (stripped.length) {
+            this.logger.warn(`user-data-update kind=stripped_owned keys=${stripped.join(',')} chat=****${String(chatId ?? '').slice(-4)}`);
+        }
+        return kept;
+    }
     async create(createUserDataDto) {
         try {
-            return await this.userDataModel.create(createUserDataDto);
+            return await this.userDataModel.create(this.withoutOwnedKeys(createUserDataDto, createUserDataDto?.chatId));
         }
         catch (error) {
             throw new common_1.InternalServerErrorException((0, parseError_1.parseError)(error));
@@ -59375,7 +59487,7 @@ let UserDataService = UserDataService_1 = class UserDataService {
         return owned ? { clientId: identifier, chatId } : { profile: resolvedProfile, chatId };
     }
     async update(profile, chatId, updateUserDataDto) {
-        const sanitizedDto = { ...updateUserDataDto };
+        const sanitizedDto = this.withoutOwnedKeys({ ...updateUserDataDto }, chatId);
         delete sanitizedDto._id;
         delete sanitizedDto.profile;
         delete sanitizedDto.chatId;
@@ -59389,7 +59501,7 @@ let UserDataService = UserDataService_1 = class UserDataService {
         return updatedUser;
     }
     async updateAll(chatId, updateUserDataDto) {
-        const sanitizedDto = { ...updateUserDataDto };
+        const sanitizedDto = this.withoutOwnedKeys({ ...updateUserDataDto }, chatId);
         delete sanitizedDto._id;
         return this.userDataModel
             .updateMany({ chatId }, { $set: sanitizedDto })
@@ -59437,66 +59549,6 @@ let UserDataService = UserDataService_1 = class UserDataService {
         catch (error) {
             throw new common_1.InternalServerErrorException((0, parseError_1.parseError)(error));
         }
-    }
-    async resetPaidUsers() {
-        try {
-            return await this.userDataModel.updateMany({ payAmount: { $gt: 10 }, totalCount: { $gt: 30 } }, {
-                $set: {
-                    totalCount: 10,
-                    limitTime: Date.now(),
-                    paidReply: true,
-                },
-            }).exec();
-        }
-        catch (error) {
-            throw new common_1.InternalServerErrorException((0, parseError_1.parseError)(error));
-        }
-    }
-    async incrementTotalCount(profile, chatId, amount = 1) {
-        const updatedUser = await this.userDataModel
-            .findOneAndUpdate({ profile, chatId }, { $inc: { totalCount: amount } }, { returnDocument: 'after' })
-            .lean()
-            .exec();
-        if (!updatedUser) {
-            throw new common_1.NotFoundException(`UserData with profile "${profile}" and chatId "${chatId}" not found`);
-        }
-        return updatedUser;
-    }
-    async incrementPayAmount(profile, chatId, amount) {
-        const updatedUser = await this.userDataModel
-            .findOneAndUpdate({ profile, chatId }, { $inc: { payAmount: amount } }, { returnDocument: 'after' })
-            .lean()
-            .exec();
-        if (!updatedUser) {
-            throw new common_1.NotFoundException(`UserData with profile "${profile}" and chatId "${chatId}" not found`);
-        }
-        return updatedUser;
-    }
-    async findByPaymentRange(minAmount, maxAmount) {
-        return this.userDataModel.find({ payAmount: { $gte: minAmount, $lte: maxAmount } }).lean().exec();
-    }
-    async bulkUpdateUsers(filter, update) {
-        try {
-            return await this.userDataModel.updateMany(filter, update, { upsert: false }).exec();
-        }
-        catch (error) {
-            throw new common_1.InternalServerErrorException((0, parseError_1.parseError)(error));
-        }
-    }
-    async findActiveUsers(threshold = 30) {
-        return this.userDataModel.find({ totalCount: { $gt: threshold } }).sort({ totalCount: -1 }).lean().exec();
-    }
-    async resetUserCounts(profile, chatId) {
-        return this.userDataModel
-            .findOneAndUpdate({ profile, chatId }, {
-            $set: {
-                totalCount: 0,
-                limitTime: new Date(),
-                paidReply: false,
-            },
-        }, { returnDocument: 'after' })
-            .lean()
-            .exec();
     }
 };
 exports.UserDataService = UserDataService;
