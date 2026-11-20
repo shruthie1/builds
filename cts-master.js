@@ -5452,26 +5452,35 @@ let TelegramService = TelegramService_1 = class TelegramService {
     ;
     async removeChannels(error, channelId, username, mobile) {
         if ((0, isDeadChannelError_1.default)(error)) {
-            try {
-                let deadId = channelId;
-                if (!deadId && username) {
-                    const found = (await this.channelsService.search({ username }))[0];
-                    deadId = found?.channelId;
-                }
-                if (deadId) {
-                    await this.channelsService.remove(deadId);
-                    await this.activeChannelsService.remove(deadId);
-                    this.logger.debug(mobile, `Removed dead channel [${deadId}] @${username}`);
-                }
-                else {
-                    this.logger.debug(mobile, `Dead channel @${username} but no channelId to remove`);
-                }
+            const deadId = String(channelId ?? '').trim();
+            if (!deadId) {
+                this.logger.info(mobile, `channel-dead kind=skip reason=no_channel_id`);
+                return;
             }
-            catch (searchError) {
-                this.logger.debug(mobile, "Failed to remove dead channel: ", (0, parseError_1.parseError)(searchError));
+            const last4 = deadId.slice(-4);
+            const removeFrom = async (collection, remove) => {
+                try {
+                    return (await remove()) ? 1 : 0;
+                }
+                catch (removeError) {
+                    this.logger.warn(mobile, `channel-dead kind=error collection=${collection} channel=${last4}: ${removeError instanceof Error ? removeError.message : String(removeError)}`);
+                    return null;
+                }
+            };
+            const channels = await removeFrom('channels', () => this.channelsService.remove(deadId));
+            const activeChannels = await removeFrom('activeChannels', () => this.activeChannelsService.remove(deadId));
+            if (channels || activeChannels) {
+                this.logger.info(mobile, `channel-dead kind=deleted channel=${last4} channels=${channels ?? 'error'} activeChannels=${activeChannels ?? 'error'}`);
+            }
+            else if (channels === 0 && activeChannels === 0) {
+                this.logger.info(mobile, `channel-dead kind=skip reason=no_row channel=${last4}`);
             }
         }
         else if (error.errorMessage === "CHANNEL_PRIVATE") {
+            if (!String(channelId ?? '').trim().replace(/^-100/, '').replace(/^-/, '')) {
+                this.logger.info(mobile, `channel-update kind=skip reason=no_channel_id`);
+                return;
+            }
             await this.channelsService.update(channelId, { private: true });
             await this.activeChannelsService.update(channelId, { private: true });
         }
@@ -16887,14 +16896,14 @@ let ActiveChannelsService = ActiveChannelsService_1 = class ActiveChannelsServic
     async update(channelId, updateActiveChannelDto) {
         try {
             delete updateActiveChannelDto["_id"];
-            if (!channelId) {
+            const key = this.channelKey(channelId);
+            if (!key) {
                 throw new common_1.BadRequestException('Channel ID is required');
             }
-            const cleanDto = Object.fromEntries(Object.entries(updateActiveChannelDto).filter(([key, value]) => value !== undefined && this.writableFields.has(key)));
+            const cleanDto = (0, durable_channel_upsert_1.castUpdateFields)(this.activeChannelModel, Object.fromEntries(Object.entries(updateActiveChannelDto).filter(([key, value]) => value !== undefined && this.writableFields.has(key))));
             if (Object.keys(cleanDto).length === 0) {
                 throw new common_1.BadRequestException('At least one field to update is required');
             }
-            const existing = await this.activeChannelModel.findOne({ channelId: this.channelKey(channelId) }).lean().exec();
             if (cleanDto.banned === true) {
                 cleanDto.bannedAt = cleanDto.bannedAt ?? Date.now();
                 cleanDto.canSendMsgs = false;
@@ -16905,18 +16914,26 @@ let ActiveChannelsService = ActiveChannelsService_1 = class ActiveChannelsServic
                 cleanDto.lastHydrationStatus = 'needs_hydration';
                 cleanDto.lastHydrationReason = 'operator_unbanned';
             }
-            else if ((0, durable_channel_upsert_1.isOperatorBan)(existing) && cleanDto.canSendMsgs === true) {
-                cleanDto.canSendMsgs = false;
-            }
             if (cleanDto.private === true || cleanDto.forbidden === true || cleanDto.broadcast === true) {
                 cleanDto.canSendMsgs = false;
             }
-            const updatedChannel = await this.activeChannelModel
-                .findOneAndUpdate({ channelId: this.channelKey(channelId) }, {
-                $set: { ...cleanDto, updatedAt: new Date() },
-            }, { returnDocument: 'after', upsert: true, lean: true })
+            const fields = { ...cleanDto, updatedAt: new Date() };
+            const unban = cleanDto.banned === false;
+            const set = {};
+            for (const [field, value] of Object.entries(fields)) {
+                set[field] = !unban && durable_channel_upsert_1.BAN_GUARDED_FIELDS.has(field) ? (0, durable_channel_upsert_1.keepOnOperatorBan)(field, value) : { $literal: value };
+            }
+            const updated = await this.activeChannelModel
+                .findOneAndUpdate({ channelId: key }, [{ $set: set }], { returnDocument: 'after', lean: true, updatePipeline: true })
                 .exec();
-            return updatedChannel;
+            if (!updated) {
+                this.logger.warn(`channel-update kind=no_row collection=activeChannels channel=${key.slice(-4)}`);
+                return null;
+            }
+            if (!unban && (0, durable_channel_upsert_1.isOperatorBan)(updated) && (0, durable_channel_upsert_1.guardedChangeRefused)(cleanDto, updated)) {
+                this.logger.warn(`channel-update kind=skip reason=banned collection=activeChannels channel=${key.slice(-4)}`);
+            }
+            return updated;
         }
         catch (error) {
             throw this.handleError(error, 'Failed to update channel');
@@ -16957,14 +16974,16 @@ let ActiveChannelsService = ActiveChannelsService_1 = class ActiveChannelsServic
     }
     async remove(channelId) {
         try {
-            if (!channelId) {
+            const key = this.channelKey(channelId);
+            if (!key) {
                 throw new common_1.BadRequestException('Channel ID is required');
             }
             const botsService = (0, utils_1.getBotsServiceInstance)();
             if (botsService) {
                 await botsService.sendMessageByCategory(bots_1.ChannelCategory.PROM_LOGS2, { title: 'Removing channel', fields: [{ label: 'Channel', value: channelId }] });
             }
-            await this.activeChannelModel.findOneAndDelete({ channelId: this.channelKey(channelId) }).exec();
+            const deleted = await this.activeChannelModel.findOneAndDelete({ channelId: key }).exec();
+            return Boolean(deleted);
         }
         catch (error) {
             throw this.handleError(error, 'Failed to remove channel');
@@ -17922,6 +17941,11 @@ exports.UpdateActiveChannelDto = void 0;
 const swagger_1 = __webpack_require__(/*! @nestjs/swagger */ "@nestjs/swagger");
 const create_active_channel_dto_1 = __webpack_require__(/*! ./create-active-channel.dto */ "./src/components/active-channels/dto/create-active-channel.dto.ts");
 class UpdateActiveChannelDto extends (0, swagger_1.PartialType)(create_active_channel_dto_1.CreateActiveChannelDto) {
+    constructor() {
+        super();
+        for (const key of Object.keys(this))
+            delete this[key];
+    }
 }
 exports.UpdateActiveChannelDto = UpdateActiveChannelDto;
 
@@ -24895,8 +24919,9 @@ var __metadata = (this && this.__metadata) || function (k, v) {
 var __param = (this && this.__param) || function (paramIndex, decorator) {
     return function (target, key) { decorator(target, key, paramIndex); }
 };
+var ChannelsService_1;
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.ChannelsService = void 0;
+exports.ChannelsService = exports.CREATED_AT_ON_INSERT_STAGE = void 0;
 const common_1 = __webpack_require__(/*! @nestjs/common */ "@nestjs/common");
 const mongoose_1 = __webpack_require__(/*! @nestjs/mongoose */ "@nestjs/mongoose");
 const mongoose_2 = __webpack_require__(/*! mongoose */ "mongoose");
@@ -24907,7 +24932,10 @@ const durable_channel_upsert_1 = __webpack_require__(/*! ../../utils/telegram-ut
 const channel_live_facts_1 = __webpack_require__(/*! ../../utils/telegram-utils/channel-live-facts */ "./src/utils/telegram-utils/channel-live-facts.ts");
 const channel_intelligence_read_service_1 = __webpack_require__(/*! ../active-channels/channel-intelligence-read.service */ "./src/components/active-channels/channel-intelligence-read.service.ts");
 const channel_name_deny_1 = __webpack_require__(/*! ./channel-name-deny */ "./src/components/channels/channel-name-deny.ts");
-let ChannelsService = class ChannelsService {
+exports.CREATED_AT_ON_INSERT_STAGE = {
+    $set: { createdAt: { $cond: [{ $eq: [{ $type: '$_id' }, 'missing'] }, '$$NOW', '$createdAt'] } },
+};
+let ChannelsService = ChannelsService_1 = class ChannelsService {
     channelKey(channelId) {
         const raw = String(channelId ?? '').trim();
         return (0, channel_live_facts_1.normalizeTelegramChannelId)(raw) || raw.replace(/^-100/, '').replace(/^-/, '');
@@ -24915,6 +24943,7 @@ let ChannelsService = class ChannelsService {
     constructor(ChannelModel, channelIntelligenceReadService) {
         this.ChannelModel = ChannelModel;
         this.channelIntelligenceReadService = channelIntelligenceReadService;
+        this.logger = new common_1.Logger(ChannelsService_1.name);
         this.writableFields = new Set([
             'title', 'username', 'participantsCount', 'broadcast', 'canSendMsgs',
             'megagroup', 'availableMsgs', 'banned', 'bannedAt', 'forbidden',
@@ -24969,7 +24998,7 @@ let ChannelsService = class ChannelsService {
             return {
                 updateOne: {
                     filter: { channelId: this.channelKey(dto.channelId) },
-                    update: [...(0, durable_channel_upsert_1.buildDurableChannelUpsertPipeline)(setFields, defaults, dto), channel_name_deny_1.NAME_DENIED_PIPELINE_STAGE],
+                    update: [...(0, durable_channel_upsert_1.buildDurableChannelUpsertPipeline)(setFields, defaults, dto), channel_name_deny_1.NAME_DENIED_PIPELINE_STAGE, exports.CREATED_AT_ON_INSERT_STAGE],
                     upsert: true,
                 },
             };
@@ -24998,24 +25027,37 @@ let ChannelsService = class ChannelsService {
         return rows.map((row) => row.channelId).filter((channelId) => Boolean(channelId));
     }
     async update(channelId, updateChannelDto) {
-        const existing = await this.ChannelModel.findOne({ channelId: this.channelKey(channelId) }).lean().exec();
-        const update = Object.fromEntries(Object.entries(updateChannelDto)
-            .filter(([key]) => this.writableFields.has(key)));
-        if ((0, durable_channel_upsert_1.isOperatorBan)(existing) && update.canSendMsgs === true) {
-            update.canSendMsgs = false;
-        }
-        if ((0, durable_channel_upsert_1.isOperatorBan)(existing) && update.banned === false)
-            delete update.banned;
+        const key = this.channelKey(channelId);
+        if (!key)
+            throw new common_1.BadRequestException('Channel ID is required');
+        const update = (0, durable_channel_upsert_1.castUpdateFields)(this.ChannelModel, Object.fromEntries(Object.entries((updateChannelDto ?? {}))
+            .filter(([field, value]) => value !== undefined && this.writableFields.has(field))));
         if (update.private === true || update.forbidden === true || update.banned === true) {
             update.canSendMsgs = false;
         }
-        if (update.title !== undefined || update.username !== undefined) {
-            const title = update.title !== undefined ? update.title : existing?.title;
-            const username = update.username !== undefined ? update.username : existing?.username;
-            update.nameDenied = (0, channel_name_deny_1.computeChannelNameDenied)(title, username);
+        if (!Object.keys(update).length) {
+            const row = await this.ChannelModel.findOne({ channelId: key }).exec();
+            if (!row)
+                this.logger.warn(`channel-update kind=no_row channel=${key.slice(-4)}`);
+            return row ?? null;
         }
-        const updatedChannel = await this.ChannelModel.findOneAndUpdate({ channelId: this.channelKey(channelId) }, { $set: update }, { returnDocument: 'after', upsert: true }).exec();
-        return updatedChannel;
+        const set = {};
+        for (const [field, value] of Object.entries(update)) {
+            set[field] = durable_channel_upsert_1.BAN_GUARDED_FIELDS.has(field) ? (0, durable_channel_upsert_1.keepOnOperatorBan)(field, value) : { $literal: value };
+        }
+        const stages = [{ $set: set }];
+        if (update.title !== undefined || update.username !== undefined) {
+            stages.push(channel_name_deny_1.NAME_DENIED_PIPELINE_STAGE);
+        }
+        const updated = await this.ChannelModel.findOneAndUpdate({ channelId: key }, stages, { returnDocument: 'after', updatePipeline: true }).exec();
+        if (!updated) {
+            this.logger.warn(`channel-update kind=no_row channel=${key.slice(-4)}`);
+            return null;
+        }
+        if ((0, durable_channel_upsert_1.isOperatorBan)(updated) && (0, durable_channel_upsert_1.guardedChangeRefused)(update, updated)) {
+            this.logger.warn(`channel-update kind=skip reason=banned channel=${key.slice(-4)}`);
+        }
+        return updated;
     }
     async markJoinRequestRequired(channelId) {
         if (!channelId)
@@ -25023,77 +25065,37 @@ let ChannelsService = class ChannelsService {
         await this.ChannelModel.updateOne({ channelId: this.channelKey(channelId) }, { $set: { joinRequestRequired: true, joinRequestSeenAt: new Date() } }).exec();
     }
     async remove(channelId) {
+        const key = this.channelKey(channelId);
+        if (!key) {
+            this.logger.warn('channel-dead kind=skip reason=no_channel_id');
+            return false;
+        }
         const botsService = (0, utils_1.getBotsServiceInstance)();
         if (botsService) {
             botsService.sendMessageByCategory(bots_1.ChannelCategory.PROM_LOGS2, { title: 'Removing Channel', fields: [{ label: 'Channel', value: channelId }] });
         }
-        const result = await this.ChannelModel.findOneAndDelete({ channelId: this.channelKey(channelId) }).exec();
+        const deleted = await this.ChannelModel.findOneAndDelete({ channelId: key }).exec();
+        return Boolean(deleted);
     }
     async search(filter) {
-        console.log(filter);
-        return this.ChannelModel.find(filter).exec();
-    }
-    async getChannels(limit = 50, skip = 0, keywords = [], notIds = []) {
-        const pattern = new RegExp(keywords.join('|'), 'i');
-        const notPattern = new RegExp('online|board|class|PROFIT|wholesale|retail|topper|exam|motivat|medico|shop|follower|insta|traini|cms|cma|subject|currency|color|amity|game|gamin|like|earn|popcorn|TANISHUV|bitcoin|crypto|mall|work|folio|health|civil|win|casino|shop|promot|english|invest|fix|money|book|anim|angime|support|cinema|bet|predic|study|youtube|sub|open|trad|cric|quot|exch|movie|search|film|offer|ott|deal|quiz|academ|insti|talkies|screen|series|webser', "i");
-        const query = {
-            $and: [
-                { username: { $ne: null } },
-                {
-                    $or: [
-                        { title: { $regex: pattern } },
-                        { username: { $regex: pattern } }
-                    ]
-                },
-                {
-                    username: {
-                        $not: {
-                            $regex: "^(" + notIds.map(id => "(?i)" + id?.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))?.join("|") + ")$"
-                        }
-                    }
-                },
-                {
-                    title: { $not: { $regex: notPattern } }
-                },
-                {
-                    username: { $not: { $regex: notPattern } }
-                },
-                {
-                    canSendMsgs: true,
-                    broadcast: { $ne: true },
-                    banned: { $ne: true },
-                    forbidden: { $ne: true },
-                    private: { $ne: true }
-                }
-            ]
+        const { minParticipantsCount, maxParticipantsCount, ...rest } = (filter ?? {});
+        const query = { ...rest };
+        const bound = (value) => {
+            if (value === undefined || value === null || String(value).trim() === '')
+                return undefined;
+            const n = Number(value);
+            return Number.isFinite(n) ? n : undefined;
         };
-        const sort = { participantsCount: "desc" };
-        try {
-            const result = await this.ChannelModel.find(query).sort(sort).skip(skip).limit(limit).exec();
-            return result;
-        }
-        catch (error) {
-            console.error('Error:', error);
-            return [];
-        }
-    }
-    async executeQuery(query, sort, limit) {
-        try {
-            if (!query) {
-                throw new common_1.BadRequestException('Query is invalid.');
-            }
-            const queryExec = this.ChannelModel.find(query);
-            if (sort) {
-                queryExec.sort(sort);
-            }
-            if (limit) {
-                queryExec.limit(limit);
-            }
-            return await queryExec.exec();
-        }
-        catch (error) {
-            throw new common_1.InternalServerErrorException(error.message);
-        }
+        const range = {};
+        const min = bound(minParticipantsCount);
+        const max = bound(maxParticipantsCount);
+        if (min !== undefined)
+            range.$gte = min;
+        if (max !== undefined)
+            range.$lte = max;
+        if (Object.keys(range).length)
+            query.participantsCount = range;
+        return this.ChannelModel.find(query).exec();
     }
     async getActiveChannels(limit = 50, skip = 0, notIds = []) {
         if (limit <= 0)
@@ -25172,7 +25174,7 @@ let ChannelsService = class ChannelsService {
     }
 };
 exports.ChannelsService = ChannelsService;
-exports.ChannelsService = ChannelsService = __decorate([
+exports.ChannelsService = ChannelsService = ChannelsService_1 = __decorate([
     (0, common_1.Injectable)(),
     __param(0, (0, mongoose_1.InjectModel)(channel_schema_1.Channel.name)),
     __metadata("design:paramtypes", [mongoose_2.Model,
@@ -25382,15 +25384,15 @@ __decorate([
 ], SearchChannelDto.prototype, "canSendMsgs", void 0);
 __decorate([
     (0, swagger_1.ApiPropertyOptional)({
-        description: 'Minimum number of participants in the channel'
+        description: 'Minimum number of participants in the channel', type: Number
     }),
-    __metadata("design:type", Number)
+    __metadata("design:type", Object)
 ], SearchChannelDto.prototype, "minParticipantsCount", void 0);
 __decorate([
     (0, swagger_1.ApiPropertyOptional)({
-        description: 'Maximum number of participants in the channel'
+        description: 'Maximum number of participants in the channel', type: Number
     }),
-    __metadata("design:type", Number)
+    __metadata("design:type", Object)
 ], SearchChannelDto.prototype, "maxParticipantsCount", void 0);
 
 
@@ -25408,6 +25410,11 @@ exports.UpdateChannelDto = void 0;
 const swagger_1 = __webpack_require__(/*! @nestjs/swagger */ "@nestjs/swagger");
 const create_channel_dto_1 = __webpack_require__(/*! ./create-channel.dto */ "./src/components/channels/dto/create-channel.dto.ts");
 class UpdateChannelDto extends (0, swagger_1.PartialType)(create_channel_dto_1.CreateChannelDto) {
+    constructor() {
+        super();
+        for (const key of Object.keys(this))
+            delete this[key];
+    }
 }
 exports.UpdateChannelDto = UpdateChannelDto;
 
@@ -68179,7 +68186,11 @@ function isChannelOrGroupEntity(entity) {
 
 
 Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.BAN_GUARDED_FIELDS = void 0;
 exports.isOperatorBan = isOperatorBan;
+exports.castUpdateFields = castUpdateFields;
+exports.keepOnOperatorBan = keepOnOperatorBan;
+exports.guardedChangeRefused = guardedChangeRefused;
 exports.buildDurableChannelUpsertPipeline = buildDurableChannelUpsertPipeline;
 const literal = (value) => ({ $literal: value });
 const OPERATOR_BAN = {
@@ -68187,6 +68198,23 @@ const OPERATOR_BAN = {
 };
 function isOperatorBan(doc) {
     return doc?.banned === true && doc?.bannedAt != null;
+}
+function castUpdateFields(model, raw) {
+    const cast = { ...model.castObject(raw) };
+    for (const [field, value] of Object.entries(raw))
+        if (value === null)
+            cast[field] = null;
+    return cast;
+}
+exports.BAN_GUARDED_FIELDS = new Set(['banned', 'bannedAt', 'canSendMsgs']);
+function keepOnOperatorBan(field, value) {
+    const kept = field === 'canSendMsgs' ? false : `$${field}`;
+    return { $cond: [OPERATOR_BAN, kept, literal(value)] };
+}
+function guardedChangeRefused(requested, after) {
+    return (requested.canSendMsgs === true && after.canSendMsgs !== true)
+        || ('banned' in requested && requested.banned !== after.banned)
+        || ('bannedAt' in requested && requested.bannedAt !== after.bannedAt);
 }
 function buildDurableChannelUpsertPipeline(setFields, defaults, incoming) {
     const hasSetField = (field) => Object.prototype.hasOwnProperty.call(setFields, field);
