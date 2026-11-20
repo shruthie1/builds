@@ -42389,7 +42389,7 @@ class ParkedChatsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_0_
         if (!persona || ids.length === 0)
             return out;
         const docs = await this.guardStrict(`readUserDataCounts(${persona})`, () => this.connection.collection('userData')
-            .find({ chatId: { $in: ids }, $or: [{ profile: persona }, { fakePaymentAt: { $ne: null } }] }, { projection: { chatId: 1, profile: 1, msgCount: 1, canReply: 1, payAmount: 1, lastMsgTimeStamp: 1, limitTime: 1, fakePaymentAt: 1, totalCount: 1, clientId: 1 }, maxTimeMS: 5000 })
+            .find({ chatId: { $in: ids }, $or: [{ profile: persona }, { fakePaymentAt: { $ne: null } }] }, { projection: { chatId: 1, profile: 1, msgCount: 1, canReply: 1, payAmount: 1, lastMsgTimeStamp: 1, limitTime: 1, fakePaymentAt: 1, windowCount: 1, clientId: 1 }, maxTimeMS: 5000 })
             .toArray());
         const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : undefined);
         // P4 verification fix 5: lastMsgTimeStamp / limitTime may be stored as BSON dates: read them as ms, not unknown.
@@ -42427,9 +42427,9 @@ class ParkedChatsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_0_
             if (limit !== undefined && limit > 0)
                 row.limitTime = Math.max(prev?.limitTime ?? limit, limit);
             // Review M7: max over duplicates (fail safe: any row at the main's cap skips the chat).
-            const total = num(doc.totalCount);
+            const total = num(doc.windowCount);
             if (total !== undefined)
-                row.totalCount = Math.max(prev?.totalCount ?? total, total);
+                row.windowCount = Math.max(prev?.windowCount ?? total, total);
             out.set(chatId, row);
         }
         return out;
@@ -43276,7 +43276,6 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   CREDITED_PAYER_MAX_PAGES: () => (/* binding */ CREDITED_PAYER_MAX_PAGES),
 /* harmony export */   CREDITED_PAYER_MAX_TIME_MS: () => (/* binding */ CREDITED_PAYER_MAX_TIME_MS),
-/* harmony export */   CREDITED_PAYER_MIN_AMOUNT: () => (/* binding */ CREDITED_PAYER_MIN_AMOUNT),
 /* harmony export */   CREDITED_PAYER_SCAN_LIMIT: () => (/* binding */ CREDITED_PAYER_SCAN_LIMIT),
 /* harmony export */   PERSONA_ASSIGNMENT_PROJECTION: () => (/* binding */ PERSONA_ASSIGNMENT_PROJECTION),
 /* harmony export */   PROMOTE_HARSH_REST_MS: () => (/* binding */ PROMOTE_HARSH_REST_MS),
@@ -43296,6 +43295,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _promote_stats_normalize__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ./promote-stats.normalize */ "../../packages/tg-db/src/collections/promote-stats.normalize.ts");
 /* harmony import */ var _tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! @tg/core/utils/dc-ip-family */ "../../packages/tg-core/src/utils/dc-ip-family.ts");
 /* harmony import */ var _account_facet_common__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ./account-facet-common */ "../../packages/tg-db/src/collections/account-facet-common.ts");
+/* harmony import */ var _user_data_repository__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ./user-data.repository */ "../../packages/tg-db/src/collections/user-data.repository.ts");
+
 
 
 
@@ -43411,8 +43412,6 @@ function promoHealthPauseFilter(expect) {
         filter.isActive = { $ne: true };
     return filter;
 }
-/** A credited payer row: highestPayAmount >= 15, not fake-marked (the listPaidChatIds rule). */
-const CREDITED_PAYER_MIN_AMOUNT = 15;
 /** userData rows per page of the payer check (newest first; the check stops at the first row that counts). */
 const CREDITED_PAYER_SCAN_LIMIT = 500;
 /** Pages the payer check reads at most; past them it throws (the caller holds the swap as payer_check_failed). */
@@ -44009,7 +44008,7 @@ class PromoteRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_1__.Ba
     }
     /**
      * The most recently active credited payer of this persona who talks to THIS client, since `since` (ms epoch), or
-     * null. userData rule (the listPaidChatIds rule): highestPayAmount >= 15, fakePaymentAt null, lastMsgTimeStamp >=
+     * null. userData rule (PAYER_FILTER, the listPaidChatIds rule): lifetimePaid > 0, fakePaymentAt null, lastMsgTimeStamp >=
      * since. userData has one row per (chatId, persona) and records no current main: `clientId` is only the client that
      * inserted the row, and a swap or a parked reply never moves it. So a row counts when it is stamped for this
      * client or unstamped (legacy), or, stamped for a sibling client, when this client has its own stats2 row for the
@@ -44030,8 +44029,7 @@ class PromoteRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_1__.Ba
         const seen = new Set();
         const base = {
             profile: identity.profile,
-            highestPayAmount: { $gte: CREDITED_PAYER_MIN_AMOUNT },
-            fakePaymentAt: null,
+            ..._user_data_repository__WEBPACK_IMPORTED_MODULE_6__.PAYER_FILTER,
         };
         const readUserData = (lastMsgTimeStamp, limit) => this.connection
             .collection('userData')
@@ -44349,8 +44347,12 @@ class StatsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_1__.Base
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   CREDIT_KEY_HISTORY: () => (/* binding */ CREDIT_KEY_HISTORY),
+/* harmony export */   PAYER_FILTER: () => (/* binding */ PAYER_FILTER),
 /* harmony export */   USER_DATA_DEFAULTS: () => (/* binding */ USER_DATA_DEFAULTS),
-/* harmony export */   UserDataRepository: () => (/* binding */ UserDataRepository)
+/* harmony export */   USER_DATA_RESET_FIELDS: () => (/* binding */ USER_DATA_RESET_FIELDS),
+/* harmony export */   USER_DATA_RESET_KEEPS: () => (/* binding */ USER_DATA_RESET_KEEPS),
+/* harmony export */   UserDataRepository: () => (/* binding */ UserDataRepository),
+/* harmony export */   isPayerRow: () => (/* binding */ isPayerRow)
 /* harmony export */ });
 /* harmony import */ var _tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/core/utils/user-scope */ "../../packages/tg-core/src/utils/user-scope.ts");
 /* harmony import */ var _tg_core_utils_mongo_errors__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! @tg/core/utils/mongo-errors */ "../../packages/tg-core/src/utils/mongo-errors.ts");
@@ -44382,12 +44384,44 @@ const USER_DATA_DEFAULTS = {
     secondShow: false,
     accessHash: '',
     username: '',
-    totalCount: 0,
     msgCount: 0,
     windowCount: 0,
 };
+/**
+ * "Is a payer" (owner 2026-11-20, userData audit A4): a credited payment (lifetimePaid > 0, raised only by
+ * creditPayment) and no operator fake-payment mark. highestPayAmount is the current service tier, never this.
+ */
+const PAYER_FILTER = Object.freeze({ lifetimePaid: { $gt: 0 }, fakePaymentAt: null });
+/** The same rule on a row in memory. */
+function isPayerRow(row) {
+    const paid = Number(row?.lifetimePaid);
+    return Number.isFinite(paid) && paid > 0 && row?.fakePaymentAt == null;
+}
+/**
+ * Keys a user-data reset (tg /reset, tg admin reset-user, CMS DELETE /userData/:profile/:chatId) never touches
+ * (owner 2026-11-20, audit A11): identity, payment history, the fake-payment mark, attribution and the completion
+ * counters. CMS user-data.reset.ts holds the same lists.
+ */
+const USER_DATA_RESET_KEEPS = Object.freeze([
+    'chatId', 'profile', 'clientId', 'username', 'accessHash', 'lastMsgTimeStamp',
+    'lifetimePaid', 'lifetimeCredits', 'creditKeys', 'firstPaidAt', 'lastPaidAt',
+    'fakePaymentAt', 'fakePaymentBy', 'fakePaymentReason', 'fakePaymentPrev', 'fakePaymentHistory', 'fakePaymentProofIds',
+    'attributionChannelIds', 'attributionUpdatedAt',
+    'demoCompletions', 'showCompletions',
+]);
+/**
+ * What a reset $sets: a fresh row's defaults (USER_DATA_DEFAULTS) minus the kept keys, plus the service-cycle fields a
+ * fresh row lacks, at their "absent" value. Never deletes the row, never $unsets.
+ */
+const USER_DATA_RESET_FIELDS = Object.freeze({
+    ...Object.fromEntries(Object.entries(USER_DATA_DEFAULTS).filter(([key]) => !USER_DATA_RESET_KEEPS.includes(key))),
+    cycleVideoBase: 0,
+    cyclePaid: 0,
+    showsPaidTo: 0,
+    callProgress: {},
+});
 /** Keys createOrUpdate/recordInbound never accept from callers ($inc-ed or identity). */
-const INBOUND_FORBIDDEN_KEYS = ['chatId', 'profile', 'totalCount', 'msgCount', 'lastMsgTimeStamp'];
+const INBOUND_FORBIDDEN_KEYS = ['chatId', 'profile', 'msgCount', 'windowCount', 'lastMsgTimeStamp'];
 /** How many recent idempotency keys a row remembers. See `creditPayment`. */
 const CREDIT_KEY_HISTORY = 20;
 class UserDataRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_2__.BaseRepository {
@@ -44657,9 +44691,9 @@ class UserDataRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_2__.B
         });
     }
     /**
-     * One inbound message: $set `updates`, $inc totalCount + msgCount (D3 dual-write), seed defaults
-     * on insert. totalCount/msgCount are never in $setOnInsert: a key in both $inc and $setOnInsert
-     * is rejected by Mongo with error 40 on every call. The caller detects creation by totalCount===1.
+     * One inbound message: $set `updates`, $inc msgCount (lifetime) + windowCount (reply window), seed defaults on
+     * insert. The $inc keys are never in $setOnInsert: a key in both $inc and $setOnInsert is rejected by Mongo with
+     * error 40 on every call. The caller detects a new row by msgCount === 1.
      */
     async recordInbound(chatId, identity, updates, now = Date.now()) {
         const profile = (0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.requireProfile)(identity);
@@ -44670,7 +44704,7 @@ class UserDataRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_2__.B
         }
         const setOnInsert = { chatId, profile, ...(0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.ownershipOnInsert)(identity) };
         for (const [key, value] of Object.entries(USER_DATA_DEFAULTS)) {
-            if (key === 'totalCount' || key === 'msgCount')
+            if (key === 'msgCount' || key === 'windowCount')
                 continue;
             if (key in safeUpdates)
                 continue;
@@ -44678,7 +44712,7 @@ class UserDataRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_2__.B
         }
         return this.upsert(chatId, identity, {
             $set: { ...safeUpdates, lastMsgTimeStamp: now },
-            $inc: { totalCount: 1, msgCount: 1 },
+            $inc: { msgCount: 1, windowCount: 1 },
             $setOnInsert: setOnInsert,
         });
     }
@@ -44710,9 +44744,13 @@ class UserDataRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_2__.B
         const result = await this.collection.updateOne((0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.personaFilter)(chatId, { profile }), { $set: fields }, { upsert: false });
         return result.acknowledged && result.matchedCount === 1;
     }
-    /** Delete the persona row(s) of chatId. Throws. */
-    async deleteForPersona(chatId, identity) {
-        return this.collection.deleteMany((0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.personaFilter)(chatId, identity));
+    /**
+     * Reset the persona row of chatId to a fresh row's state (USER_DATA_RESET_FIELDS), keeping USER_DATA_RESET_KEEPS.
+     * Never deletes, never creates (upsert false). Returns the matched count. Throws.
+     */
+    async resetForPersona(chatId, identity) {
+        const result = await this.collection.updateMany((0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.personaFilter)(chatId, identity), { $set: { ...USER_DATA_RESET_FIELDS } }, { upsert: false });
+        return Number(result?.matchedCount ?? 0);
     }
     // ── bulk maintenance (MINE scope = this persona) ────────────────────────────────────────────
     /** paidCount -> 0 on rows idle > 30 days that never paid. Throws. */
@@ -44768,21 +44806,21 @@ class UserDataRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_2__.B
             .toArray();
     }
     /**
-     * chatIds of this persona's real payers (highestPayAmount >= 15, not fake-marked by an operator), most recently
+     * chatIds of this persona's payers (PAYER_FILTER: lifetimePaid > 0, not fake-marked by an operator), most recently
      * active first. Feeds the in-house call allow-list. Until 2026-11-02 this excluded cheatCount > 0, which is the
      * user's complaint score, not payment fraud (owner 2026-11-02). Throws.
      */
     async listPaidChatIds(identity, limit) {
         const rows = await this.collection
-            .find({ ...(0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.mineFilter)(identity), highestPayAmount: { $gte: 15 }, fakePaymentAt: null }, { projection: { chatId: 1 } })
+            .find({ ...(0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_0__.mineFilter)(identity), ...PAYER_FILTER }, { projection: { chatId: 1 } })
             .sort({ lastMsgTimeStamp: -1 })
             .limit(limit)
             .toArray();
         return rows.map((row) => String(row.chatId)).filter(Boolean);
     }
-    /** Rows of `profile` among chatIds that have messaged at least once (totalCount > 0). Throws. */
+    /** Rows of `profile` among chatIds that have messaged at least once (lifetime msgCount > 0). Throws. */
     async findReachedRecords(profile, chatIds) {
-        return this.collection.find({ profile, chatId: { $in: chatIds }, totalCount: { $gt: 0 } }, { projection: { chatId: 1, attributionUpdatedAt: 1 } }).toArray();
+        return this.collection.find({ profile, chatId: { $in: chatIds }, msgCount: { $gt: 0 } }, { projection: { chatId: 1, attributionUpdatedAt: 1 } }).toArray();
     }
     async ensureIndexesForTests() {
         await this.ensureIndexes();
@@ -45143,7 +45181,6 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   BaseRepository: () => (/* reexport safe */ _base_repository__WEBPACK_IMPORTED_MODULE_2__.BaseRepository),
 /* harmony export */   CREDITED_PAYER_MAX_PAGES: () => (/* reexport safe */ _collections_promote_repository__WEBPACK_IMPORTED_MODULE_7__.CREDITED_PAYER_MAX_PAGES),
 /* harmony export */   CREDITED_PAYER_MAX_TIME_MS: () => (/* reexport safe */ _collections_promote_repository__WEBPACK_IMPORTED_MODULE_7__.CREDITED_PAYER_MAX_TIME_MS),
-/* harmony export */   CREDITED_PAYER_MIN_AMOUNT: () => (/* reexport safe */ _collections_promote_repository__WEBPACK_IMPORTED_MODULE_7__.CREDITED_PAYER_MIN_AMOUNT),
 /* harmony export */   CREDITED_PAYER_SCAN_LIMIT: () => (/* reexport safe */ _collections_promote_repository__WEBPACK_IMPORTED_MODULE_7__.CREDITED_PAYER_SCAN_LIMIT),
 /* harmony export */   CREDIT_KEY_HISTORY: () => (/* reexport safe */ _collections_user_data_repository__WEBPACK_IMPORTED_MODULE_3__.CREDIT_KEY_HISTORY),
 /* harmony export */   ChannelsRepository: () => (/* reexport safe */ _collections_channels_repository__WEBPACK_IMPORTED_MODULE_6__.ChannelsRepository),
@@ -45166,6 +45203,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   PARKED_CHATS_MAX_LOOKUP: () => (/* reexport safe */ _collections_parked_chats_repository__WEBPACK_IMPORTED_MODULE_13__.PARKED_CHATS_MAX_LOOKUP),
 /* harmony export */   PARKED_CHATS_REACH_INDEX: () => (/* reexport safe */ _collections_parked_chats_repository__WEBPACK_IMPORTED_MODULE_13__.PARKED_CHATS_REACH_INDEX),
 /* harmony export */   PARKED_EPISODE_GC_MS: () => (/* reexport safe */ _collections_parked_accounts_repository__WEBPACK_IMPORTED_MODULE_12__.PARKED_EPISODE_GC_MS),
+/* harmony export */   PAYER_FILTER: () => (/* reexport safe */ _collections_user_data_repository__WEBPACK_IMPORTED_MODULE_3__.PAYER_FILTER),
 /* harmony export */   PERSONA_ASSIGNMENT_PROJECTION: () => (/* reexport safe */ _collections_promote_repository__WEBPACK_IMPORTED_MODULE_7__.PERSONA_ASSIGNMENT_PROJECTION),
 /* harmony export */   PROMOTE_HARSH_REST_MS: () => (/* reexport safe */ _collections_promote_repository__WEBPACK_IMPORTED_MODULE_7__.PROMOTE_HARSH_REST_MS),
 /* harmony export */   PROMOTE_RUNTIME_MIN_AGE_DAYS: () => (/* reexport safe */ _collections_promote_repository__WEBPACK_IMPORTED_MODULE_7__.PROMOTE_RUNTIME_MIN_AGE_DAYS),
@@ -45181,6 +45219,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   SELECTION_READ_DEADLINE_MS: () => (/* reexport safe */ _collections_promote_repository__WEBPACK_IMPORTED_MODULE_7__.SELECTION_READ_DEADLINE_MS),
 /* harmony export */   StatsRepository: () => (/* reexport safe */ _collections_stats_repository__WEBPACK_IMPORTED_MODULE_9__.StatsRepository),
 /* harmony export */   USER_DATA_DEFAULTS: () => (/* reexport safe */ _collections_user_data_repository__WEBPACK_IMPORTED_MODULE_3__.USER_DATA_DEFAULTS),
+/* harmony export */   USER_DATA_RESET_FIELDS: () => (/* reexport safe */ _collections_user_data_repository__WEBPACK_IMPORTED_MODULE_3__.USER_DATA_RESET_FIELDS),
+/* harmony export */   USER_DATA_RESET_KEEPS: () => (/* reexport safe */ _collections_user_data_repository__WEBPACK_IMPORTED_MODULE_3__.USER_DATA_RESET_KEEPS),
 /* harmony export */   UserDataRepository: () => (/* reexport safe */ _collections_user_data_repository__WEBPACK_IMPORTED_MODULE_3__.UserDataRepository),
 /* harmony export */   UserIdentityRepository: () => (/* reexport safe */ _collections_user_identity_repository__WEBPACK_IMPORTED_MODULE_4__.UserIdentityRepository),
 /* harmony export */   activeChannelSetOnInsert: () => (/* reexport safe */ _collections_channels_repository__WEBPACK_IMPORTED_MODULE_6__.activeChannelSetOnInsert),
@@ -45198,6 +45238,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   ensureAllIndexes: () => (/* reexport safe */ _repositories__WEBPACK_IMPORTED_MODULE_18__.ensureAllIndexes),
 /* harmony export */   getPromoteRuntimeEligibilityFilter: () => (/* reexport safe */ _collections_promote_repository__WEBPACK_IMPORTED_MODULE_7__.getPromoteRuntimeEligibilityFilter),
 /* harmony export */   isDuplicateKeyError: () => (/* reexport safe */ _collections_account_leases_repository__WEBPACK_IMPORTED_MODULE_11__.isDuplicateKeyError),
+/* harmony export */   isPayerRow: () => (/* reexport safe */ _collections_user_data_repository__WEBPACK_IMPORTED_MODULE_3__.isPayerRow),
 /* harmony export */   leaseId: () => (/* reexport safe */ _collections_account_leases_repository__WEBPACK_IMPORTED_MODULE_11__.leaseId),
 /* harmony export */   mobileLookupForms: () => (/* reexport safe */ _collections_account_leases_repository__WEBPACK_IMPORTED_MODULE_11__.mobileLookupForms),
 /* harmony export */   normalizeActiveChannelWrite: () => (/* reexport safe */ _collections_channels_repository__WEBPACK_IMPORTED_MODULE_6__.normalizeActiveChannelWrite),
@@ -49695,7 +49736,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   LEASE_SAFETY_MS: () => (/* binding */ LEASE_SAFETY_MS),
 /* harmony export */   LEASE_WATCH_MS: () => (/* binding */ LEASE_WATCH_MS),
 /* harmony export */   LIMITED_GAP_MULTIPLIER: () => (/* binding */ LIMITED_GAP_MULTIPLIER),
-/* harmony export */   MAIN_TOTAL_COUNT_MAX: () => (/* binding */ MAIN_TOTAL_COUNT_MAX),
+/* harmony export */   MAIN_WINDOW_COUNT_MAX: () => (/* binding */ MAIN_WINDOW_COUNT_MAX),
 /* harmony export */   PARKED_CLIENT_PARAMS: () => (/* binding */ PARKED_CLIENT_PARAMS),
 /* harmony export */   PARK_MAX_AGE_MS: () => (/* binding */ PARK_MAX_AGE_MS),
 /* harmony export */   PEER_FLOOD_HOLD_MS: () => (/* binding */ PEER_FLOOD_HOLD_MS),
@@ -49714,7 +49755,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   TGAUT_PRE_SWAP_WINDOW_MS: () => (/* binding */ TGAUT_PRE_SWAP_WINDOW_MS),
 /* harmony export */   TRANSIENT_BACKOFF_FROM: () => (/* binding */ TRANSIENT_BACKOFF_FROM),
 /* harmony export */   TRANSIENT_BACKOFF_UNIT_MS: () => (/* binding */ TRANSIENT_BACKOFF_UNIT_MS),
-/* harmony export */   TRANSIENT_CAP: () => (/* binding */ TRANSIENT_CAP)
+/* harmony export */   TRANSIENT_CAP: () => (/* binding */ TRANSIENT_CAP),
+/* harmony export */   WINDOW_COUNT_ESTABLISHED: () => (/* binding */ WINDOW_COUNT_ESTABLISHED)
 /* harmony export */ });
 /**
  * Every number of design §6 as a named constant (owner may tune: D2, D3, D4).
@@ -49779,11 +49821,18 @@ const TGAUT_PRE_SWAP_WINDOW_MS = 48 * HOUR;
  */
 const CANREPLY_AUTO_UNBLOCK_MS = 5 * DAY;
 /**
- * Review M7: the main answers a (persona, chatId) only while userData.totalCount is below this; at or above it the
- * customer is ignored ('max-messages'). Shared with apps/tg-aut/src/conversation/inbound/existing-user-handler.ts,
- * which imports it, so the parked pass and the main can never disagree on the threshold.
+ * Review M7: the main answers a (persona, chatId) only while userData.windowCount (the reply-window counter that
+ * replaced totalCount, userData batch 2) is below this; at or above it the customer is ignored ('max-messages').
+ * Shared with apps/tg-aut/src/conversation/inbound/existing-user-handler.ts, which imports it, so the parked pass and
+ * the main can never disagree on the threshold.
  */
-const MAIN_TOTAL_COUNT_MAX = 100;
+const MAIN_WINDOW_COUNT_MAX = 100;
+/**
+ * windowCount after a reopen: a show completed, the 5-day unblock, the CMS daily reset (CommonTgService
+ * scheduled-jobs.service.ts, literal 10). The value totalCount was set to before batch 2, so every prompt threshold
+ * (>= 10, % 3, > 20) behaves as before.
+ */
+const WINDOW_COUNT_ESTABLISHED = 10;
 /** §6.4 caps and pacing (D3). */
 const CAP_PER_PASS = 20;
 const CAP_PER_DAY = 60;
@@ -49928,7 +49977,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   LEASE_WATCH_MS: () => (/* reexport safe */ _constants__WEBPACK_IMPORTED_MODULE_1__.LEASE_WATCH_MS),
 /* harmony export */   LIMITED_GAP_MULTIPLIER: () => (/* reexport safe */ _constants__WEBPACK_IMPORTED_MODULE_1__.LIMITED_GAP_MULTIPLIER),
 /* harmony export */   LeaseRenewer: () => (/* reexport safe */ _run_pass_guard__WEBPACK_IMPORTED_MODULE_18__.LeaseRenewer),
-/* harmony export */   MAIN_TOTAL_COUNT_MAX: () => (/* reexport safe */ _constants__WEBPACK_IMPORTED_MODULE_1__.MAIN_TOTAL_COUNT_MAX),
+/* harmony export */   MAIN_WINDOW_COUNT_MAX: () => (/* reexport safe */ _constants__WEBPACK_IMPORTED_MODULE_1__.MAIN_WINDOW_COUNT_MAX),
 /* harmony export */   MEMO_REASONS: () => (/* reexport safe */ _scan_scanner__WEBPACK_IMPORTED_MODULE_13__.MEMO_REASONS),
 /* harmony export */   PARKED_CLIENT_PARAMS: () => (/* reexport safe */ _constants__WEBPACK_IMPORTED_MODULE_1__.PARKED_CLIENT_PARAMS),
 /* harmony export */   PARKED_REPLY_TEMPLATES: () => (/* reexport safe */ _reply_templates__WEBPACK_IMPORTED_MODULE_9__.PARKED_REPLY_TEMPLATES),
@@ -49966,6 +50015,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   TRANSIENT_BACKOFF_UNIT_MS: () => (/* reexport safe */ _constants__WEBPACK_IMPORTED_MODULE_1__.TRANSIENT_BACKOFF_UNIT_MS),
 /* harmony export */   TRANSIENT_CAP: () => (/* reexport safe */ _constants__WEBPACK_IMPORTED_MODULE_1__.TRANSIENT_CAP),
 /* harmony export */   TUNING_BOUNDS: () => (/* reexport safe */ _run_tuning__WEBPACK_IMPORTED_MODULE_23__.TUNING_BOUNDS),
+/* harmony export */   WINDOW_COUNT_ESTABLISHED: () => (/* reexport safe */ _constants__WEBPACK_IMPORTED_MODULE_1__.WINDOW_COUNT_ESTABLISHED),
 /* harmony export */   canTransition: () => (/* reexport safe */ _registry_state_machine__WEBPACK_IMPORTED_MODULE_4__.canTransition),
 /* harmony export */   capSkip: () => (/* reexport safe */ _reply_pacing__WEBPACK_IMPORTED_MODULE_11__.capSkip),
 /* harmony export */   classifyParkedError: () => (/* reexport safe */ _errors_error_policy__WEBPACK_IMPORTED_MODULE_5__.classifyParkedError),
@@ -50468,7 +50518,7 @@ function endsChatLoop(reason) {
  *   CANREPLY_AUTO_UNBLOCK_MS (the main's 5-day auto-unblock answers such a customer again, so do we). An unknown
  *   timestamp stays blocked (the main's `lastMsgTimeStamp < now - 5 d` is false for undefined too);
  * - limitTime in the future (the main holds replies) → 'limited' (NOT memoised: re-checked next pass);
- * - review M7: totalCount + 1 ≥ MAIN_TOTAL_COUNT_MAX (the main, reading after its $inc, ignores the customer) → 'max_messages' (NOT memoised).
+ * - review M7: windowCount + 1 ≥ MAIN_WINDOW_COUNT_MAX (the main, reading after its $inc, ignores the customer) → 'max_messages' (NOT memoised).
  * No row → null (a new customer of this persona is answered).
  */
 /** P4 verification fix 5: epoch ms of a userData timestamp stored as a number OR a Date; anything else = unknown. */
@@ -50487,11 +50537,11 @@ function userDataSkip(row, nowMs) {
         // Lifted: the main resets limitTime with the block (existing-user-handler), so limitTime is not checked.
         return lifted ? null : 'blocked';
     }
-    // Round 3 (M7 off-by-one): the main reads totalCount AFTER recordInbound's $inc, then requires `< max`. This
+    // Round 3 (M7 off-by-one): the main reads windowCount AFTER recordInbound's $inc, then requires `< max`. This
     // pass reads the stored value and never increments, so decide as the main would on one more message:
-    // stored + 1 ≥ max. A missing (or non-numeric) totalCount counts as 0: the main's $inc creates it as 1 → answered.
-    const stored = typeof row.totalCount === 'number' && Number.isFinite(row.totalCount) ? row.totalCount : 0;
-    if (stored + 1 >= _constants__WEBPACK_IMPORTED_MODULE_0__.MAIN_TOTAL_COUNT_MAX)
+    // stored + 1 ≥ max. A missing (or non-numeric) windowCount counts as 0: the main's $inc creates it as 1 → answered.
+    const stored = typeof row.windowCount === 'number' && Number.isFinite(row.windowCount) ? row.windowCount : 0;
+    if (stored + 1 >= _constants__WEBPACK_IMPORTED_MODULE_0__.MAIN_WINDOW_COUNT_MAX)
         return 'max_messages';
     const limit = userDataMs(row.limitTime);
     if (limit !== undefined && limit > nowMs)
@@ -63865,8 +63915,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "952e38b34c73af3cdb084fc9c803bdc8e9f7095e" : 0;
-    const builtAt =  true ? "2026-11-20T09:47:08.676Z" : 0;
+    const sha =  true ? "c1c701dce28044ee993f320ea5c534db0e4eb99b" : 0;
+    const builtAt =  true ? "2026-11-20T11:35:48.349Z" : 0;
     return { sha, builtAt };
 }
 
@@ -66874,7 +66924,9 @@ class CallAllowList {
         if (!this.deps.isEnabled())
             return { action: 'disabled' };
         try {
-            const paid = this.deps.resolvable(await this.deps.listPaidChatIds(ALLOW_LIST_MAX));
+            const payers = await this.deps.listPaidChatIds(ALLOW_LIST_MAX);
+            const paid = this.deps.resolvable(payers);
+            this.logger.log(`payer-check kind=allow-list source=lifetimePaid payers=${payers.length} resolvable=${paid.length}`);
             const current = await this.deps.readPrivacy();
             const have = new Set(current.allowed);
             const missing = paid.filter((id) => !have.has(id));
@@ -67479,8 +67531,10 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _call_pause__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ../call-pause */ "./src/calls/call-pause.ts");
 /* harmony import */ var _crash_quarantine__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ./crash-quarantine */ "./src/calls/inhouse/crash-quarantine.ts");
 /* harmony import */ var _payments_ladder__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! ../../payments/ladder */ "./src/payments/ladder.ts");
-/* harmony import */ var _tg_core_utils_readbleTimeDifference__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! @tg/core/utils/readbleTimeDifference */ "../../packages/tg-core/src/utils/readbleTimeDifference.ts");
-/* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
+/* harmony import */ var _tg_db_collections_user_data_repository__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! @tg/db/collections/user-data.repository */ "../../packages/tg-db/src/collections/user-data.repository.ts");
+/* harmony import */ var _tg_core_utils_readbleTimeDifference__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! @tg/core/utils/readbleTimeDifference */ "../../packages/tg-core/src/utils/readbleTimeDifference.ts");
+/* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
+
 
 
 
@@ -67565,8 +67619,6 @@ function withStepTimeout(work, ms, step) {
     });
     return Promise.race([work, deadline]).finally(() => clearTimeout(timer));
 }
-/** Matches the allow-list: a real payer. */
-const PAID_THRESHOLD = 15;
 /**
  * Pitch calls (paid caller, nothing pending): pick up alternately — pick, decline, pick, ... —
  * which is exactly 3 in any 5 and never more than 2 in any 3. The limits are enforced explicitly
@@ -67691,7 +67743,9 @@ class InHouseCallService {
                     // A show is pending: always with video, even when they rang with the voice button.
                     return { action: 'answer', media: { file: plan.url, video: true, videoOnVoiceCall: true, startSec: plan.startSec, size: plan.size, ...(plan.audio === false ? { audio: false } : {}) }, options: this.callOptions(plan) };
                 }
-                if ((Number(user.highestPayAmount) || 0) < PAID_THRESHOLD)
+                const payer = (0,_tg_db_collections_user_data_repository__WEBPACK_IMPORTED_MODULE_13__.isPayerRow)(user);
+                this.logger.log(`payer-check kind=inhouse-incoming source=lifetimePaid chat=****${String(chatId).slice(-4)} payer=${payer}`);
+                if (!payer)
                     return this.refuseIncoming(chatId, 'ignore', 'not a paid caller');
                 // A pitch is not a show: it never preempts a proof call (the line is taken).
                 if (this.voiceProofCalls.size > 0)
@@ -68525,8 +68579,10 @@ class InHouseCallService {
                 this.safeWarn({ title: 'No video', summary: 'Video unavailable or unreadable; using the legacy ring.', fields: [{ label: 'Chat', value: chatId, code: false }] }, 'no_video');
                 return { status: 'fallback', reason: 'no_video', videoType: planned.videoType };
             }
-            // VCUI would show "payment required" here, never a call: ask to pay instead of a bare ring.
-            if (planned.user && (Number(planned.user.highestPayAmount) || 0) >= PAID_THRESHOLD) {
+            // VCUI would show "payment required" here, never a call: a payer is asked to pay again instead of a bare ring.
+            const payer = (0,_tg_db_collections_user_data_repository__WEBPACK_IMPORTED_MODULE_13__.isPayerRow)(planned.user);
+            this.logger.log(`payer-check kind=inhouse-not-eligible source=lifetimePaid chat=****${String(chatId).slice(-4)} payer=${payer}`);
+            if (planned.user && payer) {
                 this.promptToPayAgain(chatId, planned.user, 'not_eligible');
                 this.safeWarn({ title: 'Not eligible', fields: [{ label: 'Chat', value: chatId, code: false }, { label: 'Paid', value: planned.user.payAmount, code: false }, { label: 'Highest paid', value: planned.user.highestPayAmount, code: false }] }, `not_eligible:${chatId}`);
             }
@@ -68786,10 +68842,10 @@ class InHouseCallService {
                 continue;
             try {
                 await this.deps.resetOtherPersona(chatId, row.profile, update);
-                resets.push([row.profile, chatId, (0,_tg_core_utils_readbleTimeDifference__WEBPACK_IMPORTED_MODULE_13__.getReadableTimeDifference)(Number(row.lastMsgTimeStamp) || 0, now)]);
+                resets.push([row.profile, chatId, (0,_tg_core_utils_readbleTimeDifference__WEBPACK_IMPORTED_MODULE_14__.getReadableTimeDifference)(Number(row.lastMsgTimeStamp) || 0, now)]);
             }
             catch (error) {
-                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_14__.parseError)(error, `[in-house-calls] stale ${row.profile} row reset failed for ${chatId}`, false);
+                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_15__.parseError)(error, `[in-house-calls] stale ${row.profile} row reset failed for ${chatId}`, false);
             }
         }
         if (!resets.length)
@@ -70923,6 +70979,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _telegram_typing__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ../telegram/typing */ "./src/telegram/typing.ts");
 /* harmony import */ var telegram_Helpers__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! telegram/Helpers */ "telegram/Helpers");
 /* harmony import */ var telegram_Helpers__WEBPACK_IMPORTED_MODULE_10___default = /*#__PURE__*/__webpack_require__.n(telegram_Helpers__WEBPACK_IMPORTED_MODULE_10__);
+/* harmony import */ var _tg_parked_constants__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! @tg/parked/constants */ "../../packages/tg-parked/src/constants.ts");
+
 
 
 
@@ -71021,11 +71079,8 @@ async function executehs(client, chatId, data) {
         // Written only when it changes (an unchanged write is a wasted Mongo write).
         ...(userDetails?.cheatCount !== 0 ? { cheatCount: 0 } : {}),
         limitTime: Date.now(),
-        totalCount: 10,
-        // D3: totalCount: 10 is a FLAG, not a count — and 10 lands inside live thresholds in
-        // respondToMsgs.ts (10 % 3 === 1 fires the periodic payment prompt; >= 10 opens the pic
-        // promo). windowCount carries the intent; totalCount is kept only until readers move.
-        windowCount: 1,
+        // A show reopens the reply window at the established value (10: the % 3 prompt and the >= 10 pic promo fire).
+        windowCount: _tg_parked_constants__WEBPACK_IMPORTED_MODULE_11__.WINDOW_COUNT_ESTABLISHED,
         ...(0,_payments_ladder__WEBPACK_IMPORTED_MODULE_6__.demoDeliveredUpdate)(userDetails),
         ...completionToken('demo', userDetails).next,
     };
@@ -71169,8 +71224,7 @@ async function executehsl(client, chatId, data) {
         ...(userDetails?.cheatCount !== 0 ? { cheatCount: 0 } : {}),
         paidReply: true,
         limitTime: (0,_payments_ladder__WEBPACK_IMPORTED_MODULE_6__.showHoldsReplies)(userDetails.payAmount) ? Date.now() + _payments_ladder__WEBPACK_IMPORTED_MODULE_6__.SHOW_HOLD_REPLIES_MS : Date.now(),
-        totalCount: 10,
-        windowCount: 1, // D3 — see the demo path above.
+        windowCount: _tg_parked_constants__WEBPACK_IMPORTED_MODULE_11__.WINDOW_COUNT_ESTABLISHED, // see the demo path above
         ...(0,_payments_ladder__WEBPACK_IMPORTED_MODULE_6__.showDeliveredUpdate)(userDetails),
         ...completionToken('full', userDetails).next,
     };
@@ -73208,6 +73262,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _jobs_delayed__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ../../jobs/delayed */ "./src/jobs/delayed.ts");
 /* harmony import */ var _inbound_decision__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! ./inbound-decision */ "./src/conversation/inbound/inbound-decision.ts");
 /* harmony import */ var _payments_ladder__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! ../../payments/ladder */ "./src/payments/ladder.ts");
+/* harmony import */ var _tg_parked_constants__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! @tg/parked/constants */ "../../packages/tg-parked/src/constants.ts");
+
 
 
 
@@ -73342,8 +73398,8 @@ async function eventPrint(event, allMsg) {
         const currentTime = Date.now();
         const limitTime = userDetails?.limitTime || 0;
         const isBot = broadcastName.toLowerCase().endsWith('bot');
-        const totalCount = userDetails?.totalCount || 0;
-        if (currentTime > limitTime && !isBot && totalCount < 100) {
+        const windowCount = userDetails?.windowCount || 0;
+        if (currentTime > limitTime && !isBot && windowCount < _tg_parked_constants__WEBPACK_IMPORTED_MODULE_14__.MAIN_WINDOW_COUNT_MAX) {
             // MEMORY OPTIMIZATION: Declare msgs as mutable so we can clear it
             let msgs = null;
             try {
@@ -73358,7 +73414,7 @@ async function eventPrint(event, allMsg) {
                 const hasMyMsg = msgs.some(msg => msg?.fromId !== null);
                 const firstMsgDate = msgs[0]?.date;
                 const sixthMsgDate = msgs[6]?.date;
-                if (!msgs || msgsTotal < 2 || totalCount === 1 || (msgsTotal < 6 && !hasMyMsg)) {
+                if (!msgs || msgsTotal < 2 || windowCount === 1 || (msgsTotal < 6 && !hasMyMsg)) {
                     if (!userDetails?.payAmount) {
                         const textedClientCount = await db.textedClientCount(chatId);
                         if (textedClientCount.count < 5) {
@@ -73389,7 +73445,7 @@ async function eventPrint(event, allMsg) {
                     }
                     else {
                         if ((0,_payments_ladder__WEBPACK_IMPORTED_MODULE_13__.isPaidUser)(userDetails)) {
-                            logger.debug(`[${broadcastName}] routed to message handler: ${broadcastName} (${chatId}), payAmount: ${userDetails.payAmount}, paidCount: ${userDetails.paidCount}, totalCount: ${userDetails.totalCount}`);
+                            logger.debug(`[${broadcastName}] routed to message handler: ${broadcastName} (${chatId}), payAmount: ${userDetails.payAmount}, paidCount: ${userDetails.paidCount}, windowCount: ${userDetails.windowCount}`);
                         }
                         (0,_inbound_decision__WEBPACK_IMPORTED_MODULE_12__.markInbound)(event, "handled", "respond (early chat)");
                         await (0,_respond_to_msgs__WEBPACK_IMPORTED_MODULE_2__.respondToMsgs)(event, allMsg);
@@ -73404,17 +73460,17 @@ async function eventPrint(event, allMsg) {
                         // EARLY REPINGING: Check for reping opportunities before main processing
                         // This gives us more hits by repinging users immediately when they become active
                         await handleEarlyReping(chatId, userDetails, event);
-                        const hasEnoughMessageHistory = userDetails.totalCount > 0 || msgsTotal >= 6;
+                        const hasEnoughMessageHistory = (Number(userDetails.msgCount) || 0) > 0 || msgsTotal >= 6;
                         if (hasEnoughMessageHistory) {
                             if ((0,_payments_ladder__WEBPACK_IMPORTED_MODULE_13__.isPaidUser)(userDetails)) {
-                                logger.debug(`[${broadcastName}] routed to message handler: ${broadcastName} (${chatId}), payAmount: ${userDetails.payAmount}, paidCount: ${userDetails.paidCount}, totalCount: ${userDetails.totalCount}`);
+                                logger.debug(`[${broadcastName}] routed to message handler: ${broadcastName} (${chatId}), payAmount: ${userDetails.payAmount}, paidCount: ${userDetails.paidCount}, windowCount: ${userDetails.windowCount}`);
                             }
                             (0,_inbound_decision__WEBPACK_IMPORTED_MODULE_12__.markInbound)(event, "handled", "respond");
                             await (0,_respond_to_msgs__WEBPACK_IMPORTED_MODULE_2__.respondToMsgs)(event, allMsg);
                         }
                         else {
                             if ((0,_payments_ladder__WEBPACK_IMPORTED_MODULE_13__.isPaidUser)(userDetails)) {
-                                logger.debug(`[${broadcastName}] no response - not enough messages: ${broadcastName} (${chatId}), payAmount: ${userDetails.payAmount}, totalCount: ${userDetails.totalCount}, msgsTotal: ${msgsTotal}`);
+                                logger.debug(`[${broadcastName}] no response - not enough messages: ${broadcastName} (${chatId}), payAmount: ${userDetails.payAmount}, windowCount: ${userDetails.windowCount}, msgsTotal: ${msgsTotal}`);
                             }
                             logger.debug(`[NOT ENOUGH MSGS] ${broadcastName}: NOT REPLYING---NOT ENOUGH MSGS--${allMsg}`);
                             (0,_inbound_decision__WEBPACK_IMPORTED_MODULE_12__.markInbound)(event, "ignored", `not-enough-history (msgs=${msgsTotal})`);
@@ -73423,7 +73479,7 @@ async function eventPrint(event, allMsg) {
                     }
                     else {
                         if ((0,_payments_ladder__WEBPACK_IMPORTED_MODULE_13__.isPaidUser)(userDetails)) {
-                            logger.debug(`[${broadcastName}] no response - canReply is 0: ${broadcastName} (${chatId}), payAmount: ${userDetails.payAmount}, canReply: ${userDetails.canReply}, totalCount: ${userDetails.totalCount}`);
+                            logger.debug(`[${broadcastName}] no response - canReply is 0: ${broadcastName} (${chatId}), payAmount: ${userDetails.payAmount}, canReply: ${userDetails.canReply}, windowCount: ${userDetails.windowCount}`);
                         }
                         (0,_inbound_decision__WEBPACK_IMPORTED_MODULE_12__.markInbound)(event, "ignored", "canReply=0");
                     }
@@ -73443,10 +73499,13 @@ async function eventPrint(event, allMsg) {
         }
         else {
             if ((0,_payments_ladder__WEBPACK_IMPORTED_MODULE_13__.isPaidUser)(userDetails)) {
-                logger.debug(`[${broadcastName}] limited from processing: ${broadcastName} (${chatId}), payAmount: ${userDetails.payAmount}, canReply: ${userDetails.canReply}, limitTime: ${limitTime}, totalCount: ${totalCount}`);
+                logger.debug(`[${broadcastName}] limited from processing: ${broadcastName} (${chatId}), payAmount: ${userDetails.payAmount}, canReply: ${userDetails.canReply}, limitTime: ${limitTime}, windowCount: ${windowCount}`);
             }
-            logger.debug(`[LIMIT] ${broadcastName}: NOT REPLYING---LIMIT--${allMsg} || currentTime=${currentTime}, limitTime=${limitTime}, isBot=${isBot}, totalCount=${totalCount}`);
-            (0,_inbound_decision__WEBPACK_IMPORTED_MODULE_12__.markInbound)(event, "ignored", isBot ? "sender-is-bot" : totalCount >= 100 ? `max-messages (totalCount=${totalCount})` : `limited (${Math.ceil((limitTime - currentTime) / 60000)} min left)`);
+            logger.debug(`[LIMIT] ${broadcastName}: NOT REPLYING---LIMIT--${allMsg} || currentTime=${currentTime}, limitTime=${limitTime}, isBot=${isBot}, windowCount=${windowCount}`);
+            if (!isBot && windowCount >= _tg_parked_constants__WEBPACK_IMPORTED_MODULE_14__.MAIN_WINDOW_COUNT_MAX) {
+                logger.log(`window-count kind=max-messages chat=****${String(chatId).slice(-4)} windowCount=${windowCount} max=${_tg_parked_constants__WEBPACK_IMPORTED_MODULE_14__.MAIN_WINDOW_COUNT_MAX}`);
+            }
+            (0,_inbound_decision__WEBPACK_IMPORTED_MODULE_12__.markInbound)(event, "ignored", isBot ? "sender-is-bot" : windowCount >= _tg_parked_constants__WEBPACK_IMPORTED_MODULE_14__.MAIN_WINDOW_COUNT_MAX ? `max-messages (windowCount=${windowCount})` : `limited (${Math.ceil((limitTime - currentTime) / 60000)} min left)`);
         }
     }
     catch (error) {
@@ -73636,7 +73695,7 @@ function messageArrivedAt(event, now = Date.now()) {
 async function handleExistingUserMessage(event, userDetails, text, broadcastName, chatId) {
     const db = _data_user_data_crud__WEBPACK_IMPORTED_MODULE_0__.UserDataDtoCrud.getInstance();
     const senderJson = await (0,_sender__WEBPACK_IMPORTED_MODULE_1__.getSenderJson)(event);
-    if (userDetails.canReply !== 0 && userDetails.totalCount < _tg_parked_constants__WEBPACK_IMPORTED_MODULE_31__.MAIN_TOTAL_COUNT_MAX) {
+    if (userDetails.canReply !== 0 && userDetails.windowCount < _tg_parked_constants__WEBPACK_IMPORTED_MODULE_31__.MAIN_WINDOW_COUNT_MAX) {
         // Handle special commands
         if (await handleSpecialCommands.call(this, event, text, chatId)) {
             logger.debug(`[SPECIAL CASE] Special command handled for chatId: ${chatId}, command: ${text.substring(0, 20)}`);
@@ -73728,9 +73787,9 @@ async function handleExistingUserMessage(event, userDetails, text, broadcastName
                 return;
         }
         // Past the 100-message cap text stays ignored, but media (a payment screenshot) still reaches the media handler:
-        // a payer at totalCount >= 100 got no reply, credit or call (owner 2026-10-27).
+        // a payer at windowCount >= 100 got no reply, credit or call (owner 2026-10-27).
         if (userDetails.canReply !== 0 && event.message.media && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_14__.contains)(event.message.text || "", ["t.me"])) {
-            logger.log(`[MEDIA] ${chatId} past the message cap (totalCount=${userDetails.totalCount}): checking the media`);
+            logger.log(`[MEDIA] ${chatId} past the message cap (windowCount=${userDetails.windowCount}): checking the media`);
             if (await handleMediaMessage.call(this, event, userDetails, broadcastName, chatId)) {
                 await updateUserStats(db, chatId, senderJson.firstName, userDetails);
                 return;
@@ -73741,13 +73800,14 @@ async function handleExistingUserMessage(event, userDetails, text, broadcastName
             (0,_inbound_decision__WEBPACK_IMPORTED_MODULE_35__.markInbound)(event, "ignored", "canReply=0");
             if (userDetails.lastMsgTimeStamp < Date.now() - 5 * 24 * 60 * 60 * 1000) {
                 logger.debug(`[EDGE CASE] User inactive for 5 days - chatId: ${chatId}`);
-                // D3: totalCount: 10 here is the "treat as established" flag, not a message count.
-                await db.update(chatId, { canReply: 1, limitTime: 0, lastMsgTimeStamp: Date.now(), totalCount: 10, windowCount: 1 });
+                // The 5-day unblock reopens the reply window at the established value.
+                logger.log(`window-count kind=five-day-unblock chat=****${chatId.slice(-4)} windowCount=${_tg_parked_constants__WEBPACK_IMPORTED_MODULE_31__.WINDOW_COUNT_ESTABLISHED}`);
+                await db.update(chatId, { canReply: 1, limitTime: 0, lastMsgTimeStamp: Date.now(), windowCount: _tg_parked_constants__WEBPACK_IMPORTED_MODULE_31__.WINDOW_COUNT_ESTABLISHED });
             }
         }
-        if (userDetails.totalCount >= _tg_parked_constants__WEBPACK_IMPORTED_MODULE_31__.MAIN_TOTAL_COUNT_MAX) {
-            logger.debug(`[EDGE CASE] User reached max message count - chatId: ${chatId}, totalCount: ${userDetails.totalCount}`);
-            (0,_inbound_decision__WEBPACK_IMPORTED_MODULE_35__.markInbound)(event, "ignored", `max-messages (totalCount=${userDetails.totalCount})`);
+        if (userDetails.windowCount >= _tg_parked_constants__WEBPACK_IMPORTED_MODULE_31__.MAIN_WINDOW_COUNT_MAX) {
+            logger.log(`window-count kind=max-messages chat=****${chatId.slice(-4)} windowCount=${userDetails.windowCount} max=${_tg_parked_constants__WEBPACK_IMPORTED_MODULE_31__.MAIN_WINDOW_COUNT_MAX}`);
+            (0,_inbound_decision__WEBPACK_IMPORTED_MODULE_35__.markInbound)(event, "ignored", `max-messages (windowCount=${userDetails.windowCount})`);
         }
     }
     await updateUserStats(db, chatId, senderJson.firstName, userDetails);
@@ -73868,10 +73928,7 @@ async function sendCheatResponseMessage(event, userDetails) {
  */
 async function updateCheatCount(chatId, userDetails) {
     const db = _data_user_data_crud__WEBPACK_IMPORTED_MODULE_0__.UserDataDtoCrud.getInstance();
-    // D2: floor at 0 before incrementing. Without this, a user carrying the grace sentinel (-2) goes
-    // to -1 on a fresh accusation instead of 1 — so the sentinel silently ABSORBS two real
-    // accusations, and every `cheatCount > 2` threshold stays unreachable for four more strikes.
-    // Measured 2026-09-14: 5 live rows sitting at -1, a value no code ever writes deliberately.
+    // The score is a count >= 0: a missing, non-numeric or negative stored value (legacy -2 / -1 rows) counts as 0.
     const current = Math.max(Number(userDetails.cheatCount) || 0, 0);
     return await db.updateSingleKey(chatId, _data_user_data_crud__WEBPACK_IMPORTED_MODULE_0__.user.cheatCount, current + 1);
 }
@@ -74933,16 +74990,20 @@ async function handlePrivateMessage(event) {
     const fraud = await (0,_imageUtils_processImage__WEBPACK_IMPORTED_MODULE_13__.fraudDeadlineOnTouch)(event.client, chatId);
     if (fraud.fired)
         userDetails = (await db.read(chatId));
-    if (!userDetails && fraud.blocked) {
+    // A row reset by /reset, the admin reset or the CMS reset route (userData batch 2: reset, never delete) has msgCount 0,
+    // as no inbound has been counted since: it takes the new-user path (greeting, contact, attribution) like the deleted
+    // row did before. A row that ever counted an inbound has msgCount >= 1 (lifetime counter).
+    const freshRow = !userDetails || userDetails.msgCount === 0;
+    if (freshRow && fraud.blocked) {
         (0,_inbound_decision__WEBPACK_IMPORTED_MODULE_7__.markInbound)(event, "ignored", "canReply=0 (fake-payment block on another persona)");
         return;
     }
-    if (userDetails) {
+    if (userDetails && !freshRow) {
         (0,_inbound_decision__WEBPACK_IMPORTED_MODULE_7__.markInbound)(event, "handled", "existing-user", (0,_payments_ladder__WEBPACK_IMPORTED_MODULE_8__.isPaidUser)(userDetails) ? "paid" : "unpaid");
         await _existing_user_handler__WEBPACK_IMPORTED_MODULE_4__.handleExistingUserMessage.call(this, event, userDetails, text, broadcastName, chatId);
     }
     else {
-        logger.log("Seems New USer - ", broadcastName);
+        logger.log(`inbound-route kind=new-user reason=${userDetails ? 'reset-row' : 'no-row'} chat=****${chatId.slice(-4)}`);
         (0,_inbound_decision__WEBPACK_IMPORTED_MODULE_7__.markInbound)(event, "handled", "new-user", "new-user");
         await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_6__.sleep)(1000);
         await (0,_new_user_handler__WEBPACK_IMPORTED_MODULE_5__.handleNewUserMessage)(event, chatId, senderJson.firstName);
@@ -75411,7 +75472,7 @@ async function handleTelegramSystemMessage(event) {
 async function handleResetCommand(event) {
     const db = _data_user_data_crud__WEBPACK_IMPORTED_MODULE_0__.UserDataDtoCrud.getInstance();
     const chatId = event.message.chatId.toString();
-    await db.delete(chatId);
+    await db.reset(chatId, 'tg-reset-command');
     await (0,_telegram_delete_messages__WEBPACK_IMPORTED_MODULE_1__.deleteMessage)(event);
 }
 /**
@@ -80688,6 +80749,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _state_user_state__WEBPACK_IMPORTED_MODULE_26__ = __webpack_require__(/*! ./state/user-state */ "./src/conversation/state/user-state.ts");
 /* harmony import */ var _state_state_reset__WEBPACK_IMPORTED_MODULE_27__ = __webpack_require__(/*! ./state/state-reset */ "./src/conversation/state/state-reset.ts");
 /* harmony import */ var _inbound_inbound_decision__WEBPACK_IMPORTED_MODULE_28__ = __webpack_require__(/*! ./inbound/inbound-decision */ "./src/conversation/inbound/inbound-decision.ts");
+/* harmony import */ var _tg_parked_constants__WEBPACK_IMPORTED_MODULE_29__ = __webpack_require__(/*! @tg/parked/constants */ "../../packages/tg-parked/src/constants.ts");
 
 
 
@@ -80719,6 +80781,7 @@ __webpack_require__.r(__webpack_exports__);
 
 
 // Import state reset helpers
+
 
 
 const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_20__.Logger("tg-aut:respond-to-msgs");
@@ -80779,18 +80842,18 @@ async function respondToMsgs(event, allMsg) {
     (0,_state_state_reset__WEBPACK_IMPORTED_MODULE_27__.checkTimeBasedResets)(chatId, userDetails);
     // Single periodic payment prompt logic - avoid duplicates
     let periodicPromptSent = false;
-    if (userDetails.totalCount > 2 && Number(userDetails.totalCount) % 3 === 1) {
+    if (userDetails.windowCount > 2 && Number(userDetails.windowCount) % 3 === 1) {
         await (0,_payments_ask_to_pay_by_event__WEBPACK_IMPORTED_MODULE_17__.asktoPayByEvent)(event.client, userDetails, false);
         periodicPromptSent = true;
     }
-    else if (userDetails.payAmount < 25 && userDetails.totalCount > 20 && Math.random() < 0.1) {
+    else if (userDetails.payAmount < 25 && userDetails.windowCount > 20 && Math.random() < 0.1) {
         // Urgency logic (10% chance for unpaid users with >20 messages)
         // Filler: a newer reply in the same bubble queue replaces it (replier/reply-pieces).
         await (0,_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)(_messages_objection_handling__WEBPACK_IMPORTED_MODULE_5__.urgencyMsgs), undefined, undefined, undefined, true);
         await (0,_respond__WEBPACK_IMPORTED_MODULE_1__.sendReaction)(event, '🔥');
         periodicPromptSent = true;
     }
-    if (userDetails.canReply && userDetails.totalCount < 100 && userDetails.limitTime < Date.now()) {
+    if (userDetails.canReply && userDetails.windowCount < _tg_parked_constants__WEBPACK_IMPORTED_MODULE_29__.MAIN_WINDOW_COUNT_MAX && userDetails.limitTime < Date.now()) {
         // Used-up reset: an exhausted paid user (10 cycle videos / 8 full shows) restarts the ladder at the ₹50 demo
         // 6-10 h after the last show (deterministic per chat, service-eligibility usedUpResetDelayMs). Its own window,
         // separate from the 20/30 h reset below, which stays as it was for everyone else. `videos` and callTime are
@@ -80801,7 +80864,7 @@ async function respondToMsgs(event, allMsg) {
         }
         // PAID USER FLOW (ladder isPaidUser)
         if ((0,_payments_ladder__WEBPACK_IMPORTED_MODULE_13__.isPaidUser)(userDetails)) {
-            logger.debug(`[${broadcastName}] flow entered: ${broadcastName} (${chatId}), payAmount: ${userDetails.payAmount}, paidCount: ${userDetails.paidCount}, totalCount: ${userDetails.totalCount}`);
+            logger.debug(`[${broadcastName}] flow entered: ${broadcastName} (${chatId}), payAmount: ${userDetails.payAmount}, paidCount: ${userDetails.paidCount}, windowCount: ${userDetails.windowCount}`);
             // Reset user if they've had service and time has passed
             // Never over a payment credited since the last call: that payment is owed a show (Y4-R1: a ₹150 payer back
             // after 21 h paid ₹200, missed the ring, and the next text dropped them to ₹50 with the price menu).
@@ -80827,7 +80890,7 @@ async function respondToMsgs(event, allMsg) {
             // Check cheat count first (higher priority)
             const cheatCallInitiated = await (0,_tp_messages__WEBPACK_IMPORTED_MODULE_25__.checkCheatCountCallInitiation)(chatId, userDetails, event, _calls_call_initiation__WEBPACK_IMPORTED_MODULE_11__.initiateCall);
             if (cheatCallInitiated) {
-                logger.debug(`[${broadcastName}] no response - cheat call initiated: ${broadcastName} (${chatId}), payAmount: ${userDetails.payAmount}, totalCount: ${userDetails.totalCount}`);
+                logger.debug(`[${broadcastName}] no response - cheat call initiated: ${broadcastName} (${chatId}), payAmount: ${userDetails.payAmount}, windowCount: ${userDetails.windowCount}`);
                 (0,_inbound_inbound_decision__WEBPACK_IMPORTED_MODULE_28__.markInbound)(event, "handled", "cheat-count call initiated", "paid");
                 return; // Call initiated, stop processing
             }
@@ -80835,7 +80898,7 @@ async function respondToMsgs(event, allMsg) {
             if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['reply', 'please', 'pls', 'paid', 'answer', 'respond'])) {
                 const pleaseCallInitiated = await (0,_tp_messages__WEBPACK_IMPORTED_MODULE_25__.checkPleaseCountCallInitiation)(chatId, userDetails, text, _calls_call_initiation__WEBPACK_IMPORTED_MODULE_11__.initiateCall);
                 if (pleaseCallInitiated) {
-                    logger.debug(`[${broadcastName}] no response - please call initiated: ${broadcastName} (${chatId}), payAmount: ${userDetails.payAmount}, totalCount: ${userDetails.totalCount}`);
+                    logger.debug(`[${broadcastName}] no response - please call initiated: ${broadcastName} (${chatId}), payAmount: ${userDetails.payAmount}, windowCount: ${userDetails.windowCount}`);
                     (0,_inbound_inbound_decision__WEBPACK_IMPORTED_MODULE_28__.markInbound)(event, "handled", "please-count call initiated", "paid");
                     return; // Call initiated, stop processing
                 }
@@ -80899,7 +80962,7 @@ async function respondToMsgs(event, allMsg) {
                     }
                 }
                 else {
-                    logger.debug(`[${broadcastName}] no response - initiating initial call (paidReply false): ${broadcastName} (${chatId}), payAmount: ${userDetails.payAmount}, totalCount: ${userDetails.totalCount}`);
+                    logger.debug(`[${broadcastName}] no response - initiating initial call (paidReply false): ${broadcastName} (${chatId}), payAmount: ${userDetails.payAmount}, windowCount: ${userDetails.windowCount}`);
                     (0,_inbound_inbound_decision__WEBPACK_IMPORTED_MODULE_28__.markInbound)(event, "handled", "initial call after paid reply", "paid");
                     await (0,_calls_call_initiation__WEBPACK_IMPORTED_MODULE_11__.initiateCall)(userDetails.payAmount, userDetails, "Initial Call after Paid Reply");
                 }
@@ -80910,7 +80973,7 @@ async function respondToMsgs(event, allMsg) {
             try {
                 // Show pic promo for users with 10-25 messages, unless this message is a price / demo ask that gets the demo
                 // price block: one pay ask per pitch window, and it is the answer to the user's own question.
-                if (userDetails.totalCount >= 10 && userDetails.totalCount < 25 && !(0,_patterns_unpaid_patterns__WEBPACK_IMPORTED_MODULE_24__.answersWithDemoPrice)(chatId, text)) {
+                if (userDetails.windowCount >= 10 && userDetails.windowCount < 25 && !(0,_patterns_unpaid_patterns__WEBPACK_IMPORTED_MODULE_24__.answersWithDemoPrice)(chatId, text)) {
                     await (0,_greetings_promo_pic__WEBPACK_IMPORTED_MODULE_18__.sendPromoPic)(event.message.id, chatId, `Want more...?\n\nCall  Just **50₹**\nPics Just **25₹!!**\n**Full NUDE, With FACE!!\n\n${process.env.demolink}/${process.env.clientId}**`, `./pic.jpg`, undefined, 'reply');
                 }
                 // ===== PATTERN REGISTRY EXECUTION =====
@@ -80945,10 +81008,10 @@ async function respondToMsgs(event, allMsg) {
                         return;
                     }
                     // Only send periodic prompt if not already sent earlier
-                    if (!periodicPromptSent && userDetails.totalCount > 3 && Number(userDetails.totalCount) % 3 === 1) {
+                    if (!periodicPromptSent && userDetails.windowCount > 3 && Number(userDetails.windowCount) % 3 === 1) {
                         const handled = await (0,_payments_ask_to_pay_by_event__WEBPACK_IMPORTED_MODULE_17__.asktoPayByEvent)(event.client, userDetails, false);
                         if (handled) {
-                            logger.debug(`Unpaid user no further response - prompt sent: ${broadcastName} (${chatId}), totalCount: ${userDetails.totalCount}`);
+                            logger.debug(`Unpaid user no further response - prompt sent: ${broadcastName} (${chatId}), windowCount: ${userDetails.windowCount}`);
                             (0,_inbound_inbound_decision__WEBPACK_IMPORTED_MODULE_28__.markInbound)(event, "replied", "pay-prompt", "unpaid");
                             return; // If we sent a prompt, don't do random fallback
                         }
@@ -81041,8 +81104,11 @@ async function respondToMsgs(event, allMsg) {
         }
     }
     else {
-        logger.debug(`[${broadcastName}] limited: ${broadcastName} (${chatId}), canReply: ${userDetails.canReply}, limitTime: ${userDetails.limitTime}, totalCount: ${userDetails.totalCount}`);
-        (0,_inbound_inbound_decision__WEBPACK_IMPORTED_MODULE_28__.markInbound)(event, "ignored", !userDetails.canReply ? "canReply=0" : userDetails.totalCount >= 100 ? `max-messages (totalCount=${userDetails.totalCount})` : "limited");
+        logger.debug(`[${broadcastName}] limited: ${broadcastName} (${chatId}), canReply: ${userDetails.canReply}, limitTime: ${userDetails.limitTime}, windowCount: ${userDetails.windowCount}`);
+        if (userDetails.canReply && userDetails.windowCount >= _tg_parked_constants__WEBPACK_IMPORTED_MODULE_29__.MAIN_WINDOW_COUNT_MAX) {
+            logger.log(`window-count kind=max-messages chat=****${String(chatId).slice(-4)} windowCount=${userDetails.windowCount} max=${_tg_parked_constants__WEBPACK_IMPORTED_MODULE_29__.MAIN_WINDOW_COUNT_MAX}`);
+        }
+        (0,_inbound_inbound_decision__WEBPACK_IMPORTED_MODULE_28__.markInbound)(event, "ignored", !userDetails.canReply ? "canReply=0" : userDetails.windowCount >= _tg_parked_constants__WEBPACK_IMPORTED_MODULE_29__.MAIN_WINDOW_COUNT_MAX ? `max-messages (windowCount=${userDetails.windowCount})` : "limited");
     }
 }
 // Re-export sendTpMsg from helpers
@@ -81103,7 +81169,7 @@ async function respondToPaidMsgs(event, allMsg) {
         logger.warn(`[PaidMessages] Missing user details for chat ${chatId}; skipping paid response flow`);
         return;
     }
-    const totalMsgs = userDetails.totalCount;
+    const totalMsgs = userDetails.windowCount;
     const senderJson = await (0,_sender__WEBPACK_IMPORTED_MODULE_1__.getSenderJson)(event);
     const broadcastName = senderJson.username ? senderJson.username : senderJson.firstName;
     // ===== PATTERN REGISTRY EXECUTION =====
@@ -81120,12 +81186,12 @@ async function respondToPaidMsgs(event, allMsg) {
     if (matched) {
         // Reset counter when a pattern matches
         _state_user_state__WEBPACK_IMPORTED_MODULE_8__.stateManager.resetUnmatchedMessageCount(chatId);
-        logger.debug(`[${broadcastName}] reply handled: ${broadcastName} (${chatId}), payAmount: ${userDetails.payAmount}, totalCount: ${userDetails.totalCount}`);
+        logger.debug(`[${broadcastName}] reply handled: ${broadcastName} (${chatId}), payAmount: ${userDetails.payAmount}, windowCount: ${userDetails.windowCount}`);
     }
     else {
         // Increment counter when no pattern matches
         _state_user_state__WEBPACK_IMPORTED_MODULE_8__.stateManager.incrementUnmatchedMessageCount(chatId);
-        logger.debug(`[${broadcastName}] no response - no pattern match: ${broadcastName} (${chatId}), payAmount: ${userDetails.payAmount}, totalCount: ${userDetails.totalCount}`);
+        logger.debug(`[${broadcastName}] no response - no pattern match: ${broadcastName} (${chatId}), payAmount: ${userDetails.payAmount}, windowCount: ${userDetails.windowCount}`);
         // Handle unmatched messages: Send re-engagement message after 3 consecutive unmatched messages
         const unmatchedCount = _state_user_state__WEBPACK_IMPORTED_MODULE_8__.stateManager.getUnmatchedMessageCount(chatId);
         const contextualHandled = await (0,_engagement_fallback__WEBPACK_IMPORTED_MODULE_9__.handleContextualEngagementFallback)(event, text, userDetails, context, unmatchedCount);
@@ -81164,7 +81230,7 @@ async function respondToPaidMsgs(event, allMsg) {
     }
     // Additional prompt for users who haven't called in a while
     if (Number(totalMsgs) % 10 == 9 && userDetails.callTime < Date.now() - _payments_ladder__WEBPACK_IMPORTED_MODULE_10__.FULL_SHOW_NAG_GAP_MS && !(0,_payments_ladder__WEBPACK_IMPORTED_MODULE_10__.paidForFullShow)(userDetails.payAmount)) {
-        logger.debug(`[${broadcastName}] called check triggered: ${broadcastName} (${chatId}), payAmount: ${userDetails.payAmount}, callTime: ${userDetails.callTime}, totalCount: ${totalMsgs}`);
+        logger.debug(`[${broadcastName}] called check triggered: ${broadcastName} (${chatId}), payAmount: ${userDetails.payAmount}, callTime: ${userDetails.callTime}, windowCount: ${totalMsgs}`);
         await (0,_respond__WEBPACK_IMPORTED_MODULE_6__.respond)(event, (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_5__.pickOneMsg)([
             "Pay and Msg me Dear!!\n\n**No MONEY? then No SERVICE!!\n\nDont WASTE your TIME okay!!,\nI will not do Anything before sending Money!!**",
             "Pay karo and msg me na baby! 🙈\n\n**No Money = No Service!**\nDon't waste time reyy... pay first! 💸",
@@ -81208,7 +81274,7 @@ const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_4__.Logger("tg
 async function respondInChat(chatId, message, kind, sourceMsgId, intent) {
     try {
         const db = _data_user_data_crud__WEBPACK_IMPORTED_MODULE_1__.UserDataDtoCrud.getInstance();
-        const totalMsgs = await db?.getSingleKey(chatId, _data_user_data_crud__WEBPACK_IMPORTED_MODULE_1__.user.totalCount);
+        const totalMsgs = await db?.getSingleKey(chatId, _data_user_data_crud__WEBPACK_IMPORTED_MODULE_1__.user.windowCount);
         const waitTime = totalMsgs && totalMsgs > 20 ? 3000 : undefined;
         try {
             await (0,_replier__WEBPACK_IMPORTED_MODULE_2__.queueReply)(chatId, message, { waitTime, kind, sourceMsgId, ...(intent ? { intent } : {}) });
@@ -81234,7 +81300,7 @@ async function respond(event, message, isReply, kind, solicitedPayAsk, filler, i
     const messageText = event.message.text;
     try {
         const db = _data_user_data_crud__WEBPACK_IMPORTED_MODULE_1__.UserDataDtoCrud.getInstance();
-        const totalMsgs = await db?.getSingleKey(chatId, _data_user_data_crud__WEBPACK_IMPORTED_MODULE_1__.user.totalCount);
+        const totalMsgs = await db?.getSingleKey(chatId, _data_user_data_crud__WEBPACK_IMPORTED_MODULE_1__.user.windowCount);
         let waitTime = undefined;
         if (totalMsgs && totalMsgs > 20) {
             waitTime = 3000;
@@ -82850,8 +82916,8 @@ const CHEAT_BLOCK_DURATION_MS = 48 * 60 * 60 * 1000;
 /**
  * The call a complaint (a cheat accusation, a plea past its count) gets, by the ladder's complaintCallRoute:
  * - 'high': the call at once (`ringAtOnce`) or after the post-call wait;
- * - 'grace': when no show is callable now, ONE free show is re-owed (reOweOneShow), once per chat (graceFlag; a cheat
- *   grace also sets cheatCount -2), then the call;
+ * - 'grace': when no show is callable now, ONE free show is re-owed (reOweOneShow), once per chat (graceFlag, the only
+ *   grace marker; a cheat grace also zeroes the cheatCount score, as a completed show does), then the call;
  * - null, or a grace already used: no call.
  * Returns the route taken (null when nothing was done) and whether a call was started.
  */
@@ -82872,12 +82938,15 @@ async function complaintCall(chatId, userDetails, reason, initiateCall, options 
     if (!(0,_payments_service_eligibility__WEBPACK_IMPORTED_MODULE_4__.canProceedWithService)(userDetails)) {
         // A free show for complaints is granted once per chat (graceFlag).
         if (userDetails.graceFlag) {
-            logger.log(`[complaint] ${chatId}: grace already given; no free show re-owed, no call`);
+            logger.log(`grace-grant kind=${options.cheat ? 'cheat' : 'plea'} chat=****${chatId.slice(-4)} result=already-given`);
             return { route: null, called: false };
         }
-        // On the cheat path the grace also writes cheatCount -2 (a cooldown older readers check) next to graceFlag.
-        const updates = { ...(0,_payments_ladder__WEBPACK_IMPORTED_MODULE_5__.reOweOneShow)(userDetails), graceFlag: true, ...(options.cheat ? { cheatCount: -2 } : {}) };
+        // The cheat grace settles the accusations so far: the score restarts at 0 (it was -2 before 2026-11-20, which the
+        // next accusation floored to 0 anyway). graceFlag alone records the grant.
+        const updates = { ...(0,_payments_ladder__WEBPACK_IMPORTED_MODULE_5__.reOweOneShow)(userDetails), graceFlag: true, ...(options.cheat ? { cheatCount: 0 } : {}) };
         userDetails = await db.update(chatId, updates);
+        // Logged after the write: a failed write throws before this line, so the log never claims a grant that was lost.
+        logger.log(`grace-grant kind=${options.cheat ? 'cheat' : 'plea'} chat=****${chatId.slice(-4)} result=granted cheatCount=${(0,_payments_ladder__WEBPACK_IMPORTED_MODULE_5__.countOf)(userDetails?.cheatCount)}`);
     }
     const called = await initiateCall(amount, userDetails, reasonFor(route));
     if (options.cheat && options.messageId !== undefined)
@@ -83364,11 +83433,8 @@ __webpack_require__.r(__webpack_exports__);
 const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_5__.Logger("tg-aut:dbservice");
 const user = Object.freeze({
     picCount: 'picCount',
-    totalCount: "totalCount",
-    // D3: totalCount carries two incompatible meanings. `msgCount` is the real inbound-message
-    // counter ($inc only, never $set); `windowCount` is the "treat as established" flag that five
-    // sites were expressing by $set-ing totalCount to the literal 10 — a value that lands inside
-    // live thresholds in respondToMsgs.ts. See the design doc for the measured 2,120-row spike.
+    // msgCount: lifetime inbound messages ($inc only). windowCount: the reply-window counter that replaced totalCount
+    // (userData batch 2): $inc per inbound, $set to WINDOW_COUNT_ESTABLISHED on a reopen.
     msgCount: "msgCount",
     windowCount: "windowCount",
     lastMsgTimeStamp: "lastMsgTimeStamp",
@@ -83386,12 +83452,7 @@ const user = Object.freeze({
     videos: 'videos',
     highestPayAmount: 'highestPayAmount',
     cheatCount: "cheatCount",
-    // D2: replaces the `cheatCount = -2` sentinel. -2 meant "accusations forgiven, one more
-    // chance" — expressed as a negative COUNT because every threshold reads `cheatCount > 2`, so a
-    // negative value bought headroom. It conflates two different facts in one field, and
-    // updateCheatCount() (ExistingUserHandler.ts:305) does `cheatCount + 1` with NO floor, so a
-    // fresh accusation against a forgiven user lands at -1 instead of 1 — silently absorbing two
-    // real accusations. Measured 2026-09-14: 5 live rows sitting at -1.
+    // The grace grant (the one free complaint show). cheatCount is never -2: it stays a complaint score >= 0.
     graceFlag: "graceFlag",
     fullShow: "fullShow",
     callTime: "callTime",
@@ -83988,8 +84049,15 @@ class UserDataDtoCrud {
         // returning undefined would send an existing user down the new-user path.
         return await this.userDataRepository().findForClient(chatId, (0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_1__.currentScopeIdentity)()) ?? undefined;
     }
-    async delete(chatId) {
-        await this.userDataRepository().deleteForPersona(chatId, (0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_1__.currentScopeIdentity)());
+    /**
+     * Reset this persona's row of chatId to a fresh row (tg-db USER_DATA_RESET_FIELDS), keeping identity, payment
+     * history, the fake-payment mark, attribution and the completion counters. Never deletes (owner 2026-11-20, A11).
+     * One `user-data-reset` line. Returns the matched row count. Throws.
+     */
+    async reset(chatId, kind) {
+        const matched = await this.userDataRepository().resetForPersona(chatId, (0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_1__.currentScopeIdentity)());
+        logger.log(`user-data-reset kind=${kind} chat=****${String(chatId).slice(-4)} fields=${Object.keys(_tg_db__WEBPACK_IMPORTED_MODULE_2__.USER_DATA_RESET_FIELDS).length} matched=${matched}`);
+        return matched;
     }
     async read(chatId) {
         const result = await this.readOwnThenPersona(chatId);
@@ -84418,13 +84486,13 @@ class UserDataDtoCrud {
             const now = Date.now();
             chatId = chatId?.trim() || `fallback_${now}_${Math.random().toString(36).slice(2, 9)}`;
             (0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_1__.requireProfile)();
-            // UserDataRepository.recordInbound: atomic upsert, $inc totalCount+msgCount, caller
+            // UserDataRepository.recordInbound: atomic upsert, $inc msgCount + windowCount, caller
             // fields in $set (minus chatId/profile/counters/lastMsgTimeStamp), defaults on insert.
             // The duplicate-key race of two first messages is retried once inside upsert().
             const result = await this.userDataRepository().recordInbound(chatId, (0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_1__.currentScopeIdentity)(), updates, now);
             const userDetails = result ?? await this.read(chatId);
-            // totalCount === 1 after the $inc means this call created the doc.
-            const wasCreated = userDetails?.totalCount === 1;
+            // msgCount (lifetime) === 1 after the $inc means this call created the doc (or the first message after a reset).
+            const wasCreated = userDetails?.msgCount === 1;
             if (wasCreated) {
                 logger.log(`✅ Created new user: ${chatId} | username: ${userDetails?.username ?? ''}`);
             }
@@ -84651,15 +84719,6 @@ function formatAttributionDayKey(nowMs) {
         month: '2-digit',
         day: '2-digit',
     }).format(new Date(safeNow));
-}
-function getRecentProfiles(data, time, expectedCount) {
-    const currentTime = Date.now();
-    const oldTime = currentTime - time;
-    const filteredData = data.filter(item => {
-        const condition = ((item.lastMsgTimeStamp > oldTime) && (item.totalCount > expectedCount) && (item.payAmount < 10));
-        return (condition);
-    });
-    return filteredData;
 }
 
 
@@ -85844,11 +85903,13 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _greetings_generate_greeting__WEBPACK_IMPORTED_MODULE_18__ = __webpack_require__(/*! ../greetings/generate-greeting */ "./src/greetings/generate-greeting.ts");
 /* harmony import */ var _jobs_delayed__WEBPACK_IMPORTED_MODULE_19__ = __webpack_require__(/*! ../jobs/delayed */ "./src/jobs/delayed.ts");
 /* harmony import */ var _payments_ladder__WEBPACK_IMPORTED_MODULE_20__ = __webpack_require__(/*! ../payments/ladder */ "./src/payments/ladder.ts");
+/* harmony import */ var _tg_parked_constants__WEBPACK_IMPORTED_MODULE_21__ = __webpack_require__(/*! @tg/parked/constants */ "../../packages/tg-parked/src/constants.ts");
 
 // Operator-typed commands go out immediately, one attempt (the pre-queue behaviour): never held on a
 // call, paced, or flood-retried for up to 30 min, and deleteMessage never waits on them.
 const floodSafeSend = (client, entity, params, ctx) => (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_0__.floodSafeSend)(client, entity, params, { ...ctx, direct: true });
 const floodSafeSendFile = (client, entity, params, ctx) => (0,_telegram_flood_safe_send__WEBPACK_IMPORTED_MODULE_0__.floodSafeSendFile)(client, entity, params, { ...ctx, direct: true });
+
 
 
 
@@ -85924,7 +85985,7 @@ async function markDemoShown(event, db, chatId) {
         { delayMs: 8000, send: { message: `${_conversation_messages_payment_links__WEBPACK_IMPORTED_MODULE_4__.payLinks.phonepe3}\n${_conversation_messages_payment_links__WEBPACK_IMPORTED_MODULE_4__.payLinks.paytm1}\n${_conversation_messages_payment_links__WEBPACK_IMPORTED_MODULE_4__.payLinks.gpay1}\n\n<b>I'm Waiting without dress for you!😚😚</b>`, parseMode: 'html', linkPreview: false } },
     ]);
     const userDetails = await db.read(chatId);
-    await db.update(chatId, { paidReply: true, limitTime: Date.now(), totalCount: 10, windowCount: 1, ...(0,_payments_ladder__WEBPACK_IMPORTED_MODULE_20__.demoDeliveredUpdate)(userDetails) });
+    await db.update(chatId, { paidReply: true, limitTime: Date.now(), windowCount: _tg_parked_constants__WEBPACK_IMPORTED_MODULE_21__.WINDOW_COUNT_ESTABLISHED, ...(0,_payments_ladder__WEBPACK_IMPORTED_MODULE_20__.demoDeliveredUpdate)(userDetails) });
     await db.recordDemoGiven(chatId);
     await db.updateStatSingleKey(chatId, 'demoGivenToday', true);
 }
@@ -85933,7 +85994,7 @@ async function markFullShowGiven(event, db, chatId) {
     await (0,_telegram_delete_messages__WEBPACK_IMPORTED_MODULE_8__.deleteMessage)(event);
     await floodSafeSend(event.client, chatId, { message: `How is it?🙈` });
     const userDetails = await db.read(chatId);
-    await db.update(chatId, { paidReply: true, limitTime: Date.now() + _payments_ladder__WEBPACK_IMPORTED_MODULE_20__.OPERATOR_SHOW_HOLD_MS, totalCount: 10, windowCount: 1, ...(0,_payments_ladder__WEBPACK_IMPORTED_MODULE_20__.showDeliveredUpdate)(userDetails) });
+    await db.update(chatId, { paidReply: true, limitTime: Date.now() + _payments_ladder__WEBPACK_IMPORTED_MODULE_20__.OPERATOR_SHOW_HOLD_MS, windowCount: _tg_parked_constants__WEBPACK_IMPORTED_MODULE_21__.WINDOW_COUNT_ESTABLISHED, ...(0,_payments_ladder__WEBPACK_IMPORTED_MODULE_20__.showDeliveredUpdate)(userDetails) });
     await db.recordFullShow(chatId);
 }
 /** 'psy': full-show prices, then the pay links. */
@@ -118752,7 +118813,7 @@ router.post("/resetuser/:chatId", _http_middlewares_leader_middleware__WEBPACK_I
             return;
         }
         const db = _data_user_data_crud__WEBPACK_IMPORTED_MODULE_1__.UserDataDtoCrud.getInstance();
-        // Check if user exists before deletion
+        // Check if user exists before the reset
         const userExists = await db.checkIfUserAlreadyExists(chatId);
         if (!userExists) {
             res.status(404).json({
@@ -118764,8 +118825,8 @@ router.post("/resetuser/:chatId", _http_middlewares_leader_middleware__WEBPACK_I
         }
         // Get invalidPhotoCount before reset
         const invalidPhotoCountBefore = _conversation_state_user_state__WEBPACK_IMPORTED_MODULE_15__.stateManager.getInvalidPhotoCount(chatId);
-        // Delete user from database (resets user details)
-        await db.delete(chatId);
+        // Reset the row's conversation state (never a delete: payment history and the fake mark stay).
+        await db.reset(chatId, 'tg-admin-reset');
         // Reset invalidPhotoCount in user state
         const userState = _conversation_state_user_state__WEBPACK_IMPORTED_MODULE_15__.stateManager.getUserState(chatId);
         userState.invalidPhotoCount = 0;
