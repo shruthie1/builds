@@ -58476,10 +58476,6 @@ __decorate([
     __metadata("design:type", String)
 ], CreateUserDataDto.prototype, "chatId", void 0);
 __decorate([
-    (0, swagger_1.ApiProperty)({ description: 'Total count' }),
-    __metadata("design:type", Number)
-], CreateUserDataDto.prototype, "totalCount", void 0);
-__decorate([
     (0, swagger_1.ApiProperty)({ description: 'Picture count' }),
     __metadata("design:type", Number)
 ], CreateUserDataDto.prototype, "picCount", void 0);
@@ -58604,11 +58600,11 @@ __decorate([
     __metadata("design:type", Number)
 ], CreateUserDataDto.prototype, "lastPaidAt", void 0);
 __decorate([
-    (0, swagger_1.ApiPropertyOptional)({ description: 'True inbound-message count' }),
+    (0, swagger_1.ApiPropertyOptional)({ description: 'Lifetime inbound-message count' }),
     __metadata("design:type", Number)
 ], CreateUserDataDto.prototype, "msgCount", void 0);
 __decorate([
-    (0, swagger_1.ApiPropertyOptional)({ description: '"Treat as established" marker set by tg-aut' }),
+    (0, swagger_1.ApiPropertyOptional)({ description: 'Reply-window count (replaced totalCount): admission cap and prompts' }),
     __metadata("design:type", Number)
 ], CreateUserDataDto.prototype, "windowCount", void 0);
 __decorate([
@@ -58684,9 +58680,9 @@ class SearchDto {
 }
 exports.SearchDto = SearchDto;
 __decorate([
-    (0, swagger_1.ApiPropertyOptional)({ description: 'Total count', type: Number }),
+    (0, swagger_1.ApiPropertyOptional)({ description: 'Reply-window count', type: Number }),
     __metadata("design:type", Number)
-], SearchDto.prototype, "totalCount", void 0);
+], SearchDto.prototype, "windowCount", void 0);
 __decorate([
     (0, swagger_1.ApiPropertyOptional)({ description: 'Picture count', type: Number }),
     __metadata("design:type", Number)
@@ -58899,10 +58895,6 @@ __decorate([
     (0, mongoose_1.Prop)({ required: true }),
     __metadata("design:type", String)
 ], UserData.prototype, "chatId", void 0);
-__decorate([
-    (0, mongoose_1.Prop)({ required: true, default: 0 }),
-    __metadata("design:type", Number)
-], UserData.prototype, "totalCount", void 0);
 __decorate([
     (0, mongoose_1.Prop)({ required: true, default: 0 }),
     __metadata("design:type", Number)
@@ -59244,10 +59236,10 @@ __decorate([
 ], UserDataController.prototype, "update", null);
 __decorate([
     (0, common_1.Delete)(':profile/:chatId'),
-    (0, swagger_1.ApiOperation)({ summary: 'Delete user data by profile and chat ID', description: 'Deletes a specific user data entry identified by profile and chat ID.' }),
+    (0, swagger_1.ApiOperation)({ summary: 'Reset user data by profile and chat ID', description: 'Resets the row to a fresh row (conversation and tier state). Never deletes: identity, payment history, the fake-payment mark, attribution and completion counters stay.' }),
     (0, swagger_1.ApiParam)({ name: 'profile', description: 'User profile identifier', type: String }),
     (0, swagger_1.ApiParam)({ name: 'chatId', description: 'Chat ID associated with the user', type: String }),
-    (0, swagger_1.ApiResponse)({ status: 200, description: 'User data successfully deleted.', type: user_data_schema_1.UserData }),
+    (0, swagger_1.ApiResponse)({ status: 200, description: 'The reset row.', type: user_data_schema_1.UserData }),
     (0, swagger_1.ApiResponse)({ status: 404, description: 'User data not found.' }),
     __param(0, (0, common_1.Param)('profile')),
     __param(1, (0, common_1.Param)('chatId')),
@@ -59374,6 +59366,53 @@ function stripWorkflowOwned(body) {
 
 /***/ },
 
+/***/ "./src/components/user-data/user-data.reset.ts"
+/*!*****************************************************!*\
+  !*** ./src/components/user-data/user-data.reset.ts ***!
+  \*****************************************************/
+(__unused_webpack_module, exports) {
+
+
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.USER_DATA_RESET_KEEPS = void 0;
+exports.userDataResetFields = userDataResetFields;
+exports.USER_DATA_RESET_KEEPS = Object.freeze([
+    'chatId', 'profile', 'clientId', 'username', 'accessHash', 'lastMsgTimeStamp',
+    'lifetimePaid', 'lifetimeCredits', 'creditKeys', 'firstPaidAt', 'lastPaidAt',
+    'fakePaymentAt', 'fakePaymentBy', 'fakePaymentReason', 'fakePaymentPrev', 'fakePaymentHistory', 'fakePaymentProofIds',
+    'attributionChannelIds', 'attributionUpdatedAt',
+    'demoCompletions', 'showCompletions',
+]);
+function userDataResetFields() {
+    return {
+        fullShow: 0,
+        callTime: 0,
+        cheatCount: 0,
+        graceFlag: false,
+        highestPayAmount: 0,
+        videos: [],
+        picsSent: 0,
+        picCount: 0,
+        limitTime: 0,
+        paidCount: 0,
+        prfCount: 0,
+        canReply: 1,
+        payAmount: 0,
+        paidReply: true,
+        demoGiven: false,
+        secondShow: false,
+        msgCount: 0,
+        windowCount: 0,
+        cycleVideoBase: 0,
+        cyclePaid: 0,
+        showsPaidTo: 0,
+        callProgress: {},
+    };
+}
+
+
+/***/ },
+
 /***/ "./src/components/user-data/user-data.service.ts"
 /*!*******************************************************!*\
   !*** ./src/components/user-data/user-data.service.ts ***!
@@ -59404,6 +59443,7 @@ const parseError_1 = __webpack_require__(/*! ../../utils/parseError */ "./src/ut
 const utils_1 = __webpack_require__(/*! ../../utils */ "./src/utils/index.ts");
 const bots_1 = __webpack_require__(/*! ../bots */ "./src/components/bots/index.ts");
 const user_data_owned_keys_1 = __webpack_require__(/*! ./user-data.owned-keys */ "./src/components/user-data/user-data.owned-keys.ts");
+const user_data_reset_1 = __webpack_require__(/*! ./user-data.reset */ "./src/components/user-data/user-data.reset.ts");
 let UserDataService = UserDataService_1 = class UserDataService {
     constructor(userDataModel) {
         this.userDataModel = userDataModel;
@@ -59508,19 +59548,25 @@ let UserDataService = UserDataService_1 = class UserDataService {
             .exec();
     }
     async remove(profile, chatId) {
+        const fields = (0, user_data_reset_1.userDataResetFields)();
+        const resetUser = await this.userDataModel
+            .findOneAndUpdate(await this.userRowFilter(profile, chatId), { $set: fields }, { returnDocument: 'after', upsert: false })
+            .lean()
+            .exec();
+        if (!resetUser) {
+            this.logger.warn(`user-data-reset kind=cms-delete-route chat=****${String(chatId ?? '').slice(-4)} fields=${Object.keys(fields).length} matched=0`);
+            throw new common_1.NotFoundException(`UserData with profile "${profile}" and chatId "${chatId}" not found`);
+        }
+        this.logger.log(`user-data-reset kind=cms-delete-route chat=****${String(chatId ?? '').slice(-4)} fields=${Object.keys(fields).length} matched=1`);
         const botsService = (0, utils_1.getBotsServiceInstance)();
         if (botsService) {
             botsService.sendMessageByCategory(bots_1.ChannelCategory.PROM_LOGS2, {
                 severity: 'warning',
-                title: 'Deleting data',
-                fields: [{ label: 'Profile', value: profile }, { label: 'Chat', value: chatId }],
+                title: 'User data reset',
+                fields: [{ label: 'Profile', value: profile }, { label: 'Chat', value: `****${String(chatId ?? '').slice(-4)}` }],
             });
         }
-        const deletedUser = await this.userDataModel.findOneAndDelete(await this.userRowFilter(profile, chatId)).lean().exec();
-        if (!deletedUser) {
-            throw new common_1.NotFoundException(`UserData with profile "${profile}" and chatId "${chatId}" not found`);
-        }
-        return deletedUser;
+        return resetUser;
     }
     async search(filter) {
         const searchFilter = { ...filter };
@@ -62992,7 +63038,7 @@ var __param = (this && this.__param) || function (paramIndex, decorator) {
 };
 var ScheduledJobsService_1;
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.ScheduledJobsService = exports.SWAP_MAINTENANCE_CLAIM_TTL_MS = void 0;
+exports.ScheduledJobsService = exports.DAILY_RESET_WINDOW_VALUE = exports.DAILY_RESET_WINDOW_ABOVE = exports.SWAP_MAINTENANCE_CLAIM_TTL_MS = void 0;
 const common_1 = __webpack_require__(/*! @nestjs/common */ "@nestjs/common");
 const mongoose_1 = __webpack_require__(/*! @nestjs/mongoose */ "@nestjs/mongoose");
 const schedule = __importStar(__webpack_require__(/*! node-schedule-tz */ "node-schedule-tz"));
@@ -63006,6 +63052,8 @@ const pool_snapshot_writer_1 = __webpack_require__(/*! ../../components/monitor/
 const payment_health_service_1 = __webpack_require__(/*! ../../components/payment-health/payment-health.service */ "./src/components/payment-health/payment-health.service.ts");
 const IST = 'Asia/Kolkata';
 exports.SWAP_MAINTENANCE_CLAIM_TTL_MS = 60 * 60 * 1000;
+exports.DAILY_RESET_WINDOW_ABOVE = 30;
+exports.DAILY_RESET_WINDOW_VALUE = 10;
 let ScheduledJobsService = ScheduledJobsService_1 = class ScheduledJobsService {
     constructor(config, appService, maintenance, clientService, activeChannelsService, stat1Service, connection, analyticsHealth, poolSnapshot, paymentHealth) {
         this.config = config;
@@ -63370,15 +63418,15 @@ let ScheduledJobsService = ScheduledJobsService_1 = class ScheduledJobsService {
                 const now = Date.now();
                 const [stats2Result, paidUsersResult] = await Promise.all([
                     stats2.deleteMany({}),
-                    userData.updateMany({ payAmount: { $gt: 10 }, totalCount: { $gt: 30 } }, {
+                    userData.updateMany({ payAmount: { $gt: 10 }, windowCount: { $gt: exports.DAILY_RESET_WINDOW_ABOVE } }, {
                         $set: {
-                            totalCount: 10,
-                            windowCount: 1,
+                            windowCount: exports.DAILY_RESET_WINDOW_VALUE,
                             limitTime: now,
                             paidReply: true,
                         },
                     }),
                 ]);
+                this.logger.log(`window-count kind=daily-reset selector=payAmount>10,windowCount>${exports.DAILY_RESET_WINDOW_ABOVE} value=${exports.DAILY_RESET_WINDOW_VALUE} matched=${paidUsersResult.matchedCount ?? 0} modified=${paidUsersResult.modifiedCount ?? 0}`);
                 return {
                     stats2DeletedCount: stats2Result.deletedCount ?? 0,
                     paidUsersMatchedCount: paidUsersResult.matchedCount ?? 0,
