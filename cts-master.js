@@ -25879,9 +25879,6 @@ let ClientController = class ClientController {
     async update(clientId, updateClientDto) {
         return await this.clientService.update(clientId, updateClientDto);
     }
-    async remove(clientId) {
-        return await this.clientService.remove(clientId);
-    }
     async executeQuery(requestBody) {
         const { query, sort, limit, skip } = requestBody;
         return await this.clientService.executeQuery(query, sort, limit, skip);
@@ -26003,17 +26000,6 @@ __decorate([
     __metadata("design:paramtypes", [String, update_client_dto_1.UpdateClientDto]),
     __metadata("design:returntype", Promise)
 ], ClientController.prototype, "update", null);
-__decorate([
-    (0, common_1.Delete)(':clientId'),
-    (0, swagger_1.ApiOperation)({ summary: 'Delete client' }),
-    (0, swagger_1.ApiParam)({ name: 'clientId' }),
-    (0, swagger_1.ApiOkResponse)({ type: client_schema_1.Client }),
-    (0, swagger_1.ApiNotFoundResponse)({ description: 'Client not found.' }),
-    __param(0, (0, common_1.Param)('clientId')),
-    __metadata("design:type", Function),
-    __metadata("design:paramtypes", [String]),
-    __metadata("design:returntype", Promise)
-], ClientController.prototype, "remove", null);
 __decorate([
     (0, common_1.Post)('query'),
     (0, swagger_1.ApiOperation)({ summary: 'Execute custom MongoDB query' }),
@@ -26474,24 +26460,6 @@ let ClientService = ClientService_1 = class ClientService {
             const errorDetails = (0, parseError_1.parseError)(error, `Failed to update client ${clientId} | mobile: ${updateClientDto.mobile || 'N/A'}`);
             throw new common_1.BadRequestException(errorDetails.message);
         }
-    }
-    async remove(clientId) {
-        this.ensureInitialized();
-        try {
-            const deletedClient = await this.executeWithRetry(() => this.clientModel.findOneAndDelete({ clientId }).lean().exec());
-            if (!deletedClient) {
-                throw new common_1.NotFoundException(`Client with ID "${clientId}" not found`);
-            }
-            this.clientsMap.delete(clientId);
-            this.logger.log(`Client removed: ${clientId}`);
-            return deletedClient;
-        }
-        catch (error) {
-            const errorDetails = (0, parseError_1.parseError)(error, `Failed to remove client ${clientId}`);
-            throw new common_1.InternalServerErrorException(errorDetails.message);
-        }
-        // removed by dead control flow
-
     }
     async search(filter) {
         try {
@@ -27905,8 +27873,19 @@ let ClientService = ClientService_1 = class ClientService {
         return decision;
     }
     async notePassOutcome(pass, client, clients, decision, swapped) {
+        const read = client.swapRetry || null;
         if (swapped) {
-            await this.clientModel.updateOne({ clientId: client.clientId, swapRetry: { $exists: true } }, { $unset: { swapRetry: '' } }).exec();
+            if (!read) {
+                this.logger.log(`swap-retry kind=skip op=clear reason=no_state client=${client.clientId} pass=${pass}`);
+                return 0;
+            }
+            const cleared = await this.clientModel.updateOne({ clientId: client.clientId, ...(0, degraded_swap_1.swapRetryReadFilter)(read) }, { $unset: { swapRetry: '' } }).exec();
+            if ((cleared.matchedCount || 0) === 1) {
+                this.logger.log(`swap-retry kind=cleared client=${client.clientId} pass=${pass}`);
+            }
+            else {
+                this.logger.log(`swap-retry kind=skip op=clear reason=not_current client=${client.clientId} pass=${pass}`);
+            }
             return 0;
         }
         const attempts = decision.attempts + 1;
@@ -27922,8 +27901,13 @@ let ClientService = ClientService_1 = class ClientService {
             since: keepSince ? new Date(client.swapRetry.since) : new Date(now),
             stoppedAt: stopped ? new Date(now) : null,
         };
-        const written = await this.clientModel.updateOne({ clientId: client.clientId, mobile: client.mobile }, { $set: { swapRetry: state } }).exec();
-        if (stopped && (written.matchedCount || 0) === 1) {
+        const written = await this.clientModel.updateOne({ clientId: client.clientId, ...this.passGenerationFilter(client) }, { $set: { swapRetry: state } }).exec();
+        if ((written.matchedCount || 0) !== 1) {
+            this.logger.log(`swap-retry kind=skip op=record reason=not_current client=${client.clientId} pass=${pass} attempts=${attempts}`);
+            return attempts;
+        }
+        this.logger.log(`swap-retry kind=recorded client=${client.clientId} pass=${pass} attempts=${attempts}${stopped ? ' stopped=true' : ''}`);
+        if (stopped) {
             const text = {
                 rescue: { severity: 'critical', title: 'Rescue stopped', summary: `${client.clientId} stuck on dead main, rescue stopped after ${attempts} tries, will retry when the pool changes` },
                 upgrade: { severity: 'warning', title: 'Upgrade stopped', summary: `${client.clientId} stays on its degraded (tier ${client.degraded?.tier ?? '?'}) account, upgrade stopped after ${attempts} tries, will retry when the pool changes` },
@@ -27939,6 +27923,14 @@ let ClientService = ClientService_1 = class ClientService {
             });
         }
         return attempts;
+    }
+    passGenerationFilter(client) {
+        return {
+            mobile: client.mobile,
+            swappedAt: client.swappedAt ?? null,
+            sessionChangedAt: client.sessionChangedAt ?? null,
+            ...(client.swapRetry ? (0, degraded_swap_1.swapRetryReadFilter)(client.swapRetry) : { swapRetry: null }),
+        };
     }
     async runPassAttempt(pass, client, all, decision, request, internal) {
         let result;
@@ -28004,8 +27996,16 @@ let ClientService = ClientService_1 = class ClientService {
             try {
                 const state = states?.get(client.clientId) ?? await this.readMainState(client);
                 if (this.currentMeetsTier1(client, state)) {
-                    const cleared = await this.clientModel.updateOne({ clientId: client.clientId, mobile: client.mobile, degraded: { $exists: true } }, { $unset: { degraded: '', swapRetry: '' } }).exec();
-                    if ((cleared.modifiedCount || 0) === 1) {
+                    const cleared = await this.clientModel.updateOne({
+                        clientId: client.clientId,
+                        ...this.passGenerationFilter(client),
+                        'degraded.tier': fromTier,
+                    }, { $unset: { degraded: '', swapRetry: '' } }).exec();
+                    if ((cleared.modifiedCount || 0) !== 1) {
+                        this.logger.log(`degraded-clear kind=skip reason=not_current client=${client.clientId} tier=${fromTier}`);
+                    }
+                    else {
+                        this.logger.log(`degraded-clear kind=cleared client=${client.clientId} tier=${fromTier}`);
                         const cached = this.clientsMap.get(client.clientId);
                         if (cached) {
                             const { degraded: _dropped, ...rest } = cached;
@@ -28535,6 +28535,7 @@ exports.poolRefillLogLine = poolRefillLogLine;
 exports.leaseFreeFilter = leaseFreeFilter;
 exports.isDeadMainEvidence = isDeadMainEvidence;
 exports.passRetryDelayMs = passRetryDelayMs;
+exports.swapRetryReadFilter = swapRetryReadFilter;
 exports.swapRetryDecision = swapRetryDecision;
 exports.swapPoolFingerprint = swapPoolFingerprint;
 exports.isDeadSwapReason = isDeadSwapReason;
@@ -28613,6 +28614,14 @@ function passRetryDelayMs(misses) {
     if (misses <= 0)
         return 0;
     return exports.PASS_RETRY_BASE_MS * 2 ** (misses - 1);
+}
+function swapRetryReadFilter(read) {
+    return {
+        'swapRetry.pass': read.pass,
+        'swapRetry.mobile': read.mobile,
+        'swapRetry.attempts': read.attempts,
+        'swapRetry.nextAt': read.nextAt ? new Date(read.nextAt) : read.nextAt,
+    };
 }
 function swapRetryDecision(state, pass, mobile, fingerprint, nowMs) {
     if (!state || state.pass !== pass || state.mobile !== mobile)
@@ -29772,7 +29781,8 @@ var __metadata = (this && this.__metadata) || function (k, v) {
     if (typeof Reflect === "object" && typeof Reflect.metadata === "function") return Reflect.metadata(k, v);
 };
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.ClientSchema = exports.Client = void 0;
+exports.RETIRED_CLIENT_FIELDS = exports.ClientSchema = exports.Client = void 0;
+exports.isInclusiveProjection = isInclusiveProjection;
 const mongoose_1 = __webpack_require__(/*! @nestjs/mongoose */ "@nestjs/mongoose");
 const swagger_1 = __webpack_require__(/*! @nestjs/swagger */ "@nestjs/swagger");
 const mobile_utils_1 = __webpack_require__(/*! ../../shared/mobile-utils */ "./src/components/shared/mobile-utils.ts");
@@ -29945,6 +29955,23 @@ exports.Client = Client = __decorate([
     })
 ], Client);
 exports.ClientSchema = mongoose_1.SchemaFactory.createForClass(Client);
+exports.RETIRED_CLIENT_FIELDS = ['mainAccount'];
+function isInclusiveProjection(projection) {
+    if (!projection || typeof projection !== 'object')
+        return false;
+    const entries = Object.entries(projection);
+    const included = (v) => v === 1 || v === true
+        || (typeof v === 'object' && v !== null && ('$elemMatch' in v || '$meta' in v));
+    if (entries.some(([k, v]) => k !== '_id' && included(v)))
+        return true;
+    return entries.length > 0 && entries.every(([k, v]) => k === '_id' && included(v));
+}
+exports.ClientSchema.pre(['find', 'findOne', 'findOneAndUpdate', 'findOneAndReplace', 'findOneAndDelete'], function () {
+    const projection = this.projection();
+    if (isInclusiveProjection(projection))
+        return;
+    this.projection({ ...(projection || {}), ...Object.fromEntries(exports.RETIRED_CLIENT_FIELDS.map((f) => [f, 0])) });
+});
 
 
 /***/ },
