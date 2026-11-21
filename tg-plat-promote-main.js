@@ -37019,36 +37019,75 @@ class PromoteRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_1__.Ba
     async getPromoteClientStats() {
         return this.guard('getPromoteClientStats', null, () => this.clientStats.find({}).sort({ messageCount: -1, successCount: -1 }).toArray());
     }
+    /**
+     * Trimmed clientId for a promoteClientStats counter, or null (and one kind= line) when blank. The counters
+     * upsert, so a blank id must never reach the filter: it would create a junk row.
+     */
+    statsClientId(op, clientId) {
+        const id = typeof clientId === 'string' ? clientId.trim() : '';
+        if (!id)
+            this.logger.warn(`[promoteClientStats] kind=counter_refused op=${op} reason=missing_clientId`);
+        return id || null;
+    }
+    /**
+     * The 4 counters upsert on { clientId } (the uniq_promote_client_stats_client key), so a new client's first
+     * counts land before any routed user creates its row (schema audit batch 7, A3).
+     */
     async increaseMsgCount(clientId) {
-        return this.guard('increaseMsgCount', null, () => this.clientStats.updateOne({ clientId }, { $inc: { messageCount: 1 } }));
+        return this.guard('increaseMsgCount', null, async () => {
+            const id = this.statsClientId('increaseMsgCount', clientId);
+            return id ? await this.clientStats.updateOne({ clientId: id }, { $inc: { messageCount: 1 } }, { upsert: true }) : null;
+        });
     }
     /** promoteClientStats counter only. The per-mobile DAILY record is the caller's (recordDailyPromo). */
     async increaseSuccessCount(clientId) {
-        return this.guard('increaseSuccessCount', null, () => this.clientStats.updateOne({ clientId }, { $inc: { successCount: 1 } }));
+        return this.guard('increaseSuccessCount', null, async () => {
+            const id = this.statsClientId('increaseSuccessCount', clientId);
+            return id ? await this.clientStats.updateOne({ clientId: id }, { $inc: { successCount: 1 } }, { upsert: true }) : null;
+        });
     }
     /** promoteClientStats counter only, see increaseSuccessCount. */
     async increaseFailedCount(clientId) {
-        return this.guard('increaseFailedCount', null, () => this.clientStats.updateOne({ clientId }, { $inc: { failedCount: 1 } }));
+        return this.guard('increaseFailedCount', null, async () => {
+            const id = this.statsClientId('increaseFailedCount', clientId);
+            return id ? await this.clientStats.updateOne({ clientId: id }, { $inc: { failedCount: 1 } }, { upsert: true }) : null;
+        });
     }
     /** promoteClientStats counter only (returns the updated row), see increaseSuccessCount. */
     async increaseReactCount(clientId, number) {
         return this.guard('increaseReactCount', null, async () => {
-            const result = await this.clientStats.findOneAndUpdate({ clientId }, { $inc: { reactCount: number } }, { returnDocument: 'after' });
+            const id = this.statsClientId('increaseReactCount', clientId);
+            if (!id)
+                return null;
+            const result = await this.clientStats.findOneAndUpdate({ clientId: id }, { $inc: { reactCount: number } }, { returnDocument: 'after', upsert: true });
             return result ?? null;
         });
     }
-    /** `lastStarted` is the caller's formatted timestamp (the format is an app util). */
-    async resetPromoteClientStats(lastStarted) {
-        return this.guard('resetPromoteClientStats', null, () => this.clientStats.updateMany({}, {
-            $set: {
-                successCount: 0,
-                failedCount: 0,
-                messageCount: 0,
-                lastStarted,
-                reactCount: 0,
-                routedUserCount: 0,
-            },
-        }));
+    /**
+     * Daily reset of ONE client's row: the caller's environment clientId. Every promote process runs its own
+     * reset, so a process must never zero another client's counts (was updateMany {}). `lastStarted` is the
+     * caller's formatted timestamp (the format is an app util).
+     */
+    async resetPromoteClientStats(clientId, lastStarted) {
+        return this.guard('resetPromoteClientStats', null, async () => {
+            const id = typeof clientId === 'string' ? clientId.trim() : '';
+            if (!id) {
+                this.logger.warn('[promoteClientStats] kind=reset_refused reason=missing_clientId: no row reset');
+                return null;
+            }
+            const result = await this.clientStats.updateOne({ clientId: id }, {
+                $set: {
+                    successCount: 0,
+                    failedCount: 0,
+                    messageCount: 0,
+                    lastStarted,
+                    reactCount: 0,
+                    routedUserCount: 0,
+                },
+            });
+            this.logger.log(`[promoteClientStats] kind=reset clientId=${id} matched=${result?.matchedCount ?? 0}`);
+            return result;
+        });
     }
     /** `clientId` is the caller's environment clientId. */
     async getAvailablePromoteMobile(filter, clientId) {
@@ -52983,7 +53022,7 @@ class AppService {
             delete totalStat['_id'];
             delete totalStat["clientId"];
             delete totalStat["service"];
-            // No longer written (owner 2026-10-28), but existing rows keep it until the one-off $unset; keeps the shape.
+            // No longer written (owner 2026-10-28). Legacy rows keep it (owner rule: no $unset), so drop it here to keep the shape.
             delete totalStat["daysLeft"];
             for (const key of Object.keys(totalStat)) {
                 if (key.includes('Count')) {
@@ -53223,8 +53262,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "fd3100f3b2d2937f85e56d94104e8101e10f4260" : 0;
-    const builtAt =  true ? "2026-11-21T07:47:15.989Z" : 0;
+    const sha =  true ? "7820899fcc4d5b1f54e5cf947e00b8967881b644" : 0;
+    const builtAt =  true ? "2026-11-21T09:20:14.901Z" : 0;
     return { sha, builtAt };
 }
 
@@ -56107,7 +56146,7 @@ function setupScheduledJobs() {
             // Reset stats after 30 seconds
             (0,_tg_core_utils_timers__WEBPACK_IMPORTED_MODULE_1__.scheduleUnrefTimeout)(async () => {
                 try {
-                    await (0,_data_db__WEBPACK_IMPORTED_MODULE_4__.getRepositories)()?.promote.resetPromoteClientStats((0,_shared_time__WEBPACK_IMPORTED_MODULE_5__.formatDateTime)(new Date()));
+                    await (0,_data_db__WEBPACK_IMPORTED_MODULE_4__.getRepositories)()?.promote.resetPromoteClientStats(process.env.clientId, (0,_shared_time__WEBPACK_IMPORTED_MODULE_5__.formatDateTime)(new Date()));
                 }
                 catch (error) {
                     (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_0__.parseError)(error, "Error resetting promote client stats");
@@ -57192,20 +57231,33 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_17__.Ba
             spamCheckedAt: now,
             source: 'promote',
         };
-        void (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_13__.saveAccountRestartState)(this.mobile, verdict, now);
-        this.mirrorAccountHealth(verdict, 'promote:harsh');
+        this.saveVerdictThenMirror(verdict, now, 'promote:harsh');
+    }
+    saveVerdictThenMirror(verdict, now, by) {
+        const seqs = PromotionEngine.verdictSeqByMobile;
+        const seq = (seqs.get(this.mobile) ?? 0) + 1;
+        seqs.set(this.mobile, seq);
+        const skipped = (reason) => logger.warn(`[account-health] kind=mirror_skipped reason=${reason} by=${by} mobile=${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_18__.maskMobile)(this.mobile)}`);
+        void (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_13__.saveAccountRestartState)(this.mobile, verdict, now).then((saved) => {
+            if (!saved)
+                return skipped('redis_failed');
+            if (seq !== seqs.get(this.mobile))
+                return skipped('superseded');
+            return this.mirrorAccountHealth(verdict, by);
+        }, () => skipped('redis_failed'));
     }
     /**
      * accountHealth S2 dual-write (design 2026-11-07-account-collection-split): mirror of the tg::acct verdict just
      * saved (same values; its spamCheckedAt is the mirror's verdictAt). The repository keeps the newer verdictAt and
      * derives spamCheckedAt (status-change time) itself; daysLeft stays in tg::acct only (accountHealth no longer
-     * stores it, 2026-11-08). Fire-and-forget; never throws, never delays (no db yet = nothing mirrored).
+     * stores it, 2026-11-08). Never throws (no db yet = nothing mirrored). A newer stored verdict ('stale') is not a failure.
      */
-    mirrorAccountHealth(verdict, by) {
+    async mirrorAccountHealth(verdict, by) {
         if (!verdict.spamStatus || verdict.spamCheckedAt === null)
             return;
+        const failed = (reason) => logger.warn(`[account-health] kind=mirror_failed by=${by} mobile=${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_18__.maskMobile)(this.mobile)} reason=${reason}`);
         try {
-            (0,_data_db__WEBPACK_IMPORTED_MODULE_2__.getRepositories)()?.accountHealth.recordSoon({
+            const result = await (0,_data_db__WEBPACK_IMPORTED_MODULE_2__.getRepositories)()?.accountHealth.record({
                 mobile: this.mobile,
                 by,
                 verdict: {
@@ -57215,8 +57267,12 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_17__.Ba
                     spamCheckSource: verdict.source ?? 'promote',
                 },
             });
+            if (result === 'failed')
+                failed('write_failed');
         }
-        catch { /* best-effort mirror; tg::acct is unaffected */ }
+        catch (error) {
+            failed(error instanceof Error ? error.message : String(error));
+        }
     }
     setDaysLeft(daysLeft) {
         this.daysLeft = daysLeft;
@@ -57234,8 +57290,7 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_17__.Ba
             spamCheckedAt: now,
             source: 'promote',
         };
-        void (0,_tg_core_state_state_redis__WEBPACK_IMPORTED_MODULE_13__.saveAccountRestartState)(this.mobile, verdict, now);
-        this.mirrorAccountHealth(verdict, 'promote:days-left');
+        this.saveVerdictThenMirror(verdict, now, 'promote:days-left');
         // Healthy (-1) or released-today (0): available now. Only a real positive limit dates forward.
         // (Previously `Date.now() + daysLeft * 86400000` dated -1 to YESTERDAY, mis-flagging healthy
         // accounts as already-overdue-available — harmless but wrong; this pins today for both cases.)
@@ -57251,6 +57306,17 @@ class PromotionEngine extends _tg_channel_state__WEBPACK_IMPORTED_MODULE_17__.Ba
 }
 /** A cycle that has neither started nor finished in 50 min is wedged (supervisor watchdog is 45 min). */
 PromotionEngine.RUNNER_PROGRESS_STALE_MS = 50 * 60 * 1000;
+/**
+ * Redis wins (owner 2026-11-21): tg::acct is saved first and the accountHealth mirror is written only after that
+ * save succeeded, so Mongo never holds a verdict Redis lost. Fire-and-forget; never throws, never delays the caller.
+ * Logs `kind=mirror_skipped reason=redis_failed` (save false or rejected) and `kind=mirror_failed` (mirror write failed).
+ */
+/**
+ * Number of the newest verdict per mobile, shared by every engine instance (the manager can replace an engine
+ * while its save is pending; tg::acct is per mobile). The Redis replay queue keeps only the newest write per key,
+ * so a save of an older verdict can resolve true for a newer one: only the newest verdict is mirrored.
+ */
+PromotionEngine.verdictSeqByMobile = new Map();
 
 
 /***/ },
