@@ -1426,31 +1426,6 @@ let AppService = AppService_1 = class AppService {
     async processEligibleUsers(limit, skip) {
         return this.maintenance.processEligibleUsers(limit, skip);
     }
-    async checkPromotions() {
-        setInterval(async () => {
-            const clients = await this.clientService.findAll();
-            for (const client of clients) {
-                const userPromoteStats = await this.promoteStatService.findByClient(client.clientId);
-                if (userPromoteStats?.isActive &&
-                    (Date.now() - userPromoteStats?.lastUpdatedTimeStamp) / (1000 * 60) >
-                        6) {
-                    try {
-                        await (0, utils_1.fetchWithTimeout)(`${client.repl}/promote`, {
-                            timeout: 120000,
-                        });
-                        console.log(client.clientId, ': Promote Triggered!!');
-                    }
-                    catch (error) {
-                        (0, utils_1.parseError)(error, 'Promotion Check Err');
-                    }
-                }
-                else {
-                    console.log(client.clientId, ': ALL Good!! ---', Math.floor((Date.now() - userPromoteStats?.lastUpdatedTimeStamp) /
-                        (1000 * 60)));
-                }
-            }
-        }, 240000);
-    }
     async getPromotionStatsPlain() {
         let resp = '';
         const result = await this.promoteStatService.findAll();
@@ -19726,7 +19701,6 @@ let BotsService = BotsService_1 = class BotsService {
                     totalDocumentsSent: { $sum: '$stats.documentsSent' },
                     totalAudiosSent: { $sum: '$stats.audiosSent' },
                     totalMediaGroupsSent: { $sum: '$stats.mediaGroupsSent' },
-                    avgFailedAttempts: { $avg: '$failedAttempts' }
                 }
             }
         ]);
@@ -22780,9 +22754,11 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
         if (updateData.status === 'active' && !(updateData.session || await this.getStoredActiveSession(canonicalMobile))) {
             throw new common_1.BadRequestException('Cannot activate BufferClient without a session');
         }
-        const updatedBufferClient = await this.bufferClientModel
-            .findOneAndUpdate({ mobile: canonicalMobile }, { $set: updateData }, { returnDocument: 'after' })
-            .exec();
+        const updatedBufferClient = opts?.onBeforeStatus
+            ? await this.findOneAndUpdateCapturingBefore(this.bufferClientModel, { mobile: canonicalMobile }, updateData, opts.onBeforeStatus)
+            : await this.bufferClientModel
+                .findOneAndUpdate({ mobile: canonicalMobile }, { $set: updateData }, { returnDocument: 'after' })
+                .exec();
         if (!updatedBufferClient) {
             throw new common_1.NotFoundException(`BufferClient with mobile ${mobile} not found`);
         }
@@ -47347,7 +47323,7 @@ let PromoteClientService = PromoteClientService_1 = class PromoteClientService e
         const canonicalMobile = this.canonicalMobile(mobile);
         return !!(await this.promoteClientModel.findOne({ mobile: canonicalMobile }, { _id: 1 }).lean().exec());
     }
-    async update(mobile, updateClientDto) {
+    async update(mobile, updateClientDto, opts) {
         const canonicalMobile = this.canonicalMobile(mobile);
         const updateData = withoutRetiredFields(updateClientDto);
         if (typeof updateData.channels === 'number') {
@@ -47367,9 +47343,11 @@ let PromoteClientService = PromoteClientService_1 = class PromoteClientService e
         if (updateData.status === 'active' && !(updateData.session || await this.getStoredActiveSession(canonicalMobile))) {
             throw new common_1.BadRequestException('Cannot activate PromoteClient without a session');
         }
-        const updatedUser = await this.promoteClientModel
-            .findOneAndUpdate({ mobile: canonicalMobile }, { $set: updateData }, { returnDocument: 'after' })
-            .exec();
+        const updatedUser = opts?.onBeforeStatus
+            ? await this.findOneAndUpdateCapturingBefore(this.promoteClientModel, { mobile: canonicalMobile }, updateData, opts.onBeforeStatus)
+            : await this.promoteClientModel
+                .findOneAndUpdate({ mobile: canonicalMobile }, { $set: updateData }, { returnDocument: 'after' })
+                .exec();
         if (!updatedUser) {
             throw new common_1.NotFoundException(`PromoteClient with mobile ${mobile} not found`);
         }
@@ -48508,12 +48486,6 @@ let PromoteStatController = class PromoteStatController {
     async update(client, updatePromoteStatDto) {
         return this.promoteStatService.update(client, updatePromoteStatDto);
     }
-    async deleteOne(client) {
-        return this.promoteStatService.deleteOne(client);
-    }
-    async deleteAll() {
-        return this.promoteStatService.deleteAll();
-    }
 };
 exports.PromoteStatController = PromoteStatController;
 __decorate([
@@ -48538,19 +48510,6 @@ __decorate([
     __metadata("design:paramtypes", [String, update_promote_stat_dto_1.UpdatePromoteStatDto]),
     __metadata("design:returntype", Promise)
 ], PromoteStatController.prototype, "update", null);
-__decorate([
-    (0, common_1.Delete)(':client'),
-    __param(0, (0, common_1.Param)('client')),
-    __metadata("design:type", Function),
-    __metadata("design:paramtypes", [String]),
-    __metadata("design:returntype", Promise)
-], PromoteStatController.prototype, "deleteOne", null);
-__decorate([
-    (0, common_1.Delete)(),
-    __metadata("design:type", Function),
-    __metadata("design:paramtypes", []),
-    __metadata("design:returntype", Promise)
-], PromoteStatController.prototype, "deleteAll", null);
 exports.PromoteStatController = PromoteStatController = __decorate([
     (0, swagger_1.ApiTags)('promote-stats'),
     (0, common_1.Controller)('promote-stats'),
@@ -48654,29 +48613,6 @@ let PromoteStatService = class PromoteStatService {
         }
         return promoteStat;
     }
-    async deleteOne(client) {
-        const result = await this.promoteStatModel.deleteOne({ client }).exec();
-        if (result.deletedCount === 0) {
-            throw new common_1.NotFoundException(`PromoteStat not found for client ${client}`);
-        }
-    }
-    async deleteAll() {
-        await this.promoteStatModel.deleteMany({}).exec();
-    }
-    async reinitPromoteStats() {
-        const users = await this.findAll();
-        for (const user of users) {
-            await this.promoteStatModel.updateOne({ client: user.client }, {
-                $set: {
-                    totalCount: 0,
-                    uniqueChannels: 0,
-                    releaseDay: Date.now(),
-                    lastUpdatedTimeStamp: Date.now(),
-                    data: {}
-                }
-            });
-        }
-    }
 };
 exports.PromoteStatService = PromoteStatService;
 exports.PromoteStatService = PromoteStatService = __decorate([
@@ -48734,14 +48670,15 @@ var __metadata = (this && this.__metadata) || function (k, v) {
     if (typeof Reflect === "object" && typeof Reflect.metadata === "function") return Reflect.metadata(k, v);
 };
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.PromoteStatSchema = exports.PromoteStat = exports.TG_OWNED_PROMOTE_STAT_PATHS = void 0;
+exports.PromoteStatPipelineUpdateError = exports.PromoteStatSchema = exports.PromoteStat = exports.TG_OWNED_PROMOTE_STAT_PATHS = void 0;
 exports.stripTgOwnedPaths = stripTgOwnedPaths;
 exports.stripTgOwnedFromDoc = stripTgOwnedFromDoc;
 exports.stripTgOwnedFromBulkOps = stripTgOwnedFromBulkOps;
+const common_1 = __webpack_require__(/*! @nestjs/common */ "@nestjs/common");
 const mongoose_1 = __webpack_require__(/*! @nestjs/mongoose */ "@nestjs/mongoose");
 const swagger_1 = __webpack_require__(/*! @nestjs/swagger */ "@nestjs/swagger");
 const mongoose_2 = __webpack_require__(/*! mongoose */ "mongoose");
-exports.TG_OWNED_PROMOTE_STAT_PATHS = ['promoHealthPause'];
+exports.TG_OWNED_PROMOTE_STAT_PATHS = ['promoHealthPause', 'resetRunId'];
 let PromoteStat = class PromoteStat {
 };
 exports.PromoteStat = PromoteStat;
@@ -48794,6 +48731,10 @@ __decorate([
     __metadata("design:type", String)
 ], PromoteStat.prototype, "mobile", void 0);
 __decorate([
+    (0, mongoose_1.Prop)({ type: String, required: false }),
+    __metadata("design:type", String)
+], PromoteStat.prototype, "resetRunId", void 0);
+__decorate([
     (0, swagger_1.ApiProperty)({ description: 'tg-aut promotion-health pause cycle (read-only, written by tg-aut)', required: false, nullable: true, readOnly: true }),
     (0, mongoose_1.Prop)({ type: mongoose_2.Schema.Types.Mixed, required: false }),
     __metadata("design:type", Object)
@@ -48805,22 +48746,42 @@ exports.PromoteStatSchema = mongoose_1.SchemaFactory.createForClass(PromoteStat)
 function isTgOwnedPath(key) {
     return exports.TG_OWNED_PROMOTE_STAT_PATHS.some((path) => key === path || key.startsWith(`${path}.`));
 }
+const schemaLogger = new common_1.Logger('PromoteStatSchema');
+class PromoteStatPipelineUpdateError extends Error {
+    constructor() {
+        super('promoteStats: update pipelines are refused (a pipeline can write tg-owned paths); use operator updates');
+        this.name = 'PromoteStatPipelineUpdateError';
+    }
+}
+exports.PromoteStatPipelineUpdateError = PromoteStatPipelineUpdateError;
 function stripTgOwnedPaths(update) {
-    if (!update || typeof update !== 'object' || Array.isArray(update))
+    if (Array.isArray(update)) {
+        schemaLogger.warn('promote-stats kind=pipeline_refused reason=tg_owned_paths');
+        throw new PromoteStatPipelineUpdateError();
+    }
+    if (!update || typeof update !== 'object')
         return;
+    const stripped = [];
     for (const key of Object.keys(update)) {
         if (key.startsWith('$')) {
             const operand = update[key];
             if (operand && typeof operand === 'object' && !Array.isArray(operand)) {
-                for (const path of Object.keys(operand))
-                    if (isTgOwnedPath(path))
+                for (const [path, value] of Object.entries(operand)) {
+                    const renameTarget = key === '$rename' && typeof value === 'string' && isTgOwnedPath(value);
+                    if (isTgOwnedPath(path) || renameTarget) {
                         delete operand[path];
+                        stripped.push(renameTarget ? `${key}:${path}->${value}` : `${key}:${path}`);
+                    }
+                }
             }
         }
         else if (isTgOwnedPath(key)) {
             delete update[key];
+            stripped.push(key);
         }
     }
+    if (stripped.length)
+        schemaLogger.warn(`promote-stats kind=tg_path_stripped paths=${stripped.join(',')}`);
 }
 function stripTgOwnedFromDoc(doc) {
     if (!doc || typeof doc !== 'object')
@@ -51611,6 +51572,17 @@ class BaseClientService {
         this.KNOWN_2FA_PASSWORD = 'Ajtdmwajt1@';
         this.logger = new logger_1.Logger(loggerName);
     }
+    async findOneAndUpdateCapturingBefore(model, filter, updateData, onBeforeStatus) {
+        const set = { ...updateData, updatedAt: new Date() };
+        const before = await model
+            .findOneAndUpdate(filter, { $set: set }, { returnDocument: 'before', timestamps: false })
+            .exec();
+        if (!before)
+            return null;
+        const plain = typeof before.toObject === 'function' ? before.toObject() : before;
+        onBeforeStatus(typeof plain?.status === 'string' ? plain.status : null);
+        return model.hydrate({ ...plain, ...set });
+    }
     async updateNameAndBio(doc, client, failedAttempts) {
         const nameBioModel = this.model;
         const poolLastNames = this.clientType === 'buffer' ? client.bufferLastNames : client.promoteLastNames;
@@ -51815,15 +51787,20 @@ class BaseClientService {
             updateData.inUse = false;
         }
         try {
-            const updated = await this.update(mobile, updateData);
+            let beforeStatus;
+            const updated = await this.update(mobile, updateData, { onBeforeStatus: (s) => { beforeStatus = s; } });
             this.logger.log(`${Pool} client ${(0, monitor_util_1.maskMobile)(mobile)} status updated to ${status}`);
-            this.recordRoleEvent({
-                mobile, clientId: updated?.clientId ?? null,
-                event: status === 'inactive' ? 'retired' : 'reactivated', pool, by: 'cms:status', reason: message ?? null,
-                reasonCode: (0, account_role_events_1.classifyRoleEventReason)(message, 'status_change'),
-                details: typeof roleEvent.permanent === 'boolean' ? { permanent: roleEvent.permanent } : undefined,
-                opId: roleEvent.opId ?? undefined,
-            });
+            if (beforeStatus === status) {
+                this.logger.log(`role-event kind=skip reason=same_status pool=${pool} status=${status} mobile=${(0, monitor_util_1.maskMobile)(mobile)} by=cms:status`);
+            }
+            else
+                this.recordRoleEvent({
+                    mobile, clientId: updated?.clientId ?? null,
+                    event: status === 'inactive' ? 'retired' : 'reactivated', pool, by: 'cms:status', reason: message ?? null,
+                    reasonCode: (0, account_role_events_1.classifyRoleEventReason)(message, 'status_change'),
+                    details: typeof roleEvent.permanent === 'boolean' ? { permanent: roleEvent.permanent } : undefined,
+                    opId: roleEvent.opId ?? undefined,
+                });
             this.botsService.sendMessageByCategory(channel_category_enum_1.ChannelCategory.ACCOUNT_NOTIFICATIONS, {
                 title: `${Pool} status`,
                 fields: [
@@ -63544,16 +63521,21 @@ let ScheduledJobsService = ScheduledJobsService_1 = class ScheduledJobsService {
             return;
         }
         let resetRows = [];
+        let alreadyReset = 0;
         try {
-            const stats = await db
-                .collection('promoteStats')
-                .find({}, { projection: { client: 1, totalCount: 1, lastUpdatedTimeStamp: 1 } })
+            const promoteStats = db.collection('promoteStats');
+            alreadyReset = await promoteStats.countDocuments({ resetRunId: jobId });
+            if (alreadyReset > 0) {
+                this.logger.warn(`daily-promote-reset kind=already_reset job=${jobId} rows=${alreadyReset}`);
+            }
+            const stats = await promoteStats
+                .find({ resetRunId: { $ne: jobId } }, { projection: { client: 1, totalCount: 1, lastUpdatedTimeStamp: 1 } })
                 .toArray();
             resetRows = stats.map((stat) => [
                 String(stat.client || 'unknown').toUpperCase(),
                 Number(stat.totalCount || 0),
             ]);
-            const result = await this.resetPromoteStatsWithRetries(db.collection('promoteStats'));
+            const result = await this.resetPromoteStatsWithRetries(promoteStats, jobId);
             await this.finishRun(runs, jobId, token, 'complete', {
                 $set: {
                     completedAt: new Date(),
@@ -63567,6 +63549,8 @@ let ScheduledJobsService = ScheduledJobsService_1 = class ScheduledJobsService {
             await this.finishRun(runs, jobId, token, 'fail', this.failureUpdate(error));
             throw error;
         }
+        if (alreadyReset > 0 && resetRows.length === 0)
+            return;
         try {
             await (0, bot_notice_1.sendBotNotice)('pppl', {
                 severity: 'success',
@@ -63607,18 +63591,19 @@ let ScheduledJobsService = ScheduledJobsService_1 = class ScheduledJobsService {
             throw error;
         }
     }
-    async resetPromoteStatsWithRetries(promoteStats) {
+    async resetPromoteStatsWithRetries(promoteStats, runId) {
         let lastError;
         for (let attempt = 1; attempt <= 3; attempt += 1) {
             try {
                 const now = Date.now();
-                return await promoteStats.updateMany({}, {
+                return await promoteStats.updateMany({ resetRunId: { $ne: runId } }, {
                     $set: {
                         totalCount: 0,
                         uniqueChannels: 0,
                         releaseDay: now,
                         lastUpdatedTimeStamp: now,
                         data: {},
+                        resetRunId: runId,
                     },
                 });
             }
