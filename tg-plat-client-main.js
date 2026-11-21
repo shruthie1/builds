@@ -9920,6 +9920,7 @@ class ChannelIntelligenceService {
                 lastErrorAtMs: 0,
             },
             DMs: { credited: 0, updatedAtMs: 0 },
+            poolVersion: 0,
         };
         await this.collection.updateOne({ channelId: safeChannelId }, {
             $setOnInsert: defaults,
@@ -9943,6 +9944,7 @@ class ChannelIntelligenceService {
         }, {
             ...update,
             $set: { 'timestamps.updatedAtMs': Date.now() },
+            $inc: POOL_VERSION_BUMP,
         });
         poolLog.debug('insert', {
             chan: safeChannelId,
@@ -9968,6 +9970,7 @@ class ChannelIntelligenceService {
         }, {
             ...update,
             $set: setFields,
+            $inc: POOL_VERSION_BUMP,
         }, { arrayFilters });
         const matchedCount = result.matchedCount;
         const matched = typeof matchedCount === 'number' && matchedCount > 0;
@@ -10006,6 +10009,7 @@ class ChannelIntelligenceService {
                 messagePool: [],
                 'timestamps.updatedAtMs': Date.now(),
             },
+            $inc: POOL_VERSION_BUMP,
         });
     }
     async recordPoolEntryOutcome(channelId, entryKey, outcome, nowMs) {
@@ -10022,7 +10026,7 @@ class ChannelIntelligenceService {
             'messagePool.key': safeEntryKey,
         }, {
             ...update,
-            $inc: update.$inc,
+            $inc: { ...update.$inc, ...POOL_VERSION_BUMP },
             $set: {
                 ...update.$set,
                 'timestamps.updatedAtMs': nowMs,
@@ -10062,7 +10066,7 @@ class ChannelIntelligenceService {
                 channelId: safeChannelId,
                 'messagePool.key': verifiedEntry.key,
             }, {
-                $inc: update.$inc,
+                $inc: { ...update.$inc, ...POOL_VERSION_BUMP },
                 $set: {
                     ...update.$set,
                     'messagePool.$[e].lastSentAtMs': safeNowMs,
@@ -10098,18 +10102,20 @@ class ChannelIntelligenceService {
                 poolLog.debug('survival-skipped', { chan: safeChannelId, key: verifiedEntry.key, reason: 'not-retained' });
                 return false;
             }
-            const result = await this.collection.updateOne(buildCurrentDocumentFilter(safeChannelId, doc), {
+            const result = await this.collection.updateOne(buildPoolVersionFilter(safeChannelId, doc), {
                 $set: {
                     messagePool: compacted,
                     'timestamps.lastPromotionAtMs': safeNowMs,
                     'timestamps.updatedAtMs': safeNowMs,
                 },
+                $inc: POOL_VERSION_BUMP,
             });
             if (isMatchedUpdateResult(result)) {
                 poolLog.debug('survival-replaced', { chan: safeChannelId, key: verifiedEntry.key, attempt: attempt + 1 });
                 await this.syncPoolEntryStates(safeChannelId, safeNowMs);
                 return true;
             }
+            poolLog.warn('cas-lost', { chan: safeChannelId, path: 'record-surviving-pool-entry', key: verifiedEntry.key, version: poolVersionOf(doc), attempt: attempt + 1 });
         }
         poolLog.warn('retry-exhausted', { chan: safeChannelId, path: 'record-surviving-pool-entry' });
         return false;
@@ -10164,25 +10170,18 @@ class ChannelIntelligenceService {
             for (const p of pending) {
                 poolLog.debug('bench', { chan: safeChannelId, key: p.key, from: p.currentState, to: p.nextState });
             }
-            // Reconciliation never writes messagePool, so these independent state-only updates do not
-            // need to invalidate its root snapshot. Keeping one filter lets every pending entry update.
-            const filter = buildCurrentDocumentFilter(safeChannelId, doc);
-            let staleSnapshot = false;
-            for (const entry of pending) {
-                const result = await this.collection.updateOne(filter, {
-                    $set: {
-                        'messagePool.$[e].state': entry.nextState,
-                        'timestamps.updatedAtMs': safeNowMs,
-                    },
-                }, { arrayFilters: [{ 'e.key': entry.key }] });
-                if (!isMatchedUpdateResult(result)) {
-                    staleSnapshot = true;
-                    break;
-                }
-            }
-            if (!staleSnapshot) {
+            // Every pending state change goes in ONE compare-and-set write on poolVersion, so the first
+            // change cannot invalidate the guard for the next one, and a pool write that landed after the
+            // read (same millisecond included) makes this write miss and re-read.
+            const set = { 'timestamps.updatedAtMs': safeNowMs };
+            const arrayFilters = pending.map((entry, index) => {
+                set[`messagePool.$[e${index}].state`] = entry.nextState;
+                return { [`e${index}.key`]: entry.key };
+            });
+            const result = await this.collection.updateOne(buildPoolVersionFilter(safeChannelId, doc), { $set: set, $inc: POOL_VERSION_BUMP }, { arrayFilters });
+            if (isMatchedUpdateResult(result))
                 return;
-            }
+            poolLog.warn('cas-lost', { chan: safeChannelId, path: 'sync-pool-entry-states', version: poolVersionOf(doc), attempt: attempt + 1 });
         }
         poolLog.warn('retry-exhausted', { chan: safeChannelId, path: 'sync-pool-states' });
     }
@@ -10417,6 +10416,30 @@ function resolvePoolEntryState(entry, engine, nowMs) {
     const score = (0,_pool__WEBPACK_IMPORTED_MODULE_3__.rawScore)(entry, safeNonNegative(entry.lastValidatedAtMs), nowMs);
     const rank = engine.getPercentileRankSync(score, 'messageRawScore');
     return Number.isFinite(rank) && rank <= _pool__WEBPACK_IMPORTED_MODULE_3__.POOL.BENCH_PERCENTILE ? 'benched' : 'active';
+}
+/**
+ * Every write that changes messagePool bumps poolVersion; the two read-then-rewrite paths (full-pool
+ * replacement, state sync) compare-and-set on it AND on timestamps.updatedAtMs. updatedAtMs alone let
+ * two writes in the same millisecond both match, so one was lost (schema audit 2026-11-21). updatedAtMs
+ * stays in the filter (exact value, 0 included) for writers that do not bump poolVersion (older builds until their natural
+ * restart, one-off maintenance scripts): any write of theirs in another millisecond still makes this
+ * write miss. Docs written before poolVersion existed match on its absence; their first pool write
+ * sets it to 1.
+ */
+const POOL_VERSION_BUMP = { poolVersion: 1 };
+function poolVersionOf(doc) {
+    const version = doc.poolVersion;
+    return typeof version === 'number' && Number.isFinite(version) ? version : null;
+}
+function buildPoolVersionFilter(channelId, doc) {
+    const version = poolVersionOf(doc);
+    const updatedAtMs = doc.timestamps?.updatedAtMs;
+    return {
+        channelId,
+        poolVersion: version === null ? { $exists: false } : version,
+        // Matched exactly, 0 included (the validator accepts 0; a writer that sets a real time then misses).
+        ...(typeof updatedAtMs === 'number' && Number.isFinite(updatedAtMs) ? { 'timestamps.updatedAtMs': updatedAtMs } : {}),
+    };
 }
 /** Uses the current update timestamp after retired writer fields are removed. */
 function buildCurrentDocumentFilter(channelId, doc) {
@@ -63934,8 +63957,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "7d7ce291ffc1819c400bc19ef3ae4e17a3b1a087" : 0;
-    const builtAt =  true ? "2026-11-20T18:56:41.499Z" : 0;
+    const sha =  true ? "3f6de0006b09352d85c656ee00058c1ff8eb7e11" : 0;
+    const builtAt =  true ? "2026-11-21T03:44:46.541Z" : 0;
     return { sha, builtAt };
 }
 
