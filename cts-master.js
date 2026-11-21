@@ -22682,7 +22682,8 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
                 enrolledAt: new Date(),
                 sessionRotatedAt: null,
             };
-            return this.bufferClientModel.create({ ...createData });
+            const [created] = await this.bufferClientModel.insertMany([{ ...createData }], pool_claim_1.POOL_CLAIM_INSERT_OPTIONS);
+            return created;
         }));
         this.mirrorVerdictToAccountHealth(result, 'cms:buffer-create');
         if (!opts?.suppressEnrolledEvent) {
@@ -22718,9 +22719,12 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
         }
         return bufferClient;
     }
-    async existsByMobile(mobile) {
+    async existsByMobile(mobile, maxTimeMS) {
         const canonicalMobile = this.canonicalMobile(mobile);
-        return !!(await this.bufferClientModel.findOne({ mobile: canonicalMobile }, { _id: 1 }).lean().exec());
+        const query = this.bufferClientModel.findOne({ mobile: canonicalMobile }, { _id: 1 });
+        if (maxTimeMS)
+            query.maxTimeMS(maxTimeMS);
+        return !!(await query.lean().exec());
     }
     mirrorVerdictToAccountHealth(doc, by) {
         try {
@@ -23312,8 +23316,8 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
     }
     async isMobileEnrolledAnywhere(mobile) {
         const [bufferExists, promoteExists, clientExists] = await Promise.all([
-            this.existsByMobile(mobile),
-            this.promoteClientService.existsByMobile(mobile),
+            this.existsByMobile(mobile, pool_claim_1.POOL_CLAIM_BODY_MAX_TIME_MS),
+            this.promoteClientService.existsByMobile(mobile, pool_claim_1.POOL_CLAIM_BODY_MAX_TIME_MS),
             this.clientService.findAll().then((clients) => clients.some((c) => this.mobilesMatch(c.mobile, mobile))),
         ]);
         if (bufferExists)
@@ -36986,9 +36990,14 @@ let IpManagementService = IpManagementService_1 = class IpManagementService {
     }
     async deleteProxyIp(ipAddress, port) {
         this.logger.debug(`Deleting proxy IP: ${ipAddress}:${port}`);
-        const result = await this.proxyIpModel.deleteOne({ ipAddress, port });
+        const result = await this.proxyIpModel.deleteOne({ ipAddress, port, isAssigned: { $ne: true } });
         if (result.deletedCount === 0) {
-            throw new common_1.NotFoundException(`Proxy IP ${ipAddress}:${port} not found`);
+            const row = await this.proxyIpModel.findOne({ ipAddress, port }, { isAssigned: 1, assignedToClient: 1 }).lean();
+            if (!row) {
+                throw new common_1.NotFoundException(`Proxy IP ${ipAddress}:${port} not found`);
+            }
+            this.logger.warn(`[proxy-ips] kind=delete_refused_assigned ip=${ipAddress}:${port} client=${row.assignedToClient ?? 'unknown'}`);
+            throw new common_1.BadRequestException(`Cannot delete assigned IP ${ipAddress}:${port}`);
         }
         this.logger.log(`Deleted proxy IP: ${ipAddress}:${port}`);
     }
@@ -37118,6 +37127,7 @@ let IpManagementService = IpManagementService_1 = class IpManagementService {
         let updated = 0;
         let removed = 0;
         const errors = [];
+        let upsertFailed = false;
         const incomingKeys = new Set();
         const bulkOps = proxies.map(proxy => {
             const key = `${proxy.ipAddress}:${proxy.port}`;
@@ -37157,25 +37167,32 @@ let IpManagementService = IpManagementService_1 = class IpManagementService {
                     created = error.result.upsertedCount || 0;
                     updated = error.result.modifiedCount || 0;
                 }
+                upsertFailed = true;
                 errors.push(`Bulk upsert errors: ${error.message}`);
                 this.logger.warn(`Bulk upsert had errors: ${error.message}`);
             }
         }
-        if (removeStale) {
-            const incomingKeys = new Set(proxies.map(p => `${p.ipAddress}:${p.port}`));
+        if (removeStale && upsertFailed) {
+            this.logger.warn(`[proxy-ips] kind=prune_skipped reason=upsert_failed source=${source}`);
+        }
+        else if (removeStale && proxies.length === 0) {
+            this.logger.warn(`[proxy-ips] kind=prune_skipped reason=empty_snapshot source=${source}`);
+        }
+        else if (removeStale) {
             const existing = await this.proxyIpModel
-                .find({ source }, { ipAddress: 1, port: 1 })
+                .find({ source, status: { $ne: 'inactive' } }, { ipAddress: 1, port: 1, isAssigned: 1 })
                 .lean()
                 .exec();
-            const staleIds = existing
-                .filter(p => !incomingKeys.has(`${p.ipAddress}:${p.port}`))
-                .map(p => p._id);
+            const stale = existing.filter(p => !incomingKeys.has(`${p.ipAddress}:${p.port}`));
+            const keptAssigned = stale.filter(p => p.isAssigned === true).length;
+            const staleIds = stale.filter(p => p.isAssigned !== true).map(p => p._id);
+            if (keptAssigned > 0) {
+                this.logger.warn(`[proxy-ips] kind=prune_kept_assigned count=${keptAssigned} source=${source}`);
+            }
             if (staleIds.length > 0) {
-                const result = await this.proxyIpModel.deleteMany({ _id: { $in: staleIds } });
-                removed = result.deletedCount;
-                if (removed > 0) {
-                    this.logger.debug(`Removed ${removed} stale ${source} proxies`);
-                }
+                const result = await this.proxyIpModel.updateMany({ _id: { $in: staleIds }, isAssigned: { $ne: true } }, { $set: { status: 'inactive' } });
+                removed = result.modifiedCount;
+                this.logger.log(`[proxy-ips] kind=prune_marked_inactive count=${removed} source=${source}`);
             }
         }
         this.logger.log(`Sync "${source}" complete: created=${created}, updated=${updated}, removed=${removed}, errors=${errors.length}`);
@@ -47298,8 +47315,8 @@ let PromoteClientService = PromoteClientService_1 = class PromoteClientService e
                 enrolledAt: new Date(),
                 sessionRotatedAt: null,
             };
-            const newUser = new this.promoteClientModel(promoteClientData);
-            return newUser.save();
+            const [created] = await this.promoteClientModel.insertMany([promoteClientData], pool_claim_1.POOL_CLAIM_INSERT_OPTIONS);
+            return created;
         }));
         this.recordRoleEvent({
             mobile: canonicalMobile, clientId: promoteClient.clientId ?? null, event: 'enrolled', pool: 'promote', by: 'cms:promote-create',
@@ -47331,9 +47348,12 @@ let PromoteClientService = PromoteClientService_1 = class PromoteClientService e
         }
         return user;
     }
-    async existsByMobile(mobile) {
+    async existsByMobile(mobile, maxTimeMS) {
         const canonicalMobile = this.canonicalMobile(mobile);
-        return !!(await this.promoteClientModel.findOne({ mobile: canonicalMobile }, { _id: 1 }).lean().exec());
+        const query = this.promoteClientModel.findOne({ mobile: canonicalMobile }, { _id: 1 });
+        if (maxTimeMS)
+            query.maxTimeMS(maxTimeMS);
+        return !!(await query.lean().exec());
     }
     async update(mobile, updateClientDto, opts) {
         const canonicalMobile = this.canonicalMobile(mobile);
@@ -47593,8 +47613,8 @@ let PromoteClientService = PromoteClientService_1 = class PromoteClientService e
     }
     async isMobileEnrolledAnywhere(mobile) {
         const [promoteExists, bufferExists, clientExists] = await Promise.all([
-            this.existsByMobile(mobile),
-            this.bufferClientService.existsByMobile(mobile),
+            this.existsByMobile(mobile, pool_claim_1.POOL_CLAIM_BODY_MAX_TIME_MS),
+            this.bufferClientService.existsByMobile(mobile, pool_claim_1.POOL_CLAIM_BODY_MAX_TIME_MS),
             this.clientService.findAll().then((clients) => clients.some((c) => this.mobilesMatch(c.mobile, mobile))),
         ]);
         if (promoteExists)
@@ -55066,7 +55086,7 @@ async function enrolPoolClientFromUser(port, document, targetClientId, available
                     warmupJitter: client_helper_utils_1.ClientHelperUtils.generateWarmupJitter(),
                     enrolledAt: new Date(),
                 },
-            }, { returnDocument: 'after', upsert: true }).exec();
+            }, { returnDocument: 'after', upsert: true, maxTimeMS: pool_claim_1.POOL_CLAIM_BODY_MAX_TIME_MS }).exec();
             return true;
         }
         if (!enrolled)
@@ -55114,16 +55134,25 @@ async function enrolPoolClientFromUser(port, document, targetClientId, available
 /*!********************************************************!*\
   !*** ./src/components/shared/onboarding/pool-claim.ts ***!
   \********************************************************/
-(__unused_webpack_module, exports) {
+(__unused_webpack_module, exports, __webpack_require__) {
 
 
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.POOL_CLAIM_LEASE_MS = exports.POOL_CLAIM_COLLECTION = void 0;
+exports.POOL_CLAIM_INSERT_OPTIONS = exports.POOL_CLAIM_BODY_MAX_TIME_MS = exports.POOL_CLAIM_LEASE_MS = exports.POOL_CLAIM_COLLECTION = void 0;
 exports.ensurePoolClaimIndex = ensurePoolClaimIndex;
 exports.describeClaimHolder = describeClaimHolder;
 exports.withPoolClaim = withPoolClaim;
+const common_1 = __webpack_require__(/*! @nestjs/common */ "@nestjs/common");
+const monitor_util_1 = __webpack_require__(/*! ../../monitor/monitor-util */ "./src/components/monitor/monitor-util.ts");
 exports.POOL_CLAIM_COLLECTION = 'poolEnrolmentClaims';
 exports.POOL_CLAIM_LEASE_MS = 60_000;
+exports.POOL_CLAIM_BODY_MAX_TIME_MS = 20_000;
+exports.POOL_CLAIM_INSERT_OPTIONS = { maxTimeMS: exports.POOL_CLAIM_BODY_MAX_TIME_MS };
+const logger = new common_1.Logger('PoolClaim');
+function isMaxTimeExpired(error) {
+    const e = error;
+    return e?.code === 50 || e?.codeName === 'MaxTimeMSExpired' || (typeof e?.message === 'string' && e.message.includes('MaxTimeMSExpired'));
+}
 const indexReady = new WeakMap();
 function claimDb(model) {
     const db = model.db;
@@ -55178,6 +55207,12 @@ async function withPoolClaim(model, mobile, pool, fn, now = Date.now) {
     }
     try {
         return { claimed: true, value: await fn() };
+    }
+    catch (error) {
+        if (isMaxTimeExpired(error)) {
+            logger.warn(`[pool-claim] kind=body_timeout pool=${pool} mobile=${(0, monitor_util_1.maskMobile)(mobile)} maxTimeMS=${exports.POOL_CLAIM_BODY_MAX_TIME_MS}: claim body failed`);
+        }
+        throw error;
     }
     finally {
         await col.updateOne({ mobile, pool, at }, { $set: { at: new Date(0) } }).catch(() => undefined);
@@ -55315,6 +55350,7 @@ const warmup_phases_1 = __webpack_require__(/*! ../warmup-phases */ "./src/compo
 const candidate_source_1 = __webpack_require__(/*! ./candidate-source */ "./src/components/shared/onboarding/candidate-source.ts");
 const pool_profile_1 = __webpack_require__(/*! ./pool-profile */ "./src/components/shared/onboarding/pool-profile.ts");
 const account_role_events_1 = __webpack_require__(/*! ../../clients/account-role-events */ "./src/components/clients/account-role-events.ts");
+const pool_claim_1 = __webpack_require__(/*! ./pool-claim */ "./src/components/shared/onboarding/pool-claim.ts");
 async function setAsPoolClient(port, mobile, clientId, availableDate) {
     const { profile } = port;
     const cfg = profile.setAs;
@@ -55388,7 +55424,7 @@ async function setAsPoolClient(port, mobile, clientId, availableDate) {
                     warmupJitter: client_helper_utils_1.ClientHelperUtils.generateWarmupJitter(),
                     enrolledAt: new Date(),
                 },
-            }, { returnDocument: 'after', upsert: true })
+            }, { returnDocument: 'after', upsert: true, maxTimeMS: pool_claim_1.POOL_CLAIM_BODY_MAX_TIME_MS })
                 .exec();
         }));
         (0, account_role_events_1.recordAccountRoleEventSoon)((0, account_role_events_1.accountRoleEventsCollectionOf)(port.model), {
@@ -62739,7 +62775,7 @@ __decorate([
     (0, common_1.Post)('sync'),
     (0, swagger_1.ApiOperation)({
         summary: 'Sync proxies from Webshare',
-        description: 'Fetches all proxies from Webshare API and upserts them into the local IP pool. Optionally removes stale proxies no longer in Webshare.'
+        description: 'Fetches all proxies from Webshare API and upserts them into the local IP pool. Optionally marks stale proxies no longer in Webshare inactive (never deleted, assigned rows untouched).'
     }),
     (0, swagger_1.ApiBody)({ type: sync_proxies_dto_1.SyncProxiesDto, required: false }),
     (0, swagger_1.ApiOkResponse)({ description: 'Sync completed', type: sync_proxies_dto_1.SyncResultDto }),
