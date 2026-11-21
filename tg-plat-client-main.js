@@ -42589,7 +42589,7 @@ class ParkedControlRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_
         super(...arguments);
         this.collectionName = 'parkedControl';
     }
-    /** Enabled = global on AND app doc on AND (no clientIds list OR it includes clientId). Fails closed. */
+    /** Enabled = global on AND app doc on AND (no clientIds field OR it is an array that includes clientId). Fails closed. */
     async isEnabled(app, clientId) {
         return (await this.readState(app, clientId)).enabled;
     }
@@ -42604,6 +42604,13 @@ class ParkedControlRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_
         const appDoc = byId.get(app);
         if (byId.get('global')?.enabled !== true || appDoc?.enabled !== true)
             return CLOSED;
+        // Batch 6: a clientIds that is present but not an array (string, object, null: a mongosh typo) is DISABLED,
+        // not "no allow list" (which would open every client). MIRROR: CMS parked-session-guard.ts / parked-swap-episode.ts.
+        const rawClientIds = appDoc.clientIds;
+        if (rawClientIds !== undefined && !Array.isArray(rawClientIds)) {
+            this.logger.warn(`[parked-control] kind=client_ids_not_array app=${app} type=${rawClientIds === null ? 'null' : typeof rawClientIds}: app treated as disabled`);
+            return CLOSED;
+        }
         if (Array.isArray(appDoc.clientIds) && !(clientId !== undefined && appDoc.clientIds.includes(clientId)))
             return CLOSED;
         const overrides = appDoc.overrides;
@@ -45042,12 +45049,14 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _base_repository__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../base-repository */ "../../packages/tg-db/src/base-repository.ts");
 
 /**
- * `visionShadow`: one small comparison row per analysed payment screenshot (remote mySuperSever vs the
- * in-process @tg/vision chain), written fire-and-forget by tg-aut in shadow mode. LOG ONLY: no code path
- * reads it except scripts/vision-parity.cjs. Design: docs/design/2026-10-10-tg-vision-payment-proof.md.
+ * `visionShadow`: one small row per analysed payment screenshot (the in-process @tg/vision chain; the remote
+ * mySuperSever side was removed 2026-10-22, so `remote` is always null), written fire-and-forget by tg-aut
+ * (payments/vision-shadow.ts, shape = vision-shadow-core.ts ShadowDoc). LOG ONLY: no runtime code reads it; the
+ * debug scripts scripts/debug/payments/screenshot-funnel.cjs and trace-chat.cjs do.
+ * Design: docs/design/2026-10-10-tg-vision-payment-proof.md.
  *
- * Never stored: image bytes/base64, OCR text, payer/payee names. Only the TTL index exists (30 days);
- * the parity script range-scans `createdAt`, which that same index serves, so there is no second index.
+ * Never stored: image bytes/base64, raw OCR text. Stored: UTR, payee VPA and short scrubbed evidence inside `local`.
+ * Only the TTL index exists (30 days); the scripts range-scan `createdAt`, which that same index serves.
  */
 const VISION_SHADOW_TTL_SECONDS = 30 * 24 * 60 * 60;
 const VISION_SHADOW_TTL_INDEX = 'createdAt_ttl';
@@ -64002,8 +64011,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "5a1dcde402a441daca3980e6e3abd5c442673765" : 0;
-    const builtAt =  true ? "2026-11-21T06:58:14.256Z" : 0;
+    const sha =  true ? "fd3100f3b2d2937f85e56d94104e8101e10f4260" : 0;
+    const builtAt =  true ? "2026-11-21T07:47:18.559Z" : 0;
     return { sha, builtAt };
 }
 
@@ -98109,6 +98118,10 @@ function classifyReplyFailure(error) {
         return { errorCode: 'TIMEOUT', errorClass: 'timeout' };
     if (/NETWORK|CONNECTION|DISCONNECT|ECONNRESET|ETIMEDOUT|NOT CONNECTED/.test(text))
         return { errorCode: 'TRANSPORT', errorClass: 'transport' };
+    // GramJS and tg-aut's own UnresolvedPeerError (telegram/unreachable-report.ts) both say "Could not find the input
+    // entity for <chatId> ...". A fixed code keeps chat ids out of errorCode (the fallback below would store "Could").
+    if (f.name === 'UnresolvedPeerError' || text.includes('COULD NOT FIND THE INPUT ENTITY'))
+        return { errorCode: 'INPUT_ENTITY_NOT_FOUND', errorClass: 'other' };
     const code = f.errorMessage || f.message.split(/[\s:(]/)[0] || f.name || 'UNKNOWN';
     return { errorCode: code.slice(0, 60), errorClass: 'other' };
 }
@@ -98143,6 +98156,10 @@ function userStageOf(user) {
 }
 function composeRow(input, user, at) {
     const classified = classifyReplyFailure(input.error);
+    if (classified.errorCode === 'INPUT_ENTITY_NOT_FOUND') {
+        const source = input.error?.name === 'UnresolvedPeerError' ? 'tg-aut' : 'gramjs';
+        logger.info(`[reply-failures] kind=input_entity_not_found source=${source} path=${input.path} chat=****${String(input.chatId).slice(-4)}`);
+    }
     const userAt = (0,_conversation_state_chat_moments__WEBPACK_IMPORTED_MODULE_1__.momentAt)(input.chatId, 'user');
     const sinceUserMs = userAt === undefined ? -1 : Math.max(0, at - userAt);
     const inbound = !input.followup && sinceUserMs >= 0 && sinceUserMs <= INBOUND_WINDOW_MS;
