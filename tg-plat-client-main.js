@@ -64050,8 +64050,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "7820899fcc4d5b1f54e5cf947e00b8967881b644" : 0;
-    const builtAt =  true ? "2026-11-21T09:20:20.876Z" : 0;
+    const sha =  true ? "a2e44387e1ecea84dc8d7dfe4b25bd0691d3c2b3" : 0;
+    const builtAt =  true ? "2026-11-21T09:40:24.734Z" : 0;
     return { sha, builtAt };
 }
 
@@ -112088,7 +112088,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   UpiIds: () => (/* binding */ UpiIds),
 /* harmony export */   assigntoUpis: () => (/* binding */ assigntoUpis),
-/* harmony export */   setUpiIds: () => (/* binding */ setUpiIds)
+/* harmony export */   setUpiIds: () => (/* binding */ setUpiIds),
+/* harmony export */   upiSnapshot: () => (/* binding */ upiSnapshot)
 /* harmony export */ });
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
 
@@ -112110,7 +112111,7 @@ class UpiIds {
             throw new Error(`Cannot assign string to property ${key} (not a string property)`);
         }
     }
-    /** Adds an id once: every /upi-ids refresh re-sends the whole list, so a plain push doubled it per refresh. */
+    /** Adds one id once. A /upi-ids refresh does not use this: it replaces allIds with its snapshot (assigntoUpis). */
     static pushValue(value) {
         if (!UpiIds.allIds.includes(value))
             UpiIds.allIds.push(value);
@@ -112140,26 +112141,70 @@ async function reportUpiFetchError(error, reporter) {
     const { parseError } = await Promise.resolve(/*! import() */).then(__webpack_require__.bind(__webpack_require__, /*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts"));
     parseError(error, "Error fetching UPI Ids", false);
 }
-function assigntoUpis(jsonData) {
-    Object.entries(jsonData).forEach(([key, value]) => {
-        if (UpiIds.hasOwnProperty(key)) {
-            UpiIds.setUpiId(key, value);
-        }
-        UpiIds.pushValue(value);
-    });
-    logger.log("Upi Ids sett!!");
+/** The payee keys a /upi-ids response may set by name (the string statics above). Any other key only joins allIds. */
+const NAMED_UPI_KEYS = ['paytm1', 'paytm2', 'paytm3', 'ppay', 'bpayGen', 'bpay2', 'axisUPI', 'gpay', 'gpayid', 'defaultId', 'qrId'];
+/** Document metadata, never a payee id: the lean doc carries `_id`, and CMS PATCH stores `updatedAt`. */
+const NON_ID_KEYS = new Set(['_id', 'updatedAt', 'createdAt']);
+/** The payee-id list of one /upi-ids response: string values with "@" (QR suffix kept), metadata keys skipped, deduped. */
+function upiSnapshot(jsonData) {
+    if (!jsonData || typeof jsonData !== 'object' || Array.isArray(jsonData))
+        return [];
+    const ids = [];
+    for (const [key, value] of Object.entries(jsonData)) {
+        if (NON_ID_KEYS.has(key) || typeof value !== 'string' || !value.includes('@'))
+            continue;
+        if (!ids.includes(value))
+            ids.push(value);
+    }
+    return ids;
 }
-async function setUpiIds(fetcher = fetchUpiIdsFromService, errorReporter) {
+/**
+ * Publishes one response: the named statics it carries, then allIds REPLACED by its snapshot (a retired id drops
+ * out). Returns the new count, or null when the response holds no payee id (the last good state is kept).
+ */
+function assigntoUpis(jsonData) {
+    const ids = upiSnapshot(jsonData);
+    if (ids.length === 0)
+        return null;
+    for (const key of NAMED_UPI_KEYS) {
+        const value = jsonData[key];
+        if (typeof value === 'string' && value.includes('@'))
+            UpiIds.setUpiId(key, value);
+    }
+    UpiIds.allIds = ids;
+    return ids.length;
+}
+/**
+ * Refreshes can overlap (boot fetch, periodic, /refreshupis). Each one takes a number when it starts; a response
+ * publishes only when no later-started refresh has published already, so a slow pre-rotation response cannot put a
+ * retired id back.
+ */
+let refreshStarted = 0;
+let refreshPublished = 0;
+/** Error text with anything id-shaped (contains "@") replaced, so a log line never carries a payee id. */
+const safeReason = (error) => (error instanceof Error ? error.message : String(error)).replace(/\S*@\S*/g, '<id>');
+async function setUpiIds(fetcher = fetchUpiIdsFromService, errorReporter, log = logger) {
+    const seq = ++refreshStarted;
     try {
         const response = await fetcher();
         if (!response) {
             throw new Error("Unable to fetch UPI Ids");
         }
         const data = response.data;
-        assigntoUpis(data);
+        if (seq < refreshPublished) {
+            log.warn(`[upi-ids] kind=stale_refresh_ignored seq=${seq} published=${refreshPublished}: a later refresh already published`);
+            return data;
+        }
+        const count = assigntoUpis(data);
+        if (count === null)
+            throw new Error("UPI Ids response holds no payee id");
+        refreshPublished = seq;
+        log.log(`[upi-ids] kind=replaced count=${count}`);
         return data;
     }
     catch (error) {
+        // Ids are never printed: only the reason, with id-shaped tokens masked.
+        log.warn(`[upi-ids] kind=refresh_failed reason=${safeReason(error)}: last good list kept (${UpiIds.allIds.length} ids)`);
         await reportUpiFetchError(error, errorReporter);
     }
 }
