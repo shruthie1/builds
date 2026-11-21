@@ -58401,6 +58401,7 @@ exports.UpiId = UpiId = __decorate([
     (0, mongoose_1.Schema)({
         versionKey: false,
         autoIndex: true,
+        strict: false,
         timestamps: false,
         toJSON: {
             virtuals: false,
@@ -58442,6 +58443,10 @@ const common_1 = __webpack_require__(/*! @nestjs/common */ "@nestjs/common");
 const mongoose_1 = __webpack_require__(/*! @nestjs/mongoose */ "@nestjs/mongoose");
 const mongoose_2 = __webpack_require__(/*! mongoose */ "mongoose");
 const utils_1 = __webpack_require__(/*! ../../utils */ "./src/utils/index.ts");
+function maskIds(error) {
+    const text = error instanceof Error ? error.message : String(error);
+    return text.replace(/\S*@\S*/g, '<id>');
+}
 let UpiIdService = UpiIdService_1 = class UpiIdService {
     constructor(upiIdModel) {
         this.upiIdModel = upiIdModel;
@@ -58449,6 +58454,9 @@ let UpiIdService = UpiIdService_1 = class UpiIdService {
         this.checkInterval = null;
         this.upiIds = null;
         this.isInitialized = false;
+        this.cacheGeneration = 0;
+        this.updateTail = Promise.resolve();
+        this.updatesInFlight = 0;
         this.REFRESH_INTERVAL = 5 * 60 * 1000;
         this.MAX_RETRIES = 3;
         this.RETRY_DELAY = 1000;
@@ -58492,16 +58500,26 @@ let UpiIdService = UpiIdService_1 = class UpiIdService {
             }
         }, this.REFRESH_INTERVAL);
     }
+    readIsCurrent(generation, path) {
+        if (generation === this.cacheGeneration)
+            return true;
+        this.logger.warn(`[upi-ids] kind=stale_read_skipped path=${path}: a PATCH landed during the read, cache kept`);
+        return false;
+    }
     async refreshUPIs() {
         try {
+            const generation = this.cacheGeneration;
             const result = await this.executeWithRetry(async () => {
                 return await this.upiIdModel.findOne({}).lean().exec();
             });
+            if (result && !this.readIsCurrent(generation, 'refresh')) {
+                return;
+            }
             if (result) {
                 this.upiIds = { ...result };
             }
             else {
-                this.logger.warn('No UPI data found in database');
+                this.logger.warn('[upi-ids] kind=no_doc path=refresh: no upi-ids document, cache kept');
             }
         }
         catch (error) {
@@ -58518,11 +58536,15 @@ let UpiIdService = UpiIdService_1 = class UpiIdService {
                 return { ...this.upiIds };
             }
             this.logger.debug('Cache miss, fetching from database...');
+            const generation = this.cacheGeneration;
             const result = await this.executeWithRetry(async () => {
                 return await this.upiIdModel.findOne({}).lean().exec();
             });
+            if (!this.readIsCurrent(generation, 'read_through') && this.upiIds) {
+                return { ...this.upiIds };
+            }
             if (!result) {
-                this.logger.warn('No UPI data found');
+                this.logger.warn('[upi-ids] kind=no_doc path=read_through: no upi-ids document');
                 return null;
             }
             this.upiIds = { ...result };
@@ -58538,6 +58560,20 @@ let UpiIdService = UpiIdService_1 = class UpiIdService {
         if (!updateClientDto || typeof updateClientDto !== 'object') {
             throw new Error('Invalid update data provided');
         }
+        if (this.updatesInFlight > 0) {
+            this.logger.log(`[upi-ids] kind=update_queued ahead=${this.updatesInFlight}: waits for the earlier PATCH`);
+        }
+        this.updatesInFlight += 1;
+        const run = this.updateTail.then(() => this.applyUpdate(updateClientDto));
+        this.updateTail = run.then(() => undefined, () => undefined);
+        try {
+            return await run;
+        }
+        finally {
+            this.updatesInFlight -= 1;
+        }
+    }
+    async applyUpdate(updateClientDto) {
         try {
             const updateData = { ...updateClientDto };
             delete updateData._id;
@@ -58558,12 +58594,13 @@ let UpiIdService = UpiIdService_1 = class UpiIdService {
             if (!updatedUser) {
                 throw new common_1.NotFoundException('Failed to update UPI data');
             }
+            this.cacheGeneration += 1;
             this.upiIds = { ...updatedUser };
-            this.logger.log('UPI data updated successfully');
+            this.logger.log(`[upi-ids] kind=updated keys=${Object.keys(updateData).length}`);
             return { ...updatedUser };
         }
         catch (error) {
-            this.logger.error('Error updating UPI data', error.stack);
+            this.logger.error(`[upi-ids] kind=update_failed reason=${maskIds(error)}: cache kept`);
             throw error;
         }
     }
@@ -58573,7 +58610,7 @@ let UpiIdService = UpiIdService_1 = class UpiIdService {
                 return await operation();
             }
             catch (error) {
-                this.logger.warn(`Operation failed on attempt ${attempt}/${retries}`, error.message);
+                this.logger.warn(`Operation failed on attempt ${attempt}/${retries}`, maskIds(error));
                 if (attempt === retries) {
                     throw error;
                 }
@@ -64267,6 +64304,9 @@ const ORIGIN_ONLY_PATHS = [
     /^\/folders(?:$|[/?])/i,
     /^\/tgsignup(?:$|[/?])/i,
 ];
+const ORIGIN_READ_ONLY_PATHS = [
+    /^\/upi-ids(?:$|[/?])/i,
+];
 const IGNORE_PATHS = [
     '/',
     '/exit',
@@ -64333,7 +64373,12 @@ let AuthGuard = AuthGuard_1 = class AuthGuard {
             passedReason = 'IP allowed';
         }
         else if (origin && this.isOriginAllowed(origin) && this.isOriginOnlyPath(path, url, originalUrl)) {
-            passedReason = 'Origin allowed';
+            if (isSafeMethod || !this.isOriginReadOnlyPath(path, url, originalUrl)) {
+                passedReason = 'Origin allowed';
+            }
+            else {
+                this.logger.warn(`[auth] kind=origin_write_denied method=${method} path=${path}: an Origin alone cannot write this path`);
+            }
         }
         if (passedReason) {
             this.sanitizeQuery(request, queryApiKey);
@@ -64427,6 +64472,9 @@ let AuthGuard = AuthGuard_1 = class AuthGuard {
     isOriginOnlyPath(...urls) {
         const candidates = urls.filter(Boolean);
         return candidates.length > 0 && candidates.every((u) => ORIGIN_ONLY_PATHS.some((re) => re.test(u)));
+    }
+    isOriginReadOnlyPath(...urls) {
+        return urls.filter(Boolean).some((u) => ORIGIN_READ_ONLY_PATHS.some((re) => re.test(u)));
     }
     isOriginAllowed(origin) {
         try {
