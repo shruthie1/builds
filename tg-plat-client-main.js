@@ -41780,6 +41780,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   PARKED_ACCOUNTS_OPEN_MOBILE_INDEX: () => (/* binding */ PARKED_ACCOUNTS_OPEN_MOBILE_INDEX),
 /* harmony export */   PARKED_EPISODE_GC_MS: () => (/* binding */ PARKED_EPISODE_GC_MS),
 /* harmony export */   ParkedAccountsRepository: () => (/* binding */ ParkedAccountsRepository),
+/* harmony export */   gcAtFor: () => (/* binding */ gcAtFor),
+/* harmony export */   newerOpenFilter: () => (/* binding */ newerOpenFilter),
 /* harmony export */   stopPipeline: () => (/* binding */ stopPipeline),
 /* harmony export */   supersedeFilter: () => (/* binding */ supersedeFilter)
 /* harmony export */ });
@@ -41849,9 +41851,15 @@ function stopPipeline(reason) {
  * Review M1: both stored forms (canonical, '+canonical'), like CMS; the value as given when it is not a phone. The
  * insert itself is canonical, so a legacy '+' open episode of the same app is superseded too instead of lingering.
  */
-function supersedeFilter(mobile, app, id) {
+function supersedeFilter(mobile, app, id, parkedAt) {
     const forms = (0,_account_leases_repository__WEBPACK_IMPORTED_MODULE_1__.mobileLookupForms)(mobile);
-    return { mobile: { $in: forms.length ? forms : [mobile] }, open: true, _id: { $ne: id }, $or: [{ app }, { $expr: { $lte: ['$expiresAt', '$$NOW'] } }] };
+    // Owner 2026-11-21 (A3): only OLDER episodes. A delayed opener must not close a newer open episode. `$not $gte`
+    // also matches a row with no parkedAt (treated as older). newerOpenFilter is the exact complement.
+    return { mobile: { $in: forms.length ? forms : [mobile] }, open: true, _id: { $ne: id }, parkedAt: { $not: { $gte: parkedAt } }, $or: [{ app }, { $expr: { $lte: ['$expiresAt', '$$NOW'] } }] };
+}
+/** The open episodes supersedeFilter leaves alone only because they are as new as the seed or newer (A3). */
+function newerOpenFilter(mobile, app, id, parkedAt) {
+    return { ...supersedeFilter(mobile, app, id, parkedAt), parkedAt: { $gte: parkedAt } };
 }
 function duplicateKeyPattern(error) {
     const e = error;
@@ -41909,11 +41917,16 @@ class ParkedAccountsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE
                 // Same app only (review nit, P4): another app's UNEXPIRED open episode is left alone; the unique
                 // index then keeps refusing this seed and it ends 'failed' (logged below). Final review M1: an
                 // EXPIRED open episode of any app (nobody closed it: kill switch off, app stopped) is superseded too.
-                const closed = await this.guard(`openEpisode.supersede(${seed.mobile})`, 0, () => this.stopEach(supersedeFilter(seed.mobile, seed.app, seed._id), 'superseded', 'tg-platform:parked-supersede'));
+                const closed = await this.guard(`openEpisode.supersede(${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_6__.maskMobile)(seed.mobile)})`, 0, () => this.stopEach(supersedeFilter(seed.mobile, seed.app, seed._id, seed.parkedAt), 'superseded', 'tg-platform:parked-supersede'));
                 if (closed === 0) {
-                    const same = await this.guard(`openEpisode.exists(${seed._id})`, null, () => this.collection.findOne({ _id: seed._id }, { projection: { _id: 1 } }));
+                    const same = await this.guard(`openEpisode.exists(${maskEpisodeId(seed._id, seed.mobile)})`, null, () => this.collection.findOne({ _id: seed._id }, { projection: { _id: 1 } }));
                     if (same)
                         return 'exists';
+                    const newer = await this.guard(`openEpisode.newer(${maskEpisodeId(seed._id, seed.mobile)})`, null, () => this.collection.findOne(newerOpenFilter(seed.mobile, seed.app, seed._id, seed.parkedAt), { projection: { _id: 1 } }));
+                    if (newer) {
+                        this.logger.warn(`parked-episode kind=supersede_skip reason=newer_open episode=${maskEpisodeId(seed._id, seed.mobile)} newer=${maskEpisodeId(String(newer._id), seed.mobile)}`);
+                        return 'failed';
+                    }
                 }
             }
         }
@@ -42208,7 +42221,11 @@ class ParkedAccountsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE
             this.logger.error(`[${this.collectionName}] ${PARKED_ACCOUNTS_OPEN_MOBILE_INDEX} is missing after ensureIndexes: the parked scheduler will not run until it exists`);
     }
 }
-/** Review L6: expiresAt + 30 d, or null when expiresAt is not a valid Date. */
+/** An episode _id with its mobile masked, for logs (`promote:••••0101:1762...`). */
+function maskEpisodeId(id, mobile) {
+    return mobile ? String(id).split(mobile).join((0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_6__.maskMobile)(mobile)) : String(id);
+}
+/** Review L6: expiresAt + 30 d, or null when expiresAt is not a valid Date. Exported for the CMS MIRROR test (insert gcAt). */
 function gcAtFor(expiresAt) {
     const ms = expiresAt instanceof Date ? expiresAt.getTime() : NaN;
     return Number.isFinite(ms) ? new Date(ms + PARKED_EPISODE_GC_MS) : null;
@@ -44883,7 +44900,6 @@ class UserDataRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_2__.B
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
-/* harmony export */   ATTRIBUTION_CHANNEL_CAP: () => (/* binding */ ATTRIBUTION_CHANNEL_CAP),
 /* harmony export */   DISPLAY_NAME_HISTORY: () => (/* binding */ DISPLAY_NAME_HISTORY),
 /* harmony export */   UserIdentityRepository: () => (/* binding */ UserIdentityRepository)
 /* harmony export */ });
@@ -44891,8 +44907,6 @@ __webpack_require__.r(__webpack_exports__);
 
 /** How many distinct display names one person's row remembers. */
 const DISPLAY_NAME_HISTORY = 10;
-/** Cap on attribution channels, matching the userData field it mirrors. */
-const ATTRIBUTION_CHANNEL_CAP = 25;
 class UserIdentityRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_0__.BaseRepository {
     constructor() {
         super(...arguments);
@@ -44905,8 +44919,9 @@ class UserIdentityRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_0
      * Every field merges rather than overwrites, because two clients write here concurrently for
      * the same chatId and neither is more authoritative than the other:
      *   - `displayNames` is a set union, bounded, so the 554 conflicting observations are all kept;
-     *   - `attributionChannelIds` is a set union, so one account's evidence never erases another's;
      *   - `firstSeenAt` is written once and never moved backwards or forwards;
+     *   - `lastSeenAt` is the $max of the stored value and `now` (schema audit 2026-11-21), so a late commit of an
+     *     earlier sighting cannot move it backwards;
      *   - `handle` is only ever SET, never cleared, so an account that could not resolve a username
      *     cannot delete the one an account that could resolve it already stored.
      *
@@ -44922,17 +44937,13 @@ class UserIdentityRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_0
         // real name out of the bounded history.
         const nameIsReal = displayName !== '' && displayName !== 'Unknown';
         const handle = typeof input.handle === 'string' ? input.handle.trim() : '';
-        const channels = (input.attributionChannelIds ?? [])
-            .map((c) => String(c || '').trim())
-            .filter(Boolean)
-            .slice(0, ATTRIBUTION_CHANNEL_CAP);
         const pipeline = [
             {
                 $set: {
                     // User text inside a pipeline update: a leading '$' would be read as a field path, so wrap it.
                     chatId: { $literal: id },
                     firstSeenAt: { $ifNull: ['$firstSeenAt', now] },
-                    lastSeenAt: now,
+                    lastSeenAt: { $max: ['$lastSeenAt', now] },
                     ...(handle ? { handle: { $literal: handle } } : {}),
                     ...(nameIsReal
                         ? {
@@ -44944,30 +44955,12 @@ class UserIdentityRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_0
                             },
                         }
                         : {}),
-                    ...(channels.length
-                        ? {
-                            attributionChannelIds: {
-                                $slice: [
-                                    { $setUnion: [{ $ifNull: ['$attributionChannelIds', []] }, { $literal: channels }] },
-                                    -ATTRIBUTION_CHANNEL_CAP,
-                                ],
-                            },
-                            attributionUpdatedAt: now,
-                        }
-                        : {}),
                 },
             },
         ];
         return this.guardWrite(`observe(${id})`, () => this.collection.updateOne({ chatId: id }, pipeline, {
             upsert: true,
         }));
-    }
-    /** Read one person. Degrades to null: a missing identity row must never break a conversation. */
-    async find(chatId) {
-        const id = String(chatId || '').trim();
-        if (!id)
-            return null;
-        return this.guard(`find(${id})`, null, () => this.collection.findOne({ chatId: id }));
     }
     /**
      * `chatId` is the key, so it is UNIQUE here — unlike in userData, where the unique index is
@@ -45200,7 +45193,6 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   ACCOUNT_ROLE_EVENT_VERSION: () => (/* reexport safe */ _collections_account_role_events_repository__WEBPACK_IMPORTED_MODULE_15__.ACCOUNT_ROLE_EVENT_VERSION),
 /* harmony export */   ACCOUNT_ROLE_REASON_CODES: () => (/* reexport safe */ _collections_account_role_events_repository__WEBPACK_IMPORTED_MODULE_15__.ACCOUNT_ROLE_REASON_CODES),
 /* harmony export */   ACTIVE_CHANNEL_MESSAGE_IDS: () => (/* reexport safe */ _collections_channels_repository__WEBPACK_IMPORTED_MODULE_6__.ACTIVE_CHANNEL_MESSAGE_IDS),
-/* harmony export */   ATTRIBUTION_CHANNEL_CAP: () => (/* reexport safe */ _collections_user_identity_repository__WEBPACK_IMPORTED_MODULE_4__.ATTRIBUTION_CHANNEL_CAP),
 /* harmony export */   AccountHealthRepository: () => (/* reexport safe */ _collections_account_health_repository__WEBPACK_IMPORTED_MODULE_16__.AccountHealthRepository),
 /* harmony export */   AccountLeasesRepository: () => (/* reexport safe */ _collections_account_leases_repository__WEBPACK_IMPORTED_MODULE_11__.AccountLeasesRepository),
 /* harmony export */   AccountRoleEventsRepository: () => (/* reexport safe */ _collections_account_role_events_repository__WEBPACK_IMPORTED_MODULE_15__.AccountRoleEventsRepository),
@@ -45263,11 +45255,13 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   describeError: () => (/* reexport safe */ _connection__WEBPACK_IMPORTED_MODULE_0__.describeError),
 /* harmony export */   emptyPromoteAvailability: () => (/* reexport safe */ _collections_promote_repository__WEBPACK_IMPORTED_MODULE_7__.emptyPromoteAvailability),
 /* harmony export */   ensureAllIndexes: () => (/* reexport safe */ _repositories__WEBPACK_IMPORTED_MODULE_18__.ensureAllIndexes),
+/* harmony export */   gcAtFor: () => (/* reexport safe */ _collections_parked_accounts_repository__WEBPACK_IMPORTED_MODULE_12__.gcAtFor),
 /* harmony export */   getPromoteRuntimeEligibilityFilter: () => (/* reexport safe */ _collections_promote_repository__WEBPACK_IMPORTED_MODULE_7__.getPromoteRuntimeEligibilityFilter),
 /* harmony export */   isDuplicateKeyError: () => (/* reexport safe */ _collections_account_leases_repository__WEBPACK_IMPORTED_MODULE_11__.isDuplicateKeyError),
 /* harmony export */   isPayerRow: () => (/* reexport safe */ _collections_user_data_repository__WEBPACK_IMPORTED_MODULE_3__.isPayerRow),
 /* harmony export */   leaseId: () => (/* reexport safe */ _collections_account_leases_repository__WEBPACK_IMPORTED_MODULE_11__.leaseId),
 /* harmony export */   mobileLookupForms: () => (/* reexport safe */ _collections_account_leases_repository__WEBPACK_IMPORTED_MODULE_11__.mobileLookupForms),
+/* harmony export */   newerOpenFilter: () => (/* reexport safe */ _collections_parked_accounts_repository__WEBPACK_IMPORTED_MODULE_12__.newerOpenFilter),
 /* harmony export */   normalizeActiveChannelWrite: () => (/* reexport safe */ _collections_channels_repository__WEBPACK_IMPORTED_MODULE_6__.normalizeActiveChannelWrite),
 /* harmony export */   normalizeChannelKey: () => (/* reexport safe */ _collections_channels_repository__WEBPACK_IMPORTED_MODULE_6__.normalizeChannelKey),
 /* harmony export */   normalizeRoleEventMobile: () => (/* reexport safe */ _collections_account_role_events_repository__WEBPACK_IMPORTED_MODULE_15__.normalizeRoleEventMobile),
@@ -63957,8 +63951,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "3f6de0006b09352d85c656ee00058c1ff8eb7e11" : 0;
-    const builtAt =  true ? "2026-11-21T03:44:46.541Z" : 0;
+    const sha =  true ? "5d38774d7d4dc64430d175bd6c2b3fc1f47f7d73" : 0;
+    const builtAt =  true ? "2026-11-21T05:42:48.307Z" : 0;
     return { sha, builtAt };
 }
 
