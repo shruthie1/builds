@@ -22377,6 +22377,7 @@ const isPermanentError_1 = __importDefault(__webpack_require__(/*! ../../utils/i
 const bots_1 = __webpack_require__(/*! ../bots */ "./src/components/bots/index.ts");
 const base_client_service_1 = __webpack_require__(/*! ../shared/base-client.service */ "./src/components/shared/base-client.service.ts");
 const client_helper_utils_1 = __webpack_require__(/*! ../shared/client-helper.utils */ "./src/components/shared/client-helper.utils.ts");
+const warmup_phases_1 = __webpack_require__(/*! ../shared/warmup-phases */ "./src/components/shared/warmup-phases.ts");
 const enrollment_lock_1 = __webpack_require__(/*! ../shared/enrollment-lock */ "./src/components/shared/enrollment-lock.ts");
 const account_health_1 = __webpack_require__(/*! ../shared/account-health */ "./src/components/shared/account-health.ts");
 const pool_claim_1 = __webpack_require__(/*! ../shared/onboarding/pool-claim */ "./src/components/shared/onboarding/pool-claim.ts");
@@ -23120,19 +23121,38 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
                 authsRemoved: !!bc.otherAuthsRemovedAt,
                 channels: bc.channels || 0,
                 onCooldown: this.isOnCooldown(bc.mobile, bc.lastUpdateAttempt, now),
+                dueAt: (0, warmup_phases_1.isWarmupSlotAction)(warmupAction.action) ? (0, warmup_phases_1.getWarmupActionDueAt)(bc, warmupAction.action) : null,
             };
             if (warmupAction.phase === base_client_service_1.WarmupPhase.SETTLING) {
                 settlingDetails.push(entry);
             }
             wouldProcess.push(entry);
         }
-        wouldProcess.sort((a, b) => b.priority - a.priority);
-        const simEffectiveCap = this.getEffectiveUpdatesCap(wouldProcess.length);
+        wouldProcess.sort((a, b) => {
+            const aSlot = (0, warmup_phases_1.isWarmupSlotAction)(a.action) ? 1 : 0;
+            const bSlot = (0, warmup_phases_1.isWarmupSlotAction)(b.action) ? 1 : 0;
+            if (aSlot !== bSlot)
+                return bSlot - aSlot;
+            if (aSlot) {
+                const aDue = a.dueAt ?? Number.MAX_SAFE_INTEGER;
+                const bDue = b.dueAt ?? Number.MAX_SAFE_INTEGER;
+                if (aDue !== bDue)
+                    return aDue - bDue;
+            }
+            return b.priority - a.priority;
+        });
+        const simRunsLeftToday = this.getWarmupRunsLeftToday(now);
+        const simDueSlot = wouldProcess.filter((e) => !e.onCooldown && !e.processSkipReason && (0, warmup_phases_1.isWarmupSlotAction)(e.action)).length;
+        const simEffectiveCap = this.getEffectiveUpdatesCap(simDueSlot, simRunsLeftToday);
         let simUpdates = 0;
+        let simSensitive = 0;
+        let simOrganic = 0;
         const simProcessed = [];
         const simSkipped = [];
         for (const entry of wouldProcess) {
-            if (simUpdates >= simEffectiveCap) {
+            const dbOnly = ['wait', 'join_channels', 'advance_to_ready'].includes(entry.action)
+                && entry.dbPhase !== base_client_service_1.WarmupPhase.SESSION_ROTATED;
+            if (!dbOnly && simUpdates >= simEffectiveCap) {
                 simSkipped.push({ mobile: entry.mobile, action: entry.action, priority: entry.priority, reason: 'slot_limit_reached' });
                 continue;
             }
@@ -23143,6 +23163,20 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
             if (entry.processSkipReason) {
                 simSkipped.push({ mobile: entry.mobile, action: entry.action, reason: entry.processSkipReason });
                 continue;
+            }
+            if (entry.action === 'organic_only') {
+                if (simOrganic >= this.MAX_ORGANIC_ACTIONS_PER_CYCLE) {
+                    simSkipped.push({ mobile: entry.mobile, action: entry.action, priority: entry.priority, reason: 'organic_limit_reached' });
+                    continue;
+                }
+                simOrganic++;
+            }
+            if (this.isSensitiveWarmupAction(entry.action)) {
+                if (simSensitive >= this.MAX_SENSITIVE_ACTIONS_PER_CYCLE) {
+                    simSkipped.push({ mobile: entry.mobile, action: entry.action, priority: entry.priority, reason: 'sensitive_limit_reached' });
+                    continue;
+                }
+                simSensitive++;
             }
             const isMutation = !['wait', 'join_channels', 'advance_to_ready', 'organic_only'].includes(entry.action);
             simProcessed.push({
@@ -23165,7 +23199,8 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
             maxUpdatesPerCycle: this.MAX_UPDATES_PER_CYCLE,
             effectiveUpdatesCap: simEffectiveCap,
             capMin: this.MIN_UPDATES_PER_CYCLE,
-            targetDrainDays: this.WARMUP_TARGET_DRAIN_DAYS,
+            runsLeftToday: simRunsLeftToday,
+            dueSlotActions: simDueSlot,
             runsPerDay: this.WARMUP_RUNS_PER_DAY,
             eligibleToProcess: wouldProcess.length,
             simulation: {
@@ -23174,6 +23209,7 @@ let BufferClientService = BufferClientService_1 = class BufferClientService exte
                 totalProcessed: simProcessed.length,
                 totalSkippedAfterSlotLimit: simSkipped.filter(s => s.reason === 'slot_limit_reached').length,
                 totalSkippedCooldown: simSkipped.filter(s => s.reason === 'cooldown').length,
+                totalSkippedSensitive: simSkipped.filter(s => s.reason === 'sensitive_limit_reached').length,
                 totalSkippedOther: simSkipped.filter(s => s.reason !== 'slot_limit_reached' && s.reason !== 'cooldown').length,
             },
             top30WouldProcess: simProcessed.slice(0, 30),
@@ -23564,7 +23600,7 @@ exports.BufferClientService = BufferClientService = BufferClientService_1 = __de
 
 
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.BUFFER_SUPPLY_HARD_CAP_MAX = exports.BUFFER_SUPPLY_ENV = exports.LEGACY_HEALTHY_CAP = exports.SENSITIVE_ACTIONS_PER_ACCOUNT = void 0;
+exports.BUFFER_SUPPLY_HARD_CAP_MAX = exports.BUFFER_SUPPLY_ENV = exports.LEGACY_HEALTHY_CAP = exports.ENGINE_SENSITIVE_HEADROOM_PCT = exports.SENSITIVE_ACTIONS_PER_ACCOUNT = void 0;
 exports.classifyBufferForCap = classifyBufferForCap;
 exports.engineWeeklyCeiling = engineWeeklyCeiling;
 exports.defaultBufferSupplyConfig = defaultBufferSupplyConfig;
@@ -23616,8 +23652,9 @@ function classifyBufferForCap(doc, now, opts) {
     return { counted: false, reason: 'unknown_spam_status' };
 }
 exports.SENSITIVE_ACTIONS_PER_ACCOUNT = 3;
+exports.ENGINE_SENSITIVE_HEADROOM_PCT = 85;
 function engineWeeklyCeiling(maxSensitivePerRun, runsPerDay) {
-    return Math.floor((maxSensitivePerRun * runsPerDay * 7) / exports.SENSITIVE_ACTIONS_PER_ACCOUNT);
+    return Math.floor((maxSensitivePerRun * runsPerDay * 7 * exports.ENGINE_SENSITIVE_HEADROOM_PCT) / (exports.SENSITIVE_ACTIONS_PER_ACCOUNT * 100));
 }
 exports.LEGACY_HEALTHY_CAP = 20;
 exports.BUFFER_SUPPLY_ENV = {
@@ -51503,10 +51540,19 @@ function isRecord(value) {
     return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 class BaseClientService {
-    getEffectiveUpdatesCap(pendingMutationCount) {
-        const pending = Math.max(0, Math.floor(pendingMutationCount || 0));
-        const perRunToHitSla = Math.ceil(pending / (this.WARMUP_TARGET_DRAIN_DAYS * this.WARMUP_RUNS_PER_DAY));
-        return Math.max(this.MIN_UPDATES_PER_CYCLE, Math.min(this.MAX_UPDATES_PER_CYCLE, perRunToHitSla));
+    joinSweepCovers(running, pending) {
+        return !running.clientId || running.clientId === pending.clientId;
+    }
+    getEffectiveUpdatesCap(dueSlotActions, runsLeftToday = this.WARMUP_RUNS_PER_DAY) {
+        const due = Math.max(0, Math.floor(dueSlotActions || 0));
+        const runs = Math.max(1, Math.floor(runsLeftToday || 1));
+        return Math.max(this.MIN_UPDATES_PER_CYCLE, Math.min(this.MAX_UPDATES_PER_CYCLE, Math.ceil(due / runs)));
+    }
+    getWarmupRunsLeftToday(now) {
+        const ist = new Date(now + 5.5 * 60 * 60 * 1000);
+        const minutes = ist.getUTCHours() * 60 + ist.getUTCMinutes();
+        const slot = Math.floor(minutes / (1440 / this.WARMUP_RUNS_PER_DAY));
+        return Math.max(1, this.WARMUP_RUNS_PER_DAY - slot);
     }
     isSensitiveWarmupAction(action) {
         return !!action && BaseClientService.SENSITIVE_WARMUP_ACTIONS.has(action);
@@ -51583,19 +51629,9 @@ class BaseClientService {
     getJoinCapacityEligibilityFilter() {
         return {
             $or: [
+                { warmupPhase: warmup_phases_1.WarmupPhase.GROWING },
                 {
-                    warmupPhase: {
-                        $in: [
-                            warmup_phases_1.WarmupPhase.ENROLLED,
-                            warmup_phases_1.WarmupPhase.SETTLING,
-                            warmup_phases_1.WarmupPhase.IDENTITY,
-                            warmup_phases_1.WarmupPhase.GROWING,
-                            warmup_phases_1.WarmupPhase.MATURING,
-                        ],
-                    },
-                },
-                {
-                    warmupPhase: { $in: [warmup_phases_1.WarmupPhase.READY, warmup_phases_1.WarmupPhase.SESSION_ROTATED] },
+                    warmupPhase: { $in: [warmup_phases_1.WarmupPhase.MATURING, warmup_phases_1.WarmupPhase.READY, warmup_phases_1.WarmupPhase.SESSION_ROTATED] },
                     channels: { $lt: this.config.operationalChannelThreshold ?? warmup_phases_1.MIN_CHANNELS_FOR_MATURING },
                 },
             ],
@@ -51655,6 +51691,9 @@ class BaseClientService {
         this.isLeaveChannelProcessing = false;
         this.isWarmupCheckProcessing = false;
         this.isPrepareJoinChannelsProcessing = false;
+        this.pendingJoinSweep = null;
+        this.runningJoinSweepScope = null;
+        this.JOIN_ROUND_TIME_BUDGET_MS = 150 * 60 * 1000;
         this.activeTimeouts = new Set();
         this.ONE_DAY_MS = 24 * 60 * 60 * 1000;
         this.THREE_MONTHS_MS = 3 * 30 * this.ONE_DAY_MS;
@@ -51668,11 +51707,11 @@ class BaseClientService {
         this.MAX_FAILED_ATTEMPTS = 3;
         this.FAILURE_RESET_DAYS = 7;
         this.FAILURE_RETRY_BACKOFF_HOURS = 24;
-        this.MAX_UPDATES_PER_CYCLE = 20;
+        this.MAX_UPDATES_PER_CYCLE = 40;
         this.MIN_UPDATES_PER_CYCLE = 8;
-        this.WARMUP_TARGET_DRAIN_DAYS = 8;
         this.WARMUP_RUNS_PER_DAY = 4;
-        this.MAX_SENSITIVE_ACTIONS_PER_CYCLE = 5;
+        this.MAX_SENSITIVE_ACTIONS_PER_CYCLE = 13;
+        this.WARMUP_STUCK_AFTER_MS = 48 * 60 * 60 * 1000;
         this.MAX_ORGANIC_ACTIONS_PER_CYCLE = 5;
         this.MAX_READY_ROTATIONS_PER_SWEEP = 1;
         this.LONG_WARMING_ALERT_DAYS = 60;
@@ -51684,6 +51723,12 @@ class BaseClientService {
         this.MAX_LEAVES_PER_DAY = 20;
         this.dailyLeaveCounts = new Map();
         this.dailyLeaveDate = '';
+        this.growingChannelProgress = new Map();
+        this.JOIN_CANDIDATE_FETCH_LIMIT = 1000;
+        this.lastJoinServedAt = new Map();
+        this.joinCandidatePhase = new Map();
+        this.joinPendingSkipped = 0;
+        this.JOIN_RECOVERY_SHARE_PCT = 50;
         this.PERIODIC_HEALTH_CHECK_LIMIT = pool_profile_1.HEALTH_CHECK_CONNECTIONS_PER_RUN;
         this.PERIODIC_HEALTH_CHECK_SPARE = 10;
         this.HEALTH_CHECK_RETRY_AFTER_MS = 24 * 60 * 60 * 1000;
@@ -52009,31 +52054,74 @@ class BaseClientService {
             const priority = (0, warmup_phases_1.calculateWarmupPriority)(doc, warmupAction, now);
             toProcess.push({ doc, client, clientId: doc.clientId, priority, warmupAction });
         }
-        toProcess.sort((a, b) => b.priority - a.priority);
+        const dueAtOf = new Map();
+        for (const entry of toProcess) {
+            dueAtOf.set(entry.doc.mobile, (0, warmup_phases_1.isWarmupSlotAction)(entry.warmupAction.action)
+                ? (0, warmup_phases_1.getWarmupActionDueAt)(entry.doc, entry.warmupAction.action)
+                : null);
+        }
+        toProcess.sort((a, b) => {
+            const aSlot = (0, warmup_phases_1.isWarmupSlotAction)(a.warmupAction.action) ? 1 : 0;
+            const bSlot = (0, warmup_phases_1.isWarmupSlotAction)(b.warmupAction.action) ? 1 : 0;
+            if (aSlot !== bSlot)
+                return bSlot - aSlot;
+            if (aSlot) {
+                const aDue = dueAtOf.get(a.doc.mobile) ?? Number.MAX_SAFE_INTEGER;
+                const bDue = dueAtOf.get(b.doc.mobile) ?? Number.MAX_SAFE_INTEGER;
+                if (aDue !== bDue)
+                    return aDue - bDue;
+            }
+            return b.priority - a.priority;
+        });
         this.orderSessionRotatedOldestCheckedFirst(toProcess);
         const healthCheckCap = Math.min(pool_profile_1.HEALTH_CHECK_CONNECTIONS_PER_RUN, profile.warmupRun.healthCheckShare);
         let healthCheckConnects = 0;
         let healthChecksDeferred = 0;
-        const capBacklog = profile.warmupRun.capCountsSessionRotated
-            ? toProcess.length
-            : toProcess.filter((entry) => entry.doc.warmupPhase !== warmup_phases_1.WarmupPhase.SESSION_ROTATED).length;
-        const effectiveCap = this.getEffectiveUpdatesCap(capBacklog);
+        const dueSlotCount = toProcess.filter((entry) => (0, warmup_phases_1.isWarmupSlotAction)(entry.warmupAction.action)).length;
+        const runsLeftToday = this.getWarmupRunsLeftToday(now);
+        const effectiveCap = this.getEffectiveUpdatesCap(dueSlotCount, runsLeftToday);
         let sensitiveUpdates = 0;
         let organicUpdates = 0;
-        this.logger.log(`${profile.label} warmup run: ${toProcess.length} eligible, effective cap=${effectiveCap} (ceiling ${this.MAX_UPDATES_PER_CYCLE}), sensitive sub-cap=${this.MAX_SENSITIVE_ACTIONS_PER_CYCLE}, organic sub-cap=${this.MAX_ORGANIC_ACTIONS_PER_CYCLE}`);
+        this.logger.log(`${profile.label} warmup run: ${toProcess.length} eligible, ${dueSlotCount} due, effective cap=${effectiveCap} (runs left today ${runsLeftToday}, ceiling ${this.MAX_UPDATES_PER_CYCLE}), sensitive sub-cap=${this.MAX_SENSITIVE_ACTIONS_PER_CYCLE}, organic sub-cap=${this.MAX_ORGANIC_ACTIONS_PER_CYCLE}`);
+        const stats = {
+            mutated: 0, failed: 0, organic: 0, joinDelegated: 0, dbOnly: 0,
+            skippedCap: 0, skippedSensitive: 0, skippedOrganic: 0,
+            skippedHealthCap: 0, skippedHealthBusy: 0, skippedHealthRecent: 0,
+        };
+        const byPhase = {};
+        const notDone = [];
+        const joinNotQueued = [];
         for (const { doc, client, warmupAction } of toProcess) {
-            if (totalUpdates >= effectiveCap)
-                break;
             const warmupPhase = doc.warmupPhase || warmup_phases_1.WarmupPhase.ENROLLED;
+            byPhase[warmupAction.phase] = (byPhase[warmupAction.phase] || 0) + 1;
+            const plannedAction = warmupAction.action;
+            const plannedSlot = (0, warmup_phases_1.isWarmupSlotAction)(plannedAction);
+            if (warmupAction.action === 'join_channels') {
+                stats.joinDelegated++;
+                if (!this.joinChannelMap.has(doc.mobile))
+                    joinNotQueued.push(doc.mobile);
+            }
+            const dbOnly = BaseClientService.DB_ONLY_WARMUP_ACTIONS.has(plannedAction)
+                && warmupPhase !== warmup_phases_1.WarmupPhase.SESSION_ROTATED;
+            if (!dbOnly && totalUpdates >= effectiveCap) {
+                stats.skippedCap++;
+                if (plannedSlot)
+                    notDone.push({ doc, action: warmupAction });
+                continue;
+            }
             if (warmupPhase === warmup_phases_1.WarmupPhase.SESSION_ROTATED) {
                 if (this.getHealthCheckBusyMobiles().has(doc.mobile)) {
                     this.logger.debug(`Skipping ${pool} warmup health check for ${(0, monitor_util_1.maskMobile)(doc.mobile)}: busy in join/leave queue or client setup`);
+                    stats.skippedHealthBusy++;
                     continue;
                 }
-                if (this.healthCheckFailedRecently(doc, now))
+                if (this.healthCheckFailedRecently(doc, now)) {
+                    stats.skippedHealthRecent++;
                     continue;
+                }
                 if (healthCheckConnects >= healthCheckCap) {
                     healthChecksDeferred++;
+                    stats.skippedHealthCap++;
                     continue;
                 }
                 const lastChecked = doc.lastChecked ? new Date(doc.lastChecked).getTime() : 0;
@@ -52043,28 +52131,94 @@ class BaseClientService {
                 if (!healthCheck.passed)
                     continue;
             }
-            const plannedAction = warmupAction.action;
             if (plannedAction === 'organic_only' && organicUpdates >= this.MAX_ORGANIC_ACTIONS_PER_CYCLE) {
+                stats.skippedOrganic++;
                 continue;
             }
             const plannedSensitive = this.isSensitiveWarmupAction(plannedAction);
             if (plannedSensitive && sensitiveUpdates >= this.MAX_SENSITIVE_ACTIONS_PER_CYCLE) {
+                stats.skippedSensitive++;
+                notDone.push({ doc, action: warmupAction });
                 continue;
             }
             if (plannedSensitive)
                 sensitiveUpdates++;
-            if (plannedAction === 'organic_only')
+            if (plannedAction === 'organic_only') {
                 organicUpdates++;
+                stats.organic++;
+            }
+            if (dbOnly)
+                stats.dbOnly++;
             const processResult = await this.processClient(doc, client, warmupAction);
             if (processResult.updateCount > 0) {
                 totalUpdates += processResult.updateCount;
+                stats.mutated++;
                 updatedEntries.push({ clientId: client.clientId, mobile: doc.mobile, change: processResult.updateSummary || 'updated', count: processResult.updateCount });
+            }
+            else if (plannedSlot) {
+                stats.failed++;
+                notDone.push({ doc, action: warmupAction });
             }
         }
         if (healthChecksDeferred > 0) {
             this.logger.log(`${profile.label} warmup run: health-check cap ${healthCheckCap} reached, ${healthChecksDeferred} session_rotated account(s) deferred to the next run`);
         }
+        const skippedTotal = stats.skippedCap + stats.skippedSensitive + stats.skippedOrganic
+            + stats.skippedHealthCap + stats.skippedHealthBusy + stats.skippedHealthRecent;
+        const byPhaseText = Object.keys(byPhase).sort().map((k) => `${k}:${byPhase[k]}`).join(',') || 'none';
+        this.logger.log(`warmup-health kind=run pool=${pool} eligible=${toProcess.length} due=${dueSlotCount} cap=${effectiveCap} runsLeft=${runsLeftToday} ` +
+            `mutated=${stats.mutated} failed=${stats.failed} skipped=${skippedTotal} skippedCap=${stats.skippedCap} ` +
+            `skippedSensitive=${stats.skippedSensitive} skippedOrganic=${stats.skippedOrganic} ` +
+            `skippedHealthCap=${stats.skippedHealthCap} skippedHealthBusy=${stats.skippedHealthBusy} skippedHealthRecent=${stats.skippedHealthRecent} ` +
+            `organic=${stats.organic} dbOnly=${stats.dbOnly} ` +
+            `joinDelegated=${stats.joinDelegated} joinNotQueued=${joinNotQueued.length} byPhase=${byPhaseText}`);
+        if (stats.joinDelegated > 0) {
+            this.logger.log(`warmup-health kind=join_delegated pool=${pool} accounts=${stats.joinDelegated} ` +
+                `queued=${stats.joinDelegated - joinNotQueued.length} notQueued=${joinNotQueued.length} ` +
+                `joinBusy=${this.isJoinChannelProcessing} next=join-sweep`);
+        }
+        this.logWarmupStuck(toProcess, notDone, now);
         await hooks.enrolAfterWarmup({ clients, assigned, goodIds, now, totalUpdates, updatedEntries });
+    }
+    logWarmupStuck(entries, notDone, now) {
+        const pool = this.clientType;
+        const day = this.ONE_DAY_MS;
+        const fmt = (ms) => (ms / day).toFixed(1);
+        let logged = 0;
+        for (const { doc, action } of notDone) {
+            const dueAt = (0, warmup_phases_1.getWarmupActionDueAt)(doc, action.action);
+            if (dueAt === null || now - dueAt <= this.WARMUP_STUCK_AFTER_MS)
+                continue;
+            this.logger.warn(`warmup-health kind=stuck pool=${pool} mobile=${(0, monitor_util_1.maskMobile)(doc.mobile)} phase=${action.phase} action=${action.action} reason=step_overdue days=${fmt(now - dueAt)}`);
+            logged++;
+        }
+        const seen = new Set();
+        for (const { doc, warmupAction } of entries) {
+            if (warmupAction.action !== 'join_channels')
+                continue;
+            seen.add(doc.mobile);
+            const channels = doc.channels || 0;
+            const prev = this.growingChannelProgress.get(doc.mobile);
+            if (!prev || prev.channels !== channels) {
+                this.growingChannelProgress.set(doc.mobile, { channels, since: now });
+            }
+            else if (now - prev.since > this.WARMUP_STUCK_AFTER_MS) {
+                this.logger.warn(`warmup-health kind=stuck pool=${pool} mobile=${(0, monitor_util_1.maskMobile)(doc.mobile)} phase=${warmupAction.phase} action=join_channels reason=no_channel_growth channels=${channels} days=${fmt(now - prev.since)}`);
+                logged++;
+            }
+            if (warmupAction.phase === warmup_phases_1.WarmupPhase.GROWING) {
+                const daysInGrowing = (0, warmup_phases_1.getGrowingDaysInPhase)(doc, now);
+                if (daysInGrowing > warmup_phases_1.GROWING_ADVANCE_DEADLINE_DAYS && channels < this.operationalFloor) {
+                    this.logger.warn(`warmup-health kind=stuck pool=${pool} mobile=${(0, monitor_util_1.maskMobile)(doc.mobile)} phase=growing action=join_channels reason=below_floor_past_deadline channels=${channels} floor=${this.operationalFloor} days=${daysInGrowing.toFixed(1)}`);
+                    logged++;
+                }
+            }
+        }
+        for (const mobile of [...this.growingChannelProgress.keys()]) {
+            if (!seen.has(mobile))
+                this.growingChannelProgress.delete(mobile);
+        }
+        return logged;
     }
     orderSessionRotatedOldestCheckedFirst(list) {
         const slots = [];
@@ -52114,32 +52268,47 @@ class BaseClientService {
     isPrimaryClientMobile(mobile, primaryClientMobiles) {
         return !!mobile && primaryClientMobiles.has(mobile);
     }
-    async findPrioritizedJoinCandidates(query) {
+    async findPrioritizedJoinCandidates(query, slots = this.config.maxMapSize) {
         const model = this.model;
         const limit = this.config.maxMapSize;
-        const operationalFloor = this.config.operationalChannelThreshold ?? this.poolProfile.operationalFloor;
-        const recoveryQuery = {
-            ...query,
-            warmupPhase: { $in: [warmup_phases_1.WarmupPhase.READY, warmup_phases_1.WarmupPhase.SESSION_ROTATED] },
-            channels: { $lt: operationalFloor },
-        };
-        const recoveryQueryResult = model
-            .find(recoveryQuery)
-            .sort({ channels: -1 })
-            .limit(limit);
-        const recoveryCandidates = await this.resolveJoinCandidateQuery(recoveryQueryResult);
-        if (recoveryCandidates.length >= limit)
-            return recoveryCandidates;
-        const recoveryMobiles = new Set(recoveryCandidates.map((candidate) => candidate.mobile));
-        const standardQueryResult = model
+        const fetched = model
             .find(query)
-            .sort({ channels: -1 })
-            .limit(limit);
-        const standardCandidates = await this.resolveJoinCandidateQuery(standardQueryResult);
-        return [
-            ...recoveryCandidates,
-            ...standardCandidates.filter((candidate) => !recoveryMobiles.has(candidate.mobile)),
-        ].slice(0, limit);
+            .sort({ channels: 1, enrolledAt: 1 })
+            .limit(this.JOIN_CANDIDATE_FETCH_LIMIT);
+        const docs = await this.resolveJoinCandidateQuery(fetched);
+        if (docs.length >= this.JOIN_CANDIDATE_FETCH_LIMIT) {
+            this.logger.warn(`join-sweep kind=select_truncated limit=${this.JOIN_CANDIDATE_FETCH_LIMIT}`);
+        }
+        for (const mobile of [...this.joinCandidatePhase.keys()]) {
+            if (!this.joinChannelMap.has(mobile))
+                this.joinCandidatePhase.delete(mobile);
+        }
+        const served = (mobile) => this.lastJoinServedAt.get(mobile) ?? 0;
+        const isRecovery = (doc) => doc.warmupPhase === warmup_phases_1.WarmupPhase.READY || doc.warmupPhase === warmup_phases_1.WarmupPhase.SESSION_ROTATED;
+        const ranked = docs.map((doc, rank) => ({ doc, rank }));
+        const recovery = ranked
+            .filter((entry) => isRecovery(entry.doc))
+            .sort((a, b) => (served(a.doc.mobile) - served(b.doc.mobile))
+            || ((b.doc.channels || 0) - (a.doc.channels || 0))
+            || (a.rank - b.rank))
+            .map((entry) => entry.doc);
+        const warming = ranked
+            .filter((entry) => !isRecovery(entry.doc))
+            .sort((a, b) => (served(a.doc.mobile) - served(b.doc.mobile)) || (a.rank - b.rank))
+            .map((entry) => entry.doc);
+        const reserve = Math.ceil((Math.max(0, slots) * this.JOIN_RECOVERY_SHARE_PCT) / 100);
+        const ordered = [...recovery.slice(0, reserve), ...warming, ...recovery.slice(reserve)].slice(0, limit);
+        for (const doc of ordered)
+            this.joinCandidatePhase.set(doc.mobile, doc.warmupPhase || warmup_phases_1.WarmupPhase.ENROLLED);
+        return ordered;
+    }
+    formatJoinByPhase(mobiles) {
+        const counts = {};
+        for (const mobile of mobiles) {
+            const phase = this.joinCandidatePhase.get(mobile) || 'unknown';
+            counts[phase] = (counts[phase] || 0) + 1;
+        }
+        return Object.keys(counts).sort().map((k) => `${k}:${counts[k]}`).join(',') || 'none';
     }
     async resolveJoinCandidateQuery(query) {
         const executable = query;
@@ -52149,6 +52318,8 @@ class BaseClientService {
     }
     async refillJoinQueue(clientId) {
         if (this.isJoinChannelProcessing || this.isLeaveChannelProcessing)
+            return 0;
+        if (this.isPrepareJoinChannelsProcessing)
             return 0;
         if (this.telegramService.hasActiveClientSetup())
             return 0;
@@ -52175,16 +52346,26 @@ class BaseClientService {
                 excludedCount: excludedMobiles.size,
             });
         }
-        const eligible = await this.findPrioritizedJoinCandidates(query);
+        const freeSlots = this.config.maxMapSize - this.joinChannelMap.size;
+        this.joinPendingSkipped = 0;
+        const eligible = freeSlots > 0 ? await this.findPrioritizedJoinCandidates(query, freeSlots) : [];
         let added = 0;
         let leaveAdded = 0;
+        let capped = 0;
+        let connects = 0;
+        const addedMobiles = [];
         for (const doc of eligible) {
             if (this.isPrimaryClientMobile(doc.mobile, primaryClientMobiles)) {
                 this.logger.debug(`Skipping refill candidate ${(0, monitor_util_1.maskMobile)(doc.mobile)}: it is the live client mobile`);
                 continue;
             }
-            if (this.isMobileDailyCapped(doc.mobile))
+            if (this.isMobileDailyCapped(doc.mobile)) {
+                capped++;
                 continue;
+            }
+            if (connects >= freeSlots || this.joinChannelMap.size >= this.config.maxMapSize)
+                break;
+            connects++;
             let client = null;
             try {
                 client = await connection_manager_1.connectionManager.getClient(doc.mobile, { autoDisconnect: false, handler: false });
@@ -52199,6 +52380,7 @@ class BaseClientService {
                         continue;
                     if (this.safeSetJoinChannelMap(doc.mobile, channelsToJoin)) {
                         added++;
+                        addedMobiles.push(doc.mobile);
                     }
                 }
                 else if (!this.leaveChannelMap.has(doc.mobile)) {
@@ -52218,9 +52400,8 @@ class BaseClientService {
                 await this.safeUnregisterClient(doc.mobile);
             }
         }
-        if (added > 0) {
-            this.logger.log(`Refilled join queue with ${added} ${this.clientType} clients`);
-        }
+        this.logger.log(`join-sweep kind=select source=refill pool=${this.clientType} free=${Math.max(0, freeSlots)} candidates=${eligible.length} connects=${connects} picked=${added} ` +
+            `byPhase=${this.formatJoinByPhase(addedMobiles)} capped=${capped} leave=${leaveAdded} pendingSkipped=${this.joinPendingSkipped}`);
         if (leaveAdded > 0 && !this.leaveChannelIntervalId) {
             this.createTimeout(() => this.leaveChannelQueue(), this.drawPacing(pool_profile_1.ONBOARDING_PACING.joinSweep.refillLeaveQueueStart));
         }
@@ -52232,13 +52413,19 @@ class BaseClientService {
             return cfg.activeSetupMessage;
         }
         if (this.isJoinChannelProcessing || this.isLeaveChannelProcessing) {
-            this.logger.warn('Join/leave processing still in progress, skipping re-entry');
-            return 'Join/leave still processing, skipped';
+            this.pendingJoinSweep = { skipExisting, clientId };
+            this.logger.warn(`join-sweep kind=deferred pool=${this.clientType} reason=${this.isJoinChannelProcessing ? 'join_round_in_progress' : 'leave_in_progress'} ` +
+                `skipExisting=${skipExisting} clientId=${clientId || 'all'}`);
+            return 'Join/leave still processing, sweep deferred to the end of the round';
         }
         if (this.isPrepareJoinChannelsProcessing) {
             return 'Join-channel prepare already running, skipped';
         }
         this.isPrepareJoinChannelsProcessing = true;
+        this.runningJoinSweepScope = { clientId };
+        if (this.pendingJoinSweep && this.joinSweepCovers({ clientId }, this.pendingJoinSweep)) {
+            this.pendingJoinSweep = null;
+        }
         this.logger.log(cfg.startLog);
         try {
             if (cfg.scopesByClientId)
@@ -52259,7 +52446,43 @@ class BaseClientService {
         }
         finally {
             this.isPrepareJoinChannelsProcessing = false;
+            this.runningJoinSweepScope = null;
         }
+    }
+    async runDeferredJoinSweep(trigger) {
+        const pending = this.pendingJoinSweep;
+        if (!pending)
+            return false;
+        const pool = this.clientType;
+        if (this.isPrepareJoinChannelsProcessing) {
+            const running = this.runningJoinSweepScope || {};
+            if (this.joinSweepCovers(running, pending)) {
+                this.pendingJoinSweep = null;
+                this.logger.log(`join-sweep kind=deferred_superseded pool=${pool} trigger=${trigger} reason=sweep_in_progress`);
+                return true;
+            }
+            this.logger.log(`join-sweep kind=deferred_kept pool=${pool} trigger=${trigger} reason=sweep_other_scope ` +
+                `running=${running.clientId || 'all'} pending=${pending.clientId || 'all'}`);
+            return false;
+        }
+        const busy = this.isJoinChannelProcessing ? 'join_round_in_progress'
+            : this.isLeaveChannelProcessing ? 'leave_in_progress'
+                : this.telegramService.hasActiveClientSetup() ? 'client_setup'
+                    : null;
+        if (busy) {
+            this.logger.log(`join-sweep kind=deferred_kept pool=${pool} trigger=${trigger} reason=${busy}`);
+            return false;
+        }
+        this.pendingJoinSweep = null;
+        try {
+            const result = await this.runJoinSweep(pending.skipExisting, pending.clientId);
+            this.logger.log(`join-sweep kind=deferred_run pool=${pool} trigger=${trigger} skipExisting=${pending.skipExisting} ` +
+                `clientId=${pending.clientId || 'all'} result="${result}"`);
+        }
+        catch (error) {
+            this.logger.error(`join-sweep kind=deferred_run_failed pool=${pool} trigger=${trigger}`, error);
+        }
+        return true;
     }
     async joinSweepAccounts(clientId, preservedMobiles, primaryClientMobiles) {
         const cfg = this.poolProfile.joinSweep;
@@ -52279,14 +52502,23 @@ class BaseClientService {
                 primaryClientCount: primaryClientMobiles.size,
             });
         }
-        const clients = await this.findPrioritizedJoinCandidates(query);
+        const freeSlots = this.config.maxMapSize - this.joinChannelMap.size;
+        this.joinPendingSkipped = 0;
+        const clients = freeSlots > 0 ? await this.findPrioritizedJoinCandidates(query, freeSlots) : [];
         const joinSet = new Set();
         const leaveSet = new Set();
+        let capped = 0;
+        let connects = 0;
         for (let i = 0; i < clients.length; i++) {
             const document = clients[i];
             const mobile = document.mobile;
-            if (this.isMobileDailyCapped(mobile))
+            if (this.isMobileDailyCapped(mobile)) {
+                capped++;
                 continue;
+            }
+            if (connects >= freeSlots || this.joinChannelMap.size >= this.config.maxMapSize)
+                break;
+            connects++;
             let client = null;
             try {
                 client = await connection_manager_1.connectionManager.getClient(mobile, { autoDisconnect: false, handler: false });
@@ -52332,6 +52564,8 @@ class BaseClientService {
             }
         }
         await this.pace(pacing.settle);
+        this.logger.log(`join-sweep kind=select source=sweep pool=${this.clientType} free=${Math.max(0, freeSlots)} candidates=${clients.length} connects=${connects} picked=${joinSet.size} ` +
+            `byPhase=${this.formatJoinByPhase(joinSet)} capped=${capped} leave=${leaveSet.size} preserved=${preservedMobiles.size} pendingSkipped=${this.joinPendingSkipped}`);
         if (joinSet.size > 0) {
             this.createTimeout(() => this.joinChannelQueue(), this.drawPacing(pacing.joinQueueStart));
         }
@@ -53231,6 +53465,7 @@ class BaseClientService {
             return { updateCount: 0 };
         }
         if (warmupAction.action === 'join_channels') {
+            this.logger.debug(`warmup-health kind=join_delegated_one mobile=${(0, monitor_util_1.maskMobile)(doc.mobile)} phase=${warmupAction.phase} channels=${doc.channels || 0} queued=${this.joinChannelMap.has(doc.mobile)}`);
             return { updateCount: 0 };
         }
         if (warmupAction.action === 'advance_to_ready') {
@@ -53398,7 +53633,9 @@ class BaseClientService {
         }
         finally {
             this.isJoinChannelProcessing = false;
-            await this.scheduleNextJoinRound();
+            const ranDeferred = this.pendingJoinSweep ? await this.runDeferredJoinSweep('join_round_end') : false;
+            if (!ranDeferred || !this.joinChannelIntervalId)
+                await this.scheduleNextJoinRound();
         }
     }
     async getPendingJoinRequestChannelIds(mobile) {
@@ -53421,6 +53658,7 @@ class BaseClientService {
         if (capped <= 0)
             return [];
         const pending = await this.getPendingJoinRequestChannelIds(mobile);
+        this.joinPendingSkipped += pending.length;
         const notIds = pending.length ? Array.from(new Set([...excludedIds, ...pending])) : excludedIds;
         const result = currentChannels < 220
             ? await this.activeChannelsService.getActiveChannels(capped, 0, notIds)
@@ -53462,15 +53700,25 @@ class BaseClientService {
         this.resetDailyJoinCountersIfNeeded();
         const keys = Array.from(this.joinChannelMap.keys());
         this.logger.debug(`Processing join channel queue for ${keys.length} clients (round-robin, ${this.config.joinsPerMobilePerRound}/mobile)`);
+        const roundStart = Date.now();
+        const processed = [];
+        const round = { joined: 0, requested: 0, failed: 0, capped: 0, budgetStop: false };
         for (let i = 0; i < keys.length; i++) {
             const mobile = keys[i];
             let currentChannel = null;
             let joinCount = 0;
+            if (Date.now() - roundStart >= this.JOIN_ROUND_TIME_BUDGET_MS) {
+                round.budgetStop = true;
+                break;
+            }
             if (this.isMobileDailyCapped(mobile)) {
                 this.logger.debug(`${(0, monitor_util_1.maskMobile)(mobile)} hit daily cap (${this.config.maxChannelJoinsPerDay}), removing from queue`);
                 this.removeFromJoinMap(mobile);
+                round.capped++;
                 continue;
             }
+            processed.push(mobile);
+            this.lastJoinServedAt.set(mobile, Date.now());
             try {
                 const channels = this.joinChannelMap.get(mobile);
                 if (!channels || channels.length === 0) {
@@ -53501,6 +53749,7 @@ class BaseClientService {
                     }
                     await this.telegramService.tryJoiningChannel(mobile, currentChannel);
                     joinCount++;
+                    round.joined++;
                     this.incrementDailyJoinCount(mobile);
                     if (joinCount > 0 && joinCount % (2 + Math.floor(Math.random() * 2)) === 0) {
                         try {
@@ -53545,6 +53794,10 @@ class BaseClientService {
                 const inviteRequestSent = (0, telegram_error_code_1.hasTelegramErrorCode)(error, 'INVITE_REQUEST_SENT');
                 const errorDetails = inviteRequestSent ? null : this.handleError(error, `${mobile} ${currentChannel ? `@${currentChannel.username}` : ''} Join Channel Error`, mobile);
                 const rawErrorMessage = this.getErrorText(error);
+                if (inviteRequestSent)
+                    round.requested++;
+                else if (!(0, isDeadChannelError_1.default)(error))
+                    round.failed++;
                 if (inviteRequestSent) {
                     this.logger.debug(`${(0, monitor_util_1.maskMobile)(mobile)} join request sent (pending approval) for @${currentChannel?.username ?? 'unknown'}`);
                     this.incrementDailyJoinCount(mobile);
@@ -53608,6 +53861,18 @@ class BaseClientService {
                 }
             }
         }
+        if (round.budgetStop) {
+            for (const mobile of processed) {
+                const queued = this.joinChannelMap.get(mobile);
+                if (!queued)
+                    continue;
+                this.joinChannelMap.delete(mobile);
+                this.joinChannelMap.set(mobile, queued);
+            }
+        }
+        this.logger.log(`join-sweep kind=round pool=${this.clientType} picked=${keys.length} processed=${processed.length} ` +
+            `byPhase=${this.formatJoinByPhase(processed)} joined=${round.joined} requested=${round.requested} failed=${round.failed} ` +
+            `capped=${round.capped} budgetStop=${round.budgetStop} elapsedMin=${Math.round((Date.now() - roundStart) / 60000)} left=${this.joinChannelMap.size}`);
     }
     async leaveChannelQueue() {
         if (this.isLeaveChannelProcessing) {
@@ -53653,6 +53918,9 @@ class BaseClientService {
         finally {
             this.isLeaveChannelProcessing = false;
             this.scheduleNextLeaveRound();
+            if (this.pendingJoinSweep && !this.isJoinChannelProcessing) {
+                await this.runDeferredJoinSweep('leave_end');
+            }
             if (!this.joinChannelIntervalId && !this.isJoinChannelProcessing) {
                 this.scheduleNextJoinRound();
             }
@@ -54524,6 +54792,7 @@ class BaseClientService {
     }
 }
 exports.BaseClientService = BaseClientService;
+BaseClientService.DB_ONLY_WARMUP_ACTIONS = new Set(['wait', 'join_channels', 'advance_to_ready']);
 BaseClientService.SENSITIVE_WARMUP_ACTIONS = new Set([
     'set_2fa', 'remove_external_login_sessions', 'update_username',
 ]);
@@ -55381,7 +55650,7 @@ exports.BUFFER_PROFILE = Object.freeze({
         resultTemplate: 'Buffer Join queued for: {join}, Leave queued for: {leave}',
         wrapError: null,
     }),
-    warmupRun: Object.freeze({ logGoodIdsCount: true, healthCheckShare: exports.HEALTH_CHECK_CONNECTIONS_PER_RUN, capCountsSessionRotated: true }),
+    warmupRun: Object.freeze({ logGoodIdsCount: true, healthCheckShare: exports.HEALTH_CHECK_CONNECTIONS_PER_RUN }),
     consumerMinAgeDays: 15,
 });
 exports.PROMOTE_PROFILE = Object.freeze({
@@ -55413,7 +55682,7 @@ exports.PROMOTE_PROFILE = Object.freeze({
         resultTemplate: 'Initiated Joining channels for {join} | Queued for leave: {leave}',
         wrapError: Object.freeze({ log: 'Unexpected error during joinchannelForPromoteClients:', message: 'Failed to initiate channel joining process' }),
     }),
-    warmupRun: Object.freeze({ logGoodIdsCount: false, healthCheckShare: 4, capCountsSessionRotated: false }),
+    warmupRun: Object.freeze({ logGoodIdsCount: false, healthCheckShare: 4 }),
     consumerMinAgeDays: 15,
 });
 function isHealthyForLegacyCap(doc, operationalFloor, maxFailedAttempts) {
@@ -55700,11 +55969,14 @@ function poolClientDeleteLine(pool, kind, mobile, reason) {
 
 
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.GROWING_ADVANCE_DEADLINE_DAYS = exports.MIN_CHANNELS_FOR_MATURING = exports.MIN_DAYS_AFTER_USERNAME_BEFORE_GROWING = exports.MIN_DAYS_AFTER_NAME_BIO_BEFORE_USERNAME = exports.MIN_DAYS_AFTER_AUTH_CLEANUP_BEFORE_IDENTITY = exports.MIN_DAYS_BETWEEN_IDENTITY_STEPS = exports.WARMUP_PHASE_THRESHOLDS = exports.WarmupPhase = void 0;
+exports.WARMUP_SLOT_ACTIONS = exports.GROWING_ADVANCE_DEADLINE_DAYS = exports.MIN_CHANNELS_FOR_MATURING = exports.MIN_DAYS_AFTER_USERNAME_BEFORE_GROWING = exports.MIN_DAYS_AFTER_NAME_BIO_BEFORE_USERNAME = exports.MIN_DAYS_AFTER_AUTH_CLEANUP_BEFORE_IDENTITY = exports.MIN_DAYS_BETWEEN_IDENTITY_STEPS = exports.WARMUP_PHASE_THRESHOLDS = exports.WarmupPhase = void 0;
 exports.calculateWarmupPriority = calculateWarmupPriority;
 exports.getWarmupPhaseAction = getWarmupPhaseAction;
 exports.isAccountReady = isAccountReady;
 exports.isAccountWarmingUp = isAccountWarmingUp;
+exports.isWarmupSlotAction = isWarmupSlotAction;
+exports.getWarmupActionDueAt = getWarmupActionDueAt;
+exports.getGrowingDaysInPhase = getGrowingDaysInPhase;
 const client_helper_utils_1 = __webpack_require__(/*! ./client-helper.utils */ "./src/components/shared/client-helper.utils.ts");
 exports.WarmupPhase = {
     ENROLLED: 'enrolled',
@@ -55899,12 +56171,7 @@ function getWarmupPhaseAction(doc, now, thresholds) {
         if (identityCatchup)
             return identityCatchup;
         const channels = doc.channels || 0;
-        const growingDuration = daysSinceEnrolled - (exports.WARMUP_PHASE_THRESHOLDS.growing + jitter);
-        const stalledLong = growingDuration > (exports.WARMUP_PHASE_THRESHOLDS.maturing - exports.WARMUP_PHASE_THRESHOLDS.growing) * 2;
-        const pastAdvanceDeadline = growingDuration > exports.GROWING_ADVANCE_DEADLINE_DAYS;
-        const effectiveChannelTarget = pastAdvanceDeadline
-            ? 0
-            : (stalledLong ? Math.floor(operationalFloor / 2) : operationalFloor);
+        const effectiveChannelTarget = operationalFloor;
         if (channels < effectiveChannelTarget) {
             return { phase: exports.WarmupPhase.GROWING, action: 'join_channels', organicIntensity: 'light' };
         }
@@ -55967,6 +56234,58 @@ function isAccountWarmingUp(phase) {
         exports.WarmupPhase.GROWING,
         exports.WarmupPhase.MATURING,
     ].includes(phase);
+}
+exports.WARMUP_SLOT_ACTIONS = new Set([
+    'set_privacy',
+    'set_2fa',
+    'remove_external_login_sessions',
+    'delete_photos',
+    'update_name_bio',
+    'update_username',
+    'upload_photo',
+    'rotate_session',
+]);
+function isWarmupSlotAction(action) {
+    return !!action && exports.WARMUP_SLOT_ACTIONS.has(action);
+}
+function getWarmupActionDueAt(doc, action) {
+    const ts = (v) => client_helper_utils_1.ClientHelperUtils.getTimestamp(v);
+    const jitter = doc.warmupJitter || 0;
+    const enrolled = ts(doc.enrolledAt) || ts(doc.createdAt);
+    const after = (base, days) => (base > 0 ? base + days * ONE_DAY_MS : 0);
+    let due = 0;
+    switch (action) {
+        case 'set_privacy':
+            due = after(enrolled, exports.WARMUP_PHASE_THRESHOLDS.settling + jitter);
+            break;
+        case 'set_2fa':
+            due = after(ts(doc.privacyUpdatedAt), exports.MIN_DAYS_BETWEEN_IDENTITY_STEPS);
+            break;
+        case 'remove_external_login_sessions':
+            due = after(ts(doc.twoFASetAt), exports.MIN_DAYS_BETWEEN_IDENTITY_STEPS);
+            break;
+        case 'delete_photos':
+            due = Math.max(after(ts(doc.otherAuthsRemovedAt), exports.MIN_DAYS_AFTER_AUTH_CLEANUP_BEFORE_IDENTITY), after(enrolled, exports.WARMUP_PHASE_THRESHOLDS.identity + jitter));
+            break;
+        case 'update_name_bio':
+            due = after(ts(doc.profilePicsDeletedAt), exports.MIN_DAYS_BETWEEN_IDENTITY_STEPS);
+            break;
+        case 'update_username':
+            due = after(ts(doc.nameBioUpdatedAt), exports.MIN_DAYS_AFTER_NAME_BIO_BEFORE_USERNAME);
+            break;
+        case 'upload_photo':
+            due = Math.max(after(enrolled, exports.WARMUP_PHASE_THRESHOLDS.maturing + jitter), after(ts(doc.usernameUpdatedAt), exports.MIN_DAYS_AFTER_USERNAME_BEFORE_GROWING));
+            break;
+        default: return null;
+    }
+    return due > 0 ? due : null;
+}
+function getGrowingDaysInPhase(doc, now) {
+    const enrolled = client_helper_utils_1.ClientHelperUtils.getTimestamp(doc.enrolledAt) || client_helper_utils_1.ClientHelperUtils.getTimestamp(doc.createdAt);
+    if (enrolled <= 0)
+        return 0;
+    const start = enrolled + (exports.WARMUP_PHASE_THRESHOLDS.growing + (doc.warmupJitter || 0)) * ONE_DAY_MS;
+    return Math.max(0, (now - start) / ONE_DAY_MS);
 }
 
 
