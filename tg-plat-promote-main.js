@@ -33451,9 +33451,14 @@ __webpack_require__.r(__webpack_exports__);
  * `accountHealth`: one SpamBot verdict per account, `_id` = canonical mobile
  * (design docs/design/2026-11-07-account-collection-split.md, step S2 + "S2 review fixes").
  *
- * S2 is ADDITIVE (dual-write only): every producer keeps its existing write (bufferClients spam fields, Redis
- * tg::acct::{mobile}) and mirrors it here AFTER, fire-and-forget. No reader is switched, no field is removed, no
- * backfill runs.
+ * Every producer keeps its existing write (bufferClients spam fields, Redis tg::acct::{mobile}) and mirrors it here
+ * AFTER, fire-and-forget. One reader decides on it today: promote boot / refill selection
+ * (PromoteRepository.readPromoteSelectionHealth -> mobile-manager.ts skipSpamCandidates, PROMO_SKIP_SPAM_STATUS,
+ * default on). It drops harsh (< 30 d), holds limited-until-future back as top-up, counts an expired limit as free
+ * (`promo-select kind=limited_expired`) and allows a mobile with no row (`promo-select kind=verdict_missing`, owner
+ * 2026-11-21). Boot falls back to the unfiltered selection on a read error or an all-harsh pool; refill does not.
+ * A lost mirror (deadline, error) therefore lets a harsh promote mobile be picked until a later verdict lands.
+ * The CMS / tg-aut / parked readers behind ACCOUNT_HEALTH_READ (account-facet-read.ts) read it only when that is on.
  *   - tg-platform: tg-aut `saveAccountVerdict` (system-message-handler.ts; every tg::acct verdict write, which also
  *     covers the bufferClients `recordSpamStatus` write made in the same call), promote `PromotionEngine.setDaysLeft` /
  *     `recordHarshVerdict` (promotion-engine.ts; every promote tg::acct write).
@@ -33481,8 +33486,7 @@ __webpack_require__.r(__webpack_exports__);
  * to CMS src/components/shared/account-health.ts. Change both together; tests/unit/packages/tg-db/account-health.test.mjs
  * runs both builders over the same inputs and diffs the results.
  *
- * No secondary index: no reader exists yet and every planned lookup is by `_id` (S2 review fix D-d). An index for a
- * switched reader is added with that reader.
+ * No secondary index: every reader looks up by `_id` (S2 review fix D-d).
  */
 const ACCOUNT_HEALTH_COLLECTION = 'accountHealth';
 const ACCOUNT_HEALTH_VERSION = 1;
@@ -33620,7 +33624,9 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   mobileLookupForms: () => (/* binding */ mobileLookupForms)
 /* harmony export */ });
 /* harmony import */ var _tg_core_account_lease__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/core/account-lease */ "../../packages/tg-core/src/account-lease/index.ts");
-/* harmony import */ var _base_repository__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../base-repository */ "../../packages/tg-db/src/base-repository.ts");
+/* harmony import */ var _tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! @tg/core/utils/dc-ip-family */ "../../packages/tg-core/src/utils/dc-ip-family.ts");
+/* harmony import */ var _base_repository__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../base-repository */ "../../packages/tg-db/src/base-repository.ts");
+
 
 
 /**
@@ -33712,14 +33718,16 @@ function toRecord(doc) {
 function bumpForDay(dayField, countField, day) {
     return { $cond: [{ $eq: [`$${dayField}`, day] }, { $add: [{ $ifNull: [`$${countField}`, 0] }, 1] }, 1] };
 }
-class AccountLeasesRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_1__.BaseRepository {
+class AccountLeasesRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_2__.BaseRepository {
     constructor() {
         super(...arguments);
         this.collectionName = 'accountLeases';
     }
     /**
      * Two steps, because Mongo refuses `$expr` in an upsert filter:
-     * 1. make sure the doc exists (insert-only upsert; a concurrent insert's E11000 is fine);
+     * 1. make sure the doc exists (insert-only upsert; a concurrent insert's E11000 is fine). The insert sets
+     *    gcAt (now + 1 d, client clock: $$NOW is refused in $setOnInsert) so a skeleton left by a crash before
+     *    step 2 still ages out under the TTL (batch 5, 2026-11-21);
      * 2. CAS on `$$NOW`: take it when free, expired or already ours. No match = held by someone else.
      */
     async tryAcquire(mobile, holder, ttlMs) {
@@ -33728,7 +33736,7 @@ class AccountLeasesRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_
         const sameOwner = { $eq: [{ $ifNull: ['$holder.owner', null] }, { $literal: h.owner }] };
         return this.guardStrict(`tryAcquire(${mobile})`, async () => {
             try {
-                await this.collection.updateOne({ _id: id }, { $setOnInsert: { holder: null, until: null, fence: 0, preemptRequested: null } }, { upsert: true, ...T });
+                await this.collection.updateOne({ _id: id }, { $setOnInsert: { holder: null, until: null, fence: 0, preemptRequested: null, gcAt: new Date(Date.now() + DAY_MS) } }, { upsert: true, ...T });
             }
             catch (error) {
                 if (!isDuplicateKeyError(error))
@@ -33907,6 +33915,9 @@ class AccountLeasesRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_
      * Per-ACCOUNT parked connect cap (P3 review 4). One CAS, fenced on the parked lease this pass holds:
      * counts a connect of IST `day` unless `cap` connects of that day are already counted. ok false = cap
      * reached or the lease is not ours any more (n = the stored count of `day`). THROWS on a store error.
+     * The CAS also refuses an expired lease (until <= server $$NOW) and one with a preempt request (batch 5,
+     * 2026-11-21), so a holder whose local watcher lags never opens a session it no longer owns. Each refusal
+     * logs `account-lease kind=connect_refused reason=<cap|expired|preempt|not_owner>`.
      */
     async recordConnect(mobile, owner, fence, day, cap) {
         const id = leaseId(mobile);
@@ -33915,12 +33926,19 @@ class AccountLeasesRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_
                 _id: id,
                 'holder.owner': owner,
                 fence,
+                preemptRequested: null,
+                $expr: { $gt: ['$until', '$$NOW'] },
                 $or: [{ connectsDay: { $ne: day } }, { connectsToday: { $lt: cap } }],
             }, [{ $set: { connectsToday: bumpForDay('connectsDay', 'connectsToday', day), connectsDay: day } }], { returnDocument: 'after', ...T });
             if (after)
                 return { ok: true, n: after.connectsToday ?? 1 };
-            const doc = await this.collection.findOne({ _id: id }, { projection: { connectsDay: 1, connectsToday: 1 }, ...T });
-            return { ok: false, n: doc?.connectsDay === day ? doc.connectsToday ?? 0 : 0 };
+            const doc = await this.collection.findOne({ _id: id }, { projection: { holder: 1, fence: 1, until: 1, preemptRequested: 1, connectsDay: 1, connectsToday: 1 }, ...T });
+            const n = doc?.connectsDay === day ? doc.connectsToday ?? 0 : 0;
+            const reason = doc?.holder?.owner !== owner || (doc?.fence ?? 0) !== fence
+                ? 'not_owner'
+                : doc.preemptRequested ? 'preempt' : n >= cap ? 'cap' : 'expired';
+            this.logger.warn(`account-lease kind=connect_refused reason=${reason} mobile=${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_1__.maskMobile)(mobile)} n=${n} cap=${cap}`);
+            return { ok: false, n };
         });
     }
     /** Per-ACCOUNT replies of IST `day` (P3 review 4); returns the new count. THROWS on a store error. */
@@ -34028,7 +34046,9 @@ __webpack_require__.r(__webpack_exports__);
  *     (by 'tg-platform:parked-open' / 'tg-platform:parked-stop' / 'tg-platform:parked-supersede', opId = episode _id).
  *     ClientsRepository.updateProfile no longer writes clients.mobile, so 'tg-platform:client-profile' events
  *     stopped (owner 2026-11-20); old rows keep that `by`.
- * Nothing reads it for a decision yet (the read API below is for reports and swap reviews).
+ * Readers: tg-aut's hourly promotion send cap (promotion-engine.ts readMainSince -> lastEventForMobile, the newest
+ * became_main of the mobile, checked against clients.swappedAt so a missing or stale event cannot start the day-1/2
+ * ramp wrong; hourly-send-cap.ts) and CMS monitor-parked.ts (swap cohorts). listForMobile / listForClient serve reports.
  *
  * append() NEVER throws and is bounded by a CLIENT-SIDE deadline (insertOne ignores maxTimeMS). appendSoon() is the
  * fire-and-forget form producers use, so a stalled socket can never delay a status write.
@@ -34039,8 +34059,11 @@ __webpack_require__.r(__webpack_exports__);
  *
  * Indexes (ensureIndexes, registered in ensureAllIndexes): {mobile:1, at:-1, _id:-1} and {clientId:1, at:-1, _id:-1}
  * (the read sort is {at:-1, _id:-1}, so both serve it without a SORT stage), and a partial unique
- * {opId:1, event:1, mobile:1} on rows with a string opId: a repeat of the same operation's event is rejected (E11000)
- * and append() counts that as success. No TTL: retention default is keep forever (design §6).
+ * {opId:1, event:1, mobile:1, pool:1} on rows with a string opId: a repeat of the same operation's event in the same
+ * pool is rejected (E11000) and append() counts that as success. One row per pool (owner 2026-11-21): the CMS expiry
+ * cascade sends one cutover opId to both pools, and each pool's `retired` is its own row. The old
+ * account_role_events_op_unique {opId, event, mobile} index is retired (dropped once by hand, batch 5); no code
+ * creates it. No TTL: retention default is keep forever (design §6).
  */
 const ACCOUNT_ROLE_EVENTS_COLLECTION = 'accountRoleEvents';
 /**
@@ -34050,7 +34073,8 @@ const ACCOUNT_ROLE_EVENTS_COLLECTION = 'accountRoleEvents';
 const ACCOUNT_ROLE_EVENT_VERSION = 1;
 const ACCOUNT_ROLE_EVENTS_MOBILE_INDEX = 'account_role_events_mobile_at_id';
 const ACCOUNT_ROLE_EVENTS_CLIENT_INDEX = 'account_role_events_client_at_id';
-const ACCOUNT_ROLE_EVENTS_OP_INDEX = 'account_role_events_op_unique';
+/** Partial unique {opId, event, mobile, pool} (batch 5, 2026-11-21: replaces account_role_events_op_unique, which had no pool). */
+const ACCOUNT_ROLE_EVENTS_OP_INDEX = 'account_role_events_op_pool_unique';
 /** Read order; both read indexes end in exactly these keys. */
 const ACCOUNT_ROLE_EVENTS_SORT = { at: -1, _id: -1 };
 /** Client-side cap on the insert. */
@@ -34223,6 +34247,23 @@ class AccountRoleEventsRepository extends _base_repository__WEBPACK_IMPORTED_MOD
             return [];
         return this.list(`listForMobile(${normalized})`, { mobile: normalized }, query);
     }
+    /**
+     * The mobile's newest `event` row, or null when it has none. STRICT: throws on a read failure (logged), so a
+     * caller can tell "no event" from "the store is down" (tg-aut hourly cap, batch 5).
+     */
+    async lastEventForMobile(mobile, event) {
+        const normalized = normalizeRoleEventMobile(mobile);
+        if (!normalized)
+            return null;
+        return this.guardStrict(`lastEventForMobile(${normalized}, ${event})`, async () => {
+            const [latest] = await this.collection
+                .find({ mobile: normalized, event }, { maxTimeMS: READ_MAX_TIME_MS })
+                .sort(ACCOUNT_ROLE_EVENTS_SORT)
+                .limit(1)
+                .toArray();
+            return latest ?? null;
+        });
+    }
     /** Newest first. [] on a read failure. */
     async listForClient(clientId, query = {}) {
         const id = cleanString(clientId, 80);
@@ -34251,7 +34292,7 @@ class AccountRoleEventsRepository extends _base_repository__WEBPACK_IMPORTED_MOD
     async ensureIndexes() {
         await this.guardWrite('ensureIndexes(mobile_at_id)', () => this.collection.createIndex({ mobile: 1, at: -1, _id: -1 }, { name: ACCOUNT_ROLE_EVENTS_MOBILE_INDEX }));
         await this.guardWrite('ensureIndexes(client_at_id)', () => this.collection.createIndex({ clientId: 1, at: -1, _id: -1 }, { name: ACCOUNT_ROLE_EVENTS_CLIENT_INDEX }));
-        await this.guardWrite('ensureIndexes(op_unique)', () => this.collection.createIndex({ opId: 1, event: 1, mobile: 1 }, { name: ACCOUNT_ROLE_EVENTS_OP_INDEX, unique: true, partialFilterExpression: { opId: { $type: 'string' } } }));
+        await this.guardWrite('ensureIndexes(op_pool_unique)', () => this.collection.createIndex({ opId: 1, event: 1, mobile: 1, pool: 1 }, { name: ACCOUNT_ROLE_EVENTS_OP_INDEX, unique: true, partialFilterExpression: { opId: { $type: 'string' } } }));
     }
 }
 
@@ -37163,13 +37204,23 @@ class PromoteRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_1__.Ba
                 this.logger.warn('Skipping promote client update: a non-empty mobile identity is required');
                 return null;
             }
-            const result = await this.promoteClients.findOneAndUpdate(
+            const set = { ...data, updatedAt: new Date() };
             // `mobile` is the required identity, but callers may add lifecycle guards to
             // prevent a stale manager from mutating a reassigned client document.
-            { ...filter, mobile }, { $set: { ...data, updatedAt: new Date() } }, { returnDocument: 'after' });
-            const after = result ?? null;
-            if (after)
-                this.recordStatusRoleEvent(mobile, data, after);
+            const status = data.status;
+            if (status !== 'inactive' && status !== 'active') {
+                const result = await this.promoteClients.findOneAndUpdate({ ...filter, mobile }, { $set: set }, { returnDocument: 'after' });
+                return result ?? null;
+            }
+            // A status write takes the BEFORE doc from the same atomic write (batch 5, owner 2026-11-21), so the role
+            // event is recorded only for a real transition. The returned doc is that BEFORE doc with this $set applied
+            // (top-level fields), the same image the server stored.
+            const result = await this.promoteClients.findOneAndUpdate({ ...filter, mobile }, { $set: set }, { returnDocument: 'before' });
+            const before = result ?? null;
+            if (!before)
+                return null;
+            const after = { ...before, ...set };
+            this.recordStatusRoleEvent(mobile, data, before, after);
             return after;
         });
     }
@@ -37177,15 +37228,18 @@ class PromoteRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_1__.Ba
      * accountRoleEvents (design 2026-11-07-account-collection-split S1, additive): a status change written here
      * (permanent error, health monitor, setup-new-mobile, scraper) appends retired / reactivated. Fire-and-forget:
      * never throws, never delays the update, never changes its result.
-     * Not deduped against the before-doc: the update returns only the AFTER doc (callers use it), so a no-op status
-     * write (already inactive) cannot be told apart without an extra read. Callers that pass a `status` guard in the
-     * filter (most do) already skip the no-op. Design S1 review fixes.
+     * Deduped on the atomic write's BEFORE status (batch 5): a write that leaves the status as it was (already
+     * inactive / already active) records nothing and logs `role-event kind=skip reason=same_status`.
      */
-    recordStatusRoleEvent(mobile, data, after) {
+    recordStatusRoleEvent(mobile, data, before, after) {
         try {
             const status = data.status;
             if (status !== 'inactive' && status !== 'active')
                 return;
+            if (before.status === status) {
+                this.logger.log(`role-event kind=skip reason=same_status pool=promote status=${status} mobile=${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_4__.maskMobile)(mobile)} by=tg-platform:promote-update`);
+                return;
+            }
             const message = data.message;
             const clientId = after.clientId;
             this.roleEvents.appendSoon({
@@ -37356,13 +37410,10 @@ class PromoteRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_1__.Ba
                     repairs.totalCount = 0;
                 else if (normalizedTotalCount !== existingDocument.totalCount)
                     repairs.totalCount = normalizedTotalCount;
-                if (normalizedData.changed) {
-                    normalizedData.data[channelKey] = normalizedData.data[channelKey] ?? 0;
+                // Batch 5 (owner 2026-11-21): no zero-seed of data.<channel>. $inc creates a missing path, and a seed
+                // could land after a concurrent send's $inc and erase it. Only a malformed map is repaired (rare).
+                if (normalizedData.changed)
                     repairs.data = normalizedData.data;
-                }
-                else if (typeof normalizedData.data[channelKey] !== 'number' || !Number.isFinite(normalizedData.data[channelKey])) {
-                    repairs[`data.${channelKey}`] = 0;
-                }
                 if (Object.keys(repairs).length > 0) {
                     await this.promoteStats.updateOne(filter, { $set: repairs });
                 }
@@ -37372,10 +37423,10 @@ class PromoteRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_1__.Ba
                 $set: { lastUpdatedTimeStamp: now, releaseDay: now },
                 $setOnInsert: { client, isActive: true },
             }, { upsert: true });
-            const updatedDocument = await this.promoteStats.findOne(filter);
-            const uniqueChannels = Object.keys(updatedDocument?.data || {}).length;
-            await this.promoteStats.updateOne(filter, { $set: { uniqueChannels } });
-            return updatedDocument;
+            // uniqueChannels is computed by the server from the stored map in the same write (pipeline), never from a
+            // snapshot read earlier, so a daily reset or another send in between cannot leave a stale count.
+            const updatedDocument = await this.promoteStats.findOneAndUpdate(filter, [{ $set: { uniqueChannels: { $size: { $objectToArray: { $ifNull: ['$data', {}] } } } } }], { returnDocument: 'after' });
+            return updatedDocument ?? null;
         });
     }
     async activatePromotions(client) {
@@ -38840,7 +38891,7 @@ async function ensureAllIndexes(repositories, logger) {
         ['parkedControl', repositories.parkedControl],
         // Account collection split S1: account_role_events_mobile_at_id {mobile, at:-1, _id:-1},
         // account_role_events_client_at_id {clientId, at:-1, _id:-1} and the partial unique
-        // account_role_events_op_unique {opId, event, mobile} (creates the collection on first boot).
+        // account_role_events_op_pool_unique {opId, event, mobile, pool} (creates the collection on first boot).
         ['accountRoleEvents', repositories.accountRoleEvents],
         // Account collection split S2: declares no index (lookups by _id; S2 review fix D-d); listed so the walk covers
         // every repository.
@@ -50924,9 +50975,19 @@ function describeSkip(reason, verdict) {
         return `SpamBot harsh (last verdict ${day(verdict?.verdictAt ?? verdict?.spamCheckedAt)}, rests 30 days)`;
     return `SpamBot limited until ${day(verdict?.limitedUntil)}`;
 }
-/** 'free' with a verdict (verdictAt, else spamCheckedAt) younger than KEEP_FREE_VERDICT_MAX_AGE_MS. */
+/**
+ * Batch 5 (owner 2026-11-21): a 'limited' verdict whose limitedUntil has passed counts as 'free' (the limit it
+ * reported is over). Not skipped (promoteSpamSkipReason) and, when its verdict is fresh, kept like a free one.
+ */
+function isExpiredLimitedVerdict(verdict, nowMs) {
+    if (verdict?.spamStatus !== 'limited' || !verdict.limitedUntil)
+        return false;
+    const untilMs = new Date(verdict.limitedUntil).getTime();
+    return Number.isFinite(untilMs) && untilMs <= nowMs;
+}
+/** 'free' (or an expired 'limited') with a verdict (verdictAt, else spamCheckedAt) younger than KEEP_FREE_VERDICT_MAX_AGE_MS. */
 function isFreshFreeVerdict(verdict, nowMs) {
-    if (verdict?.spamStatus !== 'free')
+    if (verdict?.spamStatus !== 'free' && !isExpiredLimitedVerdict(verdict, nowMs))
         return false;
     const at = verdict.verdictAt ?? verdict.spamCheckedAt;
     const ms = at ? new Date(at).getTime() : NaN;
@@ -51688,10 +51749,18 @@ class MobileManager {
         const clean = [];
         const limited = [];
         const free = new Set();
+        const missing = [];
+        const expired = [];
         for (const candidate of candidates) {
             const key = (0,_tg_db_collections_promote_repository__WEBPACK_IMPORTED_MODULE_3__.canonicalPromoteMobile)(candidate.mobile);
             const reason = key ? (0,_tg_db_collections_promote_repository__WEBPACK_IMPORTED_MODULE_3__.promoteSpamSkipReason)(read.health[key], now) : null;
             if (reason === null) {
+                // Batch 5 (owner 2026-11-21): no accountHealth verdict = allowed; an expired limit = free. Both are logged.
+                // Lists log the last 4 digits bare: Logger's markdown pass eats the text between two `*` masks on one line.
+                if (key && !read.health[key])
+                    missing.push(key.slice(-4));
+                else if (key && isExpiredLimitedVerdict(read.health[key], now.getTime()))
+                    expired.push(key.slice(-4));
                 clean.push(candidate);
                 if (key && isFreshFreeVerdict(read.health[key], now.getTime()))
                     free.add(String(candidate.mobile).trim());
@@ -51701,6 +51770,10 @@ class MobileManager {
             if (reason === 'limited')
                 limited.push(candidate);
         }
+        if (missing.length)
+            logger.info(`promo-select kind=verdict_missing decision=allowed count=${missing.length} last4=${missing.join(',')}`);
+        if (expired.length)
+            logger.info(`promo-select kind=limited_expired decision=free count=${expired.length} last4=${expired.join(',')}`);
         if (clean.length < candidates.length)
             logger.info(`PROMO_SKIP_SPAM_STATUS: ${clean.length} clean, ${limited.length} limited, ${candidates.length - clean.length - limited.length} harsh of ${candidates.length} candidate(s)`);
         if (clean.length === 0 && limited.length === 0 && !opts.strict) {
@@ -53141,8 +53214,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "5d38774d7d4dc64430d175bd6c2b3fc1f47f7d73" : 0;
-    const builtAt =  true ? "2026-11-21T05:42:45.124Z" : 0;
+    const sha =  true ? "5a1dcde402a441daca3980e6e3abd5c442673765" : 0;
+    const builtAt =  true ? "2026-11-21T06:58:17.988Z" : 0;
     return { sha, builtAt };
 }
 
