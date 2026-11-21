@@ -49796,6 +49796,13 @@ class HealthMonitor {
             }
             // Check individual client health
             await this.checkIndividualClients(recoveryPlan);
+            // Review M2: a free slot takes a clean mobile (a short boot, a skipped refill, a limited mobile now free).
+            try {
+                await this.mobileManager.fillFreeSlot();
+            }
+            catch (error) {
+                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, "Promote slot fill failed", false);
+            }
             verifyActiveMobilesAfterRecovery = inactiveAtStart
                 && Boolean(recoveryPlan?.hasActions)
                 && !this.mobileManager.isActive();
@@ -50027,7 +50034,7 @@ class HealthMonitor {
                 // Flow v3 P7 fix 7 (review F2, unflagged): never swap the last loaded mobile. Only the alert, the
                 // forced probe and the swap are skipped; the rest of this pass (reaction recovery, client-details
                 // merge) still runs (v2 review HIGH-1).
-                if (!(await this.skipSwapForLastMobile(mobile, 'legacy stale', lastMsgAgoMin))) {
+                if (!(await this.skipSwapForLastMobile(mobile, 'legacy stale', lastMsgAgoMin)) && await this.cleanReplacementReady(mobile, 'stale', promoter)) {
                     logger.error(`Promotion stopped for ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_17__.maskMobile)(mobile)}, Days: ${daysLeft}`);
                     await sendHealthMonitorNotification({
                         title: "Stale: replacing",
@@ -50229,6 +50236,43 @@ class HealthMonitor {
      * Flow v3 P7 ladder-swap budget (review F8): at most 2 per client per IST day in Redis. Over budget or
      * an unreadable budget means no swap (logged once per 30 min per mobile).
      */
+    /**
+     * Owner 2026-11-21 (review M2): a swap (gate, ladder or stale) runs only when the refill after it can take a
+     * SpamBot-clean mobile. Otherwise this mobile stays (the gate keeps probing it): limited top-ups on sneha-prom2
+     * burned 20 bans in 4-6 min and exited the process. The skip line is debounced per mobile like the gate warnings.
+     */
+    async cleanReplacementReady(mobile, swap, promoter, verdict) {
+        const pool = await this.mobileManager.replacementPool();
+        let reason;
+        let counts = '';
+        if ('reason' in pool) {
+            reason = pool.reason;
+        }
+        else {
+            // Final re-review MEDIUM: a clean mobile a scheduled refill (or a pending exit's refill) will take is not free.
+            const reserved = this.mobileManager.pendingRefillCount() + (0,_telegram_setup_new_mobile__WEBPACK_IMPORTED_MODULE_11__.pendingExitCount)();
+            if (pool.clean > reserved)
+                return true;
+            reason = pool.clean > 0 ? 'clean_reserved' : pool.limited > 0 ? 'only_limited' : 'no_clean';
+            counts = ` clean=${pool.clean} reserved=${reserved} limited=${pool.limited} candidates=${pool.candidates}`;
+        }
+        const logged = this.warnGateSwapOnce(mobile, `promo-select kind=refill_skipped reason=${reason} swap=${swap} mobile=${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_17__.maskMobile)(mobile)} decision=keep_current${counts}`, HealthMonitor.SKIP_REPLACEMENT_WARN_DEBOUNCE_MS, `${mobile}:clean-pool`);
+        // Review M2 (re-review): a refused swap must not leave a silent runner dead. Same fallback as the budget refusal:
+        // a ladder restart escalation restarts the runner; a stale (silent) runner restarts too; a gate trip (it sends,
+        // the sends are banned) does not. A restart has its own 30 min key per mobile, so a gate refusal's skip line
+        // never hides a stale restart.
+        const action = swap === 'gate' ? 'none' : swap === 'ladder' ? (0,_tg_channel_state_channel_message_promotions_orchestrator_promo_health_ladder__WEBPACK_IMPORTED_MODULE_19__.swapRefusedFallback)(verdict) : 'restart_runner';
+        const fallbackLine = `promo-select kind=swap_refused_fallback swap=${swap} reason=${reason} action=${action}`;
+        if (action === 'restart_runner') {
+            if (this.warnGateSwapOnce(mobile, fallbackLine, HealthMonitor.SKIP_REPLACEMENT_WARN_DEBOUNCE_MS, `${mobile}:clean-pool-restart`)) {
+                await this.restartPromotionRunner(mobile, promoter, `${verdict?.reason ?? swap} clean_pool_refused`);
+            }
+        }
+        else if (logged) {
+            logger.warn(`[${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_17__.maskMobile)(mobile)}] ${fallbackLine}`);
+        }
+        return false;
+    }
     async readLadderSwapBudget(mobile) {
         const clientId = process.env.clientId || "unknown";
         const budget = await (0,_tg_channel_state_channel_message_promotions_orchestrator_promo_health_ladder__WEBPACK_IMPORTED_MODULE_19__.readPromoSwapBudget)(_tg_core_utils_Redis_Redis_Client__WEBPACK_IMPORTED_MODULE_18__.RedisClient, 'promote', clientId);
@@ -50258,14 +50302,14 @@ class HealthMonitor {
     }
     /**
      * Gate-triggered swap budget per clientId, persisted in Redis so a restart does not reset it:
-     * at most one swap per PROMO_GATE_SWAP_MIN_GAP_MS (default 30 min) and
-     * PROMO_GATE_SWAP_MAX_PER_DAY (default 3) per rolling 24h. Returns the recent swap times when a
+     * at most one swap per GATE_SWAP_MIN_GAP_MS (30 min) and
+     * GATE_SWAP_MAX_PER_DAY (3) per rolling 24h. Returns the recent swap times when a
      * swap is allowed, or null (over budget, or Redis unavailable: fail closed).
      */
     async readGateSwapBudget(mobile) {
         const clientId = process.env.clientId || "unknown";
-        const minGapMs = positiveEnvNumber(process.env.PROMO_GATE_SWAP_MIN_GAP_MS, 30 * 60 * 1000);
-        const maxPerDay = positiveEnvNumber(process.env.PROMO_GATE_SWAP_MAX_PER_DAY, 3);
+        const minGapMs = GATE_SWAP_MIN_GAP_MS;
+        const maxPerDay = GATE_SWAP_MAX_PER_DAY;
         const now = Date.now();
         let stored;
         try {
@@ -50340,6 +50384,8 @@ class HealthMonitor {
                 await this.restartPromotionRunner(mobile, promoter, `${verdict.reason} swap_refused`);
             return;
         }
+        if (!(await this.cleanReplacementReady(mobile, 'ladder', promoter, verdict)))
+            return;
         logger.error(`Promotion stopped for ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_17__.maskMobile)(mobile)}, Days: ${daysLeft}`);
         await sendHealthMonitorNotification({
             title: "Stale: replacing",
@@ -50424,6 +50470,8 @@ class HealthMonitor {
                 return;
             }
         }
+        if (!(await this.cleanReplacementReady(mobile, banRateGateTripped ? 'gate' : ladderSwap ? 'ladder' : 'stale', promoter, ladderSwap ? ladder : null)))
+            return;
         logger.error(`Promotion stopped for ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_17__.maskMobile)(mobile)}, Days: ${daysLeft}`);
         await sendHealthMonitorNotification({
             title: "Unhealthy: swap",
@@ -50948,12 +50996,11 @@ HealthMonitor.PROMO_SLEEP_GRACE_MS = 2 * 60 * 1000;
 // Ban-rate-gate swap budget per clientId (Redis, TTL 24h). Stops a fleet-wide gate trip from
 // swapping every mobile at once and draining the promote pool, across restarts too.
 const GATE_SWAP_WINDOW_MS = 24 * 60 * 60 * 1000;
+/** Owner 2026-11-18/21 (few knobs): were the env vars PROMO_GATE_SWAP_MIN_GAP_MS / PROMO_GATE_SWAP_MAX_PER_DAY, same defaults. */
+const GATE_SWAP_MIN_GAP_MS = 30 * 60 * 1000;
+const GATE_SWAP_MAX_PER_DAY = 3;
 function gateSwapBudgetKey(clientId) {
     return `promote:gate-swap:${clientId}:budget`;
-}
-function positiveEnvNumber(raw, fallback) {
-    const value = Number(raw);
-    return raw !== undefined && raw !== "" && Number.isFinite(value) && value > 0 ? value : fallback;
 }
 
 
@@ -50977,6 +51024,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   PROMO_KEEP_PREVIOUS_MAX_DAYS: () => (/* binding */ PROMO_KEEP_PREVIOUS_MAX_DAYS),
 /* harmony export */   REFILL_DELAY_MS: () => (/* binding */ REFILL_DELAY_MS),
 /* harmony export */   REFILL_MAX_PER_IST_DAY: () => (/* binding */ REFILL_MAX_PER_IST_DAY),
+/* harmony export */   REPLACEMENT_POOL_CACHE_MS: () => (/* binding */ REPLACEMENT_POOL_CACHE_MS),
+/* harmony export */   SLOT_FILL_MAX_PER_IST_DAY: () => (/* binding */ SLOT_FILL_MAX_PER_IST_DAY),
 /* harmony export */   keptHandoffDeps: () => (/* binding */ keptHandoffDeps),
 /* harmony export */   promoteRefillBudgetKey: () => (/* binding */ promoteRefillBudgetKey),
 /* harmony export */   promoteSkipSpamStatusEnabled: () => (/* binding */ promoteSkipSpamStatusEnabled),
@@ -51145,11 +51194,17 @@ const refillDeps = {
 function promoteRefillBudgetKey(clientId, day) {
     return `promote:refill:${clientId}:${day}`;
 }
+/** Slot fills per client per IST day. Separate from REFILL_MAX_PER_IST_DAY so a slot fill never blocks a refill or swap. */
+const SLOT_FILL_MAX_PER_IST_DAY = 2;
+/** replacementPool answers are reused this long (review LOW 3): one Mongo + SpamBot read per 5 min, not per mobile. */
+const REPLACEMENT_POOL_CACHE_MS = 5 * 60 * 1000;
 function normalizeRefillBudget(raw) {
     const obj = raw && typeof raw === 'object' ? raw : {};
     const count = typeof obj.count === 'number' && Number.isFinite(obj.count) && obj.count > 0 ? Math.floor(obj.count) : 0;
     const removed = Array.isArray(obj.removed) ? obj.removed.filter((m) => typeof m === 'string' && m.length > 0) : [];
-    return { count, removed };
+    const rawSlot = obj.slotFills;
+    const slotFills = typeof rawSlot === 'number' && Number.isFinite(rawSlot) && rawSlot > 0 ? Math.floor(rawSlot) : 0;
+    return { count, removed, slotFills };
 }
 /** Seconds to the next IST midnight plus 6 h: the day key outlives its day, then expires. */
 function refillBudgetTtlSec(nowMs) {
@@ -51190,6 +51245,16 @@ class MobileManager {
         this.refillConnecting = new Set();
         this.refillChain = Promise.resolve();
         this.refillStopped = false;
+        /** The last slot-fill skip reason logged (health cycles repeat it). */
+        this.lastSlotFillSkip = null;
+        /**
+         * Mobiles removed from the slots this IST day, in memory (review M2 re-review): removeClient and a failed connect
+         * mark them at once; Redis budget.removed gets them only when the refill runs (10 min later).
+         */
+        this.removedLocal = { day: '', mobiles: new Set() };
+        /** Refill timers scheduled and not yet fired: a slot fill waits for them. */
+        this.pendingRefills = 0;
+        this.poolCache = null;
         this.config = config ?? {
             targetMobileCount: resolveTargetMobileCount(),
             minChannels: 180,
@@ -51395,9 +51460,70 @@ class MobileManager {
             this.telegramManagers.delete(mobile);
             this.clientsMap.delete(mobile);
             (0,_tg_channel_state_channel_message_promotions_orchestrator_promo_health_ladder__WEBPACK_IMPORTED_MODULE_12__.forgetPromoLadderMobile)(mobile); // review MEDIUM 1: a re-added mobile starts a fresh health watch
+            this.markRemoved(mobile);
             logger.info(`🗑️ Removed client: ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_8__.maskMobile)(mobile)}`);
             this.scheduleRefill(mobile);
         }
+    }
+    /** Refill timers scheduled and not yet fired: each will take one clean candidate. */
+    pendingRefillCount() {
+        return this.pendingRefills;
+    }
+    markRemoved(mobile) {
+        const day = istDay(Date.now());
+        if (this.removedLocal.day !== day)
+            this.removedLocal = { day, mobiles: new Set() };
+        this.removedLocal.mobiles.add(mobile);
+        this.poolCache = null;
+    }
+    /** Removed today: Redis budget.removed plus the in-memory marks of this process. */
+    removedTodaySet(budget, day) {
+        const set = new Set(budget.removed);
+        if (this.removedLocal.day === day)
+            for (const m of this.removedLocal.mobiles)
+                set.add(m);
+        return set;
+    }
+    /**
+     * Swap pre-check (owner 2026-11-21, review M2/L8): can the refill after this swap take a SpamBot-clean mobile now?
+     * Same rules as runRefill: not loaded, not removed today, refill daily cap, strict SpamBot split (an unreadable
+     * health read is not ok). With the skip gate off (PROMO_SKIP_SPAM_STATUS=off) every candidate counts as clean.
+     */
+    async replacementPool() {
+        const now = Date.now();
+        if (this.poolCache && now - this.poolCache.at < REPLACEMENT_POOL_CACHE_MS)
+            return this.poolCache.value;
+        const value = await this.readReplacementPool(now);
+        this.poolCache = { at: now, value };
+        return value;
+    }
+    async readReplacementPool(now) {
+        let budget;
+        try {
+            budget = normalizeRefillBudget(await refillDeps.budgetGet(promoteRefillBudgetKey(process.env.clientId || 'unknown', istDay(now))));
+        }
+        catch (error) {
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, 'MobileManager.replacementPool budget read', false);
+            return { ok: false, reason: 'budget_unavailable' };
+        }
+        if (budget.count >= REFILL_MAX_PER_IST_DAY)
+            return { ok: false, reason: 'daily_cap' };
+        const removedToday = this.removedTodaySet(budget, istDay(now));
+        const fetched = await (0,_data_db__WEBPACK_IMPORTED_MODULE_2__.getRepositories)()?.promote.getAvailablePromoteMobile({}, process.env.clientId);
+        if (!fetched)
+            return { ok: false, reason: 'pool_unavailable' };
+        const candidates = fetched.filter((c) => {
+            const m = typeof c.mobile === 'string' ? c.mobile.trim() : '';
+            return m && !this.clientsMap.has(m) && !removedToday.has(m);
+        });
+        if (candidates.length === 0)
+            return { ok: true, clean: 0, limited: 0, candidates: 0 };
+        if (!promoteSkipSpamStatusEnabled())
+            return { ok: true, clean: candidates.length, limited: 0, candidates: candidates.length };
+        const gate = await this.skipSpamCandidates(candidates, { strict: true });
+        if (!gate)
+            return { ok: false, reason: 'health_unavailable' };
+        return { ok: true, clean: this.rankCandidates(gate.clean).length, limited: gate.limited.length, candidates: candidates.length };
     }
     /** Mid-run removal: one refill attempt REFILL_DELAY_MS later. */
     scheduleRefill(removed) {
@@ -51407,19 +51533,55 @@ class MobileManager {
         if (this.refillConnecting.has(removed))
             return;
         const removedAt = Date.now();
+        this.pendingRefills++;
         refillDeps.schedule(() => {
+            this.pendingRefills = Math.max(0, this.pendingRefills - 1);
             this.refillChain = this.refillChain.then(() => this.runRefill(removed, removedAt)).catch((error) => {
                 (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, 'MobileManager.refill', false);
             });
             return this.refillChain;
         }, REFILL_DELAY_MS);
     }
+    /**
+     * Slot fill (review M2, owner 2026-11-21): a process that runs below its target (a boot with fewer clean mobiles
+     * than the target, a refill skipped for only_limited, a limited mobile that expired to free) takes one clean
+     * mobile per call, by the refill rules and the refill daily cap. Called from every health cycle.
+     */
+    async fillFreeSlot() {
+        if (!this.isInitialized || this.refillStopped)
+            return;
+        if (this.clientsMap.size >= this.config.targetMobileCount)
+            return;
+        if (this.pendingRefills > 0) {
+            // The removal's own refill comes first (review M2 re-review); the slot fill waits for it.
+            if (this.lastSlotFillSkip !== 'refill_pending') {
+                this.lastSlotFillSkip = 'refill_pending';
+                logger.info(`promo-select kind=slot_fill decision=skip reason=refill_pending pending=${this.pendingRefills}`);
+            }
+            return;
+        }
+        this.refillChain = this.refillChain.then(() => this.runRefill(null, 0)).catch((error) => {
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, 'MobileManager.slotFill', false);
+        });
+        await this.refillChain;
+    }
+    /** `removed` null: a slot fill (no removal behind it). Every skip logs `promo-select kind=refill_skipped|slot_fill`. */
     async runRefill(removed, removedAt) {
-        const skip = (reason, extra = '') => logger.info(`refill_skipped | removed=${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_8__.maskMobile)(removed)} | reason=${reason}${extra ? ` | ${extra}` : ''}`);
+        const kind = removed === null ? 'slot_fill' : 'refill_skipped';
+        const skip = (reason, extra = '') => {
+            const line = `promo-select kind=${kind}${removed === null ? ' decision=skip' : ''} reason=${reason}${removed === null ? '' : ` removed=${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_8__.maskMobile)(removed)}`}${extra ? ` ${extra}` : ''}`;
+            if (removed === null) {
+                // A health cycle runs every few minutes: log a slot-fill skip only when its reason changes.
+                if (this.lastSlotFillSkip === reason)
+                    return;
+                this.lastSlotFillSkip = reason;
+            }
+            logger.info(line);
+        };
         if (this.refillStopped || !this.isInitialized)
             return skip('stopped');
         const now = Date.now();
-        if (now - removedAt < REFILL_DELAY_MS)
+        if (removed !== null && now - removedAt < REFILL_DELAY_MS)
             return skip('too_early');
         // F2: count and removed-today live in Redis, one key per client per IST day, so a restart cannot reset them.
         const clientId = process.env.clientId || 'unknown';
@@ -51431,7 +51593,7 @@ class MobileManager {
             budget = normalizeRefillBudget(await refillDeps.budgetGet(key));
         }
         catch (error) {
-            return skip('budget_unavailable', `key=${key} error=${error instanceof Error ? error.message : String(error)}`);
+            return skip('budget_unavailable', `key=${key} error=${JSON.stringify(error instanceof Error ? error.message : String(error))}`);
         }
         const saveBudget = async () => {
             try {
@@ -51443,17 +51605,25 @@ class MobileManager {
                 return false;
             }
         };
-        if (!budget.removed.includes(removed)) {
+        if (removed !== null && !budget.removed.includes(removed)) {
             budget.removed.push(removed);
             if (!(await saveBudget()))
                 return skip('budget_unavailable', `key=${key} write failed`);
         }
         const target = this.config.targetMobileCount;
-        if (this.clientsMap.size >= target)
+        if (this.clientsMap.size >= target) {
+            if (removed === null)
+                return;
             return skip('full', `active=${this.clientsMap.size} target=${target}`);
-        if (budget.count >= REFILL_MAX_PER_IST_DAY)
+        }
+        if (removed === null) {
+            if (budget.slotFills >= SLOT_FILL_MAX_PER_IST_DAY)
+                return skip('daily_cap', `ist_day=${day} slot_fills=${budget.slotFills}`);
+        }
+        else if (budget.count >= REFILL_MAX_PER_IST_DAY) {
             return skip('daily_cap', `ist_day=${day} refills=${budget.count}`);
-        const removedToday = new Set(budget.removed);
+        }
+        const removedToday = this.removedTodaySet(budget, day);
         const fetched = await (0,_data_db__WEBPACK_IMPORTED_MODULE_2__.getRepositories)()?.promote.getAvailablePromoteMobile({}, process.env.clientId);
         const candidates = (fetched ?? []).filter((c) => {
             const m = typeof c.mobile === 'string' ? c.mobile.trim() : '';
@@ -51475,10 +51645,11 @@ class MobileManager {
         }
         if (gate.clean.length === 0 && gate.limited.length === 0)
             return skip('no_clean', `candidates=${candidates.length} all harsh`);
-        const ordered = [
-            ...this.rankCandidates(gate.clean).map((c) => ({ c, source: 'clean' })),
-            ...this.rankCandidates(gate.limited).map((c) => ({ c, source: 'limited_topup' })),
-        ];
+        // Owner 2026-11-21: SpamBot-clean only, never a limited top-up. sneha-prom2 limited top-ups hit the 20/20 ban
+        // gate within 4-6 min; each burn was 20 bans and a process exit.
+        if (gate.clean.length === 0)
+            return skip('only_limited', `limited=${gate.limited.length} candidates=${candidates.length}`);
+        const ordered = this.rankCandidates(gate.clean).map((c) => ({ c, source: 'clean' }));
         if (ordered.length === 0)
             return skip('no_candidates', 'none valid after ranking');
         const store = (0,_data_db__WEBPACK_IMPORTED_MODULE_2__.getRepositories)()?.accountLeases;
@@ -51509,17 +51680,30 @@ class MobileManager {
             return skip('all_leased', `candidates=${ordered.length} leased_or_unreadable=${leased}`);
         const mobile = picked.c.mobile;
         // The cap unit is spent before connecting; a failed write means no refill (the cap must hold across restarts).
-        budget.count += 1;
+        if (removed === null)
+            budget.slotFills += 1;
+        else
+            budget.count += 1;
         if (!(await saveBudget()))
             return skip('budget_unavailable', `key=${key} write failed`);
-        logger.info(`refill_picked | removed=${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_8__.maskMobile)(removed)} | mobile=${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_8__.maskMobile)(mobile)} | source=${picked.source} | ranked=${ordered.length} | refills_today=${budget.count}/${REFILL_MAX_PER_IST_DAY}`);
-        if (picked.source === 'limited_topup') {
-            logger.warn(`⚠️ PROMO_SKIP_SPAM_STATUS top-up (refill): no clean candidate left; using limited ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_8__.maskMobile)(mobile)} (never harsh)`);
+        this.poolCache = null;
+        this.lastSlotFillSkip = null;
+        if (removed === null) {
+            logger.info(`promo-select kind=slot_fill decision=picked mobile=${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_8__.maskMobile)(mobile)} active=${this.clientsMap.size} target=${target} ranked=${ordered.length} slot_fills_today=${budget.slotFills}/${SLOT_FILL_MAX_PER_IST_DAY}`);
+        }
+        else {
+            logger.info(`refill_picked | removed=${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_8__.maskMobile)(removed)} | mobile=${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_8__.maskMobile)(mobile)} | source=${picked.source} | ranked=${ordered.length} | refills_today=${budget.count}/${REFILL_MAX_PER_IST_DAY}`);
         }
         await this.stampRunStarts([mobile], [], new Map(), now);
         const created = await this.createClientInstances([mobile]);
-        if (created.successful === 0)
+        if (created.successful === 0) {
+            this.markRemoved(mobile);
+            if (!budget.removed.includes(mobile)) {
+                budget.removed.push(mobile);
+                await saveBudget();
+            }
             return skip('create_failed', `mobile=${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_8__.maskMobile)(mobile)}`);
+        }
         let connected = false;
         this.refillConnecting.add(mobile);
         try {
@@ -51533,7 +51717,13 @@ class MobileManager {
                 // F1: no zombie slot. It would block later refills as `full` and count toward keepLastMobile.
                 if (this.clientsMap.has(mobile))
                     await this.removeClient(mobile);
-                logger.warn(`refill_connect_failed | mobile=${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_8__.maskMobile)(mobile)} | removed=${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_8__.maskMobile)(removed)} | removed_from_slots | no new refill`);
+                // Review M2 (re-review): a failed mobile is never picked again today, by a refill or a slot fill.
+                this.markRemoved(mobile);
+                if (!budget.removed.includes(mobile)) {
+                    budget.removed.push(mobile);
+                    await saveBudget();
+                }
+                logger.warn(`refill_connect_failed | mobile=${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_8__.maskMobile)(mobile)} | removed=${removed === null ? 'slot_fill' : (0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_8__.maskMobile)(removed)} | removed_from_slots | no new refill`);
             }
         }
         finally {
@@ -51587,11 +51777,17 @@ class MobileManager {
         }
         let rankedCandidates = this.rankCandidates(gate.clean, keep);
         if (rankedCandidates.length < target && gate.limited.length > 0) {
-            // Top-up (review LOW): fill the free slots with limited candidates, best ranked first. Never harsh.
-            const extra = this.rankCandidates(gate.limited).slice(0, target - rankedCandidates.length);
-            if (extra.length > 0) {
-                logger.warn(`⚠️ PROMO_SKIP_SPAM_STATUS top-up: ${rankedCandidates.length} clean of target ${target}; adding ${extra.length} limited candidate(s) (never harsh): ${extra.map((c) => (0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_8__.maskMobile)(c.mobile)).join(', ')}`);
-                rankedCandidates = [...rankedCandidates, ...extra];
+            if (rankedCandidates.length > 0) {
+                // Owner 2026-11-21: no limited top-up while a clean mobile runs (limited top-ups burned 20 bans in 4-6 min).
+                logger.warn(`promo-select kind=boot_select decision=clean_only reason=only_limited clean=${rankedCandidates.length} target=${target} limited=${gate.limited.length}`);
+            }
+            else {
+                // No clean mobile at all: boot on limited so the process keeps probing (never stop trying, owner 2026-11-18).
+                const extra = this.rankCandidates(gate.limited).slice(0, target);
+                if (extra.length > 0) {
+                    logger.warn(`promo-select kind=boot_select decision=limited_only reason=no_clean clean=0 target=${target} limited=${gate.limited.length} picked=${extra.length}`);
+                    rankedCandidates = extra;
+                }
             }
         }
         if (rankedCandidates.length === 0) {
@@ -51827,6 +52023,7 @@ class MobileManager {
         if (clean.length === 0 && limited.length === 0 && !opts.strict) {
             // Round-2 review LOW: an empty selection fails the boot (restart loop). Keep promoting with the old selection.
             logger.warn(`⚠️ PROMO_SKIP_SPAM_STATUS: all ${candidates.length} candidate(s) are SpamBot harsh; falling back to the old unfiltered selection`);
+            logger.warn(`promo-select kind=all_harsh decision=keep_probe count=${candidates.length}`);
             return { clean: candidates, limited: [], free: new Set() };
         }
         return { clean, limited, free };
@@ -53262,8 +53459,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "7820899fcc4d5b1f54e5cf947e00b8967881b644" : 0;
-    const builtAt =  true ? "2026-11-21T09:20:14.901Z" : 0;
+    const sha =  true ? "bb5f13cd48b9fa5920e005e338c707ef360fa449" : 0;
+    const builtAt =  true ? "2026-11-21T19:24:35.094Z" : 0;
     return { sha, builtAt };
 }
 
@@ -60189,6 +60386,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   __setSetupNewMobileServiceStartForTests: () => (/* binding */ __setSetupNewMobileServiceStartForTests),
 /* harmony export */   cancelSetupNewMobileRetries: () => (/* binding */ cancelSetupNewMobileRetries),
 /* harmony export */   isLastLoadedMobile: () => (/* binding */ isLastLoadedMobile),
+/* harmony export */   pendingExitCount: () => (/* binding */ pendingExitCount),
 /* harmony export */   setupNewMobile: () => (/* binding */ setupNewMobile)
 /* harmony export */ });
 /* harmony import */ var _accounts_mobile_manager__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../accounts/mobile-manager */ "./src/accounts/mobile-manager.ts");
@@ -60236,6 +60434,10 @@ const bootGuardRetryByMobile = new Map();
 // Mobiles whose exit (removeClient, 5 s after the swap) is scheduled but not done. getActiveMobiles() still lists
 // them, so the keepLastMobile guard subtracts them (two limited swaps inside that window must not both run).
 const pendingExitMobiles = new Set();
+/** Swaps whose exit is scheduled and has not run yet (each will take a refill slot). */
+function pendingExitCount() {
+    return pendingExitMobiles.size;
+}
 function __resetSetupNewMobileForTests(nextServiceStartTime = Date.now()) {
     lastExecutionTimeByMobile.clear();
     for (const timer of bootGuardRetryByMobile.values())
