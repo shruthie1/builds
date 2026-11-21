@@ -43640,36 +43640,75 @@ class PromoteRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_1__.Ba
     async getPromoteClientStats() {
         return this.guard('getPromoteClientStats', null, () => this.clientStats.find({}).sort({ messageCount: -1, successCount: -1 }).toArray());
     }
+    /**
+     * Trimmed clientId for a promoteClientStats counter, or null (and one kind= line) when blank. The counters
+     * upsert, so a blank id must never reach the filter: it would create a junk row.
+     */
+    statsClientId(op, clientId) {
+        const id = typeof clientId === 'string' ? clientId.trim() : '';
+        if (!id)
+            this.logger.warn(`[promoteClientStats] kind=counter_refused op=${op} reason=missing_clientId`);
+        return id || null;
+    }
+    /**
+     * The 4 counters upsert on { clientId } (the uniq_promote_client_stats_client key), so a new client's first
+     * counts land before any routed user creates its row (schema audit batch 7, A3).
+     */
     async increaseMsgCount(clientId) {
-        return this.guard('increaseMsgCount', null, () => this.clientStats.updateOne({ clientId }, { $inc: { messageCount: 1 } }));
+        return this.guard('increaseMsgCount', null, async () => {
+            const id = this.statsClientId('increaseMsgCount', clientId);
+            return id ? await this.clientStats.updateOne({ clientId: id }, { $inc: { messageCount: 1 } }, { upsert: true }) : null;
+        });
     }
     /** promoteClientStats counter only. The per-mobile DAILY record is the caller's (recordDailyPromo). */
     async increaseSuccessCount(clientId) {
-        return this.guard('increaseSuccessCount', null, () => this.clientStats.updateOne({ clientId }, { $inc: { successCount: 1 } }));
+        return this.guard('increaseSuccessCount', null, async () => {
+            const id = this.statsClientId('increaseSuccessCount', clientId);
+            return id ? await this.clientStats.updateOne({ clientId: id }, { $inc: { successCount: 1 } }, { upsert: true }) : null;
+        });
     }
     /** promoteClientStats counter only, see increaseSuccessCount. */
     async increaseFailedCount(clientId) {
-        return this.guard('increaseFailedCount', null, () => this.clientStats.updateOne({ clientId }, { $inc: { failedCount: 1 } }));
+        return this.guard('increaseFailedCount', null, async () => {
+            const id = this.statsClientId('increaseFailedCount', clientId);
+            return id ? await this.clientStats.updateOne({ clientId: id }, { $inc: { failedCount: 1 } }, { upsert: true }) : null;
+        });
     }
     /** promoteClientStats counter only (returns the updated row), see increaseSuccessCount. */
     async increaseReactCount(clientId, number) {
         return this.guard('increaseReactCount', null, async () => {
-            const result = await this.clientStats.findOneAndUpdate({ clientId }, { $inc: { reactCount: number } }, { returnDocument: 'after' });
+            const id = this.statsClientId('increaseReactCount', clientId);
+            if (!id)
+                return null;
+            const result = await this.clientStats.findOneAndUpdate({ clientId: id }, { $inc: { reactCount: number } }, { returnDocument: 'after', upsert: true });
             return result ?? null;
         });
     }
-    /** `lastStarted` is the caller's formatted timestamp (the format is an app util). */
-    async resetPromoteClientStats(lastStarted) {
-        return this.guard('resetPromoteClientStats', null, () => this.clientStats.updateMany({}, {
-            $set: {
-                successCount: 0,
-                failedCount: 0,
-                messageCount: 0,
-                lastStarted,
-                reactCount: 0,
-                routedUserCount: 0,
-            },
-        }));
+    /**
+     * Daily reset of ONE client's row: the caller's environment clientId. Every promote process runs its own
+     * reset, so a process must never zero another client's counts (was updateMany {}). `lastStarted` is the
+     * caller's formatted timestamp (the format is an app util).
+     */
+    async resetPromoteClientStats(clientId, lastStarted) {
+        return this.guard('resetPromoteClientStats', null, async () => {
+            const id = typeof clientId === 'string' ? clientId.trim() : '';
+            if (!id) {
+                this.logger.warn('[promoteClientStats] kind=reset_refused reason=missing_clientId: no row reset');
+                return null;
+            }
+            const result = await this.clientStats.updateOne({ clientId: id }, {
+                $set: {
+                    successCount: 0,
+                    failedCount: 0,
+                    messageCount: 0,
+                    lastStarted,
+                    reactCount: 0,
+                    routedUserCount: 0,
+                },
+            });
+            this.logger.log(`[promoteClientStats] kind=reset clientId=${id} matched=${result?.matchedCount ?? 0}`);
+            return result;
+        });
     }
     /** `clientId` is the caller's environment clientId. */
     async getAvailablePromoteMobile(filter, clientId) {
@@ -64011,8 +64050,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "fd3100f3b2d2937f85e56d94104e8101e10f4260" : 0;
-    const builtAt =  true ? "2026-11-21T07:47:18.559Z" : 0;
+    const sha =  true ? "7820899fcc4d5b1f54e5cf947e00b8967881b644" : 0;
+    const builtAt =  true ? "2026-11-21T09:20:20.876Z" : 0;
     return { sha, builtAt };
 }
 
