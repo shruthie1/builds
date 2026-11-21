@@ -26158,6 +26158,7 @@ const CONFIG = {
 };
 const SPAM_FREE_FRESH_MS = 6 * 60 * 60 * 1000;
 const MAX_SETUP_PROBES = 3;
+const MAX_SETUP_BACKUP_CHECKS = 10;
 const SETUP_PROBE_TIME_BUDGET_MS = 45_000;
 const MIN_SETUP_PROBE_MS = 8_000;
 let ClientService = ClientService_1 = class ClientService {
@@ -26601,6 +26602,7 @@ let ClientService = ClientService_1 = class ClientService {
                 const fixLeftMs = fixedAtMs + degraded_swap_1.SWAP_REPORT_GRACE_MS - Date.now();
                 if (dto?.reason && !dto?.mobile && fixedAtMs && fixLeftMs > 0) {
                     this.logger.warn(`[${clientId}] setupClient report for the main ${Math.round((Date.now() - fixedAtMs) / 1000)}s after a session change; ignored (may be the process on the old session)`, { reason: dto.reason });
+                    this.logger.log((0, degraded_swap_1.swapCandidateLogLine)('result', clientId, { status: 'cooldown', cause: 'session_changed', cooldownRemainingMs: fixLeftMs }));
                     return {
                         answer: {
                             status: 'cooldown',
@@ -26628,6 +26630,7 @@ let ClientService = ClientService_1 = class ClientService {
         const graceLeftMs = swappedAtMs + degraded_swap_1.SWAP_REPORT_GRACE_MS - Date.now();
         if (dto?.reason && !dto?.mobile && swappedAtMs && graceLeftMs > 0) {
             this.logger.warn(`[${clientId}] setupClient report without reportedMobile ${Math.round((Date.now() - swappedAtMs) / 1000)}s after a cutover or session change; ignored (may be the replaced process)`, { reason: dto.reason });
+            this.logger.log((0, degraded_swap_1.swapCandidateLogLine)('result', clientId, { status: 'cooldown', cause: 'report_grace', cooldownRemainingMs: graceLeftMs }));
             return {
                 answer: {
                     status: 'cooldown',
@@ -26664,6 +26667,7 @@ let ClientService = ClientService_1 = class ClientService {
         if (!this.canSetupClient(clientId)) {
             const cooldownRemainingMs = Math.max(0, (this.setupCooldownMap.get(clientId) || 0) + CONFIG.COOLDOWN_PERIOD - Date.now());
             this.logger.log(`Profile Setup Recently tried for ${clientId}, wait ::`, (0, utils_1.getReadableTimeDifference)(this.setupCooldownMap.get(clientId)));
+            this.logger.log((0, degraded_swap_1.swapCandidateLogLine)('result', clientId, { status: 'cooldown', cause: 'recent_swap', cooldownRemainingMs }));
             return {
                 status: 'cooldown',
                 swapped: false,
@@ -26696,12 +26700,14 @@ let ClientService = ClientService_1 = class ClientService {
             if (holder) {
                 const untilMs = holder.swapLease?.until ? new Date(holder.swapLease.until).getTime() : now.getTime();
                 this.logger.warn(`[${clientId}] Setup already in progress in another CMS process (${holder.swapLease?.owner}); not started`);
+                const cooldownRemainingMs = Math.min(CONFIG.COOLDOWN_PERIOD, Math.max(0, untilMs - now.getTime()));
+                this.logger.log((0, degraded_swap_1.swapCandidateLogLine)('result', clientId, { status: 'cooldown', cause: 'lease_held', cooldownRemainingMs }));
                 return {
                     status: 'cooldown',
                     swapped: false,
                     clientId,
                     message: 'Client setup is in progress in another CMS process',
-                    cooldownRemainingMs: Math.min(CONFIG.COOLDOWN_PERIOD, Math.max(0, untilMs - now.getTime())),
+                    cooldownRemainingMs,
                 };
             }
             return this.handleSetupClient(clientId, setupClientQueryDto, internal);
@@ -26781,17 +26787,24 @@ let ClientService = ClientService_1 = class ClientService {
         const permanentReplacement = this.isPermanentReplacementReason(setupClientQueryDto.reason);
         const upgradeFromTier = internal.upgradeFromTier;
         const dead = !upgradeFromTier && (0, degraded_swap_1.isDeadSwapReason)(setupClientQueryDto.reason);
+        const promoHealth = !upgradeFromTier && !dead && (0, degraded_swap_1.isPromoHealthSwapReason)(setupClientQueryDto.reason);
+        const cleanOnly = !upgradeFromTier && !dead && (0, degraded_swap_1.isCleanOnlySwapReason)(setupClientQueryDto.reason);
+        const tier1Accept = cleanOnly ? { requireClean: true } : {};
         const configuredTiers = (0, degraded_swap_1.parseDegradedSwapTiers)();
         const degradedTiers = setupClientQueryDto.mobile
             ? []
             : upgradeFromTier
                 ? configuredTiers.filter((tier) => tier < upgradeFromTier)
-                : dead ? configuredTiers : [];
+                : dead ? configuredTiers : promoHealth ? configuredTiers.filter((tier) => tier === 2) : [];
+        if (promoHealth && !setupClientQueryDto.mobile && !degradedTiers.includes(2)) {
+            this.logger.log((0, degraded_swap_1.swapCandidateLogLine)('tier', clientId, { tier: 'sibling', result: 'off', cause: 'DEGRADED_SWAP_TIERS' }));
+        }
         const busyMobiles = await this.busyCandidateMobiles(clientId, existingClientMobile);
         const baseCandidateQuery = this.buildEligibleBufferQuery(clientId, setupClientQueryDto.mobile ? { $eq: setupClientQueryDto.mobile, $nin: busyMobiles } : { $nin: busyMobiles });
         const parkedScan = {};
         const newProbeBudget = () => ({
             clientId, remaining: MAX_SETUP_PROBES, spentMs: 0, skipped: [], parkedScan,
+            ...(dead ? {} : { backupCap: true }),
             ...(internal.leaseOwner ? { leaseOwner: internal.leaseOwner } : {}),
             ...(internal.jobPass ? { jobPass: true } : {}),
         });
@@ -26802,21 +26815,28 @@ let ClientService = ClientService_1 = class ClientService {
             availableDate: { $lte: today },
         };
         const r3Mode = (0, account_facet_read_1.accountFacetReadMode)('health', 'R3');
-        const dueScanned = await this.bufferClientService.executeQuery(dueCandidateQuery, { availableDate: 1, createdAt: 1 }, 10);
+        const dueScanned = await this.bufferClientService.executeQuery(dueCandidateQuery, { availableDate: 1, createdAt: 1 }, degraded_swap_1.SETUP_SCAN_LIMIT);
         const candidateBufferClients = r3Mode === 'off' ? dueScanned : await this.recheckSpamEligible(r3Mode, dueScanned);
         this.logger.info(`[${clientId}] Setup candidate scan completed`, { existingMobile: (0, monitor_util_1.maskMobile)(existingClientMobile), candidateCount: candidateBufferClients.length, query: dueCandidateQuery });
-        let newBufferClient = await this.findSafeSetupBufferCandidate(candidateBufferClients, existingClient.session, probeBudget);
+        let newBufferClient = await this.findSafeSetupBufferCandidate(candidateBufferClients, existingClient.session, probeBudget, tier1Accept);
         let usedFutureAvailableFallback = false;
+        this.logger.log((0, degraded_swap_1.swapCandidateLogLine)('tier', clientId, {
+            tier: 'own', result: newBufferClient ? 'found' : 'none', scanned: dueScanned.length, limit: degraded_swap_1.SETUP_SCAN_LIMIT,
+            ...(cleanOnly ? { cleanOnly: true } : {}), ...(probeBudget.moreCandidatesPending ? { pending: true } : {}),
+        }));
         if (!newBufferClient && permanentReplacement) {
             const futureCandidateQuery = {
                 ...baseCandidateQuery,
                 availableDate: { $gt: today },
             };
-            const futureScanned = await this.bufferClientService.executeQuery(futureCandidateQuery, { availableDate: 1, createdAt: 1 }, 10);
+            const futureScanned = await this.bufferClientService.executeQuery(futureCandidateQuery, { availableDate: 1, createdAt: 1 }, degraded_swap_1.SETUP_SCAN_LIMIT);
             const futureCandidateBufferClients = r3Mode === 'off' ? futureScanned : await this.recheckSpamEligible(r3Mode, futureScanned);
             fallbackBudget = newProbeBudget();
-            newBufferClient = await this.findSafeSetupBufferCandidate(futureCandidateBufferClients, existingClient.session, fallbackBudget, {}, 'allow');
+            newBufferClient = await this.findSafeSetupBufferCandidate(futureCandidateBufferClients, existingClient.session, fallbackBudget, tier1Accept, 'allow');
             usedFutureAvailableFallback = !!newBufferClient;
+            this.logger.log((0, degraded_swap_1.swapCandidateLogLine)('tier', clientId, {
+                tier: 'own_future', result: newBufferClient ? 'found' : 'none', scanned: futureScanned.length, limit: degraded_swap_1.SETUP_SCAN_LIMIT,
+            }));
             this.logger.warn(`[${clientId}] Permanent replacement fallback scan completed`, {
                 existingMobile: (0, monitor_util_1.maskMobile)(existingClientMobile),
                 reason: setupClientQueryDto.reason,
@@ -26828,9 +26848,13 @@ let ClientService = ClientService_1 = class ClientService {
         let degradedBudget;
         let degradedPlan = null;
         const tier1Pending = !!(probeBudget.moreCandidatesPending || fallbackBudget?.moreCandidatesPending);
+        if (!newBufferClient && degradedTiers.length && tier1Pending) {
+            this.logger.log((0, degraded_swap_1.swapCandidateLogLine)('tier', clientId, { tier: degradedTiers.join(','), result: 'not_tried', cause: 'own_pending' }));
+        }
+        const siblingTried = promoHealth && !newBufferClient && degradedTiers.length > 0 && !tier1Pending;
         if (!newBufferClient && degradedTiers.length && !tier1Pending) {
-            degradedBudget = newProbeBudget();
-            const pick = await this.findDegradedCandidate(existingClient, degradedTiers, degradedBudget, today, busyMobiles);
+            degradedBudget = promoHealth ? probeBudget : newProbeBudget();
+            const pick = await this.findDegradedCandidate(existingClient, degradedTiers, degradedBudget, today, busyMobiles, cleanOnly);
             if (pick) {
                 newBufferClient = pick.candidate;
                 const previous = existingClient.degraded;
@@ -26859,6 +26883,7 @@ let ClientService = ClientService_1 = class ClientService {
             let existingRetired = false;
             if (upgradeFromTier) {
                 this.logger.log(`[${clientId}] No better-tier buffer for degraded client (tier ${upgradeFromTier})`);
+                this.logger.log((0, degraded_swap_1.swapCandidateLogLine)('result', clientId, { status: 'no_candidate', cause: 'upgrade' }));
                 return {
                     status: 'no_candidate',
                     swapped: false,
@@ -26876,7 +26901,9 @@ let ClientService = ClientService_1 = class ClientService {
                 await this.retireReplacedMobile(existingClientMobile, setupClientQueryDto.reason);
                 existingRetired = true;
             }
-            const moreCandidatesPending = !!(probeBudget.moreCandidatesPending || fallbackBudget?.moreCandidatesPending || degradedBudget?.moreCandidatesPending);
+            const probeUnknown = !!(probeBudget.unknownRejected || fallbackBudget?.unknownRejected || degradedBudget?.unknownRejected);
+            const budgetPending = !!(probeBudget.moreCandidatesPending || fallbackBudget?.moreCandidatesPending || degradedBudget?.moreCandidatesPending);
+            const moreCandidatesPending = budgetPending || probeUnknown;
             const pendingNote = moreCandidatesPending
                 ? ' (SpamBot probe budget exhausted; more unprobed candidates remain, retry to check them)'
                 : '';
@@ -26895,10 +26922,21 @@ let ClientService = ClientService_1 = class ClientService {
                         ...(dead ? [{ label: 'Reason', value: String(setupClientQueryDto.reason).substring(0, 80), code: false }] : []),
                         ...(alreadyDegraded ? [{ label: 'Degraded', value: `tier ${existingClient.degraded?.tier}`, code: false }] : []),
                     ],
-                    tables: this.probeSkipTables(probeBudget, fallbackBudget, degradedBudget),
+                    tables: this.probeSkipTables(probeBudget, fallbackBudget, degradedBudget === probeBudget ? undefined : degradedBudget),
                 });
             }
             this.logger.log('Buffer Clients not safely available', { clientId, dead, moreCandidatesPending, alreadyDegraded });
+            const detail = probeUnknown ? 'probe_unknown'
+                : budgetPending ? 'budget_pending'
+                    : siblingTried ? 'sibling_none'
+                        : (probeBudget.backupCapped || fallbackBudget?.backupCapped || degradedBudget?.backupCapped) ? 'backup_cap'
+                            : dueScanned.length === 0 && !fallbackBudget ? 'no_rows'
+                                : 'all_rejected';
+            this.logger.log((0, degraded_swap_1.swapCandidateLogLine)('result', clientId, {
+                status: 'no_candidate', pending: moreCandidatesPending,
+                ...(promoHealth ? { cause: 'promo_health' } : cleanOnly ? { cause: 'pool_refill' } : dead ? { cause: 'dead' } : {}),
+                detail,
+            }));
             return {
                 status: 'no_candidate',
                 swapped: false,
@@ -26906,6 +26944,7 @@ let ClientService = ClientService_1 = class ClientService {
                 existingMobile: existingClientMobile,
                 existingRetired,
                 ...(moreCandidatesPending ? { moreCandidatesPending: true } : {}),
+                ...(probeUnknown ? { probeUnknown: true } : {}),
                 ...(alreadyDegraded ? { degraded: true } : {}),
                 message: `No safe buffer client is currently available${pendingNote}`,
             };
@@ -26950,7 +26989,7 @@ let ClientService = ClientService_1 = class ClientService {
                     { label: 'New mobile', value: newBufferClient.mobile },
                     ...(degradedPlan ? [{ label: 'Degraded tier', value: String(degradedPlan.markerTier ?? `${degradedPlan.pickTier} (meets tier-1 rules)`), code: false }] : []),
                 ],
-                tables: this.probeSkipTables(probeBudget, fallbackBudget, degradedBudget),
+                tables: this.probeSkipTables(probeBudget, fallbackBudget, degradedBudget === probeBudget ? undefined : degradedBudget),
             });
             this.logger.debug(`[${clientId}] Active client setup registered`, {
                 existingMobile: (0, monitor_util_1.maskMobile)(existingClientMobile),
@@ -27443,6 +27482,7 @@ let ClientService = ClientService_1 = class ClientService {
     }
     async findSafeSetupBufferCandidate(candidates, existingClientSession, probeBudget = { clientId: '-', remaining: MAX_SETUP_PROBES, spentMs: 0, skipped: [] }, accept = {}, parkedPolicy = 'exclude') {
         let parkedOpen = new Set();
+        let backupChecks = 0;
         if (parkedPolicy === 'exclude' && candidates?.length) {
             const nonPhone = candidates.filter((c) => c?.mobile && (0, parked_session_guard_1.parkedCanonicalMobile)(c.mobile) === null).length;
             if (nonPhone > 0) {
@@ -27485,6 +27525,14 @@ let ClientService = ClientService_1 = class ClientService {
             }
             let picked = false;
             try {
+                if (!probeBudget.jobPass && probeBudget.backupCap) {
+                    if (backupChecks >= MAX_SETUP_BACKUP_CHECKS) {
+                        this.logger.log((0, degraded_swap_1.swapCandidateLogLine)('skip', probeBudget.clientId, { reason: 'backup_cap', mobile: (0, degraded_swap_1.last4)(candidate.mobile), cap: MAX_SETUP_BACKUP_CHECKS }));
+                        probeBudget.backupCapped = true;
+                        return null;
+                    }
+                    backupChecks += 1;
+                }
                 const backupUser = probeBudget.jobPass
                     ? await this.storedDistinctBackup(candidate.mobile, candidate.session)
                     : await this.assertDistinctUserBackupSession(candidate.mobile, candidate.session);
@@ -27512,7 +27560,7 @@ let ClientService = ClientService_1 = class ClientService {
                     mobile: candidate.mobile,
                     session: candidate.session,
                     backupUser,
-                    ...(verdict && Object.keys(accept).length
+                    ...(verdict && Object.keys(accept).some((key) => key !== 'requireClean')
                         ? { spamStatus: verdict.status, limitedUntil: verdict.status === 'unknown' ? storedLimitedUntil : verdict.limitedUntil }
                         : {}),
                 };
@@ -27588,6 +27636,12 @@ let ClientService = ClientService_1 = class ClientService {
                 budget.skipped.push(`${candidate.mobile} frozen (SpamBot reply)`);
                 return false;
             }
+            if (accept.requireClean) {
+                this.logger.log((0, degraded_swap_1.swapCandidateLogLine)('skip', budget.clientId, { reason: 'probe_unknown', mobile: (0, degraded_swap_1.last4)(candidate.mobile) }));
+                budget.unknownRejected = true;
+                budget.skipped.push(`${candidate.mobile} SpamBot inconclusive (clean-only swap)`);
+                return false;
+            }
             this.logger.warn(`[${budget.clientId}] SpamBot probe inconclusive for ${(0, monitor_util_1.maskMobile)(candidate.mobile)} (${result.error || 'unrecognized reply'}); allowing candidate`);
             budget.lastVerdict = { status: 'unknown', limitedUntil: null };
             return true;
@@ -27618,6 +27672,7 @@ let ClientService = ClientService_1 = class ClientService {
             ? `limited until ${result.limitedUntil.toISOString().slice(0, 16).replace('T', ' ')} UTC`
             : 'harsh limit (indefinite)';
         this.logger.warn(`[${budget.clientId}] Skipping setup candidate ${(0, monitor_util_1.maskMobile)(candidate.mobile)}: SpamBot ${detail}`);
+        this.logger.log((0, degraded_swap_1.swapCandidateLogLine)('skip', budget.clientId, { reason: result.status, mobile: (0, degraded_swap_1.last4)(candidate.mobile) }));
         budget.skipped.push(`${candidate.mobile} ${detail}`);
         return false;
     }
@@ -27665,14 +27720,14 @@ let ClientService = ClientService_1 = class ClientService {
             .sort((a, b) => until(a.view) - until(b.view) || a.i - b.i)
             .map((k) => k.candidate);
     }
-    async findDegradedCandidate(existingClient, tiers, budget, today, busyMobiles) {
+    async findDegradedCandidate(existingClient, tiers, budget, today, busyMobiles, cleanOnly = false) {
         for (const tier of tiers) {
             if (budget.remaining <= 0) {
                 budget.moreCandidatesPending = true;
                 break;
             }
             if (tier === 2) {
-                const pick = await this.findSiblingCandidate(existingClient, budget, today, busyMobiles);
+                const pick = await this.findSiblingCandidate(existingClient, budget, today, busyMobiles, cleanOnly);
                 if (pick)
                     return { tier, ...pick };
                 continue;
@@ -27694,37 +27749,58 @@ let ClientService = ClientService_1 = class ClientService {
         }
         return null;
     }
-    async findSiblingCandidate(existingClient, budget, today, busyMobiles) {
+    async findSiblingCandidate(existingClient, budget, today, busyMobiles, cleanOnly = false) {
         const persona = (existingClient.dbcoll || '').trim().toLowerCase();
-        if (!persona)
+        if (!persona) {
+            this.logger.log((0, degraded_swap_1.swapCandidateLogLine)('tier', existingClient.clientId, { tier: 'sibling', result: 'none', cause: 'no_persona' }));
             return null;
+        }
         const siblings = (await this.findAll()).filter((client) => client.clientId !== existingClient.clientId && (client.dbcoll || '').trim().toLowerCase() === persona);
         const ranked = [];
         for (const sibling of siblings) {
-            const scanned = await this.bufferClientService.executeQuery({
-                ...this.buildEligibleBufferQuery(sibling.clientId, { $nin: [...busyMobiles, sibling.mobile] }),
-                availableDate: { $lte: today },
-            }, { availableDate: 1, createdAt: 1 });
-            const r3Mode = (0, account_facet_read_1.accountFacetReadMode)('health', 'R3');
-            const rows = r3Mode === 'off' ? scanned : await this.recheckSpamEligible(r3Mode, scanned);
-            const spares = await this.filterServingUsers(rows, { requireDistinctBackup: true });
+            const spares = await this.usableSpares(sibling.clientId, [...busyMobiles, sibling.mobile], today, budget);
             if (spares.length >= degraded_swap_1.SIBLING_MIN_SPARES_AFTER + 1)
-                ranked.push({ siblingId: sibling.clientId, spares });
+                ranked.push({ siblingId: sibling.clientId, spares: ClientService_1.lendOrder(spares) });
         }
         ranked.sort((a, b) => b.spares.length - a.spares.length || a.siblingId.localeCompare(b.siblingId));
         this.logger.info(`[${existingClient.clientId}] Degraded tier 2 scan`, {
             siblings: siblings.map((s) => s.clientId),
             lenders: ranked.map((r) => `${r.siblingId}:${r.spares.length}`),
         });
+        const accept = { ...(0, degraded_swap_1.probeAcceptanceForTier)(2), ...(cleanOnly ? { requireClean: true } : {}) };
         for (const { siblingId, spares } of ranked) {
             const tryable = spares.slice(0, spares.length - degraded_swap_1.SIBLING_MIN_SPARES_AFTER);
-            const candidate = await this.findSafeSetupBufferCandidate(tryable, existingClient.session, budget, (0, degraded_swap_1.probeAcceptanceForTier)(2), 'allow');
-            if (candidate)
+            const candidate = await this.findSafeSetupBufferCandidate(tryable, existingClient.session, budget, accept, 'allow');
+            if (candidate) {
+                this.logger.log((0, degraded_swap_1.swapCandidateLogLine)('tier', existingClient.clientId, { tier: 'sibling', result: 'found', from: siblingId, lenders: ranked.length }));
                 return { candidate, fromClientId: siblingId };
+            }
             if (budget.remaining <= 0)
                 break;
         }
+        this.logger.log((0, degraded_swap_1.swapCandidateLogLine)('tier', existingClient.clientId, {
+            tier: 'sibling', result: 'none', siblings: siblings.length, lenders: ranked.length, ...(budget.moreCandidatesPending ? { pending: true } : {}),
+        }));
         return null;
+    }
+    async usableSpares(clientId, excludeMobiles, today, budget) {
+        const scanned = await this.bufferClientService.executeQuery({ ...this.buildEligibleBufferQuery(clientId, { $nin: excludeMobiles }), availableDate: { $lte: today } }, { availableDate: 1, createdAt: 1 });
+        const r3Mode = (0, account_facet_read_1.accountFacetReadMode)('health', 'R3');
+        const rows = r3Mode === 'off' ? scanned : await this.recheckSpamEligible(r3Mode, scanned);
+        const serving = await this.filterServingUsers(rows, { requireDistinctBackup: true });
+        if (!serving.some((row) => (0, parked_session_guard_1.parkedCanonicalMobile)(row.mobile) !== null))
+            return serving;
+        const parkedOpen = await this.parkedOpenOnce(budget);
+        return parkedOpen.size ? serving.filter((row) => !parkedOpen.has((0, parked_session_guard_1.parkedCanonicalMobile)(row.mobile) ?? '')) : serving;
+    }
+    static lendOrder(spares) {
+        const rank = (row) => (row.spamStatus === 'free' ? 2 : row.spamStatus ? 0 : 1);
+        return spares
+            .map((row, i) => ({ row, i }))
+            .sort((a, b) => rank(a.row) - rank(b.row)
+            || (rank(a.row) === 2 ? (0, degraded_swap_1.toTimeMs)(a.row.spamCheckedAt) - (0, degraded_swap_1.toTimeMs)(b.row.spamCheckedAt) : 0)
+            || a.i - b.i)
+            .map((x) => x.row);
     }
     async filterServingUsers(candidates, opts = {}) {
         const kept = [];
@@ -27771,7 +27847,7 @@ let ClientService = ClientService_1 = class ClientService {
             await this.notify({
                 severity: 'warning',
                 title: 'Buffer borrowed',
-                summary: `Dead main replaced by a spare borrowed from ${plan.fromClientId} (meets tier-1 rules; no degraded marker)`,
+                summary: `${(0, degraded_swap_1.isDeadSwapReason)(plan.reason) ? 'Dead main' : 'Main'} replaced by a spare borrowed from ${plan.fromClientId} (meets tier-1 rules; no degraded marker)`,
                 fields: [
                     { label: 'Client ID', value: clientId },
                     { label: 'Borrowed from', value: plan.fromClientId },
@@ -27929,6 +28005,10 @@ let ClientService = ClientService_1 = class ClientService {
         }
         if (result.status === 'cooldown' || result.status === 'disabled' || result.status === 'stale_main')
             return { clientId: client.clientId, status: result.status };
+        if (result.status === 'no_candidate' && result.probeUnknown) {
+            this.logger.log(`swap-retry kind=skip op=record reason=probe_unknown client=${client.clientId} pass=${pass}`);
+            return { clientId: client.clientId, status: result.status };
+        }
         const used = await this.notePassOutcome(pass, client, all, decision, result.swapped);
         return {
             clientId: client.clientId,
@@ -28065,9 +28145,14 @@ let ClientService = ClientService_1 = class ClientService {
                     continue;
                 }
                 const busy = await this.busyCandidateMobiles(client.clientId, client.mobile);
-                const spare = await this.bufferClientService.executeQuery({ ...this.buildEligibleBufferQuery(client.clientId, { $nin: busy }), availableDate: { $lte: today } }, undefined, 1);
-                if (!spare.length)
+                const spares = await this.usableSpares(client.clientId, busy, today, { clientId: client.clientId, remaining: 0, spentMs: 0, skipped: [] });
+                if (spares.length <= 1) {
+                    const reason = spares.length ? 'last_spare' : 'no_spare';
+                    this.logger.log((0, degraded_swap_1.poolRefillLogLine)('skip', client.clientId, reason, client, health, Date.now(), `usableSpares=${spares.length}`));
+                    if (spares.length)
+                        results.push({ clientId: client.clientId, status: 'skipped_last_spare' });
                     continue;
+                }
                 attempts++;
                 const row = await this.runPassAttempt('refill', client, all, decision, { days: 0, archiveOld: true, formalities: true, reason: degraded_swap_1.POOL_REFILL_REASON }, { refillSnapshot: { mobile: client.mobile, swappedAtMs: (0, degraded_swap_1.toTimeMs)(client.swappedAt) } });
                 if (row.status !== 'stale_main') {
@@ -28514,7 +28599,10 @@ exports.ClientService = ClientService = ClientService_1 = __decorate([
 
 
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.PASS_MAX_ATTEMPTS = exports.PASS_RETRY_BASE_MS = exports.toTimeMs = exports.POOL_REFILL_RECENT_SWAP_MS = exports.MIN_LIMIT_DAYS_FOR_SWAP = exports.MAIN_SPAM_STATUS_FRESH_MS = exports.SWAP_REPORT_GRACE_MS = exports.SWAP_LEASE_RENEW_MS = exports.SWAP_LEASE_TTL_MS = exports.DEAD_MAIN_HANDOFF_WAIT_MS = exports.POOL_REFILL_MAX_PER_RUN = exports.UPGRADE_MAX_PER_RUN = exports.RESCUE_MAX_PER_RUN = exports.POOL_REFILL_REASON = exports.DEAD_MAIN_RESCUE_REASON = exports.DEAD_SWAP_REASON_CODES = exports.DEGRADED_UPGRADE_REASON = exports.SIBLING_MIN_SPARES_AFTER = exports.ALL_DEGRADED_TIERS = void 0;
+exports.PASS_MAX_ATTEMPTS = exports.PASS_RETRY_BASE_MS = exports.toTimeMs = exports.POOL_REFILL_RECENT_SWAP_MS = exports.MIN_LIMIT_DAYS_FOR_SWAP = exports.MAIN_SPAM_STATUS_FRESH_MS = exports.SWAP_REPORT_GRACE_MS = exports.SWAP_LEASE_RENEW_MS = exports.SWAP_LEASE_TTL_MS = exports.DEAD_MAIN_HANDOFF_WAIT_MS = exports.POOL_REFILL_MAX_PER_RUN = exports.UPGRADE_MAX_PER_RUN = exports.RESCUE_MAX_PER_RUN = exports.SETUP_SCAN_LIMIT = exports.PROMO_HEALTH_REASON_PREFIX = exports.POOL_REFILL_REASON = exports.DEAD_MAIN_RESCUE_REASON = exports.DEAD_SWAP_REASON_CODES = exports.DEGRADED_UPGRADE_REASON = exports.SIBLING_MIN_SPARES_AFTER = exports.ALL_DEGRADED_TIERS = void 0;
+exports.isPromoHealthSwapReason = isPromoHealthSwapReason;
+exports.isCleanOnlySwapReason = isCleanOnlySwapReason;
+exports.swapCandidateLogLine = swapCandidateLogLine;
 exports.isSessionOnlyStamp = isSessionOnlyStamp;
 exports.poolRefillSkip = poolRefillSkip;
 exports.poolRefillLogLine = poolRefillLogLine;
@@ -28548,6 +28636,20 @@ exports.DEAD_SWAP_REASON_CODES = [
 ];
 exports.DEAD_MAIN_RESCUE_REASON = 'DEAD_MAIN_RESCUE';
 exports.POOL_REFILL_REASON = 'POOL_REFILL';
+exports.PROMO_HEALTH_REASON_PREFIX = 'Promotion health check failed';
+function isPromoHealthSwapReason(reason) {
+    return typeof reason === 'string' && reason.trimStart().startsWith(exports.PROMO_HEALTH_REASON_PREFIX);
+}
+function isCleanOnlySwapReason(reason) {
+    return isPromoHealthSwapReason(reason) || (typeof reason === 'string' && reason.trim() === exports.POOL_REFILL_REASON);
+}
+exports.SETUP_SCAN_LIMIT = 25;
+function swapCandidateLogLine(kind, clientId, fields) {
+    const head = Object.entries(fields).filter(([key]) => key === 'tier' || key === 'reason' || key === 'status' || key === 'result');
+    const rest = Object.entries(fields).filter(([key]) => !head.some(([h]) => h === key));
+    const fmt = (pairs) => pairs.map(([k, v]) => `${k}=${v}`);
+    return ['swap-candidate', `kind=${kind}`, ...fmt(head), `client=${clientId}`, ...fmt(rest)].join(' ');
+}
 const DEAD_REASON_OVERRIDES = ['INPUT_USER_DEACTIVATED'];
 exports.RESCUE_MAX_PER_RUN = 3;
 exports.UPGRADE_MAX_PER_RUN = 3;
