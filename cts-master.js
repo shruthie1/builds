@@ -16743,6 +16743,7 @@ const active_channel_schema_1 = __webpack_require__(/*! ./schemas/active-channel
 const parseError_1 = __webpack_require__(/*! ../../utils/parseError */ "./src/utils/parseError.ts");
 const bot_notice_1 = __webpack_require__(/*! ../../utils/bot-notice */ "./src/utils/bot-notice.ts");
 const utils_1 = __webpack_require__(/*! ../../utils */ "./src/utils/index.ts");
+const common_2 = __webpack_require__(/*! ../../utils/common */ "./src/utils/common.ts");
 const bots_1 = __webpack_require__(/*! ../bots */ "./src/components/bots/index.ts");
 const durable_channel_upsert_1 = __webpack_require__(/*! ../../utils/telegram-utils/durable-channel-upsert */ "./src/utils/telegram-utils/durable-channel-upsert.ts");
 const channel_live_facts_1 = __webpack_require__(/*! ../../utils/telegram-utils/channel-live-facts */ "./src/utils/telegram-utils/channel-live-facts.ts");
@@ -16784,11 +16785,10 @@ let ActiveChannelsService = ActiveChannelsService_1 = class ActiveChannelsServic
             if (!createActiveChannelDto.channelId) {
                 throw new common_1.BadRequestException('Channel ID is required');
             }
-            const availableMsgs = await this.getAvailableMessages();
             const createdChannel = new this.activeChannelModel({
                 ...createActiveChannelDto,
                 channelId: this.channelKey(createActiveChannelDto.channelId),
-                availableMsgs,
+                availableMsgs: this.insertTemplateIds(),
                 createdAt: new Date(),
             });
             return await createdChannel.save();
@@ -16832,7 +16832,7 @@ let ActiveChannelsService = ActiveChannelsService_1 = class ActiveChannelsServic
                     canSendMsgs: false,
                     participantsCount: 0,
                     reactRestricted: false,
-                    availableMsgs: [],
+                    availableMsgs: this.insertTemplateIds(),
                     banned: dto.banned === true,
                     bannedAt: dto.banned === true ? (dto.bannedAt ?? Date.now()) : null,
                     private: false,
@@ -17301,7 +17301,7 @@ let ActiveChannelsService = ActiveChannelsService_1 = class ActiveChannelsServic
     async resetAvailableMsgs() {
         try {
             await (0, bot_notice_1.sendBotNotice)('notif', { title: 'Maintenance', summary: 'Reset available messages' });
-            const availableMsgs = await this.getAvailableMessages();
+            const availableMsgs = this.insertTemplateIds();
             await this.activeChannelModel.updateMany({
                 $expr: {
                     $lt: [{ $size: { $ifNull: ['$availableMsgs', []] } }, 5],
@@ -17330,17 +17330,8 @@ let ActiveChannelsService = ActiveChannelsService_1 = class ActiveChannelsServic
             throw this.handleError(error, 'Failed to update banned channels');
         }
     }
-    async getAvailableMessages() {
-        try {
-            const data = await this.promoteMsgsService.findOne();
-            return Object.keys(data || {});
-        }
-        catch (error) {
-            if (error instanceof common_1.NotFoundException || error?.status === 404) {
-                return [];
-            }
-            throw this.handleError(error, 'Failed to fetch available messages');
-        }
+    insertTemplateIds() {
+        return [...common_2.defaultMessages];
     }
     handleError(error, message) {
         (0, parseError_1.parseError)(error, message);
@@ -45530,7 +45521,7 @@ __decorate([
     (0, swagger_1.ApiOperation)({
         summary: 'Void ONE credited payment: Postgres payment_void (out of revenue; payer taken back only if it was the day\'s last), ' +
             'stats2 day marker, the profile\'s userData credit/tier, review stamp fake. Idempotent (changed:false). ' +
-            '409 fake_marked | call_in_progress (retry with force) | pg_row_pending | ambiguous_match | already_voided | uncredit_in_progress; 502 {failedAt, compensated}',
+            '409 fake_marked | call_in_progress (retry with force) | pg_row_pending | ambiguous_match | already_voided | uncredit_in_progress | proof_too_old (row older than 6 days, TTL 7); 502 {failedAt, compensated}',
     }),
     (0, swagger_1.ApiParam)({ name: 'proofId', description: '<clientId>-<chatId>-<telegramMsgId>' }),
     (0, swagger_1.ApiBody)({
@@ -45553,7 +45544,7 @@ __decorate([
 __decorate([
     (0, common_1.Post)(':proofId/recredit'),
     (0, common_1.HttpCode)(200),
-    (0, swagger_1.ApiOperation)({ summary: 'Undo an Uncredit: userData, stats2, Postgres payment_unvoid, review stamp back. Idempotent (changed:false)' }),
+    (0, swagger_1.ApiOperation)({ summary: 'Undo an Uncredit: userData, stats2, Postgres payment_unvoid, review stamp back. Idempotent (changed:false). 409 proof_too_old (row older than 6 days, TTL 7)' }),
     (0, swagger_1.ApiParam)({ name: 'proofId' }),
     (0, swagger_1.ApiBody)({ schema: { type: 'object', properties: { by: { type: 'string', description: "default 'tg-chats'" } } } }),
     __param(0, (0, common_1.Param)('proofId')),
@@ -45636,7 +45627,7 @@ var __param = (this && this.__param) || function (paramIndex, decorator) {
 };
 var PaymentUncreditService_1;
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.PaymentUncreditService = exports.PENDING_STALE_MS = exports.PG_ROW_GRACE_MS = exports.UNCREDIT_REASONS = void 0;
+exports.PaymentUncreditService = exports.PROOF_MAX_AGE_MS = exports.PENDING_STALE_MS = exports.PG_ROW_GRACE_MS = exports.UNCREDIT_REASONS = void 0;
 exports.isCredited = isCredited;
 exports.creditOf = creditOf;
 const common_1 = __webpack_require__(/*! @nestjs/common */ "@nestjs/common");
@@ -45656,6 +45647,7 @@ const MAX_BY = 60;
 const MAX_NOTE = 300;
 exports.PG_ROW_GRACE_MS = 60 * 60_000;
 exports.PENDING_STALE_MS = 2 * 60_000;
+exports.PROOF_MAX_AGE_MS = 6 * 24 * 60 * 60_000;
 function clean(value, max) {
     return typeof value === 'string' ? value.trim().slice(0, max) : '';
 }
@@ -45713,6 +45705,22 @@ let PaymentUncreditService = PaymentUncreditService_1 = class PaymentUncreditSer
         }
         return rows[0];
     }
+    refuseIfTooOld(proof, action, nowMs) {
+        const masked = `${proof.clientId}-****${String(proof.chatId).slice(-4)}-${proof.telegramMsgId}`;
+        const created = proof.createdAt ? new Date(proof.createdAt).getTime() : NaN;
+        if (!Number.isFinite(created)) {
+            this.logger.warn(`payment-uncredit kind=age_unknown action=${action} proof=${masked}: no createdAt, allowed`);
+            return;
+        }
+        const ageMs = nowMs - created;
+        if (ageMs > exports.PROOF_MAX_AGE_MS) {
+            this.logger.warn(`payment-uncredit kind=refused reason=proof_too_old action=${action} proof=${masked} age_h=${Math.floor(ageMs / 3_600_000)}`);
+            throw new common_1.ConflictException({
+                code: 'proof_too_old',
+                message: `this payment proof is older than 6 days and expires at 7 days: ${action === 'uncredit' ? 'Uncredit' : 'Recredit'} refused; fix it by hand`,
+            });
+        }
+    }
     async setJournal(id, set) {
         await this.proofs.updateOne({ _id: id }, { $set: set });
     }
@@ -45732,6 +45740,7 @@ let PaymentUncreditService = PaymentUncreditService_1 = class PaymentUncreditSer
         const by = clean(body.by, MAX_BY) || DEFAULT_BY;
         const force = body.force === true;
         const proof = await this.proofOrThrow(rawProofId);
+        this.refuseIfTooOld(proof, 'uncredit', nowMs);
         const proofId = (0, payment_proofs_classify_1.proofIdOf)(proof);
         const A = creditOf(proof);
         if (!isCredited(proof) || !A || !proof.servedAt)
@@ -45850,6 +45859,7 @@ let PaymentUncreditService = PaymentUncreditService_1 = class PaymentUncreditSer
     async recredit(rawProofId, body = {}, nowMs = Date.now()) {
         const by = clean(body.by, MAX_BY) || DEFAULT_BY;
         const proof = await this.proofOrThrow(rawProofId);
+        this.refuseIfTooOld(proof, 'recredit', nowMs);
         const proofId = (0, payment_proofs_classify_1.proofIdOf)(proof);
         const journal = proof.uncredited;
         if (!journal)
@@ -53711,7 +53721,9 @@ class BaseClientService {
         if (!distinctBackup) {
             return null;
         }
-        await this.usersService.update(user.tgId, { session: distinctBackup });
+        if (!(await this.usersService.replaceSessionOfRow(mobile, user.session, distinctBackup, user.tgId))) {
+            return null;
+        }
         return {
             ...user,
             session: distinctBackup,
@@ -54161,19 +54173,22 @@ class BaseClientService {
         if (!backupSession) {
             return { backupSession: null, reusedExisting: false };
         }
-        await this.usersService.update(user.tgId, { session: backupSession });
+        if (!(await this.usersService.replaceSessionOfRow(mobile, user.session, backupSession, user.tgId))) {
+            return { backupSession: null, reusedExisting: false };
+        }
         return { backupSession, reusedExisting: false };
     }
     async verifyRotationPersistence(mobile, activeSession, expectedBackupSession) {
-        const persistedBackupUsers = await this.usersService.search({ mobile });
-        const persistedBackup = persistedBackupUsers[0]?.session?.trim() || null;
         const persistedActive = await this.getStoredActiveSession(mobile);
         if (persistedActive?.trim() !== activeSession) {
             this.logger.error(`Active session changed unexpectedly during rotation for ${(0, monitor_util_1.maskMobile)(mobile)}`);
             return false;
         }
-        if (!persistedBackup || persistedBackup === activeSession || persistedBackup !== expectedBackupSession) {
-            this.logger.error(`Backup session persistence verification failed for ${(0, monitor_util_1.maskMobile)(mobile)}`);
+        const backupHeld = !!expectedBackupSession
+            && expectedBackupSession !== activeSession
+            && await this.usersService.liveRowHoldsSession(mobile, expectedBackupSession);
+        if (!backupHeld) {
+            this.logger.error(`users-session kind=verify_mismatch mobile=${(0, monitor_util_1.maskMobile)(mobile)}: Backup session persistence verification failed (no live row of this mobile holds the new backup)`);
             return false;
         }
         return true;
@@ -61730,6 +61745,45 @@ let UsersService = UsersService_1 = class UsersService {
         }
         return updated;
     }
+    async replaceSessionOfRow(mobile, priorSession, session, tgId) {
+        const canonicalMobile = this.canonicalMobile(mobile);
+        const masked = (0, monitor_util_1.maskMobile)(canonicalMobile);
+        if (!priorSession) {
+            if (!tgId) {
+                this.logger.warn(`users-session kind=skipped reason=no_prior_session mobile=${masked}: no row named, nothing written`);
+                return false;
+            }
+            const blank = await this.userModel
+                .updateOne({ mobile: canonicalMobile, tgId, $or: [{ session: { $exists: false } }, { session: null }, { session: '' }] }, { $set: { session } })
+                .exec();
+            if (blank.matchedCount === 0) {
+                this.logger.warn(`users-session kind=skipped reason=row_changed_blank mobile=${masked}: no blank-session row of this account any more, nothing written`);
+                return false;
+            }
+            this.logger.log(`users-session kind=written_blank_row mobile=${masked}`);
+            return true;
+        }
+        const result = await this.userModel
+            .updateOne({ mobile: canonicalMobile, session: priorSession }, { $set: { session } })
+            .exec();
+        if (result.matchedCount === 0) {
+            this.logger.warn(`users-session kind=skipped reason=row_changed mobile=${masked}: no row of this mobile holds the prior session any more, nothing written`);
+            return false;
+        }
+        this.logger.log(`users-session kind=written mobile=${masked}`);
+        return true;
+    }
+    async liveRowHoldsSession(mobile, session) {
+        const want = session?.trim();
+        if (!want)
+            return false;
+        const canonicalMobile = this.canonicalMobile(mobile);
+        const rows = await this.userModel
+            .find({ mobile: canonicalMobile, expired: { $ne: true } }, { session: 1 })
+            .lean()
+            .exec();
+        return rows.some((r) => typeof r.session === 'string' && r.session.trim() === want);
+    }
     async updateByFilter(filter, updateDto) {
         const result = await this.userModel
             .updateMany(filter, { $set: updateDto })
@@ -62027,7 +62081,7 @@ let UsersService = UsersService_1 = class UsersService {
                     'relationships.bestScore': bestScore,
                     'relationships.computedAt': new Date(),
                     'relationships.top': top,
-                    calls: callAgg,
+                    ...Object.fromEntries(Object.entries(callAgg).map(([k, v]) => [`calls.${k}`, v])),
                 },
             }).exec();
             this.logger.log(`[${(0, monitor_util_1.maskMobile)(canonicalMobile)}] Relationship scoring complete: accountScore=${accountScore}, bestScore=${bestScore}, topCount=${top.length}, candidates=${candidates.length}/${candidateMap.size}`);
