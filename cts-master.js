@@ -29389,6 +29389,7 @@ async function prepareParkedCutover(collections, input, opts) {
 
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.PARKED_OPEN_SCAN_LIMIT = exports.PARKED_CONTROL_APPS = exports.PARKED_SESSION_BUSY = exports.PARKED_GUARD_DEADLINE_MS = exports.PARKED_GUARD_OP_MAX_TIME_MS = void 0;
+exports.warnClientIdsNotArray = warnClientIdsNotArray;
 exports.parkedEnabledEpisodeClauses = parkedEnabledEpisodeClauses;
 exports.parkedMobileForms = parkedMobileForms;
 exports.checkParkedSession = checkParkedSession;
@@ -29399,6 +29400,9 @@ exports.PARKED_GUARD_OP_MAX_TIME_MS = 3_000;
 exports.PARKED_GUARD_DEADLINE_MS = 4_000;
 exports.PARKED_SESSION_BUSY = 'PARKED_SESSION_BUSY';
 exports.PARKED_CONTROL_APPS = ['tg-aut', 'promote'];
+function warnClientIdsNotArray(app, clientIds) {
+    console.warn(`[parked-control] kind=client_ids_not_array app=${app} type=${clientIds === null ? 'null' : typeof clientIds}: app treated as disabled`);
+}
 function parkedEnabledEpisodeClauses(docs) {
     const doc = (id) => {
         const d = docs[id];
@@ -29411,6 +29415,10 @@ function parkedEnabledEpisodeClauses(docs) {
         const d = doc(app);
         if (d?.enabled !== true)
             continue;
+        if (d.clientIds !== undefined && !Array.isArray(d.clientIds)) {
+            warnClientIdsNotArray(app, d.clientIds);
+            continue;
+        }
         if (Array.isArray(d.clientIds)) {
             clauses.push({ app, clientId: { $in: d.clientIds.filter((c) => typeof c === 'string') } });
         }
@@ -29664,6 +29672,10 @@ async function tgAutParkedEnabled(control, clientId, deadlineMs = exports.SWAP_E
         const app = byId.get('tg-aut');
         if (byId.get('global')?.enabled !== true || app?.enabled !== true)
             return { enabled: false };
+        if (app.clientIds !== undefined && !Array.isArray(app.clientIds)) {
+            (0, parked_session_guard_1.warnClientIdsNotArray)('tg-aut', app.clientIds);
+            return { enabled: false };
+        }
         if (Array.isArray(app.clientIds) && !app.clientIds.includes(clientId))
             return { enabled: false };
         return { enabled: true };
@@ -49564,22 +49576,6 @@ let SessionAuditService = class SessionAuditService {
         }
         catch (error) {
             this.logger.error(mobile || 'system', 'Failed to get session stats', error);
-            throw error;
-        }
-    }
-    async cleanupOldSessions(days = 90) {
-        try {
-            const cutoffDate = new Date();
-            cutoffDate.setDate(cutoffDate.getDate() - days);
-            const result = await this.sessionAuditModel.deleteMany({
-                createdAt: { $lt: cutoffDate },
-                isActive: false
-            });
-            this.logger.info('system', `Cleaned up ${result.deletedCount} old session records`);
-            return { deletedCount: result.deletedCount };
-        }
-        catch (error) {
-            this.logger.error('system', 'Failed to cleanup old sessions', error);
             throw error;
         }
     }
