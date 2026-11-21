@@ -64050,8 +64050,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "a2e44387e1ecea84dc8d7dfe4b25bd0691d3c2b3" : 0;
-    const builtAt =  true ? "2026-11-21T09:40:24.734Z" : 0;
+    const sha =  true ? "bb5f13cd48b9fa5920e005e338c707ef360fa449" : 0;
+    const builtAt =  true ? "2026-11-21T19:24:31.819Z" : 0;
     return { sha, builtAt };
 }
 
@@ -92222,6 +92222,10 @@ function gateOnlyCause(check, _stats, gate) {
  * SETUP_CLIENT_BACKOFF_MS (the shared no_candidate backoff).
  */
 function promoSwapRetryMs(result) {
+    // A flat-retry no_candidate names its own retry time (pending: 15 min twice, then 2 h).
+    const retryAfter = Number(result.retryAfterMs);
+    if (Number.isFinite(retryAfter) && retryAfter > 0)
+        return retryAfter;
     const remaining = Number(result.cooldownRemainingMs);
     if (Number.isFinite(remaining) && remaining > 0)
         return remaining;
@@ -93555,8 +93559,13 @@ class JobManager {
         const swapReason = `Promotion health check failed: retry ${reason} (landed=${evidence.landed}, failed=${evidence.failed} since the retry), failStreak=${messageStats.failStreak}, failedRetries=${failedRetries}`;
         const url = `${runtimeBase}/setupClient/${process.env.clientId}?archiveOld=true&days=${(0,_telegram_spam_state__WEBPACK_IMPORTED_MODULE_31__.clampSwapRestDays)((0,_telegram_spam_state__WEBPACK_IMPORTED_MODULE_31__.swapDaysForCurrentSpamState)())}&formalities=true&reason=${encodeURIComponent(swapReason)}`;
         let setupResult;
+        // Logged before the request: a swap that succeeds restarts this process before the swapped=true line.
+        // A request the local backoff answers never reaches CMS (review L5).
+        const swapOptions = { flatNoCandidateRetry: true };
+        this.log('warn', (0,_promotion_promo_health_log__WEBPACK_IMPORTED_MODULE_27__.promoHealthLine)('swap', mobile, { state: (0,_telegram_setup_client__WEBPACK_IMPORTED_MODULE_30__.setupClientSuppressed)(swapOptions) ? 'suppressed_local' : 'requested', failedRetries, budget: 'charged', cause: ctx.noPause ? 'ban_gate' : undefined }));
         try {
-            setupResult = await (0,_telegram_setup_client__WEBPACK_IMPORTED_MODULE_30__.requestClientSetup)(url, _tg_core_utils_fetchWithTimeout__WEBPACK_IMPORTED_MODULE_32__.fetchWithTimeout, process.env.clientId);
+            // Owner 2026-11-21: a promo-health swap that gets no_candidate retries every 2 h and never stops.
+            setupResult = await (0,_telegram_setup_client__WEBPACK_IMPORTED_MODULE_30__.requestClientSetup)(url, _tg_core_utils_fetchWithTimeout__WEBPACK_IMPORTED_MODULE_32__.fetchWithTimeout, process.env.clientId, swapOptions);
         }
         catch (error) {
             // No clear answer (timeout, no response, invalid contract): CMS may have swapped; the charge stays.
@@ -93583,11 +93592,21 @@ class JobManager {
         const lastUpdatedTimeStamp = Number(ctx.promotionHealth?.metadata?.durableLastUpdatedAt ?? ctx.promotedStats.lastUpdatedTimeStamp ?? 0);
         const why = ctx.noPause ? 'at once, ban gate tripped (no payer hold)' : `after ${failedRetries} failed retries, no payer active in 6 h`;
         const alertMsg = `Promotions failing! Rotating user ${why} 🔄\n\nLast update: ${(0,_tg_core_utils_readbleTimeDifference__WEBPACK_IMPORTED_MODULE_19__.getReadableTimeDifference)(lastUpdatedTimeStamp)}\nHealth: ${ctx.promotionHealth?.summary ?? 'unhealthy'}\nIssues: ${(ctx.promotionHealth?.issues ?? []).join(', ') || 'none'}\nRetry: ${reason}, landed ${evidence.landed}, failed ${evidence.failed} since the retry\nFailed streak: ${messageStats.failStreak}\nTotal Failed: ${messageStats.totalFailed}\nSuccess: ${messageStats.successCount}\nDeleted: ${messageStats.deletedCount}\nDaysLeft: ${ctx.daysLeft}`;
-        // Alert only when a rotation request actually went out.
-        if (!setupResult.suppressedLocally)
+        // Alert only when a rotation request actually went out, and only on the first no_candidate of a streak (review M1).
+        const streak = Number(setupResult.noCandidateStreak ?? 0);
+        if (setupResult.status === 'no_candidate' && streak > 1) {
+            this.log('warn', (0,_promotion_promo_health_log__WEBPACK_IMPORTED_MODULE_27__.promoHealthLine)('alert_suppressed', mobile, { reason: 'no_candidate_streak', streak, failedRetries }));
+        }
+        else if (!setupResult.suppressedLocally) {
             await this.notifyError(`${alertMsg}\n\nResult: ${setupResult.status}`);
+        }
         if (!setupResult.swapped) {
             this.log('warn', `Promotion rotation not performed: ${setupResult.status} — ${setupResult.message}`);
+            if (setupResult.status === 'no_candidate') {
+                const retryMs = promoSwapRetryMs(setupResult);
+                // From the response time, not the tick start (review L6).
+                this.log('warn', (0,_promotion_promo_health_log__WEBPACK_IMPORTED_MODULE_27__.promoHealthLine)('swap_backoff', mobile, { next: new Date(Date.now() + retryMs).toISOString(), reason: 'no_candidate', retryMin: Math.ceil(retryMs / 60000), streak: setupResult.noCandidateStreak }));
+            }
             if (ctx.noPause)
                 await waitForSwap(setupResult.status, promoSwapRetryMs(setupResult));
             else
@@ -113328,7 +113347,8 @@ __webpack_require__.r(__webpack_exports__);
 /**
  * Owner rule 2026-11-19: every promotion-health decision on the tg-aut main writes one greppable line,
  * `promo-health kind=<kind> client=<clientId> mobile=***1234 key=value ...`. A value with spaces is quoted.
- * Kinds: pause, retry, retry_wait, retry_rebase, repause, swap, swap_held, alert_suppressed, paused_fault, stale_write_skipped,
+ * Kinds: pause, retry, retry_wait, retry_rebase, repause, swap (state=requested before the CMS request, then swapped=...),
+ * swap_backoff (no_candidate: next=<ISO> retry, flat 2 h, never stops), swap_held, alert_suppressed, paused_fault, stale_write_skipped,
  * gate_hold, hold_summary, resume (source=daily_reset|spambot_good_news|route|retry|main_changed|external).
  * No-pause holds (owner 2026-11-20 fix): a main whose only cause is the ban gate is not paused; the gate's 10 min probes
  * run. Owner 2026-11-20 ("6hrs is huge"): the swap is asked when the gate hold starts (gate_hold state=start swap=now,
@@ -131106,12 +131126,14 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   SETUP_CLIENT_BACKOFF_MS: () => (/* binding */ SETUP_CLIENT_BACKOFF_MS),
 /* harmony export */   SETUP_CLIENT_DEGRADED_HOLD_MS: () => (/* binding */ SETUP_CLIENT_DEGRADED_HOLD_MS),
 /* harmony export */   SETUP_CLIENT_FAILURE_BACKOFF_MS: () => (/* binding */ SETUP_CLIENT_FAILURE_BACKOFF_MS),
+/* harmony export */   SETUP_CLIENT_FLAT_PENDING_RETRIES: () => (/* binding */ SETUP_CLIENT_FLAT_PENDING_RETRIES),
 /* harmony export */   SETUP_CLIENT_MAX_FAILURES: () => (/* binding */ SETUP_CLIENT_MAX_FAILURES),
 /* harmony export */   SETUP_CLIENT_MAX_NO_CANDIDATE: () => (/* binding */ SETUP_CLIENT_MAX_NO_CANDIDATE),
 /* harmony export */   SETUP_CLIENT_PENDING_BACKOFF_MS: () => (/* binding */ SETUP_CLIENT_PENDING_BACKOFF_MS),
 /* harmony export */   SETUP_CLIENT_POST_SWAP_MS: () => (/* binding */ SETUP_CLIENT_POST_SWAP_MS),
 /* harmony export */   requestClientSetup: () => (/* binding */ requestClientSetup),
 /* harmony export */   resetSetupClientBackoff: () => (/* binding */ resetSetupClientBackoff),
+/* harmony export */   setupClientSuppressed: () => (/* binding */ setupClientSuppressed),
 /* harmony export */   withReportedMobile: () => (/* binding */ withReportedMobile)
 /* harmony export */ });
 /* harmony import */ var _tg_core_account_health_handoff__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/core/account-health/handoff */ "../../packages/tg-core/src/account-health/handoff.ts");
@@ -131168,64 +131190,122 @@ const SETUP_CLIENT_MAX_NO_CANDIDATE = _tg_core_account_health_handoff__WEBPACK_I
  * source of truth for `degraded`.
  */
 const SETUP_CLIENT_DEGRADED_HOLD_MS = _tg_core_account_health_handoff__WEBPACK_IMPORTED_MODULE_0__.HANDOFF_DEGRADED_HOLD_MS;
+/**
+ * Promotion-health swap requests (flatNoCandidateRetry, owner 2026-11-21): consecutive pending no_candidate answers
+ * retry after SETUP_CLIENT_PENDING_BACKOFF_MS this many times, then after SETUP_CLIENT_BACKOFF_MS.
+ */
+const SETUP_CLIENT_FLAT_PENDING_RETRIES = 2;
+/** Deadline for the SpamBot / other triggers (doubling no_candidate backoff, stop after 5). */
 let swapSuppressedUntil = 0;
+/** Deadline for flat-retry (promotion-health) requests: no_candidate never doubles or stops. */
+let flatSuppressedUntil = 0;
 let inFlight = null;
+let inFlightFlat = null;
 let consecutiveFailures = 0;
 let consecutiveNoCandidates = 0;
+/** Flat requests: consecutive pending no_candidate answers (15 min retries while below the cap). */
+let flatPendingStreak = 0;
+/** Flat requests: consecutive no_candidate answers (the caller alerts on the first one only). */
+let flatNoCandidateStreak = 0;
 let stopReason = null;
-/** The swapSuppressedUntil value set by the last degraded no_candidate (names the hold in the message). */
+/** The deadline set by the last degraded no_candidate (names the hold in the message). */
 let degradedHoldUntil = 0;
 function resetSetupClientBackoff() {
     swapSuppressedUntil = 0;
+    flatSuppressedUntil = 0;
     inFlight = null;
+    inFlightFlat = null;
     consecutiveFailures = 0;
     consecutiveNoCandidates = 0;
+    flatPendingStreak = 0;
+    flatNoCandidateStreak = 0;
     stopReason = null;
     degradedHoldUntil = 0;
 }
+/** Applies a deadline to both kinds. `own` kind takes it as is; the other kind never gets a shorter one. */
+function holdBoth(until, flatRetry) {
+    if (flatRetry) {
+        flatSuppressedUntil = until;
+        swapSuppressedUntil = Math.max(swapSuppressedUntil, until);
+    }
+    else {
+        swapSuppressedUntil = until;
+        flatSuppressedUntil = Math.max(flatSuppressedUntil, until);
+    }
+}
 function stopRequests(reason) {
     swapSuppressedUntil = Number.POSITIVE_INFINITY;
+    flatSuppressedUntil = Number.POSITIVE_INFINITY;
     stopReason = reason;
 }
-function noteSetupFailure() {
+function noteSetupFailure(flatRetry) {
+    // The failure rule (owner 2026-10-11) is shared by both kinds: 15, 30, 60, 120 min, stop after 5.
+    if (flatRetry) {
+        flatPendingStreak = 0;
+        flatNoCandidateStreak = 0;
+    }
     consecutiveFailures++;
     if (consecutiveFailures >= SETUP_CLIENT_MAX_FAILURES) {
         stopRequests(`setupClient requests stopped after ${consecutiveFailures} failures in a row; a process restart re-arms them`);
         return;
     }
-    swapSuppressedUntil = Date.now() + SETUP_CLIENT_FAILURE_BACKOFF_MS * 2 ** (consecutiveFailures - 1);
+    // max() for the other kind (review L3): a flat failure never shortens another trigger's stop.
+    holdBoth(Date.now() + SETUP_CLIENT_FAILURE_BACKOFF_MS * 2 ** (consecutiveFailures - 1), flatRetry);
 }
-function noteNoCandidate(result) {
+function noteNoCandidate(result, flatRetry) {
     consecutiveFailures = 0;
+    const now = Date.now();
+    if (flatRetry)
+        flatNoCandidateStreak++;
     if (result.degraded === true) {
-        swapSuppressedUntil = Date.now() + SETUP_CLIENT_DEGRADED_HOLD_MS;
-        degradedHoldUntil = swapSuppressedUntil;
+        if (flatRetry)
+            flatPendingStreak = 0;
+        holdBoth(now + SETUP_CLIENT_DEGRADED_HOLD_MS, flatRetry);
+        degradedHoldUntil = now + SETUP_CLIENT_DEGRADED_HOLD_MS;
         return;
     }
-    consecutiveNoCandidates++;
-    if (consecutiveNoCandidates >= SETUP_CLIENT_MAX_NO_CANDIDATE) {
-        stopRequests(`setupClient requests stopped after ${consecutiveNoCandidates} no_candidate answers in a row; a process restart re-arms them`);
+    if (flatRetry) {
+        // Promotion health: never doubles, never stops. Pending: 15 min for the first 2 in a row, then 2 h (review M1).
+        flatPendingStreak = result.moreCandidatesPending ? flatPendingStreak + 1 : 0;
+        const wait = result.moreCandidatesPending && flatPendingStreak <= SETUP_CLIENT_FLAT_PENDING_RETRIES ? SETUP_CLIENT_PENDING_BACKOFF_MS : SETUP_CLIENT_BACKOFF_MS;
+        holdBoth(now + wait, true);
         return;
     }
     const base = result.moreCandidatesPending ? SETUP_CLIENT_PENDING_BACKOFF_MS : SETUP_CLIENT_BACKOFF_MS;
-    swapSuppressedUntil = Date.now() + base * 2 ** (consecutiveNoCandidates - 1);
+    // Flat requests wait one base after a no_candidate from another trigger, never its doubled backoff or stop.
+    flatSuppressedUntil = Math.max(flatSuppressedUntil, now + base);
+    consecutiveNoCandidates++;
+    if (consecutiveNoCandidates >= SETUP_CLIENT_MAX_NO_CANDIDATE) {
+        swapSuppressedUntil = Number.POSITIVE_INFINITY;
+        stopReason = `setupClient requests stopped after ${consecutiveNoCandidates} no_candidate answers in a row; a process restart re-arms them`;
+        return;
+    }
+    swapSuppressedUntil = now + base * 2 ** (consecutiveNoCandidates - 1);
+}
+/** True when a request of this kind would be answered locally now (no CMS call). */
+function setupClientSuppressed(options = {}, now = Date.now()) {
+    if (options.bypassBackoff === true)
+        return false;
+    return now < (options.flatNoCandidateRetry === true ? flatSuppressedUntil : swapSuppressedUntil);
 }
 /**
  * Shared by every swap trigger (SpamBot limits, promotion health). Process-local backoff: after a
- * no_candidate result, requests from any trigger are answered locally for SETUP_CLIENT_BACKOFF_MS (15 min when CMS reports moreCandidatesPending)
- * so a no_candidate pool is not re-asked every health cycle.
+ * no_candidate result, requests are answered locally for SETUP_CLIENT_BACKOFF_MS (15 min when CMS reports
+ * moreCandidatesPending) so a no_candidate pool is not re-asked every health cycle.
  */
 async function requestClientSetup(url, request, expectedClientId, options = {}) {
     const bypass = options.bypassBackoff === true;
+    const flatRetry = options.flatNoCandidateRetry === true;
     const startedAt = Date.now();
-    if (!bypass && startedAt < swapSuppressedUntil) {
-        const remainingMs = swapSuppressedUntil - startedAt;
+    const suppressedUntil = flatRetry ? flatSuppressedUntil : swapSuppressedUntil;
+    if (!bypass && startedAt < suppressedUntil) {
+        const remainingMs = suppressedUntil - startedAt;
         return {
             status: 'cooldown',
             swapped: false,
             clientId: expectedClientId ?? '',
             message: Number.isFinite(remainingMs)
-                ? swapSuppressedUntil === degradedHoldUntil
+                ? suppressedUntil === degradedHoldUntil
                     ? `setupClient requests held for another ${Math.ceil(remainingMs / 1000)}s: this client runs on a degraded account and the CMS upgrade job moves it up; requests re-arm 1 h after the degraded no_candidate`
                     : `setupClient request suppressed locally for another ${Math.ceil(remainingMs / 1000)}s after a no_candidate, swapped or failed result`
                 : stopReason ?? 'setupClient requests stopped; a process restart re-arms them',
@@ -131235,9 +131315,10 @@ async function requestClientSetup(url, request, expectedClientId, options = {}) 
     }
     if (bypass)
         return requestClientSetupUnguarded(url, request, expectedClientId);
-    // Coalesce concurrent triggers (e.g. a SpamBot reply and a health pass) into one CMS request.
-    if (inFlight)
-        return inFlight;
+    // Coalesce concurrent triggers of the same kind (e.g. a SpamBot reply and a health pass) into one CMS request.
+    const current = flatRetry ? inFlightFlat : inFlight;
+    if (current)
+        return current;
     const pending = requestClientSetupUnguarded(url, request, expectedClientId)
         .then((result) => {
         // Only "nothing swappable" backs off for long. CMS's own short cooldown or a transient
@@ -131245,7 +131326,11 @@ async function requestClientSetup(url, request, expectedClientId, options = {}) 
         if (result.swapped) {
             consecutiveFailures = 0;
             consecutiveNoCandidates = 0;
-            swapSuppressedUntil = Date.now() + SETUP_CLIENT_POST_SWAP_MS;
+            flatPendingStreak = 0;
+            flatNoCandidateStreak = 0;
+            const until = Date.now() + SETUP_CLIENT_POST_SWAP_MS;
+            swapSuppressedUntil = until;
+            flatSuppressedUntil = until;
         }
         else if (result.status === 'stale_report') {
             // This process runs a replaced mobile; CMS restarts it onto the current main.
@@ -131253,26 +131338,39 @@ async function requestClientSetup(url, request, expectedClientId, options = {}) 
             stopRequests('setupClient requests stopped: CMS says this process runs a mobile that is no longer the client main (stale_report); a process restart re-arms them');
         }
         else if (result.status === 'no_candidate') {
-            noteNoCandidate(result);
+            noteNoCandidate(result, flatRetry);
+            if (flatRetry)
+                return { ...result, noCandidateStreak: flatNoCandidateStreak, retryAfterMs: flatSuppressedUntil - Date.now() };
         }
         else if (result.status === 'cooldown') {
             // CMS's own cooldown: wait exactly that long, not a failure.
+            if (flatRetry) {
+                flatPendingStreak = 0;
+                flatNoCandidateStreak = 0;
+            }
             if (result.cooldownRemainingMs && result.cooldownRemainingMs > 0)
-                swapSuppressedUntil = Date.now() + result.cooldownRemainingMs;
+                holdBoth(Date.now() + result.cooldownRemainingMs, flatRetry);
         }
         else {
-            noteSetupFailure();
+            noteSetupFailure(flatRetry);
         }
         return result;
     }, (error) => {
-        noteSetupFailure();
+        noteSetupFailure(flatRetry);
         throw error;
     })
         .finally(() => {
-        if (inFlight === pending)
+        if (flatRetry) {
+            if (inFlightFlat === pending)
+                inFlightFlat = null;
+        }
+        else if (inFlight === pending)
             inFlight = null;
     });
-    inFlight = pending;
+    if (flatRetry)
+        inFlightFlat = pending;
+    else
+        inFlight = pending;
     return pending;
 }
 async function requestClientSetupUnguarded(url, request, expectedClientId) {
