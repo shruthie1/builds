@@ -29550,6 +29550,7 @@ exports.swapCutoverOpId = swapCutoverOpId;
 exports.buildSwapEpisode = buildSwapEpisode;
 exports.supersededStopPipeline = supersededStopPipeline;
 exports.swapSupersedeFilter = swapSupersedeFilter;
+exports.swapNewerOpenFilter = swapNewerOpenFilter;
 exports.tgAutExistsMergePipeline = tgAutExistsMergePipeline;
 exports.recordUnparked = recordUnparked;
 exports.tgAutParkedEnabled = tgAutParkedEnabled;
@@ -29591,6 +29592,7 @@ function buildSwapEpisode(input, now, random) {
         liveSince: null,
         parkedAt: new Date(anchor),
         expiresAt: new Date(anchor + exports.TGAUT_PARK_MAX_AGE_MS),
+        gcAt: new Date(anchor + exports.TGAUT_PARK_MAX_AGE_MS + PARKED_EPISODE_GC_MS),
         nextRunAt: new Date(anchor + delay),
         createdBy: 'cms',
         open: true,
@@ -29623,9 +29625,12 @@ function supersededStopPipeline() {
         { $unset: ['open'] },
     ];
 }
-function swapSupersedeFilter(mobile, id) {
+function swapSupersedeFilter(mobile, id, parkedAt) {
     const forms = (0, parked_session_guard_1.parkedMobileForms)(mobile);
-    return { mobile: { $in: forms.length ? forms : [mobile] }, open: true, _id: { $ne: id }, $or: [{ app: 'tg-aut' }, { $expr: { $lte: ['$expiresAt', '$$NOW'] } }] };
+    return { mobile: { $in: forms.length ? forms : [mobile] }, open: true, _id: { $ne: id }, parkedAt: { $not: { $gte: parkedAt } }, $or: [{ app: 'tg-aut' }, { $expr: { $lte: ['$expiresAt', '$$NOW'] } }] };
+}
+function swapNewerOpenFilter(mobile, id, parkedAt) {
+    return { ...swapSupersedeFilter(mobile, id, parkedAt), parkedAt: { $gte: parkedAt } };
 }
 const TGAUT_FALLBACK_REASON = 'swap';
 function tgAutExistsMergePipeline(input) {
@@ -29745,7 +29750,7 @@ async function openSwapEpisode(collection, input, opts) {
             try {
                 let closed = 0;
                 while (closed < SUPERSEDE_LOOP_MAX) {
-                    const stopped = await withDeadline(collection.findOneAndUpdate(swapSupersedeFilter(input.mobile, String(doc._id)), supersededStopPipeline(), { ...OP, returnDocument: 'after', projection: { _id: 1, app: 1, mobile: 1, clientId: 1, stopReason: 1 } }), deadlineMs, 'parkedAccounts.findOneAndUpdate');
+                    const stopped = await withDeadline(collection.findOneAndUpdate(swapSupersedeFilter(input.mobile, String(doc._id), doc.parkedAt), supersededStopPipeline(), { ...OP, returnDocument: 'after', projection: { _id: 1, app: 1, mobile: 1, clientId: 1, stopReason: 1 } }), deadlineMs, 'parkedAccounts.findOneAndUpdate');
                     if (!stopped)
                         break;
                     closed += 1;
@@ -29755,6 +29760,12 @@ async function openSwapEpisode(collection, input, opts) {
                     const same = await withDeadline(collection.findOne({ _id: doc._id }, { projection: { _id: 1 }, ...OP }), deadlineMs, 'parkedAccounts.findOne');
                     if (same)
                         return exists();
+                    const newer = await withDeadline(collection.findOne(swapNewerOpenFilter(input.mobile, String(doc._id), doc.parkedAt), { projection: { _id: 1 }, ...OP }), deadlineMs, 'parkedAccounts.findOne(newer)');
+                    if (newer) {
+                        const mask = (id) => String(id).split(input.mobile).join(String(meta.mobile));
+                        logger.warn(`parked-episode kind=supersede_skip reason=newer_open episode=${mask(doc._id)} newer=${mask(newer._id)}`, meta);
+                        return 'failed';
+                    }
                 }
             }
             catch (stopError) {
@@ -63238,10 +63249,11 @@ var __param = (this && this.__param) || function (paramIndex, decorator) {
 };
 var ScheduledJobsService_1;
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.ScheduledJobsService = exports.DAILY_RESET_WINDOW_VALUE = exports.DAILY_RESET_WINDOW_ABOVE = exports.SWAP_MAINTENANCE_CLAIM_TTL_MS = void 0;
+exports.ScheduledJobsService = exports.DAILY_RESET_WINDOW_VALUE = exports.DAILY_RESET_WINDOW_ABOVE = exports.JOB_RUN_RESERVED_KEYS = exports.SWAP_MAINTENANCE_CLAIM_TTL_MS = void 0;
 const common_1 = __webpack_require__(/*! @nestjs/common */ "@nestjs/common");
 const mongoose_1 = __webpack_require__(/*! @nestjs/mongoose */ "@nestjs/mongoose");
 const mongoose_2 = __webpack_require__(/*! mongoose */ "mongoose");
+const crypto_1 = __webpack_require__(/*! crypto */ "crypto");
 const schedule = __importStar(__webpack_require__(/*! node-schedule-tz */ "node-schedule-tz"));
 const components_1 = __webpack_require__(/*! ../../components */ "./src/components/index.ts");
 const bot_notice_1 = __webpack_require__(/*! ../../utils/bot-notice */ "./src/utils/bot-notice.ts");
@@ -63253,6 +63265,7 @@ const pool_snapshot_writer_1 = __webpack_require__(/*! ../../components/monitor/
 const payment_health_service_1 = __webpack_require__(/*! ../../components/payment-health/payment-health.service */ "./src/components/payment-health/payment-health.service.ts");
 const IST = 'Asia/Kolkata';
 exports.SWAP_MAINTENANCE_CLAIM_TTL_MS = 60 * 60 * 1000;
+exports.JOB_RUN_RESERVED_KEYS = ['_id', 'startedAt', 'completedAt', 'leaseOwner', 'leaseExpiresAt', 'claimToken', 'failedAt', 'error'];
 exports.DAILY_RESET_WINDOW_ABOVE = 30;
 exports.DAILY_RESET_WINDOW_VALUE = 10;
 let ScheduledJobsService = ScheduledJobsService_1 = class ScheduledJobsService {
@@ -63442,21 +63455,41 @@ let ScheduledJobsService = ScheduledJobsService_1 = class ScheduledJobsService {
                 return;
             }
         }
-        if (!(await this.claimJob(runs, jobId, options.ttlMs))) {
+        const token = await this.claimJob(runs, jobId, options.ttlMs);
+        if (!token) {
             this.logger.warn(`${label} already claimed or completed: ${jobId}`);
             return;
         }
         try {
-            const outcome = await task();
-            await runs.updateOne({ _id: jobId }, { $set: { completedAt: new Date(), ...outcome }, $unset: { leaseOwner: '', leaseExpiresAt: '' } });
+            const outcome = this.withoutReservedKeys(jobId, await task());
+            await this.finishRun(runs, jobId, token, 'complete', { $set: { completedAt: new Date(), ...outcome }, $unset: { leaseOwner: '', leaseExpiresAt: '' } });
         }
         catch (error) {
-            await runs.updateOne({ _id: jobId }, {
-                $set: { failedAt: new Date(), error: error instanceof Error ? error.message : String(error), leaseExpiresAt: new Date(0) },
-                $unset: { leaseOwner: '' },
-            });
+            await this.finishRun(runs, jobId, token, 'fail', this.failureUpdate(error));
             throw error;
         }
+    }
+    withoutReservedKeys(jobId, outcome) {
+        const out = { ...(outcome ?? {}) };
+        const dropped = exports.JOB_RUN_RESERVED_KEYS.filter((k) => Object.prototype.hasOwnProperty.call(out, k));
+        for (const k of dropped)
+            delete out[k];
+        if (dropped.length)
+            this.logger.warn(`job-run kind=reserved_key_dropped job=${jobId} keys=${dropped.join(',')}`);
+        return out;
+    }
+    failureUpdate(error) {
+        return {
+            $set: { failedAt: new Date(), error: error instanceof Error ? error.message : String(error), leaseExpiresAt: new Date(0) },
+            $unset: { leaseOwner: '' },
+        };
+    }
+    async finishRun(runs, jobId, token, phase, update) {
+        const result = await runs.updateOne({ _id: jobId, claimToken: token }, update);
+        if (result?.matchedCount === 1)
+            return true;
+        this.logger.warn(`job-run kind=terminal_skip reason=lease_lost job=${jobId} phase=${phase}`);
+        return false;
     }
     utcHourKey(now = new Date()) {
         return now.toISOString().slice(0, 13);
@@ -63479,7 +63512,8 @@ let ScheduledJobsService = ScheduledJobsService_1 = class ScheduledJobsService {
         const db = this.requireDatabase('analytics health check');
         const runs = db.collection('controlPlaneJobRuns');
         const jobId = `analytics-health:${this.istDateKey()}`;
-        if (!(await this.claimJob(runs, jobId))) {
+        const token = await this.claimJob(runs, jobId);
+        if (!token) {
             this.logger.warn(`Analytics health check already claimed or completed: ${jobId}`);
             return;
         }
@@ -63490,27 +63524,22 @@ let ScheduledJobsService = ScheduledJobsService_1 = class ScheduledJobsService {
                 .limit(1)
                 .next();
             const { problems, suppressed, historyAlerts } = await this.analyticsHealth.runWithState(Date.now(), previous?.historyAlerts ?? {});
-            await runs.updateOne({ _id: jobId }, {
+            await this.finishRun(runs, jobId, token, 'complete', {
                 $set: { completedAt: new Date(), problems, suppressed, historyAlerts },
                 $unset: { leaseOwner: '', leaseExpiresAt: '' },
             });
         }
         catch (error) {
-            await runs.updateOne({ _id: jobId }, {
-                $set: {
-                    failedAt: new Date(),
-                    error: error instanceof Error ? error.message : String(error),
-                    leaseExpiresAt: new Date(0),
-                },
-                $unset: { leaseOwner: '' },
-            });
+            await this.finishRun(runs, jobId, token, 'fail', this.failureUpdate(error));
             throw error;
         }
     }
     async runDailyPromoteReset() {
         const db = this.requireDatabase('daily promoteStats reset');
         const jobId = `daily-promote-stats-reset:${this.istDateKey()}`;
-        if (!(await this.claimJob(db.collection('controlPlaneJobRuns'), jobId))) {
+        const runs = db.collection('controlPlaneJobRuns');
+        const token = await this.claimJob(runs, jobId);
+        if (!token) {
             this.logger.warn(`Daily promoteStats reset already claimed or completed: ${jobId}`);
             return;
         }
@@ -63525,7 +63554,7 @@ let ScheduledJobsService = ScheduledJobsService_1 = class ScheduledJobsService {
                 Number(stat.totalCount || 0),
             ]);
             const result = await this.resetPromoteStatsWithRetries(db.collection('promoteStats'));
-            await db.collection('controlPlaneJobRuns').updateOne({ _id: jobId }, {
+            await this.finishRun(runs, jobId, token, 'complete', {
                 $set: {
                     completedAt: new Date(),
                     resetMatchedCount: result.matchedCount,
@@ -63535,14 +63564,7 @@ let ScheduledJobsService = ScheduledJobsService_1 = class ScheduledJobsService {
             });
         }
         catch (error) {
-            await db.collection('controlPlaneJobRuns').updateOne({ _id: jobId }, {
-                $set: {
-                    failedAt: new Date(),
-                    error: error instanceof Error ? error.message : String(error),
-                    leaseExpiresAt: new Date(0),
-                },
-                $unset: { leaseOwner: '' },
-            });
+            await this.finishRun(runs, jobId, token, 'fail', this.failureUpdate(error));
             throw error;
         }
         try {
@@ -63562,13 +63584,15 @@ let ScheduledJobsService = ScheduledJobsService_1 = class ScheduledJobsService {
         const now = new Date();
         const dayKey = this.istDateKey(now);
         const jobId = `daily-user-stats-reset:${dayKey}`;
-        if (!(await this.claimJob(db.collection('controlPlaneJobRuns'), jobId))) {
+        const runs = db.collection('controlPlaneJobRuns');
+        const token = await this.claimJob(runs, jobId);
+        if (!token) {
             this.logger.warn(`Daily user stats reset already claimed or completed: ${jobId}`);
             return;
         }
         try {
             const result = await this.resetUserStatsWithRetries(db.collection('stats2'), db.collection('userData'), new Date(`${dayKey}T00:00:00+05:30`));
-            await db.collection('controlPlaneJobRuns').updateOne({ _id: jobId }, {
+            await this.finishRun(runs, jobId, token, 'complete', {
                 $set: {
                     completedAt: new Date(),
                     stats2DeletedCount: result.stats2DeletedCount,
@@ -63579,14 +63603,7 @@ let ScheduledJobsService = ScheduledJobsService_1 = class ScheduledJobsService {
             });
         }
         catch (error) {
-            await db.collection('controlPlaneJobRuns').updateOne({ _id: jobId }, {
-                $set: {
-                    failedAt: new Date(),
-                    error: error instanceof Error ? error.message : String(error),
-                    leaseExpiresAt: new Date(0),
-                },
-                $unset: { leaseOwner: '' },
-            });
+            await this.finishRun(runs, jobId, token, 'fail', this.failureUpdate(error));
             throw error;
         }
     }
@@ -63658,6 +63675,7 @@ let ScheduledJobsService = ScheduledJobsService_1 = class ScheduledJobsService {
     async claimJob(collection, jobId, ttlMs = 15 * 60 * 1000) {
         const now = new Date();
         const leaseExpiresAt = new Date(now.getTime() + ttlMs);
+        const claimToken = (0, crypto_1.randomUUID)();
         const claimed = await collection.updateOne({
             _id: jobId,
             completedAt: { $exists: false },
@@ -63665,21 +63683,22 @@ let ScheduledJobsService = ScheduledJobsService_1 = class ScheduledJobsService {
                 { leaseExpiresAt: { $lt: now } },
                 { leaseExpiresAt: { $exists: false } },
             ],
-        }, { $set: { leaseOwner: this.owner, leaseExpiresAt, startedAt: now } });
+        }, { $set: { leaseOwner: this.owner, leaseExpiresAt, startedAt: now, claimToken } });
         if (claimed.modifiedCount === 1)
-            return true;
+            return claimToken;
         try {
             await collection.insertOne({
                 _id: jobId,
                 leaseOwner: this.owner,
                 leaseExpiresAt,
                 startedAt: now,
+                claimToken,
             });
-            return true;
+            return claimToken;
         }
         catch (error) {
             if (error.code === 11000)
-                return false;
+                return null;
             throw error;
         }
     }
