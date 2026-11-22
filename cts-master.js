@@ -40787,13 +40787,14 @@ function presetOf(r, today) {
 /*!***********************************************!*\
   !*** ./src/components/monitor/monitor-upi.ts ***!
   \***********************************************/
-(__unused_webpack_module, exports) {
+(__unused_webpack_module, exports, __webpack_require__) {
 
 
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.UPI_PROOF_PROJECTION = exports.UPI_ACCOUNT_MIN_READS = exports.UPI_MAX_EDITS = exports.UPI_MIN_EDIT_LEN = exports.UPI_MIN_PIECE = exports.UPI_BIG_CREDIT = exports.UPI_WINDOWS = void 0;
+exports.UPI_ROW_KEY = exports.UPI_OTHER_KEY = exports.UPI_PROOF_PROJECTION = exports.UPI_ACCOUNT_MIN_READS = exports.UPI_MAX_EDITS = exports.UPI_MIN_EDIT_LEN = exports.UPI_MIN_PIECE = exports.UPI_BIG_CREDIT = exports.UPI_WINDOWS = void 0;
 exports.normUpi = normUpi;
 exports.maskUpi = maskUpi;
+exports.upiRowKey = upiRowKey;
 exports.knownUpiIds = knownUpiIds;
 exports.matchUpi = matchUpi;
 exports.mainQrIds = mainQrIds;
@@ -40802,6 +40803,9 @@ exports.accountsOfIds = accountsOfIds;
 exports.nameMatchedId = nameMatchedId;
 exports.creditOf = creditOf;
 exports.foldUpiRevenue = foldUpiRevenue;
+exports.foldUpiRevenueWithCredits = foldUpiRevenueWithCredits;
+exports.upiRowItems = upiRowItems;
+const crypto_1 = __webpack_require__(/*! crypto */ "crypto");
 exports.UPI_WINDOWS = ['today', '7d'];
 exports.UPI_BIG_CREDIT = 1000;
 exports.UPI_MIN_PIECE = 4;
@@ -40813,7 +40817,10 @@ const NAME_FORMS = OUR_BANKING_NAMES.map((name) => {
     return { tag: words.map((w) => w[0].toUpperCase()).join(''), forms: [words.join(''), [...words].reverse().join('')] };
 });
 exports.UPI_ACCOUNT_MIN_READS = 2;
-exports.UPI_PROOF_PROJECTION = { chatId: 1, clientId: 1, payeeUpiId: 1, payeeName: 1, creditAmount: 1, amount: 1, servedAt: 1, 'uncredited.state': 1 };
+exports.UPI_PROOF_PROJECTION = {
+    chatId: 1, clientId: 1, payeeUpiId: 1, payeeName: 1, creditAmount: 1, amount: 1, servedAt: 1, 'uncredited.state': 1,
+    proofId: 1, profile: 1, telegramMsgId: 1, createdAt: 1, 'verdict.outcome': 1,
+};
 function normUpi(v) {
     return String(v ?? '').trim().toLowerCase().replace(/\s+/g, '').split('&')[0];
 }
@@ -40824,6 +40831,11 @@ function maskUpi(v) {
     const handle = at >= 0 ? n.slice(at) : '';
     return `****${local.slice(-4)}${handle}`;
 }
+function upiRowKey(id) {
+    return id === null ? exports.UPI_OTHER_KEY : `u${(0, crypto_1.createHash)('sha256').update(id).digest('hex').slice(0, 12)}`;
+}
+exports.UPI_OTHER_KEY = 'other';
+exports.UPI_ROW_KEY = /^(other|u[0-9a-f]{12})$/;
 const compact = (s) => s.replace(/[^a-z0-9]/g, '');
 function editsWithin(a, b, max) {
     if (Math.abs(a.length - b.length) > max)
@@ -40978,6 +40990,9 @@ function creditOf(r) {
 }
 const newAcc = () => ({ rupees: 0, credits: 0, nameRupees: 0, nameCredits: 0, payers: new Set(), tags: new Map() });
 function foldUpiRevenue(input) {
+    return foldUpiRevenueWithCredits(input).fold;
+}
+function foldUpiRevenueWithCredits(input) {
     const known = knownUpiIds(input.upiDocs, input.clients);
     const qrOf = new Map();
     const gpayOf = new Map();
@@ -41001,6 +41016,7 @@ function foldUpiRevenue(input) {
     const nameMatched = { rupees: 0, credits: 0 };
     const excluded = { fakeRupees: 0, fakeCredits: 0, bigRupees: 0, bigCredits: 0, voidedCredits: 0 };
     const acc = new Map();
+    const counted = [];
     const allPayers = new Set();
     let rupees = 0;
     let credits = 0;
@@ -41037,6 +41053,7 @@ function foldUpiRevenue(input) {
         if (tag)
             a.tags.set(tag, (a.tags.get(tag) ?? 0) + 1);
         acc.set(key, a);
+        counted.push({ key: upiRowKey(key), proof: r, rupees: amt, match: key === null ? 'none' : byName ? 'name' : 'id' });
         allPayers.add(chat);
         rupees += amt;
         credits++;
@@ -41048,6 +41065,7 @@ function foldUpiRevenue(input) {
     const rows = [...acc.entries()].map(([id, a]) => {
         const tag = [...a.tags.entries()].sort((x, y) => y[1] - x[1] || x[0].localeCompare(y[0]))[0]?.[0] ?? null;
         return {
+            key: upiRowKey(id),
             id: id === null ? null : maskUpi(id),
             kind: id === null ? 'other' : qrOf.has(id) ? 'qr' : gpayOf.has(id) ? 'gpay' : 'listed',
             tag: id !== null && mainQr.has(id) ? tag : null,
@@ -41071,13 +41089,46 @@ function foldUpiRevenue(input) {
             r.id = `${r.id} (${id.split('@')[0].length} ch)`;
     }
     rows.sort((x, y) => Number(x.kind === 'other') - Number(y.kind === 'other') || y.rupees - x.rupees || y.credits - x.credits || String(x.id).localeCompare(String(y.id)));
-    return {
+    const fold = {
         rows,
         total: { rupees, payers: allPayers.size, credits },
         nameMatched,
         excluded,
         idsWithCredits: rows.filter((r) => r.kind !== 'other' && r.credits > 0).length,
     };
+    return { fold, credits: counted };
+}
+const iso = (v) => {
+    if (v === null || v === undefined || v === '')
+        return null;
+    const t = new Date(v).getTime();
+    return Number.isFinite(t) ? new Date(t).toISOString() : null;
+};
+function upiRowItems(credits, key, hosts = new Map()) {
+    return credits
+        .filter((c) => c.key === key)
+        .map(({ proof: r, rupees, match }) => {
+        const read = normUpi(r.payeeUpiId);
+        const tel = Number(r.telegramMsgId);
+        return {
+            proofId: typeof r.proofId === 'string' && r.proofId ? r.proofId : null,
+            clientId: String(r.clientId ?? ''),
+            chatId: String(r.chatId ?? ''),
+            profile: typeof r.profile === 'string' && r.profile ? r.profile : null,
+            telegramMsgId: Number.isInteger(tel) && tel > 0 ? tel : null,
+            servedAt: iso(r.servedAt),
+            createdAt: iso(r.createdAt),
+            rupees,
+            match,
+            payeeUpi: read ? maskUpi(read) : null,
+            payeeTag: bankingTag(r.payeeName),
+            payeeNameRead: String(r.payeeName ?? '').trim() !== '',
+            legacy: !(typeof r.verdict?.outcome === 'string' && r.verdict.outcome),
+            clientHost: hosts.get(String(r.clientId ?? '')) ?? null,
+            username: null,
+        };
+    })
+        .sort((a, b) => (Date.parse(b.servedAt ?? '') || 0) - (Date.parse(a.servedAt ?? '') || 0) || String(a.proofId).localeCompare(String(b.proofId)));
 }
 
 
@@ -41209,6 +41260,7 @@ exports.parsePeriod = parsePeriod;
 exports.parseWindow = parseWindow;
 exports.parseReactWindow = parseReactWindow;
 exports.parseUpiWindow = parseUpiWindow;
+exports.parseUpiRowKey = parseUpiRowKey;
 exports.parseDays = parseDays;
 exports.parseSvc = parseSvc;
 exports.parsePaidDate = parsePaidDate;
@@ -41254,6 +41306,12 @@ function parseUpiWindow(window) {
     if (monitor_upi_1.UPI_WINDOWS.includes(window))
         return window;
     throw new common_1.BadRequestException(`window must be one of ${monitor_upi_1.UPI_WINDOWS.join('|')} (paymentProofs keep 7 days)`);
+}
+function parseUpiRowKey(key) {
+    const k = String(key ?? '').trim();
+    if (monitor_upi_1.UPI_ROW_KEY.test(k))
+        return k;
+    throw new common_1.BadRequestException('key must be a row key of /monitor/upi-revenue (other, or u + 12 hex)');
 }
 function parseDays(days) {
     if (days === undefined || days === '' || days === '7')
@@ -41381,6 +41439,9 @@ let MonitorController = class MonitorController {
     }
     upiRevenue(window) {
         return this.service.upiRevenue(parseUpiWindow(window));
+    }
+    upiRevenueItems(window, key) {
+        return this.service.upiRevenueItems(parseUpiWindow(window), parseUpiRowKey(key));
     }
     parkedChat(chatId) {
         if (!CHAT_ID_RE.test(chatId ?? ''))
@@ -41520,6 +41581,16 @@ __decorate([
     __metadata("design:paramtypes", [String]),
     __metadata("design:returntype", void 0)
 ], MonitorController.prototype, "upiRevenue", null);
+__decorate([
+    (0, common_1.Get)('upi-revenue/items'),
+    (0, swagger_1.ApiQuery)({ name: 'window', required: false, enum: monitor_upi_1.UPI_WINDOWS }),
+    (0, swagger_1.ApiQuery)({ name: 'key', required: true, description: "row key from /monitor/upi-revenue ('other' or u + 12 hex)" }),
+    __param(0, (0, common_1.Query)('window')),
+    __param(1, (0, common_1.Query)('key')),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [String, String]),
+    __metadata("design:returntype", void 0)
+], MonitorController.prototype, "upiRevenueItems", null);
 __decorate([
     (0, common_1.Get)('parked/chat/:chatId'),
     (0, swagger_1.ApiParam)({ name: 'chatId' }),
@@ -43850,6 +43921,34 @@ let MonitorService = MonitorService_1 = class MonitorService {
         }
     }
     async upiRevenue(window) {
+        const { meta, snap } = await this.upiRevenueSnapshot(window);
+        return {
+            ...meta,
+            ...snap.fold,
+            notes: [
+                'Excludes proofs voided by Uncredit, every credit of chats marked fake, and any credit of ₹1,000 or more.',
+                "Name-matched: no UPI id read, so the banking name read picks the id (the client's qrId, else gpayId, on that account; else the account's one id).",
+            ],
+        };
+    }
+    async upiRevenueItems(window, key) {
+        const { meta, snap } = await this.upiRevenueSnapshot(window);
+        const row = snap.fold.rows.find((r) => r.key === key);
+        if (!row)
+            throw new common_1.NotFoundException(`no row ${key} in the ${window} window`);
+        const items = (0, monitor_upi_1.upiRowItems)(snap.credits, key, snap.hosts);
+        const notes = [];
+        await this.addUsernames(items, notes);
+        return {
+            ...meta,
+            key,
+            row,
+            items,
+            total: { rupees: items.reduce((s, i) => s + i.rupees, 0), credits: items.length },
+            notes,
+        };
+    }
+    async upiRevenueSnapshot(window) {
         const now = Date.now();
         const today = (0, monitor_time_1.istDate)(now);
         const from = window === 'today' ? today : (0, monitor_time_1.addDays)(today, -6);
@@ -43863,7 +43962,7 @@ let MonitorService = MonitorService_1 = class MonitorService {
                 const [proofs7, upiDocs, clients] = await Promise.all([
                     this.mongoFind('paymentProofs', { servedAt: { $gte: new Date((0, monitor_time_1.istDayStart)(from7)), $lt: end } }, monitor_upi_1.UPI_PROOF_PROJECTION, 'mongo.paymentProofs_upi', timings),
                     this.mongoFind('upi-ids', {}, {}, 'mongo.upiIds', timings),
-                    this.mongoFind('clients', {}, { clientId: 1, qrId: 1, gpayId: 1 }, 'mongo.clients_upi', timings),
+                    this.mongoFind('clients', {}, { clientId: 1, qrId: 1, gpayId: 1, repl: 1 }, 'mongo.clients_upi', timings),
                 ]);
                 const proofs = proofs7.filter((p) => new Date(p.servedAt).getTime() >= start);
                 const chats = [...new Set(proofs.map((p) => String(p.chatId ?? '')).filter(Boolean))];
@@ -43873,21 +43972,15 @@ let MonitorService = MonitorService_1 = class MonitorService {
                     for (const d of docs)
                         fakeChats.add(String(d.chatId));
                 }
-                return { value: (0, monitor_upi_1.foldUpiRevenue)({ proofs, accountProofs: proofs7, fakeChats, upiDocs, clients }), asOf, timings };
+                const hosts = new Map();
+                for (const c of clients)
+                    if (typeof c.clientId === 'string' && typeof c.repl === 'string' && c.repl)
+                        hosts.set(c.clientId, c.repl);
+                const { fold, credits } = (0, monitor_upi_1.foldUpiRevenueWithCredits)({ proofs, accountProofs: proofs7, fakeChats, upiDocs, clients });
+                return { value: { fold, credits, hosts }, asOf, timings };
             }, (0, monitor_time_1.istDayStart)((0, monitor_time_1.addDays)(today, 1)));
             const v = res.value;
-            return {
-                window,
-                from,
-                to: today,
-                tz: 'Asia/Kolkata',
-                asOf: v.asOf,
-                ...v.value,
-                notes: [
-                    'Excludes proofs voided by Uncredit, every credit of chats marked fake, and any credit of ₹1,000 or more.',
-                    "Name-matched: no UPI id read, so the banking name read picks the id (the client's qrId, else gpayId, on that account; else the account's one id).",
-                ],
-            };
+            return { meta: { window, from, to: today, tz: 'Asia/Kolkata', asOf: v.asOf }, snap: v.value };
         }
         catch (err) {
             const msg = String(err?.message ?? err).slice(0, 200);
