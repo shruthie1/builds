@@ -8916,7 +8916,7 @@ async function set2fa(ctx) {
                     },
                     onEmailCodeError: (e) => {
                         ctx.logger.error(ctx.phoneNumber, 'Email code error:', (0, parseError_1.parseError)(e));
-                        return Promise.reject(e);
+                        throw e;
                     },
                 });
             }
@@ -53682,6 +53682,9 @@ class BaseClientService {
         }
         catch (error) {
             const errorDetails = this.handleError(error, 'Error setting 2FA', doc.mobile);
+            const rawReason = error?.errorMessage ?? (error instanceof Error ? error.message : undefined) ?? 'unknown';
+            const reason = String(rawReason).replace(/\s+/g, '_').slice(0, 80);
+            this.logger.warn(`warmup-step kind=set2fa result=failed reason=${reason} mobile=${(0, monitor_util_1.maskMobile)(doc.mobile)} fails=${failedAttempts + 1}`);
             await this.update(doc.mobile, {
                 lastUpdateAttempt: new Date(),
                 failedUpdateAttempts: failedAttempts + 1,
