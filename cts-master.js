@@ -26168,6 +26168,7 @@ const os = __importStar(__webpack_require__(/*! os */ "os"));
 const crypto_1 = __webpack_require__(/*! crypto */ "crypto");
 const tl_1 = __webpack_require__(/*! telegram/tl */ "telegram/tl");
 const isPermanentError_1 = __importDefault(__webpack_require__(/*! ../../utils/isPermanentError */ "./src/utils/isPermanentError.ts"));
+const isForeign2faError_1 = __webpack_require__(/*! ../../utils/isForeign2faError */ "./src/utils/isForeign2faError.ts");
 const Telegram_service_1 = __webpack_require__(/*! ../Telegram/Telegram.service */ "./src/components/Telegram/Telegram.service.ts");
 const homoglyph_normalizer_1 = __webpack_require__(/*! ../../utils/homoglyph-normalizer */ "./src/utils/homoglyph-normalizer.ts");
 const warmup_phases_1 = __webpack_require__(/*! ../shared/warmup-phases */ "./src/components/shared/warmup-phases.ts");
@@ -27491,7 +27492,7 @@ let ClientService = ClientService_1 = class ClientService {
         catch (error) {
             const errorDetails = (0, parseError_1.parseError)(error, `Error returning old client to buffer pool: ${existingMobile}`, true);
             await this.notify({ severity: 'error', title: 'Return error', fields: [{ label: 'Mobile', value: existingMobile }], details: errorDetails.message?.substring(0, 500), detailsTitle: 'Error message' });
-            if ((0, isPermanentError_1.default)(errorDetails)) {
+            if ((0, isPermanentError_1.default)(errorDetails) || (0, isForeign2faError_1.isForeign2faError)(error) || (0, isForeign2faError_1.isForeign2faError)(errorDetails.message)) {
                 this.logger.log('Marking replaced buffer inactive:', (0, monitor_util_1.maskMobile)(existingMobile));
                 await this.retireReplacedMobile(existingMobile, errorDetails.message, roleOpId);
             }
@@ -51969,6 +51970,7 @@ const telegram_2 = __webpack_require__(/*! telegram */ "telegram");
 const Password_1 = __webpack_require__(/*! telegram/Password */ "telegram/Password");
 const sessions_1 = __webpack_require__(/*! telegram/sessions */ "telegram/sessions");
 const isPermanentError_1 = __importDefault(__webpack_require__(/*! ../../utils/isPermanentError */ "./src/utils/isPermanentError.ts"));
+const isForeign2faError_1 = __webpack_require__(/*! ../../utils/isForeign2faError */ "./src/utils/isForeign2faError.ts");
 const isDeadChannelError_1 = __importDefault(__webpack_require__(/*! ../../utils/isDeadChannelError */ "./src/utils/isDeadChannelError.ts"));
 const telegram_error_code_1 = __webpack_require__(/*! ../../utils/telegram-error-code */ "./src/utils/telegram-error-code.ts");
 const channel_category_enum_1 = __webpack_require__(/*! ../bots/channel-category.enum */ "./src/components/bots/channel-category.enum.ts");
@@ -53138,6 +53140,28 @@ class BaseClientService {
         }
         return true;
     }
+    async dropForeign2fa(mobile, path) {
+        this.logger.warn(`mobile-drop reason=foreign_2fa mobile=${(0, monitor_util_1.maskMobile)(mobile)} pool=${this.clientType} path=${path}`);
+        const poolDoc = await this.findOne(mobile, false).catch(() => undefined);
+        let result;
+        let dropped;
+        if (poolDoc === null) {
+            await this.expireUserByMobile(mobile);
+            result = `no ${this.clientType} row; retired via users cascade`;
+            dropped = true;
+        }
+        else {
+            dropped = await this.deactivateClient(mobile, 'foreign_2fa: Foreign 2FA password, not ours. Account unrecoverable if session dies', { permanent: true });
+            if (!dropped)
+                await this.expireUserByMobile(mobile);
+            result = dropped ? 'inactivated' : 'inactivate FAILED';
+        }
+        this.sendAccountNotice(this.warmupNotice('critical', 'Foreign 2FA', mobile, [
+            { label: 'Result', value: result, code: false },
+            { label: 'Path', value: path, code: false },
+        ], 'Unrecoverable: the account is not safely controlled by us'));
+        return dropped;
+    }
     async updateUser2FAStatus(tgId, mobile) {
         try {
             await this.usersService.update(tgId, { twoFA: true });
@@ -53632,7 +53656,7 @@ class BaseClientService {
         }
         catch (error) {
             const msg = this.getErrorText(error).toLowerCase();
-            if (msg.includes('password_hash_invalid')) {
+            if ((0, isForeign2faError_1.isForeign2faError)(error)) {
                 this.logger.warn(`${(0, monitor_util_1.maskMobile)(mobile)}: 2FA password verification failed — foreign password`);
                 return 'foreign';
             }
@@ -53661,8 +53685,7 @@ class BaseClientService {
                 }
                 else if (verificationStatus === 'foreign') {
                     this.logger.error(`${(0, monitor_util_1.maskMobile)(doc.mobile)} has FOREIGN 2FA password — cannot control this account safely`);
-                    const deactivated = await this.deactivateClient(doc.mobile, 'Foreign 2FA password — account unrecoverable if session dies', { permanent: true });
-                    this.sendAccountNotice(this.warmupNotice('critical', 'Foreign 2FA', doc.mobile, [{ label: 'Result', value: deactivated ? 'inactivated' : 'inactivate FAILED', code: false }], 'Unrecoverable: the account is not safely controlled by us'));
+                    await this.dropForeign2fa(doc.mobile, 'warmup_set2fa');
                     return 0;
                 }
                 throw new Error('2FA password verification was inconclusive; will retry with normal warmup backoff');
@@ -54505,12 +54528,20 @@ class BaseClientService {
             throw error;
         }
     }
-    async createDistinctSessionString(mobile, forbiddenSessions, maxAttempts = 2) {
+    async createDistinctSessionString(mobile, forbiddenSessions, maxAttempts = 2, path = 'new_session') {
         const forbidden = new Set(forbiddenSessions
             .map((session) => session?.trim())
             .filter((session) => !!session));
         for (let attempt = 0; attempt < maxAttempts; attempt++) {
-            const newSession = (await this.telegramService.createNewSession(mobile))?.trim();
+            let newSession;
+            try {
+                newSession = (await this.telegramService.createNewSession(mobile))?.trim();
+            }
+            catch (error) {
+                if ((0, isForeign2faError_1.isForeign2faError)(error))
+                    await this.dropForeign2fa(mobile, path);
+                throw error;
+            }
             if (newSession && !forbidden.has(newSession)) {
                 return newSession;
             }
@@ -54555,7 +54586,7 @@ class BaseClientService {
         if (currentBackup && currentBackup !== active) {
             return user;
         }
-        const distinctBackup = await this.createDistinctSessionString(mobile, [active, currentBackup]);
+        const distinctBackup = await this.createDistinctSessionString(mobile, [active, currentBackup], 2, 'backup_session');
         if (!distinctBackup) {
             return null;
         }
@@ -55007,7 +55038,7 @@ class BaseClientService {
             this.logger.warn(`Existing backup session is not valid for ${(0, monitor_util_1.maskMobile)(mobile)}; creating a fresh backup`);
         }
         this.logger.log(`Creating fresh backup session for ${(0, monitor_util_1.maskMobile)(mobile)}`);
-        const backupSession = await this.createDistinctSessionString(mobile, [activeSession, existingBackup]);
+        const backupSession = await this.createDistinctSessionString(mobile, [activeSession, existingBackup], 2, 'rotate_session');
         if (!backupSession) {
             return { backupSession: null, reusedExisting: false };
         }
@@ -66928,6 +66959,33 @@ function isDeadChannelError(error) {
             return true;
     }
     return classify(String(error));
+}
+
+
+/***/ },
+
+/***/ "./src/utils/isForeign2faError.ts"
+/*!****************************************!*\
+  !*** ./src/utils/isForeign2faError.ts ***!
+  \****************************************/
+(__unused_webpack_module, exports) {
+
+
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.isForeign2faError = isForeign2faError;
+const FOREIGN_2FA_TOKEN = /(^|[^A-Z0-9_])PASSWORD_HASH_INVALID([^A-Z0-9_]|$)/i;
+function isForeign2faError(error) {
+    const texts = [];
+    if (typeof error === 'string')
+        texts.push(error);
+    else if (error && typeof error === 'object') {
+        const e = error;
+        if (typeof e.errorMessage === 'string')
+            texts.push(e.errorMessage);
+        if (typeof e.message === 'string')
+            texts.push(e.message);
+    }
+    return texts.some((t) => FOREIGN_2FA_TOKEN.test(t));
 }
 
 
