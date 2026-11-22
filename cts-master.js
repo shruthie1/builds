@@ -40783,6 +40783,250 @@ function presetOf(r, today) {
 
 /***/ },
 
+/***/ "./src/components/monitor/monitor-upi.ts"
+/*!***********************************************!*\
+  !*** ./src/components/monitor/monitor-upi.ts ***!
+  \***********************************************/
+(__unused_webpack_module, exports) {
+
+
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.UPI_PROOF_PROJECTION = exports.UPI_MAX_EDITS = exports.UPI_MIN_EDIT_LEN = exports.UPI_MIN_PIECE = exports.UPI_BIG_CREDIT = exports.UPI_WINDOWS = void 0;
+exports.normUpi = normUpi;
+exports.maskUpi = maskUpi;
+exports.knownUpiIds = knownUpiIds;
+exports.matchUpi = matchUpi;
+exports.mainQrIds = mainQrIds;
+exports.bankingTag = bankingTag;
+exports.creditOf = creditOf;
+exports.foldUpiRevenue = foldUpiRevenue;
+exports.UPI_WINDOWS = ['today', '7d'];
+exports.UPI_BIG_CREDIT = 1000;
+exports.UPI_MIN_PIECE = 4;
+exports.UPI_MIN_EDIT_LEN = 8;
+exports.UPI_MAX_EDITS = 2;
+const OUR_BANKING_NAMES = ['Ravva Lakshmi', 'Lakshmi Stores', 'Girls Community', 'Reddy Girl', 'Shetty Saikumar', 'Shetty Srinivas'];
+const NAME_FORMS = OUR_BANKING_NAMES.map((name) => {
+    const words = name.toLowerCase().split(' ');
+    return { tag: words.map((w) => w[0].toUpperCase()).join(''), forms: [words.join(''), [...words].reverse().join('')] };
+});
+exports.UPI_PROOF_PROJECTION = { chatId: 1, clientId: 1, payeeUpiId: 1, payeeName: 1, creditAmount: 1, amount: 1, servedAt: 1, 'uncredited.state': 1 };
+function normUpi(v) {
+    return String(v ?? '').trim().toLowerCase().replace(/\s+/g, '').split('&')[0];
+}
+function maskUpi(v) {
+    const n = normUpi(v);
+    const at = n.indexOf('@');
+    const local = at >= 0 ? n.slice(0, at) : n;
+    const handle = at >= 0 ? n.slice(at) : '';
+    return `****${local.slice(-4)}${handle}`;
+}
+const compact = (s) => s.replace(/[^a-z0-9]/g, '');
+function editsWithin(a, b, max) {
+    if (Math.abs(a.length - b.length) > max)
+        return max + 1;
+    let prev = Array.from({ length: b.length + 1 }, (_, j) => j);
+    for (let i = 1; i <= a.length; i++) {
+        const cur = [i];
+        let best = i;
+        for (let j = 1; j <= b.length; j++) {
+            cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+            best = Math.min(best, cur[j]);
+        }
+        if (best > max)
+            return max + 1;
+        prev = cur;
+    }
+    return prev[b.length];
+}
+function knownUpiIds(upiDocs, clients) {
+    const out = new Map();
+    const add = (v) => {
+        if (typeof v !== 'string' || !v.includes('@'))
+            return;
+        const id = normUpi(v);
+        if (!id.includes('@') || out.has(id))
+            return;
+        out.set(id, { id, local: compact(id.split('@')[0]) });
+    };
+    for (const d of upiDocs)
+        for (const [k, v] of Object.entries(d || {}))
+            if (k !== '_id')
+                (Array.isArray(v) ? v : [v]).forEach(add);
+    for (const c of clients) {
+        add(c.qrId);
+        add(c.gpayId);
+    }
+    return [...out.values()];
+}
+const MASK_CHAR = /[*•·●]/;
+function maskedMatch(local, known) {
+    if (!MASK_CHAR.test(local) && !/\.\.|…/.test(local))
+        return undefined;
+    if (compact(local).length < exports.UPI_MIN_PIECE)
+        return null;
+    let re = '';
+    for (const m of local.matchAll(/([*•·●]+)|(\.{2,}|…+)|(\.)|([^*•·●.…]+)/g)) {
+        if (m[1])
+            re += '.+';
+        else if (m[2])
+            re += '.*';
+        else if (m[3])
+            re += '.';
+        else
+            re += m[4].replace(/[\\^$+?()[\]{}|-]/g, '\\$&');
+    }
+    const rx = new RegExp(`^${re}$`);
+    const hits = known.filter((k) => rx.test(k.id.split('@')[0]));
+    return hits.length === 1 ? hits[0].id : null;
+}
+function matchUpi(read, known) {
+    const n = normUpi(read);
+    if (!n)
+        return null;
+    if (known.some((k) => k.id === n))
+        return n;
+    const masked = maskedMatch(n.split('@')[0], known);
+    if (masked !== undefined)
+        return masked;
+    const local = compact(n.split('@')[0].replace(/(\.\.\.|…).*$/, ''));
+    if (local.length >= exports.UPI_MIN_PIECE) {
+        const hits = known.filter((k) => k.local.includes(local));
+        if (hits.length === 1)
+            return hits[0].id;
+        if (hits.length > 1)
+            return null;
+    }
+    if (local.length >= exports.UPI_MIN_EDIT_LEN) {
+        let best = exports.UPI_MAX_EDITS + 1;
+        let hit = [];
+        for (const k of known) {
+            const d = editsWithin(local, k.local, exports.UPI_MAX_EDITS);
+            if (d < best) {
+                best = d;
+                hit = [k];
+            }
+            else if (d === best)
+                hit.push(k);
+        }
+        if (best <= exports.UPI_MAX_EDITS && hit.length === 1)
+            return hit[0].id;
+    }
+    return null;
+}
+const MAIN_QR_KEY = /^qrid\d*$/i;
+function mainQrIds(upiDocs, clients) {
+    const out = new Set();
+    const add = (v) => { if (typeof v === 'string' && v.includes('@'))
+        out.add(normUpi(v)); };
+    for (const d of upiDocs)
+        for (const [k, v] of Object.entries(d || {}))
+            if (MAIN_QR_KEY.test(k))
+                (Array.isArray(v) ? v : [v]).forEach(add);
+    for (const c of clients)
+        add(c.qrId);
+    return out;
+}
+function bankingTag(name) {
+    const n = compact(String(name ?? '').toLowerCase());
+    if (!n)
+        return null;
+    return NAME_FORMS.find((f) => f.forms.some((form) => n.includes(form)))?.tag ?? null;
+}
+function creditOf(r) {
+    const v = Number(r.creditAmount ?? r.amount ?? 0);
+    return Number.isFinite(v) ? v : 0;
+}
+function foldUpiRevenue(input) {
+    const known = knownUpiIds(input.upiDocs, input.clients);
+    const qrOf = new Map();
+    const gpayOf = new Map();
+    for (const c of input.clients) {
+        if (!c.clientId)
+            continue;
+        for (const [field, map] of [['qrId', qrOf], ['gpayId', gpayOf]]) {
+            const v = c[field];
+            if (typeof v !== 'string' || !v.includes('@'))
+                continue;
+            const id = normUpi(v);
+            map.set(id, [...(map.get(id) ?? []), c.clientId]);
+        }
+    }
+    const mainQr = mainQrIds(input.upiDocs, input.clients);
+    const excluded = { fakeRupees: 0, fakeCredits: 0, bigRupees: 0, bigCredits: 0, voidedCredits: 0 };
+    const acc = new Map();
+    const allPayers = new Set();
+    let rupees = 0;
+    let credits = 0;
+    for (const r of input.proofs) {
+        if (r.uncredited?.state === 'done') {
+            excluded.voidedCredits++;
+            continue;
+        }
+        const amt = creditOf(r);
+        const chat = String(r.chatId ?? '');
+        if (input.fakeChats.has(chat)) {
+            excluded.fakeRupees += amt;
+            excluded.fakeCredits++;
+            continue;
+        }
+        if (amt >= exports.UPI_BIG_CREDIT) {
+            excluded.bigRupees += amt;
+            excluded.bigCredits++;
+            continue;
+        }
+        const key = matchUpi(r.payeeUpiId, known);
+        const a = acc.get(key) ?? { rupees: 0, credits: 0, payers: new Set(), tags: new Map() };
+        a.rupees += amt;
+        a.credits++;
+        a.payers.add(chat);
+        const tag = bankingTag(r.payeeName);
+        if (tag)
+            a.tags.set(tag, (a.tags.get(tag) ?? 0) + 1);
+        acc.set(key, a);
+        allPayers.add(chat);
+        rupees += amt;
+        credits++;
+    }
+    for (const id of qrOf.keys())
+        if (!acc.has(id))
+            acc.set(id, { rupees: 0, credits: 0, payers: new Set(), tags: new Map() });
+    const share = (v) => (rupees > 0 ? Math.round((v / rupees) * 10_000) / 10_000 : 0);
+    const rows = [...acc.entries()].map(([id, a]) => {
+        const tag = [...a.tags.entries()].sort((x, y) => y[1] - x[1] || x[0].localeCompare(y[0]))[0]?.[0] ?? null;
+        return {
+            id: id === null ? null : maskUpi(id),
+            kind: id === null ? 'other' : qrOf.has(id) ? 'qr' : gpayOf.has(id) ? 'gpay' : 'listed',
+            tag: id !== null && mainQr.has(id) ? tag : null,
+            rupees: a.rupees,
+            payers: a.payers.size,
+            credits: a.credits,
+            share: share(a.rupees),
+            qrClients: id === null ? [] : [...(qrOf.get(id) ?? [])].sort(),
+            gpayClients: id === null ? [] : [...(gpayOf.get(id) ?? [])].sort(),
+        };
+    });
+    const byMask = new Map();
+    for (const r of rows)
+        if (r.id)
+            byMask.set(r.id, (byMask.get(r.id) ?? 0) + 1);
+    for (const [i, [id]] of [...acc.entries()].entries()) {
+        const r = rows[i];
+        if (id !== null && r.id && (byMask.get(r.id) ?? 0) > 1)
+            r.id = `${r.id} (${id.split('@')[0].length} ch)`;
+    }
+    rows.sort((x, y) => Number(x.kind === 'other') - Number(y.kind === 'other') || y.rupees - x.rupees || y.credits - x.credits || String(x.id).localeCompare(String(y.id)));
+    return {
+        rows,
+        total: { rupees, payers: allPayers.size, credits },
+        excluded,
+        idsWithCredits: rows.filter((r) => r.kind !== 'other' && r.credits > 0).length,
+    };
+}
+
+
+/***/ },
+
 /***/ "./src/components/monitor/monitor-util.ts"
 /*!************************************************!*\
   !*** ./src/components/monitor/monitor-util.ts ***!
@@ -40908,6 +41152,7 @@ exports.MonitorController = void 0;
 exports.parsePeriod = parsePeriod;
 exports.parseWindow = parseWindow;
 exports.parseReactWindow = parseReactWindow;
+exports.parseUpiWindow = parseUpiWindow;
 exports.parseDays = parseDays;
 exports.parseSvc = parseSvc;
 exports.parsePaidDate = parsePaidDate;
@@ -40921,6 +41166,7 @@ const monitor_time_1 = __webpack_require__(/*! ./monitor-time */ "./src/componen
 const monitor_history_1 = __webpack_require__(/*! ./monitor-history */ "./src/components/monitor/monitor-history.ts");
 const monitor_promotions_1 = __webpack_require__(/*! ./monitor-promotions */ "./src/components/monitor/monitor-promotions.ts");
 const monitor_reactions_1 = __webpack_require__(/*! ./monitor-reactions */ "./src/components/monitor/monitor-reactions.ts");
+const monitor_upi_1 = __webpack_require__(/*! ./monitor-upi */ "./src/components/monitor/monitor-upi.ts");
 const monitor_util_1 = __webpack_require__(/*! ./monitor-util */ "./src/components/monitor/monitor-util.ts");
 const monitor_service_1 = __webpack_require__(/*! ./monitor.service */ "./src/components/monitor/monitor.service.ts");
 const CLIENT_ID_RE = /^[A-Za-z0-9_-]{1,40}$/;
@@ -40945,6 +41191,13 @@ function parseReactWindow(window) {
     if (monitor_reactions_1.REACT_WINDOWS.includes(window))
         return window;
     throw new common_1.BadRequestException(`window must be one of ${monitor_reactions_1.REACT_WINDOWS.join('|')} (reactions are daily counters; no 24h)`);
+}
+function parseUpiWindow(window) {
+    if (window === undefined || window === '')
+        return 'today';
+    if (monitor_upi_1.UPI_WINDOWS.includes(window))
+        return window;
+    throw new common_1.BadRequestException(`window must be one of ${monitor_upi_1.UPI_WINDOWS.join('|')} (paymentProofs keep 7 days)`);
 }
 function parseDays(days) {
     if (days === undefined || days === '' || days === '7')
@@ -41069,6 +41322,9 @@ let MonitorController = class MonitorController {
         const now = Date.now();
         const r = parseRange(from, to, now) ?? { from: (0, monitor_time_1.istDate)(now), to: (0, monitor_time_1.istDate)(now) };
         return this.service.parked(r, parseOptionalClientId(client));
+    }
+    upiRevenue(window) {
+        return this.service.upiRevenue(parseUpiWindow(window));
     }
     parkedChat(chatId) {
         if (!CHAT_ID_RE.test(chatId ?? ''))
@@ -41201,6 +41457,14 @@ __decorate([
     __metadata("design:returntype", void 0)
 ], MonitorController.prototype, "parked", null);
 __decorate([
+    (0, common_1.Get)('upi-revenue'),
+    (0, swagger_1.ApiQuery)({ name: 'window', required: false, enum: monitor_upi_1.UPI_WINDOWS }),
+    __param(0, (0, common_1.Query)('window')),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [String]),
+    __metadata("design:returntype", void 0)
+], MonitorController.prototype, "upiRevenue", null);
+__decorate([
     (0, common_1.Get)('parked/chat/:chatId'),
     (0, swagger_1.ApiParam)({ name: 'chatId' }),
     __param(0, (0, common_1.Param)('chatId')),
@@ -41330,6 +41594,7 @@ const monitor_reactions_1 = __webpack_require__(/*! ./monitor-reactions */ "./sr
 const monitor_mongo_1 = __webpack_require__(/*! ./monitor-mongo */ "./src/components/monitor/monitor-mongo.ts");
 const monitor_sql_1 = __webpack_require__(/*! ./monitor-sql */ "./src/components/monitor/monitor-sql.ts");
 const monitor_parked_1 = __webpack_require__(/*! ./monitor-parked */ "./src/components/monitor/monitor-parked.ts");
+const monitor_upi_1 = __webpack_require__(/*! ./monitor-upi */ "./src/components/monitor/monitor-upi.ts");
 const monitor_time_1 = __webpack_require__(/*! ./monitor-time */ "./src/components/monitor/monitor-time.ts");
 const monitor_history_1 = __webpack_require__(/*! ./monitor-history */ "./src/components/monitor/monitor-history.ts");
 const monitor_enrich_1 = __webpack_require__(/*! ./monitor-enrich */ "./src/components/monitor/monitor-enrich.ts");
@@ -41566,6 +41831,7 @@ let MonitorService = MonitorService_1 = class MonitorService {
         this.parkedTodayCache = new monitor_cache_1.SwrCache({ freshMs: exports.TODAY_FRESH_MS, maxStaleMs: exports.TODAY_MAX_STALE_MS, maxKeys: 10 });
         this.parkedClosedCache = new monitor_cache_1.SwrCache({ freshMs: exports.HISTORY_FRESH_MS, maxKeys: 20 });
         this.parkedChatCache = new monitor_cache_1.TtlCache(exports.PARKED_CHAT_TTL_MS, 200);
+        this.upiRevenueCache = new monitor_cache_1.SwrCache({ freshMs: exports.TODAY_FRESH_MS, maxStaleMs: exports.TODAY_MAX_STALE_MS, maxKeys: 4 });
         this.parkedChatPgTimeoutMs = exports.PARKED_CHAT_PG_TIMEOUT_MS;
         this.poolHealthShadow = null;
         const store = typeof redis?.get === 'function' && typeof redis?.set === 'function'
@@ -43525,6 +43791,47 @@ let MonitorService = MonitorService_1 = class MonitorService {
         catch (err) {
             const msg = String(err?.message ?? err).slice(0, 200);
             throw new common_1.ServiceUnavailableException(`parked chat unavailable: ${msg}`);
+        }
+    }
+    async upiRevenue(window) {
+        const now = Date.now();
+        const today = (0, monitor_time_1.istDate)(now);
+        const from = window === 'today' ? today : (0, monitor_time_1.addDays)(today, -6);
+        try {
+            const res = await this.upiRevenueCache.get(window, async () => {
+                const asOf = Date.now();
+                const timings = {};
+                const start = new Date((0, monitor_time_1.istDayStart)(from));
+                const end = new Date((0, monitor_time_1.istDayStart)((0, monitor_time_1.addDays)(today, 1)));
+                const [proofs, upiDocs, clients] = await Promise.all([
+                    this.mongoFind('paymentProofs', { servedAt: { $gte: start, $lt: end } }, monitor_upi_1.UPI_PROOF_PROJECTION, 'mongo.paymentProofs_upi', timings),
+                    this.mongoFind('upi-ids', {}, {}, 'mongo.upiIds', timings),
+                    this.mongoFind('clients', {}, { clientId: 1, qrId: 1, gpayId: 1 }, 'mongo.clients_upi', timings),
+                ]);
+                const chats = [...new Set(proofs.map((p) => String(p.chatId ?? '')).filter(Boolean))];
+                const fakeChats = new Set();
+                for (let i = 0; i < chats.length; i += monitor_parked_1.PARKED_CHAT_CHUNK) {
+                    const docs = await this.mongoFind('userData', { chatId: { $in: chats.slice(i, i + monitor_parked_1.PARKED_CHAT_CHUNK) }, fakePaymentAt: { $ne: null } }, { chatId: 1 }, 'mongo.userData_fake_upi', timings);
+                    for (const d of docs)
+                        fakeChats.add(String(d.chatId));
+                }
+                return { value: (0, monitor_upi_1.foldUpiRevenue)({ proofs, fakeChats, upiDocs, clients }), asOf, timings };
+            }, (0, monitor_time_1.istDayStart)((0, monitor_time_1.addDays)(today, 1)));
+            const v = res.value;
+            return {
+                window,
+                from,
+                to: today,
+                tz: 'Asia/Kolkata',
+                asOf: v.asOf,
+                ...v.value,
+                notes: ['Excludes proofs voided by Uncredit, every credit of chats marked fake, and any credit of ₹1,000 or more.'],
+            };
+        }
+        catch (err) {
+            const msg = String(err?.message ?? err).slice(0, 200);
+            this.logger.warn(`monitor upi-revenue ${window} failed: ${msg}`);
+            throw new common_1.ServiceUnavailableException(`upi revenue unavailable: ${msg}`);
         }
     }
 };
