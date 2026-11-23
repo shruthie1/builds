@@ -31249,6 +31249,8 @@ function isBotLocalFile(media) {
 // that was never made channel admin (pending_admin — its sends fail), or one parked for a human
 // (manual_attention). Loading them only burns a failed send + retry and logs Unauthorized.
 const RETIRED_BOT_LIFECYCLES = new Set(['dead_token', 'pending_admin', 'manual_attention']);
+/** PEER_ID_INVALID sends in a row (no success between) that bench a bot: one is not proof, a frozen bot fails every send. */
+const PEER_ID_INVALID_STRIKES = 3;
 function isRetiredBot(doc) {
     // lifecycle is CMS's authoritative eligibility field; legacy `status` decides only when absent.
     if (typeof doc.lifecycle === 'string')
@@ -31272,6 +31274,8 @@ class BotConfig {
         this.usageFlushTimer = null;
         /** Tokens Telegram answered 401 for: skipped for the life of the process (a revoked token never comes back). */
         this.revokedTokens = new Set();
+        /** Consecutive PEER_ID_INVALID sends per token (reset by a successful send). */
+        this.peerInvalidStreak = new Map();
         this.BOT_REFRESH_MS = 30 * 60000;
         this.USAGE_FLUSH_MS = 60000;
         this.DEFAULT_BOT_RATE_LIMIT_COOLDOWN_MS = 60000;
@@ -31695,14 +31699,47 @@ class BotConfig {
             description: error instanceof Error ? error.message : String(error),
         };
     }
+    /**
+     * A bot Telegram froze (2026-11-22: client_updates_2hi_bot / client_updates_y2y_bot) still passes getMe and
+     * getChat, but every send fails. FROZEN_METHOD_INVALID benches it at once. PEER_ID_INVALID is what a frozen
+     * bot gets from sendMessage, so it benches only after PEER_ID_INVALID_STRIKES sends in a row with no success
+     * in between; each earlier strike moves the send to the next bot. Benched for the life of the process.
+     * Returns 'benched', 'strike' or null (not this kind of failure).
+     */
+    markBotDead(data, category, botIndex, error) {
+        const description = `${error?.response?.data?.description || error?.message || ''}`;
+        const token = String(data.botTokens[botIndex] ?? '');
+        const botId = token.split(':')[0];
+        let reason;
+        if (/FROZEN_METHOD_INVALID/i.test(description)) {
+            reason = 'frozen_method_invalid';
+        }
+        else if (/PEER_ID_INVALID/i.test(description)) {
+            const streak = (this.peerInvalidStreak.get(token) ?? 0) + 1;
+            this.peerInvalidStreak.set(token, streak);
+            if (streak < PEER_ID_INVALID_STRIKES) {
+                logger.warn(`[bots] kind=bot_strike reason=peer_id_invalid streak=${streak}/${PEER_ID_INVALID_STRIKES} category=${category} bot=${botId} channel=${data.channelId}`);
+                return 'strike';
+            }
+            reason = `peer_id_invalid_x${streak}`;
+        }
+        else {
+            return null;
+        }
+        data.botCooldownUntil[botIndex] = Infinity;
+        logger.warn(`[bots] kind=bot_benched reason=${reason} category=${category} bot=${botId} channel=${data.channelId} until=restart`);
+        return 'benched';
+    }
     shouldRetryWithNextBot(data, category, botIndex, error) {
         const benched = this.markBotRateLimited(data, category, botIndex, error)
             || this.markBotUnreachable(data, category, botIndex, error)
-            || this.markBotRevoked(data, category, botIndex, error);
+            || this.markBotRevoked(data, category, botIndex, error)
+            || this.markBotDead(data, category, botIndex, error) !== null;
         return benched && data.botTokens.length > 1 && this.hasAnotherAvailableBot(data);
     }
     /** Count a successful send; counts are written to the bots collection in one batch per USAGE_FLUSH_MS. */
     recordSuccessfulBotSend(category, token, channelId) {
+        this.peerInvalidStreak.delete(token);
         if (!this.getMongoUri()) {
             return;
         }
@@ -31846,7 +31883,7 @@ class BotConfig {
     isBotOrChannelFailure(error) {
         const { status, description } = this.botSendFailureDetails(error);
         return Number(status) === 429 || Number(status) === 403 || Number(status) === 401
-            || /too many requests|retry after|chat not found|not a member|kicked|not enough rights|CHAT_WRITE_FORBIDDEN|bot was blocked/i.test(String(description));
+            || /too many requests|retry after|chat not found|not a member|kicked|not enough rights|CHAT_WRITE_FORBIDDEN|bot was blocked|PEER_ID_INVALID|FROZEN_METHOD_INVALID/i.test(String(description));
     }
     /**
      * Literal text command sent as a classic sendMessage, byte for byte: no client prefix, no parse mode, no
@@ -64050,8 +64087,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "8badbef7fa6d8fa989ea15c74e38a772fb22278a" : 0;
-    const builtAt =  true ? "2026-11-23T03:13:44.475Z" : 0;
+    const sha =  true ? "ad483b7e8ca7f3c0ca63d64a73f577ecaf48e50e" : 0;
+    const builtAt =  true ? "2026-11-23T03:50:11.412Z" : 0;
     return { sha, builtAt };
 }
 
@@ -72176,6 +72213,65 @@ class ChannelSafetyChecker {
 }
 const channelSafetyChecker = new ChannelSafetyChecker();
 
+
+
+/***/ },
+
+/***/ "./src/channels/client-updates-channel.ts"
+/*!************************************************!*\
+  !*** ./src/channels/client-updates-channel.ts ***!
+  \************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   joinClientUpdatesChannel: () => (/* binding */ joinClientUpdatesChannel)
+/* harmony export */ });
+/* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! telegram */ "telegram");
+/* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(telegram__WEBPACK_IMPORTED_MODULE_0__);
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _unwanted_updates_group__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./unwanted-updates-group */ "./src/channels/unwanted-updates-group.ts");
+
+
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_1__.Logger("tg-aut:client-updates");
+function rpcMessage(error) {
+    const e = error;
+    return String(e?.errorMessage ?? e?.message ?? error);
+}
+async function joinClientUpdatesChannel(client) {
+    const raw = process.env.CLIENT_UPDATES_INVITE;
+    const hash = (0,_unwanted_updates_group__WEBPACK_IMPORTED_MODULE_2__.parseInviteHash)(raw);
+    if (!hash) {
+        logger.warn(`[client-updates] kind=no_invite reason=${raw ? "not_an_invite_link" : "unset"}`);
+        return { kind: "no_invite" };
+    }
+    try {
+        const invite = await client.invoke(new telegram__WEBPACK_IMPORTED_MODULE_0__.Api.messages.CheckChatInvite({ hash }));
+        if (invite instanceof telegram__WEBPACK_IMPORTED_MODULE_0__.Api.ChatInviteAlready) {
+            logger.log(`[client-updates] kind=already_member`);
+            return { kind: "already_member" };
+        }
+        try {
+            await client.invoke(new telegram__WEBPACK_IMPORTED_MODULE_0__.Api.messages.ImportChatInvite({ hash }));
+        }
+        catch (error) {
+            if (!rpcMessage(error).includes("USER_ALREADY_PARTICIPANT"))
+                throw error;
+            logger.log(`[client-updates] kind=already_member`);
+            return { kind: "already_member" };
+        }
+        logger.log(`[client-updates] kind=joined`);
+        return { kind: "joined" };
+    }
+    catch (error) {
+        const message = rpcMessage(error);
+        const floodWait = /FLOOD_WAIT|FloodWait|wait of \d+ seconds/i.test(message);
+        logger.warn(`[client-updates] kind=join_failed error=${message.slice(0, 120)}${floodWait ? " flood=1" : ""}`);
+        return floodWait ? { kind: "join_failed", floodWait: true } : { kind: "join_failed" };
+    }
+}
 
 
 /***/ },
@@ -128769,18 +128865,23 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _file_sender__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./file-sender */ "./src/telegram/file-sender.ts");
 /* harmony import */ var _channels_channel_ops__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../channels/channel-ops */ "./src/channels/channel-ops.ts");
 /* harmony import */ var _channels_unwanted_updates_group__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../channels/unwanted-updates-group */ "./src/channels/unwanted-updates-group.ts");
+/* harmony import */ var _channels_client_updates_channel__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../channels/client-updates-channel */ "./src/channels/client-updates-channel.ts");
 
 
 
 
-// Constants for initialization
-const DEFAULT_CHANNELS = "@clientupdates|@miscmessages";
+
+// Constants for initialization. CLIENT_UPDATES is private since 2026-11-23: joined by invite (CLIENT_UPDATES_INVITE).
+const DEFAULT_CHANNELS = "@miscmessages";
 const JOIN_GAP_MS = 3 * 60 * 1000;
 /**
  * Initialize setup
  */
 async function initSetup(client) {
     _file_sender__WEBPACK_IMPORTED_MODULE_1__.fileSender.setClient(client);
+    if ((await (0,_channels_client_updates_channel__WEBPACK_IMPORTED_MODULE_4__.joinClientUpdatesChannel)(client)).floodWait)
+        return;
+    await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_0__.sleep)(JOIN_GAP_MS);
     if ((await (0,_channels_channel_ops__WEBPACK_IMPORTED_MODULE_2__.joinChannels)(client, DEFAULT_CHANNELS, false)) === "stop")
         return;
     // The unwanted-updates group is private: joined via its invite, spaced like the channel joins (never throws).
