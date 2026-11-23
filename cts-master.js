@@ -41181,7 +41181,9 @@ function presetOf(r, today) {
 
 
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.UPI_ROW_KEY = exports.UPI_OTHER_KEY = exports.UPI_PROOF_PROJECTION = exports.UPI_ACCOUNT_MIN_READS = exports.UPI_MAX_EDITS = exports.UPI_MIN_EDIT_LEN = exports.UPI_MIN_PIECE = exports.UPI_BIG_CREDIT = exports.UPI_WINDOWS = void 0;
+exports.UPI_ROW_KEY = exports.upiLabelKey = exports.UPI_LAXMI_KEY = exports.UPI_OTHER_KEY = exports.UPI_PROOF_PROJECTION = exports.UPI_LABEL = exports.UPI_ACCOUNT_MIN_READS = exports.UPI_MAX_EDITS = exports.UPI_MIN_EDIT_LEN = exports.UPI_MIN_PIECE = exports.UPI_BIG_CREDIT = exports.UPI_WINDOWS = void 0;
+exports.isLaxmiName = isLaxmiName;
+exports.labelsOfIds = labelsOfIds;
 exports.normUpi = normUpi;
 exports.maskUpi = maskUpi;
 exports.upiRowKey = upiRowKey;
@@ -41202,11 +41204,27 @@ exports.UPI_MIN_PIECE = 4;
 exports.UPI_MIN_EDIT_LEN = 8;
 exports.UPI_MAX_EDITS = 2;
 const OUR_BANKING_NAMES = ['Ravva Lakshmi', 'Lakshmi Stores', 'Girls Community', 'Reddy Girl', 'Shetty Saikumar', 'Shetty Srinivas'];
+const storeForm = (s) => s.replace(/stores/g, 'store');
 const NAME_FORMS = OUR_BANKING_NAMES.map((name) => {
-    const words = name.toLowerCase().split(' ');
+    const words = storeForm(name.toLowerCase()).split(' ');
     return { tag: words.map((w) => w[0].toUpperCase()).join(''), forms: [words.join(''), [...words].reverse().join('')] };
 });
 exports.UPI_ACCOUNT_MIN_READS = 2;
+function isLaxmiName(name) {
+    return String(name ?? '').toLowerCase().split(/[^a-z]+/).some((w) => w.includes('laxm'));
+}
+exports.UPI_LABEL = /^[A-Z0-9]{1,8}$/;
+function labelsOfIds(rows) {
+    const out = new Map();
+    for (const r of rows ?? []) {
+        if (typeof r?.upiId !== 'string' || !r.upiId.includes('@') || typeof r.label !== 'string')
+            continue;
+        const label = r.label.trim().toUpperCase();
+        if (exports.UPI_LABEL.test(label))
+            out.set(normUpi(r.upiId), label);
+    }
+    return out;
+}
 exports.UPI_PROOF_PROJECTION = {
     chatId: 1, clientId: 1, payeeUpiId: 1, payeeName: 1, creditAmount: 1, amount: 1, servedAt: 1, 'uncredited.state': 1,
     proofId: 1, profile: 1, telegramMsgId: 1, createdAt: 1, 'verdict.outcome': 1,
@@ -41225,7 +41243,10 @@ function upiRowKey(id) {
     return id === null ? exports.UPI_OTHER_KEY : `u${(0, crypto_1.createHash)('sha256').update(id).digest('hex').slice(0, 12)}`;
 }
 exports.UPI_OTHER_KEY = 'other';
-exports.UPI_ROW_KEY = /^(other|u[0-9a-f]{12})$/;
+exports.UPI_LAXMI_KEY = 'laxmi';
+const upiLabelKey = (label) => `l${label}`;
+exports.upiLabelKey = upiLabelKey;
+exports.UPI_ROW_KEY = /^(other|laxmi|u[0-9a-f]{12}|l[A-Z0-9]{1,8})$/;
 const compact = (s) => s.replace(/[^a-z0-9]/g, '');
 function editsWithin(a, b, max) {
     if (Math.abs(a.length - b.length) > max)
@@ -41334,7 +41355,7 @@ function mainQrIds(upiDocs, clients) {
 }
 function bankingTag(name) {
     const lower = String(name ?? '').toLowerCase().replace(/\s+/g, '');
-    const n = compact(lower);
+    const n = storeForm(compact(lower));
     if (!n)
         return null;
     const hit = NAME_FORMS.find((f) => f.forms.some((form) => n.includes(form)))?.tag;
@@ -41342,7 +41363,7 @@ function bankingTag(name) {
         return hit;
     return /ravvalaksh(\.\.\.|…)/.test(lower) ? 'RL' : null;
 }
-function accountsOfIds(proofs, known) {
+function accountsOfIds(proofs, known, minReads = exports.UPI_ACCOUNT_MIN_READS) {
     const reads = new Map();
     for (const r of proofs) {
         const tag = bankingTag(r.payeeName);
@@ -41358,7 +41379,7 @@ function accountsOfIds(proofs, known) {
     const out = new Map();
     for (const [id, m] of reads) {
         const [only] = [...m.entries()];
-        if (m.size === 1 && only[1] >= exports.UPI_ACCOUNT_MIN_READS)
+        if (m.size === 1 && only[1] >= minReads)
             out.set(id, only[0]);
     }
     return out;
@@ -41399,6 +41420,8 @@ function foldUpiRevenueWithCredits(input) {
     }
     const mainQr = mainQrIds(input.upiDocs, input.clients);
     const accounts = accountsOfIds(input.accountProofs ?? input.proofs, known);
+    const suggestions = accountsOfIds(input.accountProofs ?? input.proofs, known, 1);
+    const labelOf = labelsOfIds(input.labels);
     const clientById = new Map();
     for (const c of input.clients)
         if (c.clientId)
@@ -41406,6 +41429,7 @@ function foldUpiRevenueWithCredits(input) {
     const nameMatched = { rupees: 0, credits: 0 };
     const excluded = { fakeRupees: 0, fakeCredits: 0, bigRupees: 0, bigCredits: 0, voidedCredits: 0 };
     const acc = new Map();
+    const laxmi = newAcc();
     const counted = [];
     const allPayers = new Set();
     let rupees = 0;
@@ -41427,6 +41451,16 @@ function foldUpiRevenueWithCredits(input) {
             excluded.bigCredits++;
             continue;
         }
+        allPayers.add(chat);
+        rupees += amt;
+        credits++;
+        if (isLaxmiName(r.payeeName)) {
+            laxmi.rupees += amt;
+            laxmi.credits++;
+            laxmi.payers.add(chat);
+            counted.push({ key: exports.UPI_LAXMI_KEY, row: exports.UPI_LAXMI_KEY, proof: r, rupees: amt, match: 'none' });
+            continue;
+        }
         const tag = bankingTag(r.payeeName);
         let key = matchUpi(r.payeeUpiId, known);
         const byName = key === null && tag !== null && (key = nameMatchedId(tag, clientById.get(String(r.clientId ?? '')), accounts)) !== null;
@@ -41443,10 +41477,8 @@ function foldUpiRevenueWithCredits(input) {
         if (tag)
             a.tags.set(tag, (a.tags.get(tag) ?? 0) + 1);
         acc.set(key, a);
-        counted.push({ key: upiRowKey(key), proof: r, rupees: amt, match: key === null ? 'none' : byName ? 'name' : 'id' });
-        allPayers.add(chat);
-        rupees += amt;
-        credits++;
+        const label = key === null ? undefined : labelOf.get(key);
+        counted.push({ key: upiRowKey(key), row: label ? (0, exports.upiLabelKey)(label) : upiRowKey(key), proof: r, rupees: amt, match: key === null ? 'none' : byName ? 'name' : 'id' });
     }
     for (const id of qrOf.keys())
         if (!acc.has(id))
@@ -41459,6 +41491,8 @@ function foldUpiRevenueWithCredits(input) {
             id: id === null ? null : maskUpi(id),
             kind: id === null ? 'other' : qrOf.has(id) ? 'qr' : gpayOf.has(id) ? 'gpay' : 'listed',
             tag: id !== null && mainQr.has(id) ? tag : null,
+            label: id === null ? null : labelOf.get(id) ?? null,
+            suggestedLabel: id === null || labelOf.has(id) ? null : suggestions.get(id) ?? null,
             rupees: a.rupees,
             payers: a.payers.size,
             credits: a.credits,
@@ -41478,13 +41512,45 @@ function foldUpiRevenueWithCredits(input) {
         if (id !== null && r.id && (byMask.get(r.id) ?? 0) > 1)
             r.id = `${r.id} (${id.split('@')[0].length} ch)`;
     }
-    rows.sort((x, y) => Number(x.kind === 'other') - Number(y.kind === 'other') || y.rupees - x.rupees || y.credits - x.credits || String(x.id).localeCompare(String(y.id)));
+    const idsWithCredits = rows.filter((r) => r.kind !== 'other' && r.credits > 0).length;
+    const ids = [...acc.keys()];
+    const byLabel = new Map();
+    const top = [];
+    rows.forEach((r, i) => {
+        if (!r.label) {
+            top.push(r);
+            return;
+        }
+        const g = byLabel.get(r.label) ?? { subs: [], payers: new Set() };
+        g.subs.push(r);
+        acc.get(ids[i]).payers.forEach((c) => g.payers.add(c));
+        byLabel.set(r.label, g);
+    });
+    const byRs = (x, y) => y.rupees - x.rupees || y.credits - x.credits || String(x.id).localeCompare(String(y.id));
+    for (const [label, g] of byLabel) {
+        const sum = (f) => g.subs.reduce((s, r) => s + f(r), 0);
+        const rs = sum((r) => r.rupees);
+        const union = (f) => [...new Set(g.subs.flatMap(f))].sort();
+        top.push({
+            key: (0, exports.upiLabelKey)(label), id: null, kind: 'label', tag: label, label, suggestedLabel: null,
+            rupees: rs, payers: g.payers.size, credits: sum((r) => r.credits), nameRupees: sum((r) => r.nameRupees), nameCredits: sum((r) => r.nameCredits),
+            share: share(rs), qrClients: union((r) => r.qrClients), gpayClients: union((r) => r.gpayClients), upis: [...g.subs].sort(byRs),
+        });
+    }
+    if (laxmi.credits > 0) {
+        top.push({
+            key: exports.UPI_LAXMI_KEY, id: null, kind: 'laxmi', tag: null, label: null, suggestedLabel: null, rupees: laxmi.rupees, payers: laxmi.payers.size,
+            credits: laxmi.credits, nameRupees: 0, nameCredits: 0, share: share(laxmi.rupees), qrClients: [], gpayClients: [],
+        });
+    }
+    const tail = (r) => (r.kind === 'other' ? 2 : r.kind === 'laxmi' ? 1 : 0);
+    top.sort((x, y) => tail(x) - tail(y) || byRs(x, y));
     const fold = {
-        rows,
+        rows: top,
         total: { rupees, payers: allPayers.size, credits },
         nameMatched,
         excluded,
-        idsWithCredits: rows.filter((r) => r.kind !== 'other' && r.credits > 0).length,
+        idsWithCredits,
     };
     return { fold, credits: counted };
 }
@@ -41496,7 +41562,7 @@ const iso = (v) => {
 };
 function upiRowItems(credits, key, hosts = new Map()) {
     return credits
-        .filter((c) => c.key === key)
+        .filter((c) => c.key === key || c.row === key)
         .map(({ proof: r, rupees, match }) => {
         const read = normUpi(r.payeeUpiId);
         const tel = Number(r.telegramMsgId);
@@ -41701,7 +41767,7 @@ function parseUpiRowKey(key) {
     const k = String(key ?? '').trim();
     if (monitor_upi_1.UPI_ROW_KEY.test(k))
         return k;
-    throw new common_1.BadRequestException('key must be a row key of /monitor/upi-revenue (other, or u + 12 hex)');
+    throw new common_1.BadRequestException('key must be a row key of /monitor/upi-revenue (other, laxmi, l + label, or u + 12 hex)');
 }
 function parseDays(days) {
     if (days === undefined || days === '' || days === '7')
@@ -41974,7 +42040,7 @@ __decorate([
 __decorate([
     (0, common_1.Get)('upi-revenue/items'),
     (0, swagger_1.ApiQuery)({ name: 'window', required: false, enum: monitor_upi_1.UPI_WINDOWS }),
-    (0, swagger_1.ApiQuery)({ name: 'key', required: true, description: "row key from /monitor/upi-revenue ('other' or u + 12 hex)" }),
+    (0, swagger_1.ApiQuery)({ name: 'key', required: true, description: "row key from /monitor/upi-revenue ('other', 'laxmi', l + label, or u + 12 hex)" }),
     __param(0, (0, common_1.Query)('window')),
     __param(1, (0, common_1.Query)('key')),
     __metadata("design:type", Function),
@@ -42091,7 +42157,7 @@ var __param = (this && this.__param) || function (paramIndex, decorator) {
 };
 var MonitorService_1;
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.MonitorService = exports.UNASSIGNED_POOL_KEY = exports.FLEET_DETAIL_ID = exports.PAID_IDS_TTL_MS = exports.PAID_SEARCH_MAX_Q = exports.PAID_SEARCH_MIN_Q = exports.PAID_SEARCH_MAX_LIMIT = exports.PAID_SEARCH_LIMIT = exports.PAID_ENRICH_MAX = exports.PAID_HIST_KEYS = exports.RANGE_ONLY_NOTE_PREFIX = exports.RANGE_ONLY_FIELDS = exports.RANGE_PAGE_RE = exports.RANGE_CLOSED_FRESH_MS = exports.PROMO_DAYS_HISTORY = exports.LIVE_SVCS = exports.HEARTBEAT_INDEX_KEY = exports.CLIENT_TTL_MS = exports.FLEET_TTL_MS = exports.PREWARM_PAGES = exports.MIDNIGHT_PREWARM_AFTER_MS = exports.PREWARM_DELAY_MS = exports.SNAPSHOT_TTL_SEC = exports.SNAPSHOT_KEY_PREFIX = exports.PART_REFRESH_AHEAD_MS = exports.SNAPSHOT_WARM_MAX_KEYS = exports.SNAPSHOT_WARM_IGNORE_GAP_MS = exports.SNAPSHOT_WARM_MAX_INTERVAL_MS = exports.SNAPSHOT_WARM_MIN_INTERVAL_MS = exports.SNAPSHOT_WARM_DEFAULT_INTERVAL_MS = exports.SNAPSHOT_WARM_MARGIN_MS = exports.SNAPSHOT_WARM_LEAD_MS = exports.SNAPSHOT_MAX_SERVE_STALE_MS = exports.SNAPSHOT_FRESH_MS = exports.PARKED_CHAT_PG_TIMEOUT_MS = exports.PARKED_CHAT_TTL_MS = exports.RESTRICTED_FRESH_MS = exports.LIVE_TTL_MS = exports.CHANNEL_CANDIDATES = exports.HISTORY_DAYS = exports.POOL_FRESH_MS = exports.HISTORY_FRESH_MS = exports.TODAY_MAX_STALE_MS = exports.TODAY_FRESH_MS = exports.LIVE_REDIS_DEADLINE_MS = exports.MONGO_TIMEOUT_MS = exports.PG_TIMEOUT_MS = exports.MONITOR_REDIS = void 0;
+exports.MonitorService = exports.UNASSIGNED_POOL_KEY = exports.FLEET_DETAIL_ID = exports.PAID_IDS_TTL_MS = exports.PAID_SEARCH_MAX_Q = exports.PAID_SEARCH_MIN_Q = exports.PAID_SEARCH_MAX_LIMIT = exports.PAID_SEARCH_LIMIT = exports.PAID_ENRICH_MAX = exports.UPI_LABELS_FAILED_NOTE = exports.PAID_HIST_KEYS = exports.RANGE_ONLY_NOTE_PREFIX = exports.RANGE_ONLY_FIELDS = exports.RANGE_PAGE_RE = exports.RANGE_CLOSED_FRESH_MS = exports.PROMO_DAYS_HISTORY = exports.LIVE_SVCS = exports.HEARTBEAT_INDEX_KEY = exports.CLIENT_TTL_MS = exports.FLEET_TTL_MS = exports.PREWARM_PAGES = exports.MIDNIGHT_PREWARM_AFTER_MS = exports.PREWARM_DELAY_MS = exports.SNAPSHOT_TTL_SEC = exports.SNAPSHOT_KEY_PREFIX = exports.PART_REFRESH_AHEAD_MS = exports.SNAPSHOT_WARM_MAX_KEYS = exports.SNAPSHOT_WARM_IGNORE_GAP_MS = exports.SNAPSHOT_WARM_MAX_INTERVAL_MS = exports.SNAPSHOT_WARM_MIN_INTERVAL_MS = exports.SNAPSHOT_WARM_DEFAULT_INTERVAL_MS = exports.SNAPSHOT_WARM_MARGIN_MS = exports.SNAPSHOT_WARM_LEAD_MS = exports.SNAPSHOT_MAX_SERVE_STALE_MS = exports.SNAPSHOT_FRESH_MS = exports.PARKED_CHAT_PG_TIMEOUT_MS = exports.PARKED_CHAT_TTL_MS = exports.RESTRICTED_FRESH_MS = exports.LIVE_TTL_MS = exports.CHANNEL_CANDIDATES = exports.HISTORY_DAYS = exports.POOL_FRESH_MS = exports.HISTORY_FRESH_MS = exports.TODAY_MAX_STALE_MS = exports.TODAY_FRESH_MS = exports.LIVE_REDIS_DEADLINE_MS = exports.MONGO_TIMEOUT_MS = exports.PG_TIMEOUT_MS = exports.MONITOR_REDIS = void 0;
 exports.rangeOfPage = rangeOfPage;
 exports.legacyOf = legacyOf;
 exports.fleetSummaryRow = fleetSummaryRow;
@@ -42169,6 +42235,7 @@ function legacyOf(v) {
     return out;
 }
 exports.PAID_HIST_KEYS = 30;
+exports.UPI_LABELS_FAILED_NOTE = 'Labels unavailable, showing one row per UPI id.';
 exports.PAID_ENRICH_MAX = 1000;
 exports.PAID_SEARCH_LIMIT = 100;
 exports.PAID_SEARCH_MAX_LIMIT = 200;
@@ -44318,16 +44385,17 @@ let MonitorService = MonitorService_1 = class MonitorService {
             notes: [
                 'Excludes proofs voided by Uncredit, every credit of chats marked fake, and any credit of ₹1,000 or more.',
                 "Name-matched: no UPI id read, so the banking name read picks the id (the client's qrId, else gpayId, on that account; else the account's one id).",
+                ...(snap.labelsFailed ? [exports.UPI_LABELS_FAILED_NOTE] : []),
             ],
         };
     }
     async upiRevenueItems(window, key) {
         const { meta, snap } = await this.upiRevenueSnapshot(window);
-        const row = snap.fold.rows.find((r) => r.key === key);
+        const row = snap.fold.rows.find((r) => r.key === key) ?? snap.fold.rows.flatMap((r) => r.upis ?? []).find((r) => r.key === key);
         if (!row)
             throw new common_1.NotFoundException(`no row ${key} in the ${window} window`);
         const items = (0, monitor_upi_1.upiRowItems)(snap.credits, key, snap.hosts);
-        const notes = [];
+        const notes = snap.labelsFailed ? [exports.UPI_LABELS_FAILED_NOTE] : [];
         await this.addUsernames(items, notes);
         return {
             ...meta,
@@ -44349,10 +44417,17 @@ let MonitorService = MonitorService_1 = class MonitorService {
                 const timings = {};
                 const start = (0, monitor_time_1.istDayStart)(from);
                 const end = new Date((0, monitor_time_1.istDayStart)((0, monitor_time_1.addDays)(today, 1)));
-                const [proofs7, upiDocs, clients] = await Promise.all([
+                let labelsFailed = false;
+                const [proofs7, upiDocs, clients, labels] = await Promise.all([
                     this.mongoFind('paymentProofs', { servedAt: { $gte: new Date((0, monitor_time_1.istDayStart)(from7)), $lt: end } }, monitor_upi_1.UPI_PROOF_PROJECTION, 'mongo.paymentProofs_upi', timings),
                     this.mongoFind('upi-ids', {}, {}, 'mongo.upiIds', timings),
                     this.mongoFind('clients', {}, { clientId: 1, qrId: 1, gpayId: 1, repl: 1 }, 'mongo.clients_upi', timings),
+                    this.mongoFind('upi-labels', {}, { upiId: 1, label: 1 }, 'mongo.upiLabels', timings).catch((err) => {
+                        const msg = String(err?.message ?? err).replace(/mongodb(\+srv)?:\/\/\S+/gi, '<uri>').slice(0, 200);
+                        this.logger.warn(`upi-labels kind=read_failed window=${window} err=${msg}`);
+                        labelsFailed = true;
+                        return [];
+                    }),
                 ]);
                 const proofs = proofs7.filter((p) => new Date(p.servedAt).getTime() >= start);
                 const chats = [...new Set(proofs.map((p) => String(p.chatId ?? '')).filter(Boolean))];
@@ -44366,8 +44441,12 @@ let MonitorService = MonitorService_1 = class MonitorService {
                 for (const c of clients)
                     if (typeof c.clientId === 'string' && typeof c.repl === 'string' && c.repl)
                         hosts.set(c.clientId, c.repl);
-                const { fold, credits } = (0, monitor_upi_1.foldUpiRevenueWithCredits)({ proofs, accountProofs: proofs7, fakeChats, upiDocs, clients });
-                return { value: { fold, credits, hosts }, asOf, timings };
+                const { fold, credits } = (0, monitor_upi_1.foldUpiRevenueWithCredits)({ proofs, accountProofs: proofs7, fakeChats, upiDocs, clients, labels });
+                const labelRows = fold.rows.filter((r) => r.kind === 'label').length;
+                const unlabelled = fold.rows.filter((r) => r.kind !== 'label' && r.kind !== 'laxmi' && r.kind !== 'other').length;
+                const laxmiCredits = fold.rows.find((r) => r.kind === 'laxmi')?.credits ?? 0;
+                this.logger.log(`upi-labels kind=fold window=${window} labels=${labels.length} labelRows=${labelRows} unlabelled=${unlabelled} laxmiCredits=${laxmiCredits}`);
+                return { value: { fold, credits, hosts, labelsFailed }, asOf, timings };
             }, (0, monitor_time_1.istDayStart)((0, monitor_time_1.addDays)(today, 1)));
             const v = res.value;
             return { meta: { window, from, to: today, tz: 'Asia/Kolkata', asOf: v.asOf }, snap: v.value };
