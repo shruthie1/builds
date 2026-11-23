@@ -31249,7 +31249,11 @@ function isBotLocalFile(media) {
 // that was never made channel admin (pending_admin — its sends fail), or one parked for a human
 // (manual_attention). Loading them only burns a failed send + retry and logs Unauthorized.
 const RETIRED_BOT_LIFECYCLES = new Set(['dead_token', 'pending_admin', 'manual_attention']);
-/** PEER_ID_INVALID sends in a row (no success between) that bench a bot: one is not proof, a frozen bot fails every send. */
+/**
+ * PEER_ID_INVALID sends in a row (no success between) on one channel that bench a bot for BOT_REFRESH_MS: one is
+ * not proof, and it is not permanent either (a channel mix-up or a Telegram hiccup also returns it), so the bench
+ * is timed and the bot is tried again when it expires.
+ */
 const PEER_ID_INVALID_STRIKES = 3;
 function isRetiredBot(doc) {
     // lifecycle is CMS's authoritative eligibility field; legacy `status` decides only when absent.
@@ -31274,7 +31278,7 @@ class BotConfig {
         this.usageFlushTimer = null;
         /** Tokens Telegram answered 401 for: skipped for the life of the process (a revoked token never comes back). */
         this.revokedTokens = new Set();
-        /** Consecutive PEER_ID_INVALID sends per token (reset by a successful send). */
+        /** Consecutive PEER_ID_INVALID sends per token+channel (reset by a successful send with that token on that channel). */
         this.peerInvalidStreak = new Map();
         this.BOT_REFRESH_MS = 30 * 60000;
         this.USAGE_FLUSH_MS = 60000;
@@ -31614,16 +31618,21 @@ class BotConfig {
         data.lastUsedIndex = (data.lastUsedIndex + 1) % data.botUsernames.length;
         return data.botUsernames[data.lastUsedIndex];
     }
-    getNextAvailableBotIndex(data, category) {
+    /** Next bot that is off cooldown and not yet tried by this send (`tried` holds tokens: each bot at most once per send). */
+    getNextAvailableBotIndex(data, category, tried) {
         const now = Date.now();
         const tokenCount = data.botTokens.length;
         for (let offset = 1; offset <= tokenCount; offset++) {
             const index = (data.lastUsedIndex + offset) % tokenCount;
             const cooldownUntil = data.botCooldownUntil[index] || 0;
-            if (cooldownUntil <= now) {
+            if (cooldownUntil <= now && !tried?.has(data.botTokens[index])) {
                 data.lastUsedIndex = index;
                 return index;
             }
+        }
+        if (tried && tried.size > 0) {
+            logger.warn(`[bots] kind=send_failed reason=all_bots_tried category=${category} tried=${tried.size} channel=${data.channelId}`);
+            return null;
         }
         const cooldowns = data.botCooldownUntil.filter(until => until && Number.isFinite(until));
         const earliest = cooldowns.length > 0 ? Math.min(...cooldowns) : now + this.DEFAULT_BOT_RATE_LIMIT_COOLDOWN_MS;
@@ -31651,9 +31660,10 @@ class BotConfig {
         const description = `${error?.response?.data?.description || error?.message || ''}`;
         if (!/chat not found|bot is not a member|bot was kicked|not enough rights|need administrator rights|CHAT_WRITE_FORBIDDEN/i.test(description))
             return false;
-        data.botCooldownUntil[botIndex] = Date.now() + this.BOT_REFRESH_MS;
         const botId = String(data.botTokens[botIndex] ?? '').split(':')[0];
+        const until = this.benchTimed(data, botIndex);
         logger.warn(`${category}: bot ${botId} cannot post to ${data.channelId} (${description.slice(0, 80)}); benched ${this.BOT_REFRESH_MS / 60000} min`);
+        logger.warn(`[bots] kind=bot_benched reason=chat_unreachable category=${category} bot=${botId} channel=${data.channelId} until=${until} bench=timed`);
         return true;
     }
     /**
@@ -31671,9 +31681,16 @@ class BotConfig {
         }
         return true;
     }
-    hasAnotherAvailableBot(data) {
+    /** Bench a bot for BOT_REFRESH_MS (never past a cooldown it already has); returns the ISO end time for the log. */
+    benchTimed(data, botIndex) {
+        const until = Math.max(data.botCooldownUntil[botIndex] || 0, Date.now() + this.BOT_REFRESH_MS);
+        data.botCooldownUntil[botIndex] = until;
+        return Number.isFinite(until) ? new Date(until).toISOString() : 'restart';
+    }
+    /** Another bot that is off cooldown and not yet tried by this send. */
+    hasAnotherAvailableBot(data, botIndex, tried) {
         const now = Date.now();
-        return data.botTokens.some((_, index) => index !== data.lastUsedIndex && (data.botCooldownUntil[index] || 0) <= now);
+        return data.botTokens.some((token, index) => index !== botIndex && (data.botCooldownUntil[index] || 0) <= now && !tried?.has(token));
     }
     createTelegramBotApiError(response, fallbackMessage) {
         const error = new Error(response.data?.description || fallbackMessage);
@@ -31701,10 +31718,10 @@ class BotConfig {
     }
     /**
      * A bot Telegram froze (2026-11-22: client_updates_2hi_bot / client_updates_y2y_bot) still passes getMe and
-     * getChat, but every send fails. FROZEN_METHOD_INVALID benches it at once. PEER_ID_INVALID is what a frozen
-     * bot gets from sendMessage, so it benches only after PEER_ID_INVALID_STRIKES sends in a row with no success
-     * in between; each earlier strike moves the send to the next bot. Benched for the life of the process.
-     * Returns 'benched', 'strike' or null (not this kind of failure).
+     * getChat, but every send fails. FROZEN_METHOD_INVALID is proof: benched for the life of the process.
+     * PEER_ID_INVALID is what a frozen bot gets from sendMessage, but not proof, so PEER_ID_INVALID_STRIKES in a row
+     * on one channel (no success between) give a timed bench (BOT_REFRESH_MS); each earlier strike only moves the
+     * send to the next untried bot. Returns 'benched', 'strike' or null (not this kind of failure).
      */
     markBotDead(data, category, botIndex, error) {
         const description = `${error?.response?.data?.description || error?.message || ''}`;
@@ -31715,31 +31732,43 @@ class BotConfig {
             reason = 'frozen_method_invalid';
         }
         else if (/PEER_ID_INVALID/i.test(description)) {
-            const streak = (this.peerInvalidStreak.get(token) ?? 0) + 1;
-            this.peerInvalidStreak.set(token, streak);
+            const key = this.streakKey(token, data.channelId);
+            const streak = (this.peerInvalidStreak.get(key) ?? 0) + 1;
+            this.peerInvalidStreak.set(key, streak);
             if (streak < PEER_ID_INVALID_STRIKES) {
-                logger.warn(`[bots] kind=bot_strike reason=peer_id_invalid streak=${streak}/${PEER_ID_INVALID_STRIKES} category=${category} bot=${botId} channel=${data.channelId}`);
+                logger.warn(`[bots] kind=bot_strike reason=peer_id_invalid streak=${streak}/${PEER_ID_INVALID_STRIKES} category=${category} bot=${botId} channel=${data.channelId} until=none`);
                 return 'strike';
             }
-            reason = `peer_id_invalid_x${streak}`;
+            const until = this.benchTimed(data, botIndex);
+            logger.warn(`[bots] kind=bot_benched reason=peer_id_invalid_x${streak} category=${category} bot=${botId} channel=${data.channelId} until=${until} bench=timed`);
+            return 'benched';
         }
         else {
             return null;
         }
         data.botCooldownUntil[botIndex] = Infinity;
-        logger.warn(`[bots] kind=bot_benched reason=${reason} category=${category} bot=${botId} channel=${data.channelId} until=restart`);
+        logger.warn(`[bots] kind=bot_benched reason=${reason} category=${category} bot=${botId} channel=${data.channelId} until=restart bench=permanent`);
         return 'benched';
     }
-    shouldRetryWithNextBot(data, category, botIndex, error) {
+    streakKey(token, channelId) {
+        return `${token}\u0000${channelId}`;
+    }
+    /** Bench/strike the failed bot, then retry only on another bot this send has not tried yet. */
+    shouldRetryWithNextBot(data, category, botIndex, error, tried) {
         const benched = this.markBotRateLimited(data, category, botIndex, error)
             || this.markBotUnreachable(data, category, botIndex, error)
             || this.markBotRevoked(data, category, botIndex, error)
             || this.markBotDead(data, category, botIndex, error) !== null;
-        return benched && data.botTokens.length > 1 && this.hasAnotherAvailableBot(data);
+        if (!benched)
+            return false;
+        if (data.botTokens.length > 1 && this.hasAnotherAvailableBot(data, botIndex, tried))
+            return true;
+        logger.warn(`[bots] kind=send_failed reason=no_untried_bot category=${category} tried=${tried?.size ?? 1} bots=${data.botTokens.length} channel=${data.channelId}`);
+        return false;
     }
     /** Count a successful send; counts are written to the bots collection in one batch per USAGE_FLUSH_MS. */
     recordSuccessfulBotSend(category, token, channelId) {
-        this.peerInvalidStreak.delete(token);
+        this.peerInvalidStreak.delete(this.streakKey(token, channelId));
         if (!this.getMongoUri()) {
             return;
         }
@@ -31908,7 +31937,7 @@ class BotConfig {
             return true;
         return this.sendMessageNow(category, message, options);
     }
-    async sendMessageNow(category, message, options = {}) {
+    async sendMessageNow(category, message, options = {}, tried = new Set()) {
         const richHtml = this.richMessageHtml(message, options, category);
         await this.ensureInitialized();
         const data = this.categoryMap.get(category);
@@ -31916,10 +31945,11 @@ class BotConfig {
             logger.error(`No valid bots configured for ${category}`);
             return false;
         }
-        const botIndex = this.getNextAvailableBotIndex(data, category);
+        const botIndex = this.getNextAvailableBotIndex(data, category, tried);
         if (botIndex == null)
             return false;
         const token = data.botTokens[botIndex];
+        tried.add(token);
         const channelId = data.channelId;
         const body = { chat_id: channelId, rich_message: { html: richHtml } };
         const keyboard = this.richKeyboard(message, options.replyMarkup);
@@ -31951,33 +31981,36 @@ class BotConfig {
             const { status, description } = this.botSendFailureDetails(error);
             logger.warn(`BOT rich-send-failed | ${category} | ${channelId} | bot ${botIndex} | ${status} | ${String(description).slice(0, 180)}`);
             if (this.isBotOrChannelFailure(error)) {
-                if (this.shouldRetryWithNextBot(data, category, botIndex, error)) {
+                if (this.shouldRetryWithNextBot(data, category, botIndex, error, tried)) {
                     data.lastUsedIndex = botIndex; // Will be incremented in the recursive call
-                    return this.sendMessageNow(category, message, options);
+                    return this.sendMessageNow(category, message, options, tried);
                 }
                 return false;
             }
             // Telegram refused the rich payload itself (parse error, unsupported tag): never lose the notice,
             // send it the classic way with the same bot. Network errors stay single-attempt, as before.
             if (Number(status) === 400 || Number(status) === 404) {
+                // The payload failed, not the bot: the same bot may send the classic message.
                 data.lastUsedIndex = (botIndex - 1 + data.botTokens.length) % data.botTokens.length;
-                return this.sendPlainMessage(category, message, options);
+                tried.delete(token);
+                return this.sendPlainMessage(category, message, options, tried);
             }
             return false;
         }
     }
     /** Classic sendMessage (HTML / plain), used for literal commands and as the rich-message fallback. */
-    async sendPlainMessage(category, message, options = {}) {
+    async sendPlainMessage(category, message, options = {}, tried = new Set()) {
         await this.ensureInitialized();
         const data = this.categoryMap.get(category);
         if (!data || data.botTokens.length === 0) {
             logger.error(`No valid bots configured for ${category}`);
             return false;
         }
-        const botIndex = this.getNextAvailableBotIndex(data, category);
+        const botIndex = this.getNextAvailableBotIndex(data, category, tried);
         if (botIndex == null)
             return false;
         const token = data.botTokens[botIndex];
+        tried.add(token);
         const channelId = data.channelId;
         const formatted = this.formatNotificationMessage(message, options, category);
         // Prepare request parameters
@@ -32040,10 +32073,10 @@ class BotConfig {
         catch (error) {
             const { status, description } = this.botSendFailureDetails(error);
             logger.warn(`BOT send-failed | ${category} | ${channelId} | bot ${botIndex} | ${status} | ${String(description).slice(0, 180)}`);
-            if (this.shouldRetryWithNextBot(data, category, botIndex, error)) {
+            if (this.shouldRetryWithNextBot(data, category, botIndex, error, tried)) {
                 logger.debug(`Retrying with next available bot for ${category}`);
                 data.lastUsedIndex = botIndex; // Will be incremented in the recursive call
-                return this.sendPlainMessage(category, message, options);
+                return this.sendPlainMessage(category, message, options, tried);
             }
             return false;
         }
@@ -32184,17 +32217,18 @@ class BotConfig {
         }
         return false;
     }
-    async sendPhotoVideoGroup(category, mediaContent) {
+    async sendPhotoVideoGroup(category, mediaContent, tried = new Set()) {
         await this.ensureInitialized();
         const data = this.categoryMap.get(category);
         if (!data || data.botTokens.length === 0) {
             logger.error(`No valid bots configured for ${category}`);
             return false;
         }
-        const botIndex = this.getNextAvailableBotIndex(data, category);
+        const botIndex = this.getNextAvailableBotIndex(data, category, tried);
         if (botIndex == null)
             return false;
         const token = data.botTokens[botIndex];
+        tried.add(token);
         const channelId = data.channelId;
         const formData = new (form_data__WEBPACK_IMPORTED_MODULE_2___default())();
         formData.append('chat_id', channelId);
@@ -32245,10 +32279,10 @@ class BotConfig {
         catch (error) {
             const { status, description } = this.botSendFailureDetails(error);
             logger.warn(`BOT sendMediaGroup-failed | ${category} | ${channelId} | bot ${botIndex} | ${status} | ${String(description).slice(0, 180)}`);
-            if (this.shouldRetryWithNextBot(data, category, botIndex, error)) {
+            if (this.shouldRetryWithNextBot(data, category, botIndex, error, tried)) {
                 logger.debug(`Retrying with next available bot for ${category}`);
                 data.lastUsedIndex = botIndex;
-                return this.sendPhotoVideoGroup(category, mediaContent);
+                return this.sendPhotoVideoGroup(category, mediaContent, tried);
             }
             return false;
         }
@@ -32256,17 +32290,18 @@ class BotConfig {
     /**
      * Generic method to send media
      */
-    async sendMedia(category, method, media, options = {}) {
+    async sendMedia(category, method, media, options = {}, tried = new Set()) {
         await this.ensureInitialized();
         const data = this.categoryMap.get(category);
         if (!data || data.botTokens.length === 0) {
             logger.error(`No valid bots configured for ${category}`);
             return false;
         }
-        const botIndex = this.getNextAvailableBotIndex(data, category);
+        const botIndex = this.getNextAvailableBotIndex(data, category, tried);
         if (botIndex == null)
             return false;
         const token = data.botTokens[botIndex];
+        tried.add(token);
         const channelId = String(options.targetChannelId || data.channelId);
         const formData = new (form_data__WEBPACK_IMPORTED_MODULE_2___default())();
         formData.append('chat_id', channelId);
@@ -32457,10 +32492,10 @@ class BotConfig {
         catch (error) {
             localStream?.destroy(); // a failed upload never leaves the file open (the retry opens its own)
             (0,_parseError__WEBPACK_IMPORTED_MODULE_4__.parseError)(error, `Failed to send ${method} to ${channelId} using bot at index ${botIndex}:`, false);
-            if (this.shouldRetryWithNextBot(data, category, botIndex, error)) {
+            if (this.shouldRetryWithNextBot(data, category, botIndex, error, tried)) {
                 logger.debug(`Retrying with next available bot for ${category}`);
                 data.lastUsedIndex = botIndex;
-                return this.sendMedia(category, method, media, options);
+                return this.sendMedia(category, method, media, options, tried);
             }
             return false;
         }
@@ -64087,8 +64122,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "ad483b7e8ca7f3c0ca63d64a73f577ecaf48e50e" : 0;
-    const builtAt =  true ? "2026-11-23T03:50:11.412Z" : 0;
+    const sha =  true ? "98d0d2ae571cc0c49d1d4c64da737c7a2467919e" : 0;
+    const builtAt =  true ? "2026-11-23T04:42:15.520Z" : 0;
     return { sha, builtAt };
 }
 
@@ -128879,9 +128914,12 @@ const JOIN_GAP_MS = 3 * 60 * 1000;
  */
 async function initSetup(client) {
     _file_sender__WEBPACK_IMPORTED_MODULE_1__.fileSender.setClient(client);
-    if ((await (0,_channels_client_updates_channel__WEBPACK_IMPORTED_MODULE_4__.joinClientUpdatesChannel)(client)).floodWait)
+    const clientUpdates = await (0,_channels_client_updates_channel__WEBPACK_IMPORTED_MODULE_4__.joinClientUpdatesChannel)(client);
+    if (clientUpdates.floodWait)
         return;
-    await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_0__.sleep)(JOIN_GAP_MS);
+    // No invite configured: no join was made, so no gap is needed before the next one.
+    if (clientUpdates.kind !== "no_invite")
+        await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_0__.sleep)(JOIN_GAP_MS);
     if ((await (0,_channels_channel_ops__WEBPACK_IMPORTED_MODULE_2__.joinChannels)(client, DEFAULT_CHANNELS, false)) === "stop")
         return;
     // The unwanted-updates group is private: joined via its invite, spaced like the channel joins (never throws).
