@@ -64050,8 +64050,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "bb5f13cd48b9fa5920e005e338c707ef360fa449" : 0;
-    const builtAt =  true ? "2026-11-21T19:24:31.819Z" : 0;
+    const sha =  true ? "8badbef7fa6d8fa989ea15c74e38a772fb22278a" : 0;
+    const builtAt =  true ? "2026-11-23T03:13:44.475Z" : 0;
     return { sha, builtAt };
 }
 
@@ -80840,15 +80840,15 @@ function setDaysLeft(value) {
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   cleanupRespondToMsgs: () => (/* binding */ cleanupRespondToMsgs),
-/* harmony export */   getMsgStats: () => (/* reexport safe */ _replier__WEBPACK_IMPORTED_MODULE_22__.getMsgStats),
+/* harmony export */   getMsgStats: () => (/* reexport safe */ _replier__WEBPACK_IMPORTED_MODULE_23__.getMsgStats),
 /* harmony export */   getRepingMap: () => (/* binding */ getRepingMap),
-/* harmony export */   getReplierState: () => (/* reexport safe */ _replier__WEBPACK_IMPORTED_MODULE_22__.getReplierState),
+/* harmony export */   getReplierState: () => (/* reexport safe */ _replier__WEBPACK_IMPORTED_MODULE_23__.getReplierState),
 /* harmony export */   hasPicMap: () => (/* binding */ hasPicMap),
 /* harmony export */   hasTpMap: () => (/* binding */ hasTpMap),
-/* harmony export */   localMsgStats: () => (/* reexport safe */ _replier__WEBPACK_IMPORTED_MODULE_22__.localMsgStats),
-/* harmony export */   pushToReplies: () => (/* reexport safe */ _replier__WEBPACK_IMPORTED_MODULE_22__.pushToReplies),
-/* harmony export */   queueReply: () => (/* reexport safe */ _replier__WEBPACK_IMPORTED_MODULE_22__.queueReply),
-/* harmony export */   replier: () => (/* reexport safe */ _replier__WEBPACK_IMPORTED_MODULE_22__.replier),
+/* harmony export */   localMsgStats: () => (/* reexport safe */ _replier__WEBPACK_IMPORTED_MODULE_23__.localMsgStats),
+/* harmony export */   pushToReplies: () => (/* reexport safe */ _replier__WEBPACK_IMPORTED_MODULE_23__.pushToReplies),
+/* harmony export */   queueReply: () => (/* reexport safe */ _replier__WEBPACK_IMPORTED_MODULE_23__.queueReply),
+/* harmony export */   replier: () => (/* reexport safe */ _replier__WEBPACK_IMPORTED_MODULE_23__.replier),
 /* harmony export */   respondToMsgs: () => (/* binding */ respondToMsgs),
 /* harmony export */   sendTpMsg: () => (/* binding */ sendTpMsg),
 /* harmony export */   setPicMap: () => (/* binding */ setPicMap),
@@ -80873,18 +80873,20 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _respond_to_paid__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! ./respond-to-paid */ "./src/conversation/respond-to-paid.ts");
 /* harmony import */ var _tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! @tg/core/utils/parseError */ "../../packages/tg-core/src/utils/parseError.ts");
 /* harmony import */ var _payments_ask_to_pay_by_event__WEBPACK_IMPORTED_MODULE_17__ = __webpack_require__(/*! ../payments/ask-to-pay-by-event */ "./src/payments/ask-to-pay-by-event.ts");
-/* harmony import */ var _greetings_promo_pic__WEBPACK_IMPORTED_MODULE_18__ = __webpack_require__(/*! ../greetings/promo-pic */ "./src/greetings/promo-pic.ts");
-/* harmony import */ var _engagement_fallback__WEBPACK_IMPORTED_MODULE_19__ = __webpack_require__(/*! ./engagement-fallback */ "./src/conversation/engagement-fallback.ts");
-/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_20__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
-/* harmony import */ var _pattern_handlers_regex__WEBPACK_IMPORTED_MODULE_21__ = __webpack_require__(/*! ../pattern-handlers/regex */ "./src/pattern-handlers/regex/index.ts");
-/* harmony import */ var _replier__WEBPACK_IMPORTED_MODULE_22__ = __webpack_require__(/*! ../replier */ "./src/replier/index.ts");
-/* harmony import */ var _patterns__WEBPACK_IMPORTED_MODULE_23__ = __webpack_require__(/*! ./patterns */ "./src/conversation/patterns/index.ts");
-/* harmony import */ var _patterns_unpaid_patterns__WEBPACK_IMPORTED_MODULE_24__ = __webpack_require__(/*! ./patterns/unpaid-patterns */ "./src/conversation/patterns/unpaid-patterns.ts");
-/* harmony import */ var _tp_messages__WEBPACK_IMPORTED_MODULE_25__ = __webpack_require__(/*! ./tp-messages */ "./src/conversation/tp-messages.ts");
-/* harmony import */ var _state_user_state__WEBPACK_IMPORTED_MODULE_26__ = __webpack_require__(/*! ./state/user-state */ "./src/conversation/state/user-state.ts");
-/* harmony import */ var _state_state_reset__WEBPACK_IMPORTED_MODULE_27__ = __webpack_require__(/*! ./state/state-reset */ "./src/conversation/state/state-reset.ts");
-/* harmony import */ var _inbound_inbound_decision__WEBPACK_IMPORTED_MODULE_28__ = __webpack_require__(/*! ./inbound/inbound-decision */ "./src/conversation/inbound/inbound-decision.ts");
-/* harmony import */ var _tg_parked_constants__WEBPACK_IMPORTED_MODULE_29__ = __webpack_require__(/*! @tg/parked/constants */ "../../packages/tg-parked/src/constants.ts");
+/* harmony import */ var _payments_pay_ask_guard__WEBPACK_IMPORTED_MODULE_18__ = __webpack_require__(/*! ../payments/pay-ask-guard */ "./src/payments/pay-ask-guard.ts");
+/* harmony import */ var _greetings_promo_pic__WEBPACK_IMPORTED_MODULE_19__ = __webpack_require__(/*! ../greetings/promo-pic */ "./src/greetings/promo-pic.ts");
+/* harmony import */ var _engagement_fallback__WEBPACK_IMPORTED_MODULE_20__ = __webpack_require__(/*! ./engagement-fallback */ "./src/conversation/engagement-fallback.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_21__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _pattern_handlers_regex__WEBPACK_IMPORTED_MODULE_22__ = __webpack_require__(/*! ../pattern-handlers/regex */ "./src/pattern-handlers/regex/index.ts");
+/* harmony import */ var _replier__WEBPACK_IMPORTED_MODULE_23__ = __webpack_require__(/*! ../replier */ "./src/replier/index.ts");
+/* harmony import */ var _patterns__WEBPACK_IMPORTED_MODULE_24__ = __webpack_require__(/*! ./patterns */ "./src/conversation/patterns/index.ts");
+/* harmony import */ var _patterns_unpaid_patterns__WEBPACK_IMPORTED_MODULE_25__ = __webpack_require__(/*! ./patterns/unpaid-patterns */ "./src/conversation/patterns/unpaid-patterns.ts");
+/* harmony import */ var _tp_messages__WEBPACK_IMPORTED_MODULE_26__ = __webpack_require__(/*! ./tp-messages */ "./src/conversation/tp-messages.ts");
+/* harmony import */ var _state_user_state__WEBPACK_IMPORTED_MODULE_27__ = __webpack_require__(/*! ./state/user-state */ "./src/conversation/state/user-state.ts");
+/* harmony import */ var _state_state_reset__WEBPACK_IMPORTED_MODULE_28__ = __webpack_require__(/*! ./state/state-reset */ "./src/conversation/state/state-reset.ts");
+/* harmony import */ var _inbound_inbound_decision__WEBPACK_IMPORTED_MODULE_29__ = __webpack_require__(/*! ./inbound/inbound-decision */ "./src/conversation/inbound/inbound-decision.ts");
+/* harmony import */ var _tg_parked_constants__WEBPACK_IMPORTED_MODULE_30__ = __webpack_require__(/*! @tg/parked/constants */ "../../packages/tg-parked/src/constants.ts");
+
 
 
 
@@ -80919,37 +80921,37 @@ __webpack_require__.r(__webpack_exports__);
 
 
 
-const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_20__.Logger("tg-aut:respond-to-msgs");
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_21__.Logger("tg-aut:respond-to-msgs");
 // Service-period reset window after the second / full shows: 20 h, 30 h at ₹250+ (owner 2026-10-28: back from the
 // 48 h / 72 h of 2026-10-27).
 const SERVICE_RESET_MS = 20 * 60 * 60 * 1000;
 const HIGH_PAY_SERVICE_RESET_MS = 30 * 60 * 60 * 1000;
 // Initialize patterns once at module load
-(0,_patterns__WEBPACK_IMPORTED_MODULE_23__.initializePatterns)();
+(0,_patterns__WEBPACK_IMPORTED_MODULE_24__.initializePatterns)();
 // Migrated to UserState - using centralized state management with Redis persistence
 // Migrated to UserState - using centralized state management with Redis persistence
 // Helper functions now use UserState (tpMap is in messageHelpers)
-const hasTpMap = _tp_messages__WEBPACK_IMPORTED_MODULE_25__.hasTpMap;
-const setTpMap = _tp_messages__WEBPACK_IMPORTED_MODULE_25__.setTpMap;
+const hasTpMap = _tp_messages__WEBPACK_IMPORTED_MODULE_26__.hasTpMap;
+const setTpMap = _tp_messages__WEBPACK_IMPORTED_MODULE_26__.setTpMap;
 function setRepingMap(chatId, value) {
-    _state_user_state__WEBPACK_IMPORTED_MODULE_26__.stateManager.setRepingCount(chatId, value);
+    _state_user_state__WEBPACK_IMPORTED_MODULE_27__.stateManager.setRepingCount(chatId, value);
 }
 function getRepingMap(chatId) {
-    return _state_user_state__WEBPACK_IMPORTED_MODULE_26__.stateManager.getRepingCount(chatId);
+    return _state_user_state__WEBPACK_IMPORTED_MODULE_27__.stateManager.getRepingCount(chatId);
 }
 // DEPRECATED: Use stateManager.setPromoShown() directly instead
 function setPicMap(chatId, value) {
-    _state_user_state__WEBPACK_IMPORTED_MODULE_26__.stateManager.setPromoShown(chatId, value);
+    _state_user_state__WEBPACK_IMPORTED_MODULE_27__.stateManager.setPromoShown(chatId, value);
 }
 // DEPRECATED: Use stateManager.hasPromoShown() directly instead
 function hasPicMap(chatId) {
-    return _state_user_state__WEBPACK_IMPORTED_MODULE_26__.stateManager.hasPromoShown(chatId);
+    return _state_user_state__WEBPACK_IMPORTED_MODULE_27__.stateManager.hasPromoShown(chatId);
 }
 // Enhanced cleanup function with timeout management
 async function cleanupRespondToMsgs() {
-    await (0,_replier__WEBPACK_IMPORTED_MODULE_22__.cleanupRespondToMsgs)();
+    await (0,_replier__WEBPACK_IMPORTED_MODULE_23__.cleanupRespondToMsgs)();
     // Clean up all user timeouts to prevent memory leaks
-    const allUserStates = _state_user_state__WEBPACK_IMPORTED_MODULE_26__.stateManager.getAllUserStates();
+    const allUserStates = _state_user_state__WEBPACK_IMPORTED_MODULE_27__.stateManager.getAllUserStates();
     for (const [, userState] of allUserStates) {
         if (userState.miscTimeouts) {
             userState.miscTimeouts.forEach(timeout => clearTimeout(timeout));
@@ -80974,21 +80976,25 @@ async function respondToMsgs(event, allMsg) {
         return;
     }
     // Smart state management: Check time-based resets and user progression
-    (0,_state_state_reset__WEBPACK_IMPORTED_MODULE_27__.checkTimeBasedResets)(chatId, userDetails);
+    (0,_state_state_reset__WEBPACK_IMPORTED_MODULE_28__.checkTimeBasedResets)(chatId, userDetails);
     // Single periodic payment prompt logic - avoid duplicates
     let periodicPromptSent = false;
     if (userDetails.windowCount > 2 && Number(userDetails.windowCount) % 3 === 1) {
         await (0,_payments_ask_to_pay_by_event__WEBPACK_IMPORTED_MODULE_17__.asktoPayByEvent)(event.client, userDetails, false);
         periodicPromptSent = true;
     }
-    else if (userDetails.payAmount < 25 && userDetails.windowCount > 20 && Math.random() < 0.1) {
-        // Urgency logic (10% chance for unpaid users with >20 messages)
+    else if (userDetails.payAmount < 25 && userDetails.windowCount > 20 && Math.random() < 0.1 &&
+        (0,_payments_pay_ask_guard__WEBPACK_IMPORTED_MODULE_18__.unpromptedPayAskAllowed)(chatId, 'urgency')) {
+        // Urgency logic (10% chance for unpaid users with >20 messages); an unprompted pay ask (pay-ask-guard).
         // Filler: a newer reply in the same bubble queue replaces it (replier/reply-pieces).
-        await (0,_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)(_messages_objection_handling__WEBPACK_IMPORTED_MODULE_5__.urgencyMsgs), undefined, undefined, undefined, true);
+        // Counted when the replier actually sends it (a newer reply may replace this filler).
+        const urgency = (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)(_messages_objection_handling__WEBPACK_IMPORTED_MODULE_5__.urgencyMsgs);
+        (0,_payments_pay_ask_guard__WEBPACK_IMPORTED_MODULE_18__.expectUnpromptedPayAsk)(chatId, urgency);
+        await (0,_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, urgency, undefined, undefined, undefined, true);
         await (0,_respond__WEBPACK_IMPORTED_MODULE_1__.sendReaction)(event, '🔥');
         periodicPromptSent = true;
     }
-    if (userDetails.canReply && userDetails.windowCount < _tg_parked_constants__WEBPACK_IMPORTED_MODULE_29__.MAIN_WINDOW_COUNT_MAX && userDetails.limitTime < Date.now()) {
+    if (userDetails.canReply && userDetails.windowCount < _tg_parked_constants__WEBPACK_IMPORTED_MODULE_30__.MAIN_WINDOW_COUNT_MAX && userDetails.limitTime < Date.now()) {
         // Used-up reset: an exhausted paid user (10 cycle videos / 8 full shows) restarts the ladder at the ₹50 demo
         // 6-10 h after the last show (deterministic per chat, service-eligibility usedUpResetDelayMs). Its own window,
         // separate from the 20/30 h reset below, which stays as it was for everyone else. `videos` and callTime are
@@ -81016,25 +81022,25 @@ async function respondToMsgs(event, allMsg) {
             // once (used-up-answer); anything else is a normal paid message. Never initiateCall: it would promise a
             // call that cannot ring and mute the next messages for 5 min (D2, "Voice call" got nothing).
             if ((0,_payments_service_eligibility__WEBPACK_IMPORTED_MODULE_7__.serviceUsedUp)(userDetails)) {
-                (0,_inbound_inbound_decision__WEBPACK_IMPORTED_MODULE_28__.markInbound)(event, "handled", "used-up", "paid");
+                (0,_inbound_inbound_decision__WEBPACK_IMPORTED_MODULE_29__.markInbound)(event, "handled", "used-up", "paid");
                 if (!(await (0,_used_up_answer__WEBPACK_IMPORTED_MODULE_9__.answerUsedUpCallRequest)(event, userDetails, allMsg, 'respond-to-msgs'))) {
                     await (0,_respond_to_paid__WEBPACK_IMPORTED_MODULE_15__.respondToPaidMsgs)(event, allMsg);
                 }
                 return;
             }
             // Check cheat count first (higher priority)
-            const cheatCallInitiated = await (0,_tp_messages__WEBPACK_IMPORTED_MODULE_25__.checkCheatCountCallInitiation)(chatId, userDetails, event, _calls_call_initiation__WEBPACK_IMPORTED_MODULE_11__.initiateCall);
+            const cheatCallInitiated = await (0,_tp_messages__WEBPACK_IMPORTED_MODULE_26__.checkCheatCountCallInitiation)(chatId, userDetails, event, _calls_call_initiation__WEBPACK_IMPORTED_MODULE_11__.initiateCall);
             if (cheatCallInitiated) {
                 logger.debug(`[${broadcastName}] no response - cheat call initiated: ${broadcastName} (${chatId}), payAmount: ${userDetails.payAmount}, windowCount: ${userDetails.windowCount}`);
-                (0,_inbound_inbound_decision__WEBPACK_IMPORTED_MODULE_28__.markInbound)(event, "handled", "cheat-count call initiated", "paid");
+                (0,_inbound_inbound_decision__WEBPACK_IMPORTED_MODULE_29__.markInbound)(event, "handled", "cheat-count call initiated", "paid");
                 return; // Call initiated, stop processing
             }
             // Check please count if user is asking for service
             if ((0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['reply', 'please', 'pls', 'paid', 'answer', 'respond'])) {
-                const pleaseCallInitiated = await (0,_tp_messages__WEBPACK_IMPORTED_MODULE_25__.checkPleaseCountCallInitiation)(chatId, userDetails, text, _calls_call_initiation__WEBPACK_IMPORTED_MODULE_11__.initiateCall);
+                const pleaseCallInitiated = await (0,_tp_messages__WEBPACK_IMPORTED_MODULE_26__.checkPleaseCountCallInitiation)(chatId, userDetails, text, _calls_call_initiation__WEBPACK_IMPORTED_MODULE_11__.initiateCall);
                 if (pleaseCallInitiated) {
                     logger.debug(`[${broadcastName}] no response - please call initiated: ${broadcastName} (${chatId}), payAmount: ${userDetails.payAmount}, windowCount: ${userDetails.windowCount}`);
-                    (0,_inbound_inbound_decision__WEBPACK_IMPORTED_MODULE_28__.markInbound)(event, "handled", "please-count call initiated", "paid");
+                    (0,_inbound_inbound_decision__WEBPACK_IMPORTED_MODULE_29__.markInbound)(event, "handled", "please-count call initiated", "paid");
                     return; // Call initiated, stop processing
                 }
             }
@@ -81044,15 +81050,21 @@ async function respondToMsgs(event, allMsg) {
             // re-request below rings as before.
             if ((0,_pattern_handlers_regex_callRequestRegex__WEBPACK_IMPORTED_MODULE_14__.isCallRequest)(text) && !(0,_payments_service_eligibility__WEBPACK_IMPORTED_MODULE_7__.canProceedWithService)(userDetails) &&
                 await (0,_calls_call_initiation__WEBPACK_IMPORTED_MODULE_11__.answerPendingService)(userDetails, chatId, 'Call request (service owed)', (m) => (0,_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, m))) {
-                (0,_inbound_inbound_decision__WEBPACK_IMPORTED_MODULE_28__.markInbound)(event, "handled", "owed call ask", "paid");
+                (0,_inbound_inbound_decision__WEBPACK_IMPORTED_MODULE_29__.markInbound)(event, "handled", "owed call ask", "paid");
                 return;
             }
             // Handle paid reply flow
             if (!userDetails.paidReply && userDetails.callTime < Date.now() - _payments_ladder__WEBPACK_IMPORTED_MODULE_13__.PAY_PROMPT_GAP_MS &&
                 !(0,_payments_service_eligibility__WEBPACK_IMPORTED_MODULE_7__.canProceedWithService)(userDetails) && !(0,_payments_ladder__WEBPACK_IMPORTED_MODULE_13__.paidForFullShow)(userDetails.payAmount)) {
+                // The bot's own ask (pay-ask-guard): skipped -> paidReply stays false, the next message tries again.
+                if (!(0,_payments_pay_ask_guard__WEBPACK_IMPORTED_MODULE_18__.unpromptedPayAskAllowed)(chatId, 'paid-reply-prompt')) {
+                    (0,_inbound_inbound_decision__WEBPACK_IMPORTED_MODULE_29__.markInbound)(event, "handled", "paid-reply prompt skipped (pay-ask guard)", "paid");
+                    return;
+                }
                 logger.debug(`[PaidReply-False] Prompting paid reply for user ${chatId}`);
                 userDetails = await db.updateSingleKey(chatId, _data_user_data_crud__WEBPACK_IMPORTED_MODULE_0__.user.paidReply, true);
-                await (0,_payments_ask_to_pay_by_event__WEBPACK_IMPORTED_MODULE_17__.asktoPayByEvent)(event.client, userDetails, true);
+                // Forced past the pitch window, but the bot's own ask: unprompted (pay-ask-guard).
+                await (0,_payments_ask_to_pay_by_event__WEBPACK_IMPORTED_MODULE_17__.asktoPayByEvent)(event.client, userDetails, true, '', true, { unprompted: true });
             }
             else {
                 if (userDetails.paidReply) {
@@ -81064,7 +81076,7 @@ async function respondToMsgs(event, allMsg) {
                         let callInitiated = false;
                         const currentTime = Date.now();
                         const asksForService = (0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, ['call', 'reply', 'please', 'pls', 'complete', 'finish', 'respond', 'cheat', 'fake', 'fraud', 'paid', 'answer']) ||
-                            _pattern_handlers_regex__WEBPACK_IMPORTED_MODULE_21__.paymentDoneRegex.test(text);
+                            _pattern_handlers_regex__WEBPACK_IMPORTED_MODULE_22__.paymentDoneRegex.test(text);
                         // The ladder's re-ring rule (reRingDue: 20 min below ₹250, 2 h at it, a plea or a payment since
                         // the last show at once) and the amount it books (reRingAmount).
                         if ((0,_payments_ladder__WEBPACK_IMPORTED_MODULE_13__.reRingDue)(userDetails, currentTime, asksForService, (0,_calls_inhouse_video_policy__WEBPACK_IMPORTED_MODULE_12__.paidSinceLastShow)(userDetails))) {
@@ -81083,22 +81095,22 @@ async function respondToMsgs(event, allMsg) {
                         // If call was initiated, return early. Otherwise, continue to respondToPaidMsgs
                         if (callInitiated) {
                             logger.debug(`[${broadcastName}] call initiated: ${broadcastName} (${chatId}), payAmount: ${userDetails.payAmount}, highestPayAmount: ${userDetails.highestPayAmount}`);
-                            (0,_inbound_inbound_decision__WEBPACK_IMPORTED_MODULE_28__.markInbound)(event, "handled", "re-requested call initiated", "paid");
+                            (0,_inbound_inbound_decision__WEBPACK_IMPORTED_MODULE_29__.markInbound)(event, "handled", "re-requested call initiated", "paid");
                             return;
                         }
                         else {
-                            (0,_inbound_inbound_decision__WEBPACK_IMPORTED_MODULE_28__.markInbound)(event, "handled", "paid-reply", "paid");
+                            (0,_inbound_inbound_decision__WEBPACK_IMPORTED_MODULE_29__.markInbound)(event, "handled", "paid-reply", "paid");
                             await (0,_respond_to_paid__WEBPACK_IMPORTED_MODULE_15__.respondToPaidMsgs)(event, allMsg);
                         }
                     }
                     else {
-                        (0,_inbound_inbound_decision__WEBPACK_IMPORTED_MODULE_28__.markInbound)(event, "handled", "paid-reply", "paid");
+                        (0,_inbound_inbound_decision__WEBPACK_IMPORTED_MODULE_29__.markInbound)(event, "handled", "paid-reply", "paid");
                         await (0,_respond_to_paid__WEBPACK_IMPORTED_MODULE_15__.respondToPaidMsgs)(event, allMsg);
                     }
                 }
                 else {
                     logger.debug(`[${broadcastName}] no response - initiating initial call (paidReply false): ${broadcastName} (${chatId}), payAmount: ${userDetails.payAmount}, windowCount: ${userDetails.windowCount}`);
-                    (0,_inbound_inbound_decision__WEBPACK_IMPORTED_MODULE_28__.markInbound)(event, "handled", "initial call after paid reply", "paid");
+                    (0,_inbound_inbound_decision__WEBPACK_IMPORTED_MODULE_29__.markInbound)(event, "handled", "initial call after paid reply", "paid");
                     await (0,_calls_call_initiation__WEBPACK_IMPORTED_MODULE_11__.initiateCall)(userDetails.payAmount, userDetails, "Initial Call after Paid Reply");
                 }
             }
@@ -81108,8 +81120,8 @@ async function respondToMsgs(event, allMsg) {
             try {
                 // Show pic promo for users with 10-25 messages, unless this message is a price / demo ask that gets the demo
                 // price block: one pay ask per pitch window, and it is the answer to the user's own question.
-                if (userDetails.windowCount >= 10 && userDetails.windowCount < 25 && !(0,_patterns_unpaid_patterns__WEBPACK_IMPORTED_MODULE_24__.answersWithDemoPrice)(chatId, text)) {
-                    await (0,_greetings_promo_pic__WEBPACK_IMPORTED_MODULE_18__.sendPromoPic)(event.message.id, chatId, `Want more...?\n\nCall  Just **50₹**\nPics Just **25₹!!**\n**Full NUDE, With FACE!!\n\n${process.env.demolink}/${process.env.clientId}**`, `./pic.jpg`, undefined, 'reply');
+                if (userDetails.windowCount >= 10 && userDetails.windowCount < 25 && !(0,_patterns_unpaid_patterns__WEBPACK_IMPORTED_MODULE_25__.answersWithDemoPrice)(chatId, text)) {
+                    await (0,_greetings_promo_pic__WEBPACK_IMPORTED_MODULE_19__.sendPromoPic)(event.message.id, chatId, `Want more...?\n\nCall  Just **50₹**\nPics Just **25₹!!**\n**Full NUDE, With FACE!!\n\n${process.env.demolink}/${process.env.clientId}**`, `./pic.jpg`, undefined, 'reply');
                 }
                 // ===== PATTERN REGISTRY EXECUTION =====
                 // Create context for pattern handlers
@@ -81123,23 +81135,23 @@ async function respondToMsgs(event, allMsg) {
                     setRepingMap,
                 };
                 // Execute pattern matching
-                const matched = await _patterns__WEBPACK_IMPORTED_MODULE_23__.patternRegistry.execute(event, text, allMsg, userDetails, context);
+                const matched = await _patterns__WEBPACK_IMPORTED_MODULE_24__.patternRegistry.execute(event, text, allMsg, userDetails, context);
                 // Track unmatched messages for re-engagement
                 if (matched) {
                     // Reset counter when a pattern matches
-                    _state_user_state__WEBPACK_IMPORTED_MODULE_26__.stateManager.resetUnmatchedMessageCount(chatId);
+                    _state_user_state__WEBPACK_IMPORTED_MODULE_27__.stateManager.resetUnmatchedMessageCount(chatId);
                 }
                 else {
                     // Increment counter when no pattern matches
-                    _state_user_state__WEBPACK_IMPORTED_MODULE_26__.stateManager.incrementUnmatchedMessageCount(chatId);
+                    _state_user_state__WEBPACK_IMPORTED_MODULE_27__.stateManager.incrementUnmatchedMessageCount(chatId);
                 }
                 // If no pattern matched, execute fallback logic
                 if (!matched) {
-                    const unmatchedCount = _state_user_state__WEBPACK_IMPORTED_MODULE_26__.stateManager.getUnmatchedMessageCount(chatId);
-                    const contextualHandled = await (0,_engagement_fallback__WEBPACK_IMPORTED_MODULE_19__.handleContextualEngagementFallback)(event, text, userDetails, context, unmatchedCount);
+                    const unmatchedCount = _state_user_state__WEBPACK_IMPORTED_MODULE_27__.stateManager.getUnmatchedMessageCount(chatId);
+                    const contextualHandled = await (0,_engagement_fallback__WEBPACK_IMPORTED_MODULE_20__.handleContextualEngagementFallback)(event, text, userDetails, context, unmatchedCount);
                     if (contextualHandled) {
-                        (0,_inbound_inbound_decision__WEBPACK_IMPORTED_MODULE_28__.markInbound)(event, "replied", "contextual-fallback", "unpaid");
-                        _state_user_state__WEBPACK_IMPORTED_MODULE_26__.stateManager.resetUnmatchedMessageCount(chatId);
+                        (0,_inbound_inbound_decision__WEBPACK_IMPORTED_MODULE_29__.markInbound)(event, "replied", "contextual-fallback", "unpaid");
+                        _state_user_state__WEBPACK_IMPORTED_MODULE_27__.stateManager.resetUnmatchedMessageCount(chatId);
                         return;
                     }
                     // Only send periodic prompt if not already sent earlier
@@ -81147,7 +81159,7 @@ async function respondToMsgs(event, allMsg) {
                         const handled = await (0,_payments_ask_to_pay_by_event__WEBPACK_IMPORTED_MODULE_17__.asktoPayByEvent)(event.client, userDetails, false);
                         if (handled) {
                             logger.debug(`Unpaid user no further response - prompt sent: ${broadcastName} (${chatId}), windowCount: ${userDetails.windowCount}`);
-                            (0,_inbound_inbound_decision__WEBPACK_IMPORTED_MODULE_28__.markInbound)(event, "replied", "pay-prompt", "unpaid");
+                            (0,_inbound_inbound_decision__WEBPACK_IMPORTED_MODULE_29__.markInbound)(event, "replied", "pay-prompt", "unpaid");
                             return; // If we sent a prompt, don't do random fallback
                         }
                     }
@@ -81164,15 +81176,15 @@ async function respondToMsgs(event, allMsg) {
                             }
                         }
                         if (defaultReply || text === '' || msgsLength < 5) {
-                            (0,_inbound_inbound_decision__WEBPACK_IMPORTED_MODULE_28__.markInbound)(event, "replied", "random-default", "unpaid");
+                            (0,_inbound_inbound_decision__WEBPACK_IMPORTED_MODULE_29__.markInbound)(event, "replied", "random-default", "unpaid");
                             const Msg = (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_3__.pickOneMsg)(_messages_random_messages__WEBPACK_IMPORTED_MODULE_4__.randomMsg);
                             // Special promotional handling for random messages
                             const promoRoll = Math.random();
-                            if (promoRoll < 0.1) { // 10% chance for QR promotion
-                                await (0,_payments_ask_to_pay_by_event__WEBPACK_IMPORTED_MODULE_17__.asktoPayByEvent)(event.client, userDetails, true);
+                            if (promoRoll < 0.1) { // 10% chance for QR promotion (the bot's own ask: pay-ask-guard)
+                                await (0,_payments_ask_to_pay_by_event__WEBPACK_IMPORTED_MODULE_17__.asktoPayByEvent)(event.client, userDetails, true, '', true, { unprompted: true });
                             }
                             else if (promoRoll < 0.2) { // 10% chance for pic promotion
-                                const sent = await (0,_greetings_promo_pic__WEBPACK_IMPORTED_MODULE_18__.sendPromoPic)(event.message.id, chatId, `Want more...?\n\nCall  Just **50₹**\nPics Just **25₹!!**\n**Full NUDE, With FACE!!\n\n${process.env.demolink}/${process.env.clientId}**`, `./pic.jpg`, undefined, 'reply');
+                                const sent = await (0,_greetings_promo_pic__WEBPACK_IMPORTED_MODULE_19__.sendPromoPic)(event.message.id, chatId, `Want more...?\n\nCall  Just **50₹**\nPics Just **25₹!!**\n**Full NUDE, With FACE!!\n\n${process.env.demolink}/${process.env.clientId}**`, `./pic.jpg`, undefined, 'reply');
                                 if (!sent) {
                                     // If promo wasn't sent (already sent max times), send regular message
                                     await (0,_respond__WEBPACK_IMPORTED_MODULE_1__.respond)(event, Msg);
@@ -81184,11 +81196,11 @@ async function respondToMsgs(event, allMsg) {
                         }
                         else {
                             // One of our last 3 messages is ours: no pattern matched, so stay quiet until the user writes more.
-                            (0,_inbound_inbound_decision__WEBPACK_IMPORTED_MODULE_28__.markInbound)(event, "ignored", "no-pattern; our message is among the last 3", "unpaid");
+                            (0,_inbound_inbound_decision__WEBPACK_IMPORTED_MODULE_29__.markInbound)(event, "ignored", "no-pattern; our message is among the last 3", "unpaid");
                         }
                     }
                     catch (error) {
-                        (0,_inbound_inbound_decision__WEBPACK_IMPORTED_MODULE_28__.markInbound)(event, "error", "fallback reply failed", "unpaid");
+                        (0,_inbound_inbound_decision__WEBPACK_IMPORTED_MODULE_29__.markInbound)(event, "error", "fallback reply failed", "unpaid");
                         (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_16__.parseError)(error, "Failed to fetch old Msgs1");
                     }
                     finally {
@@ -81199,7 +81211,7 @@ async function respondToMsgs(event, allMsg) {
                         }
                     }
                 }
-                const userState = _state_user_state__WEBPACK_IMPORTED_MODULE_26__.stateManager.getUserState(chatId);
+                const userState = _state_user_state__WEBPACK_IMPORTED_MODULE_27__.stateManager.getUserState(chatId);
                 // Random reaction with cleanup
                 if (Math.random() < 0.1) {
                     const reactionTimeout = setTimeout(() => {
@@ -81221,7 +81233,7 @@ async function respondToMsgs(event, allMsg) {
                 }
             }
             catch (error) {
-                (0,_inbound_inbound_decision__WEBPACK_IMPORTED_MODULE_28__.markInbound)(event, "error", `exception: ${error?.message ?? String(error)}`.slice(0, 160));
+                (0,_inbound_inbound_decision__WEBPACK_IMPORTED_MODULE_29__.markInbound)(event, "error", `exception: ${error?.message ?? String(error)}`.slice(0, 160));
                 (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_16__.parseError)(error);
                 // A permanent error while responding (frozen/revoked account) must trigger the swap;
                 // otherwise every inbound message is silently absorbed here. Self-filters + dedupes.
@@ -81240,14 +81252,14 @@ async function respondToMsgs(event, allMsg) {
     }
     else {
         logger.debug(`[${broadcastName}] limited: ${broadcastName} (${chatId}), canReply: ${userDetails.canReply}, limitTime: ${userDetails.limitTime}, windowCount: ${userDetails.windowCount}`);
-        if (userDetails.canReply && userDetails.windowCount >= _tg_parked_constants__WEBPACK_IMPORTED_MODULE_29__.MAIN_WINDOW_COUNT_MAX) {
-            logger.log(`window-count kind=max-messages chat=****${String(chatId).slice(-4)} windowCount=${userDetails.windowCount} max=${_tg_parked_constants__WEBPACK_IMPORTED_MODULE_29__.MAIN_WINDOW_COUNT_MAX}`);
+        if (userDetails.canReply && userDetails.windowCount >= _tg_parked_constants__WEBPACK_IMPORTED_MODULE_30__.MAIN_WINDOW_COUNT_MAX) {
+            logger.log(`window-count kind=max-messages chat=****${String(chatId).slice(-4)} windowCount=${userDetails.windowCount} max=${_tg_parked_constants__WEBPACK_IMPORTED_MODULE_30__.MAIN_WINDOW_COUNT_MAX}`);
         }
-        (0,_inbound_inbound_decision__WEBPACK_IMPORTED_MODULE_28__.markInbound)(event, "ignored", !userDetails.canReply ? "canReply=0" : userDetails.windowCount >= _tg_parked_constants__WEBPACK_IMPORTED_MODULE_29__.MAIN_WINDOW_COUNT_MAX ? `max-messages (windowCount=${userDetails.windowCount})` : "limited");
+        (0,_inbound_inbound_decision__WEBPACK_IMPORTED_MODULE_29__.markInbound)(event, "ignored", !userDetails.canReply ? "canReply=0" : userDetails.windowCount >= _tg_parked_constants__WEBPACK_IMPORTED_MODULE_30__.MAIN_WINDOW_COUNT_MAX ? `max-messages (windowCount=${userDetails.windowCount})` : "limited");
     }
 }
 // Re-export sendTpMsg from helpers
-const sendTpMsg = _tp_messages__WEBPACK_IMPORTED_MODULE_25__.sendTpMsg;
+const sendTpMsg = _tp_messages__WEBPACK_IMPORTED_MODULE_26__.sendTpMsg;
 // Re-export functions from replier module
 
 // Export state management functions for use in patterns (now using UserState)
@@ -81270,14 +81282,16 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _data_user_data_crud__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../data/user-data-crud */ "./src/data/user-data-crud.ts");
 /* harmony import */ var _sender__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./sender */ "./src/conversation/sender.ts");
 /* harmony import */ var _payments_ask_to_pay_by_event__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../payments/ask-to-pay-by-event */ "./src/payments/ask-to-pay-by-event.ts");
-/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
-/* harmony import */ var _messages_conversational_replies__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ./messages/conversational-replies */ "./src/conversation/messages/conversational-replies.ts");
-/* harmony import */ var _messages_pick_one__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ./messages/pick-one */ "./src/conversation/messages/pick-one.ts");
-/* harmony import */ var _respond__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ./respond */ "./src/conversation/respond.ts");
-/* harmony import */ var _patterns__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ./patterns */ "./src/conversation/patterns/index.ts");
-/* harmony import */ var _state_user_state__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ./state/user-state */ "./src/conversation/state/user-state.ts");
-/* harmony import */ var _engagement_fallback__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ./engagement-fallback */ "./src/conversation/engagement-fallback.ts");
-/* harmony import */ var _payments_ladder__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ../payments/ladder */ "./src/payments/ladder.ts");
+/* harmony import */ var _payments_pay_ask_guard__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../payments/pay-ask-guard */ "./src/payments/pay-ask-guard.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _messages_conversational_replies__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ./messages/conversational-replies */ "./src/conversation/messages/conversational-replies.ts");
+/* harmony import */ var _messages_pick_one__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ./messages/pick-one */ "./src/conversation/messages/pick-one.ts");
+/* harmony import */ var _respond__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ./respond */ "./src/conversation/respond.ts");
+/* harmony import */ var _patterns__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ./patterns */ "./src/conversation/patterns/index.ts");
+/* harmony import */ var _state_user_state__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ./state/user-state */ "./src/conversation/state/user-state.ts");
+/* harmony import */ var _engagement_fallback__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ./engagement-fallback */ "./src/conversation/engagement-fallback.ts");
+/* harmony import */ var _payments_ladder__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ../payments/ladder */ "./src/payments/ladder.ts");
+
 
 
 
@@ -81290,7 +81304,7 @@ __webpack_require__.r(__webpack_exports__);
 
 
 
-const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_3__.Logger("tg-aut:respond-to-paid-messages");
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_4__.Logger("tg-aut:respond-to-paid-messages");
 async function respondToPaidMsgs(event, allMsg) {
     const db = _data_user_data_crud__WEBPACK_IMPORTED_MODULE_0__.UserDataDtoCrud.getInstance();
     const text = allMsg.toLowerCase();
@@ -81316,29 +81330,29 @@ async function respondToPaidMsgs(event, allMsg) {
         isPaidUser: true, // This is paid user flow
     };
     // Execute pattern matching for paid users
-    const matched = await _patterns__WEBPACK_IMPORTED_MODULE_7__.patternRegistry.execute(event, text, allMsg, userDetails, context);
+    const matched = await _patterns__WEBPACK_IMPORTED_MODULE_8__.patternRegistry.execute(event, text, allMsg, userDetails, context);
     // Track unmatched messages for re-engagement
     if (matched) {
         // Reset counter when a pattern matches
-        _state_user_state__WEBPACK_IMPORTED_MODULE_8__.stateManager.resetUnmatchedMessageCount(chatId);
+        _state_user_state__WEBPACK_IMPORTED_MODULE_9__.stateManager.resetUnmatchedMessageCount(chatId);
         logger.debug(`[${broadcastName}] reply handled: ${broadcastName} (${chatId}), payAmount: ${userDetails.payAmount}, windowCount: ${userDetails.windowCount}`);
     }
     else {
         // Increment counter when no pattern matches
-        _state_user_state__WEBPACK_IMPORTED_MODULE_8__.stateManager.incrementUnmatchedMessageCount(chatId);
+        _state_user_state__WEBPACK_IMPORTED_MODULE_9__.stateManager.incrementUnmatchedMessageCount(chatId);
         logger.debug(`[${broadcastName}] no response - no pattern match: ${broadcastName} (${chatId}), payAmount: ${userDetails.payAmount}, windowCount: ${userDetails.windowCount}`);
         // Handle unmatched messages: Send re-engagement message after 3 consecutive unmatched messages
-        const unmatchedCount = _state_user_state__WEBPACK_IMPORTED_MODULE_8__.stateManager.getUnmatchedMessageCount(chatId);
-        const contextualHandled = await (0,_engagement_fallback__WEBPACK_IMPORTED_MODULE_9__.handleContextualEngagementFallback)(event, text, userDetails, context, unmatchedCount);
+        const unmatchedCount = _state_user_state__WEBPACK_IMPORTED_MODULE_9__.stateManager.getUnmatchedMessageCount(chatId);
+        const contextualHandled = await (0,_engagement_fallback__WEBPACK_IMPORTED_MODULE_10__.handleContextualEngagementFallback)(event, text, userDetails, context, unmatchedCount);
         if (contextualHandled) {
-            _state_user_state__WEBPACK_IMPORTED_MODULE_8__.stateManager.resetUnmatchedMessageCount(chatId);
+            _state_user_state__WEBPACK_IMPORTED_MODULE_9__.stateManager.resetUnmatchedMessageCount(chatId);
             return;
         }
         if (unmatchedCount >= 3) {
             // Reset counter after sending
-            _state_user_state__WEBPACK_IMPORTED_MODULE_8__.stateManager.resetUnmatchedMessageCount(chatId);
+            _state_user_state__WEBPACK_IMPORTED_MODULE_9__.stateManager.resetUnmatchedMessageCount(chatId);
             // Send offer message for paid users (more engaging than init message)
-            await (0,_respond__WEBPACK_IMPORTED_MODULE_6__.respond)(event, (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_5__.pickOneMsg)(_messages_conversational_replies__WEBPACK_IMPORTED_MODULE_4__.offerMsgs), undefined, 'pitch');
+            await (0,_respond__WEBPACK_IMPORTED_MODULE_7__.respond)(event, (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_6__.pickOneMsg)(_messages_conversational_replies__WEBPACK_IMPORTED_MODULE_5__.offerMsgs), undefined, 'pitch');
             logger.debug(`[Re-engagement] Sent re-engagement message to paid user ${broadcastName} (${chatId}) after ${unmatchedCount} unmatched messages`);
         }
     }
@@ -81364,13 +81378,18 @@ async function respondToPaidMsgs(event, allMsg) {
         }
     }
     // Additional prompt for users who haven't called in a while
-    if (Number(totalMsgs) % 10 == 9 && userDetails.callTime < Date.now() - _payments_ladder__WEBPACK_IMPORTED_MODULE_10__.FULL_SHOW_NAG_GAP_MS && !(0,_payments_ladder__WEBPACK_IMPORTED_MODULE_10__.paidForFullShow)(userDetails.payAmount)) {
+    // The windowCount nag is the bot's own pay ask (pay-ask-guard), though respond() tags it with the user's message id.
+    if (Number(totalMsgs) % 10 == 9 && userDetails.callTime < Date.now() - _payments_ladder__WEBPACK_IMPORTED_MODULE_11__.FULL_SHOW_NAG_GAP_MS && !(0,_payments_ladder__WEBPACK_IMPORTED_MODULE_11__.paidForFullShow)(userDetails.payAmount) &&
+        (0,_payments_pay_ask_guard__WEBPACK_IMPORTED_MODULE_3__.unpromptedPayAskAllowed)(chatId, 'paid-nag')) {
         logger.debug(`[${broadcastName}] called check triggered: ${broadcastName} (${chatId}), payAmount: ${userDetails.payAmount}, callTime: ${userDetails.callTime}, windowCount: ${totalMsgs}`);
-        await (0,_respond__WEBPACK_IMPORTED_MODULE_6__.respond)(event, (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_5__.pickOneMsg)([
+        const nag = (0,_messages_pick_one__WEBPACK_IMPORTED_MODULE_6__.pickOneMsg)([
             "Pay and Msg me Dear!!\n\n**No MONEY? then No SERVICE!!\n\nDont WASTE your TIME okay!!,\nI will not do Anything before sending Money!!**",
             "Pay karo and msg me na baby! 🙈\n\n**No Money = No Service!**\nDon't waste time reyy... pay first! 💸",
             "Just pay and message me dear! 😘\n\n**Without money, no service baby!**\nLet's not waste time na! 💋",
-        ]), undefined, 'pitch');
+        ]);
+        // Counted when the replier actually sends it (the voice check may drop a 'pitch').
+        (0,_payments_pay_ask_guard__WEBPACK_IMPORTED_MODULE_3__.expectUnpromptedPayAsk)(chatId, nag);
+        await (0,_respond__WEBPACK_IMPORTED_MODULE_7__.respond)(event, nag, undefined, 'pitch');
     }
 }
 
@@ -81559,7 +81578,7 @@ __webpack_require__.r(__webpack_exports__);
 // Not here on purpose: live call machinery (plans, peers, promises), in-flight payment sequencing, caches. Those are
 // runtime objects of this process, not chat history.
 const MOMENTS = new Set([
-    'user', 'returned', 'replied', 'pitch', 'pitchSent', 'demo', 'fullShow', 'priceAsked', 'greeting', 'autoCall', 'paymentPhoto', 'paymentJudged', 'paymentVerdict', 'paymentCredited', 'fraudWarned',
+    'user', 'returned', 'replied', 'pitch', 'pitchSent', 'demo', 'fullShow', 'priceAsked', 'greeting', 'autoCall', 'paymentPhoto', 'paymentJudged', 'paymentVerdict', 'paymentCredited', 'payClaim', 'fraudWarned',
     'fraudReminder', 'demoPricePrompt', 'callRequestBlockedUntil', 'callPausedUntil', 'usedUpAnswered', 'queued',
 ]);
 const MAX_CHATS = 5000;
@@ -81968,7 +81987,7 @@ __webpack_require__.r(__webpack_exports__);
 
 const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_2__.Logger("tg-aut:user-state");
 /** Chat moments persisted immediately (write-through) instead of at the next periodic sync. */
-const CRITICAL_MOMENTS = new Set(['paymentCredited', 'fraudWarned', 'pitchSent']);
+const CRITICAL_MOMENTS = new Set(['paymentCredited', 'fraudWarned', 'pitchSent', 'payClaim']);
 class State {
     constructor() {
         this.SYNC_INTERVAL_MS = 60 * 1000; // 1 minute (faster sync for reliability)
@@ -100284,7 +100303,9 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _pattern_helpers__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! ./pattern-helpers */ "./src/pattern-handlers/common/pattern-helpers.ts");
 /* harmony import */ var _conversation_state_upsell_quiet__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! ../../conversation/state/upsell-quiet */ "./src/conversation/state/upsell-quiet.ts");
 /* harmony import */ var _outbound_chat_notice__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! ../../outbound/chat-notice */ "./src/outbound/chat-notice.ts");
+/* harmony import */ var _payments_pay_ask_guard__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! ../../payments/pay-ask-guard */ "./src/payments/pay-ask-guard.ts");
 /** Common patterns, part of commonPatterns (order matters within equal priorities): Payment proof pending, repeat service, payment-confirmation claims, bot verification, empty text. */
+
 
 
 
@@ -100562,6 +100583,9 @@ const paymentStatusPatterns = [
                     !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, NEG) && !hasQuestion && !hasPaymentNegation && !hasFuturePayment && !sendsProof && !unresolvedServiceWait) ||
                 ((0,_pattern_helpers__WEBPACK_IMPORTED_MODULE_13__.containsPadded)(text, ['paid']) && !(0,_tg_core_utils_contains__WEBPACK_IMPORTED_MODULE_2__.contains)(text, URGENCY) && !hasFuturePayment && !hasPaymentNegation && !hasQuestion && !sendsProof && !unresolvedServiceWait);
             if (isPaymentConfirmed) {
+                // Await-proof hold (payments/pay-ask-guard): this claim's own reply is the one ask; no unprompted pay
+                // ask until a screenshot or a credit comes, for at most AWAIT_PROOF_MS.
+                (0,_payments_pay_ask_guard__WEBPACK_IMPORTED_MODULE_16__.notePayClaim)(context.chatId);
                 const db = _data_user_data_crud__WEBPACK_IMPORTED_MODULE_6__.UserDataDtoCrud.getInstance();
                 // One atomic increment (userData audit A3): a missing/NaN count starts at 1 and two claims never
                 // write the same value. No row: nothing is created, and NaN keeps the reply the old read + 1 gave
@@ -104534,6 +104558,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var telegram_Helpers__WEBPACK_IMPORTED_MODULE_21__ = __webpack_require__(/*! telegram/Helpers */ "telegram/Helpers");
 /* harmony import */ var telegram_Helpers__WEBPACK_IMPORTED_MODULE_21___default = /*#__PURE__*/__webpack_require__.n(telegram_Helpers__WEBPACK_IMPORTED_MODULE_21__);
 /* harmony import */ var _jobs_delayed__WEBPACK_IMPORTED_MODULE_22__ = __webpack_require__(/*! ../jobs/delayed */ "./src/jobs/delayed.ts");
+/* harmony import */ var _pay_ask_guard__WEBPACK_IMPORTED_MODULE_23__ = __webpack_require__(/*! ./pay-ask-guard */ "./src/payments/pay-ask-guard.ts");
+
 
 
 
@@ -104580,6 +104606,9 @@ async function runAskToPayQr(client, chatId, args) {
             logger.log(`[askToPay] ${chatId}: payment credited after the ask was decided; delayed QR not sent`);
             return;
         }
+        // A claim or other asks since the decision (pay-ask-guard): the guard logs the skip.
+        if (args.unprompted && !(0,_pay_ask_guard__WEBPACK_IMPORTED_MODULE_23__.unpromptedPayAskAllowed)(chatId, 'askToPayQr'))
+            return;
         const dialogManager = _telegram_client_access__WEBPACK_IMPORTED_MODULE_11__.TelegramManager.getInstance().dialogManager;
         const peer = await (0,_tg_core_telegram_utils_resolveEntity__WEBPACK_IMPORTED_MODULE_9__.resolveUserPeer)(client, dialogManager, chatId, { accessHash: args.accessHash, username: args.username });
         if (!peer)
@@ -104594,6 +104623,8 @@ async function runAskToPayQr(client, chatId, args) {
             }, { voice: force ? 'system' : 'pitch', queuedAt: decidedAt });
             // The helper resolves undefined when the voice check or the queue dropped/held the ask, or the send failed
             // (prod 2026-10-29 sneha1/nidhi1: "QR sent" logged for 9-18% of asks that were dropped by the pitch window).
+            if (sent && args.unprompted)
+                (0,_pay_ask_guard__WEBPACK_IMPORTED_MODULE_23__.noteUnpromptedPayAsk)(chatId);
             if (sent)
                 logger.log(`[askToPay] Payment request with QR sent to ${args.username || chatId}, payAmount: ${args.payAmount}`);
             else
@@ -104602,7 +104633,9 @@ async function runAskToPayQr(client, chatId, args) {
         catch (fileError) {
             logger.error(`[askToPay] Failed to send QR, sending text only:`, fileError);
             try {
-                await sendMessageWithTimeout(client, peer, { message: paymentMessage }, { voice: force ? 'system' : 'pitch', queuedAt: decidedAt });
+                const sent = await sendMessageWithTimeout(client, peer, { message: paymentMessage }, { voice: force ? 'system' : 'pitch', queuedAt: decidedAt });
+                if (sent && args.unprompted)
+                    (0,_pay_ask_guard__WEBPACK_IMPORTED_MODULE_23__.noteUnpromptedPayAsk)(chatId);
             }
             catch (fallbackError) {
                 logger.error(`[askToPay] Failed to send fallback text payment request:`, fallbackError);
@@ -104639,7 +104672,7 @@ const shouldSkipPaymentPromptForUserIntent = (dialog) => {
     return farewell || noInterest;
 };
 // Simple payment request using stateManager
-async function asktoPayByEvent(client, userDetails, force = false, prefix = '', sendQR = true) {
+async function asktoPayByEvent(client, userDetails, force = false, prefix = '', sendQR = true, options = {}) {
     try {
         const chatId = typeof userDetails.chatId === 'object' ?
             String(userDetails.chatId) :
@@ -104696,6 +104729,13 @@ async function asktoPayByEvent(client, userDetails, force = false, prefix = '', 
             logger.debug(`[askToPay] ${chatId}: not asking: a demo call was given ${Math.round((0,_conversation_state_chat_moments__WEBPACK_IMPORTED_MODULE_3__.msSince)(chatId, 'demo') / 1000)}s ago`);
             return false;
         }
+        // Unprompted pay asks (pay-ask-guard): only when this call sends the menu / QR (not the soft nudge or the init
+        // message below). The guard logs the skip.
+        const unprompted = options.unprompted ?? !force;
+        const sendsPayAsk = !!userDetails.paidReply && (force || !(0,_service_eligibility__WEBPACK_IMPORTED_MODULE_6__.canProceedWithService)(userDetails));
+        if (unprompted && sendsPayAsk && !(0,_pay_ask_guard__WEBPACK_IMPORTED_MODULE_23__.unpromptedPayAskAllowed)(chatId, force ? 'ladder-forced' : 'ladder')) {
+            return false;
+        }
         // Get entity on-demand only when we are actually going to send.
         // cache/dialogs -> stored accessHash -> cached username; throws like the old resolver on a total miss.
         const resolvedPeer = await (0,_tg_core_telegram_utils_resolveEntity__WEBPACK_IMPORTED_MODULE_9__.resolveUserPeer)(client, dialogManager, chatId, { accessHash: userDetails.accessHash, username: userDetails.username });
@@ -104734,11 +104774,14 @@ async function asktoPayByEvent(client, userDetails, force = false, prefix = '', 
                     decidedAt,
                     username: userDetails.username || undefined,
                     accessHash: userDetails.accessHash ? String(userDetails.accessHash) : undefined,
+                    ...(unprompted ? { unprompted: true } : {}),
                 };
                 (0,_jobs_delayed__WEBPACK_IMPORTED_MODULE_22__.scheduleDelayed)(chatId, 'askToPayQr', qrArgs, ASK_TO_PAY_QR_DELAY_MS);
             }
             else {
-                await sendMessageWithTimeout(client, peer, { message: (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_4__.pickOneMsg)(upsellMessage) }, { voice: force ? 'system' : 'pitch' });
+                const sent = await sendMessageWithTimeout(client, peer, { message: (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_4__.pickOneMsg)(upsellMessage) }, { voice: force ? 'system' : 'pitch' });
+                if (sent && unprompted)
+                    (0,_pay_ask_guard__WEBPACK_IMPORTED_MODULE_23__.noteUnpromptedPayAsk)(chatId);
             }
         }
         else {
@@ -105528,6 +105571,184 @@ function hasOpenPaymentAsk(db, chatId, kind) {
     catch {
         return Promise.resolve(false);
     }
+}
+
+
+/***/ },
+
+/***/ "./src/payments/pay-ask-guard.ts"
+/*!***************************************!*\
+  !*** ./src/payments/pay-ask-guard.ts ***!
+  \***************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   AWAIT_PROOF_MS: () => (/* binding */ AWAIT_PROOF_MS),
+/* harmony export */   PAY_ASK_CAP: () => (/* binding */ PAY_ASK_CAP),
+/* harmony export */   PAY_ASK_CAP_SCOPE_MS: () => (/* binding */ PAY_ASK_CAP_SCOPE_MS),
+/* harmony export */   PAY_ASK_WINDOW_MS: () => (/* binding */ PAY_ASK_WINDOW_MS),
+/* harmony export */   awaitingProof: () => (/* binding */ awaitingProof),
+/* harmony export */   capScopeStart: () => (/* binding */ capScopeStart),
+/* harmony export */   confirmUnpromptedPayAskSent: () => (/* binding */ confirmUnpromptedPayAskSent),
+/* harmony export */   expectUnpromptedPayAsk: () => (/* binding */ expectUnpromptedPayAsk),
+/* harmony export */   notePayClaim: () => (/* binding */ notePayClaim),
+/* harmony export */   noteUnpromptedPayAsk: () => (/* binding */ noteUnpromptedPayAsk),
+/* harmony export */   payAskVerdict: () => (/* binding */ payAskVerdict),
+/* harmony export */   resetPayAskGuard: () => (/* binding */ resetPayAskGuard),
+/* harmony export */   unpromptedPayAskAllowed: () => (/* binding */ unpromptedPayAskAllowed)
+/* harmony export */ });
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _conversation_state_chat_moments__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../conversation/state/chat-moments */ "./src/conversation/state/chat-moments.ts");
+// Unprompted pay-ask guard (owner 2026-11-22). Live 3.6 days: users said "paid" and the bot kept sending its own pay
+// asks (474 of 742 claim chats got one within 30 min, one chat 12 in 36 min); complaints rose with the count. Two rules,
+// checked by every unprompted pay-ask send path through unpromptedPayAskAllowed():
+//
+//   await_proof: a text "paid" claim with no screenshot and no credit since: no unprompted pay ask for AWAIT_PROOF_MS.
+//                The claim handler's own reply is the one ask. A screenshot or a credit ends the hold.
+//   cap:         in a payment chat (a text claim, a payment-gate answer to a screenshot judged a payment, or a credit
+//                in the last PAY_ASK_CAP_SCOPE_MS), at most PAY_ASK_CAP unprompted asks per PAY_ASK_WINDOW_MS, counted
+//                from that latest signal. A photo alone (a selfie) is no signal. Chats with none are not capped (HEAD
+//                behaviour), and neither are asks after a show delivered since then (they go with repeat payments).
+//
+// "Unprompted" is decided by the CALLER, never by how the send is tagged downstream: respond() items carry the user's
+// message id (sourceMsgId) and look like replies in the replier, so a send-time check cannot tell the nag from a real
+// answer. Only the ladder (asktoPayByEvent not forced, or forced with unprompted), the windowCount nag and the urgency
+// line call this guard; pattern replies to a price / QR / link / how-to-pay question never do.
+//
+// An ask counts when it is actually sent: asktoPayByEvent / its QR on the send helper's result; the respond() nag and
+// urgency line are registered with expectUnpromptedPayAsk and counted by the replier's send success
+// (confirmUnpromptedPayAskSent), so one dropped by the voice check or replaced by a newer reply never uses a slot.
+//
+// State: the claim, verdict, credit and show times are chat moments (persisted with the chat's Redis entry). The
+// sent-ask times are in memory: a restart forgets them, so a chat may get up to PAY_ASK_CAP more asks after one.
+
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_0__.Logger('tg-aut:pay-ask-guard');
+const PAY_ASK_CAP = 2;
+const PAY_ASK_WINDOW_MS = 30 * 60 * 1000;
+const AWAIT_PROOF_MS = 30 * 60 * 1000;
+/** The cap applies only this long after the chat's latest claim, screenshot or credit. */
+const PAY_ASK_CAP_SCOPE_MS = 6 * 60 * 60 * 1000;
+const MAX_CHATS = 5000;
+const sentAsks = new Map();
+/** The user claimed in text that they paid (common/payment-status-patterns user_payment_confirmation_claim). */
+function notePayClaim(chatId, at = Date.now()) {
+    (0,_conversation_state_chat_moments__WEBPACK_IMPORTED_MODULE_1__.noteMoment)(chatId, 'payClaim', at);
+}
+/** A text claim with no screenshot or credit since, less than AWAIT_PROOF_MS old. */
+function awaitingProof(chatId, now = Date.now()) {
+    const claim = (0,_conversation_state_chat_moments__WEBPACK_IMPORTED_MODULE_1__.momentAt)(chatId, 'payClaim');
+    if (claim === undefined || claim > now || now - claim >= AWAIT_PROOF_MS)
+        return false;
+    const photo = (0,_conversation_state_chat_moments__WEBPACK_IMPORTED_MODULE_1__.momentAt)(chatId, 'paymentPhoto');
+    const credited = (0,_conversation_state_chat_moments__WEBPACK_IMPORTED_MODULE_1__.momentAt)(chatId, 'paymentCredited');
+    return !(photo !== undefined && photo >= claim) && !(credited !== undefined && credited >= claim);
+}
+/**
+ * When the cap window starts for this chat: its latest payment signal within scope; undefined = no cap. Signals: a text
+ * claim, the payment gate answering a screenshot ('paymentVerdict': doubt, fake warning, details ask, resend answer)
+ * and a credit. Not 'paymentPhoto': every analysed photo notes it, selfies included.
+ */
+function capScopeStart(chatId, now = Date.now()) {
+    const times = ['payClaim', 'paymentVerdict', 'paymentCredited']
+        .map((m) => (0,_conversation_state_chat_moments__WEBPACK_IMPORTED_MODULE_1__.momentAt)(chatId, m))
+        .filter((t) => t !== undefined && t <= now);
+    if (times.length === 0)
+        return undefined;
+    const latest = Math.max(...times);
+    if (now - latest >= PAY_ASK_CAP_SCOPE_MS)
+        return undefined;
+    // A show delivered since (executehs / executehsl note the 'demo' moment): asks now go with repeat payments.
+    const show = (0,_conversation_state_chat_moments__WEBPACK_IMPORTED_MODULE_1__.momentAt)(chatId, 'demo');
+    if (show !== undefined && show >= latest && show <= now)
+        return undefined;
+    return latest;
+}
+/** Unprompted asks sent since `since` and within the window. */
+function countSince(chatId, since, now) {
+    return (sentAsks.get(chatId) ?? []).filter((t) => t >= since && now - t < PAY_ASK_WINDOW_MS && t <= now).length;
+}
+/** Pure decision (no log). */
+function payAskVerdict(chatId, now = Date.now()) {
+    if (awaitingProof(chatId, now)) {
+        const claim = (0,_conversation_state_chat_moments__WEBPACK_IMPORTED_MODULE_1__.momentAt)(chatId, 'payClaim');
+        return { allowed: false, reason: 'await_proof', count: countSince(chatId, claim, now) };
+    }
+    const scope = capScopeStart(chatId, now);
+    if (scope === undefined)
+        return { allowed: true, reason: '', count: 0 };
+    const count = countSince(chatId, scope, now);
+    return count >= PAY_ASK_CAP ? { allowed: false, reason: 'cap', count } : { allowed: true, reason: '', count };
+}
+function chatTag(chatId) {
+    return `••••${String(chatId).slice(-4)}`;
+}
+/**
+ * THE check for every unprompted pay ask, right before it is sent. false = skip it (one `pay-ask kind=skip` line).
+ * `site` names the caller in the line. Call noteUnpromptedPayAsk once the ask actually went out.
+ */
+function unpromptedPayAskAllowed(chatId, site, now = Date.now()) {
+    if (!chatId)
+        return true;
+    const verdict = payAskVerdict(chatId, now);
+    if (verdict.allowed)
+        return true;
+    logger.log(`pay-ask kind=skip reason=${verdict.reason} client=${process.env.clientId ?? '-'} chat=${chatTag(chatId)} count=${verdict.count} site=${site}`);
+    return false;
+}
+/** An unprompted pay ask went out (or was queued) now. */
+function noteUnpromptedPayAsk(chatId, at = Date.now()) {
+    if (!chatId)
+        return;
+    const kept = (sentAsks.get(chatId) ?? []).filter((t) => at - t < PAY_ASK_CAP_SCOPE_MS);
+    kept.push(at);
+    sentAsks.delete(chatId);
+    sentAsks.set(chatId, kept);
+    if (sentAsks.size > MAX_CHATS)
+        sentAsks.delete(sentAsks.keys().next().value);
+}
+/** A queued respond() ask waits this long at most for its send (the replier holds an ask through a payment check). */
+const PENDING_MAX_MS = 15 * 60 * 1000;
+const pendingAsks = new Map();
+/** An unprompted ask was queued in the replier (respond()): counted by confirmUnpromptedPayAskSent once it is sent. */
+function expectUnpromptedPayAsk(chatId, text, at = Date.now()) {
+    const t = (text ?? '').trim();
+    if (!chatId || !t)
+        return;
+    const kept = (pendingAsks.get(chatId) ?? []).filter((p) => at - p.at < PENDING_MAX_MS);
+    kept.push({ text: t, at });
+    pendingAsks.delete(chatId);
+    pendingAsks.set(chatId, kept);
+    if (pendingAsks.size > MAX_CHATS)
+        pendingAsks.delete(pendingAsks.keys().next().value);
+}
+/**
+ * The replier sent `sentText` (before masking; a merged bubble: its pieces joined) to the chat: each pending ask it
+ * carries counts now. A dropped or replaced ask never comes here and expires unseen.
+ */
+function confirmUnpromptedPayAskSent(chatId, sentText, at = Date.now()) {
+    const pending = pendingAsks.get(chatId);
+    if (!pending || !sentText)
+        return;
+    const left = pending.filter((p) => {
+        if (at - p.at >= PENDING_MAX_MS)
+            return false;
+        if (!sentText.includes(p.text))
+            return true;
+        noteUnpromptedPayAsk(chatId, at);
+        return false;
+    });
+    if (left.length)
+        pendingAsks.set(chatId, left);
+    else
+        pendingAsks.delete(chatId);
+}
+/** Tests / shutdown. */
+function resetPayAskGuard() {
+    sentAsks.clear();
+    pendingAsks.clear();
 }
 
 
@@ -116290,10 +116511,12 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _outbound_reply_failures__WEBPACK_IMPORTED_MODULE_23__ = __webpack_require__(/*! ../outbound/reply-failures */ "./src/outbound/reply-failures.ts");
 /* harmony import */ var _conversation_state_chat_moments__WEBPACK_IMPORTED_MODULE_24__ = __webpack_require__(/*! ../conversation/state/chat-moments */ "./src/conversation/state/chat-moments.ts");
 /* harmony import */ var _reply_pieces__WEBPACK_IMPORTED_MODULE_25__ = __webpack_require__(/*! ./reply-pieces */ "./src/replier/reply-pieces.ts");
+/* harmony import */ var _payments_pay_ask_guard__WEBPACK_IMPORTED_MODULE_26__ = __webpack_require__(/*! ../payments/pay-ask-guard */ "./src/payments/pay-ask-guard.ts");
 /**
  * Reply Processor
  * Handles processing and sending of individual replies
  */
+
 
 
 
@@ -116781,6 +117004,7 @@ async function sendReply(client, replyObj, userDetail, entity, onSuccess, onRequ
         // ToS safety: mask sensitive keywords in the outgoing text right before it
         // leaves for Telegram. Catalogs stay clean plaintext; this single seam handles
         // every outgoing message (text + file caption read replyObj.msg in sendFile).
+        const unmaskedMsg = replyObj.msg;
         if (replyObj.msg) {
             replyObj.msg = (0,_telegram_mask_sensitive_words__WEBPACK_IMPORTED_MODULE_10__.maskSensitiveWords)(replyObj.msg);
         }
@@ -116824,6 +117048,8 @@ async function sendReply(client, replyObj, userDetail, entity, onSuccess, onRequ
             }
             // Call success callback to update queues
             onSuccess();
+            // An unprompted respond() pay ask (the nag, the urgency line) counts for the cap only now (payments/pay-ask-guard).
+            (0,_payments_pay_ask_guard__WEBPACK_IMPORTED_MODULE_26__.confirmUnpromptedPayAskSent)(replyObj.chatId, unmaskedMsg);
             // [REPLY SENT] — one positive line per delivered reply. [PITCH SENT] highlights the
             // revenue-critical close (payment prompt / paid-content pic) so the funnel is grep-able:
             //   grep '\[PITCH SENT\]' → who got pitched | grep '\[REPLY SEND FAILED\]' → silent losses
