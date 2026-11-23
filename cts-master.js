@@ -13,26 +13,153 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.MailReader = void 0;
-exports.extractTelegramCode = extractTelegramCode;
-exports.isMailFreshEnough = isMailFreshEnough;
+exports.MailReader = exports.EmailCodeError = void 0;
+exports.parseTelegram2faEmail = parseTelegram2faEmail;
+exports.pickTextPart = pickTextPart;
+exports.htmlToText = htmlToText;
+exports.emailCodeLog = emailCodeLog;
 const imap_1 = __importDefault(__webpack_require__(/*! imap */ "imap"));
 const parseError_1 = __webpack_require__(/*! ../utils/parseError */ "./src/utils/parseError.ts");
+const logger_1 = __webpack_require__(/*! ../utils/logger */ "./src/utils/logger.ts");
+const mailbox_lock_1 = __webpack_require__(/*! ./mailbox-lock */ "./src/IMap/mailbox-lock.ts");
 const DEFAULT_IMAP_CONNECT_TIMEOUT_MS = 30_000;
-const MAIL_CLOCK_SKEW_MS = 60_000;
-const TELEGRAM_CODE_PATTERN = /\b\d{4,8}\b/g;
-function extractTelegramCode(body, expectedLength) {
-    const matches = body.match(TELEGRAM_CODE_PATTERN) ?? [];
-    if (expectedLength) {
-        return matches.find((match) => match.length === expectedLength) || null;
+const TELEGRAM_SENDER = 'noreply@telegram.org';
+const SENT_BEFORE_REQUEST_SKEW_MS = 45_000;
+const MAX_CANDIDATES_PER_POLL = 20;
+const MAX_PART_BYTES = 64 * 1024;
+const MAILBOX_LOCK_TTL_MS = 5 * 60_000;
+const MAILBOX_LOCK_WAIT_MS = 3 * 60_000;
+const MAILBOX_LOCK_RETRY_MS = 2_000;
+const logger = new logger_1.Logger('MailReader');
+const CODE_LINE_PATTERN = /your code is:?\s*(\d+)\b/gi;
+const SUBJECT_CODE_PATTERN = /^\s*your code\s*-\s*(\d+)\s*$/i;
+const TWO_STEP_PATTERN = /\b(two|2)[- ]?step verification\b/i;
+function parseTelegram2faEmail(subject, body, expectedLength) {
+    const text = body.replace(/\r\n/g, '\n');
+    if (/recovery code/i.test(subject) || /disable your password/i.test(text))
+        return { reason: 'recovery_email' };
+    if (!TWO_STEP_PATTERN.test(text))
+        return { reason: 'not_2fa_email' };
+    const bodyCodes = Array.from(text.matchAll(CODE_LINE_PATTERN), (m) => m[1]);
+    if (bodyCodes.length === 0)
+        return { reason: 'no_code' };
+    const subjectCode = subject.match(SUBJECT_CODE_PATTERN)?.[1];
+    const distinct = new Set(subjectCode ? [...bodyCodes, subjectCode] : bodyCodes);
+    if (distinct.size > 1)
+        return { reason: 'ambiguous' };
+    const code = bodyCodes[0];
+    if (code.length < 4 || code.length > 8)
+        return { reason: 'no_code' };
+    if (expectedLength && code.length !== expectedLength)
+        return { reason: 'length_mismatch' };
+    return { code };
+}
+function headerValue(headerText, name) {
+    const unfolded = headerText.replace(/\r?\n[ \t]+/g, ' ');
+    const match = unfolded.match(new RegExp(`^${name}:\\s*(.*)$`, 'im'));
+    return match ? match[1].trim() : '';
+}
+function parseMailDate(value) {
+    if (!value)
+        return null;
+    const parsed = new Date(value.replace(/\s*\([^)]*\)\s*$/, ''));
+    return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+function leafParts(struct, out = []) {
+    if (Array.isArray(struct)) {
+        for (const item of struct)
+            leafParts(item, out);
     }
-    return matches[0] || null;
+    else if (struct && typeof struct === 'object' && struct.partID) {
+        out.push(struct);
+    }
+    return out;
 }
-function isMailFreshEnough(receivedAt, minReceivedAt) {
-    if (!minReceivedAt || !receivedAt)
-        return true;
-    return receivedAt.getTime() >= minReceivedAt.getTime() - MAIL_CLOCK_SKEW_MS;
+function pickTextPart(struct) {
+    const parts = leafParts(struct).filter((p) => String(p.type).toLowerCase() === 'text');
+    const plain = parts.find((p) => String(p.subtype).toLowerCase() === 'plain');
+    if (plain)
+        return { partID: String(plain.partID), html: false, encoding: plain.encoding };
+    const html = parts.find((p) => String(p.subtype).toLowerCase() === 'html');
+    if (html)
+        return { partID: String(html.partID), html: true, encoding: html.encoding };
+    return null;
 }
+const HTML_DROP_BLOCKS = new Set(['style', 'script', 'head']);
+const HTML_LINE_BREAK_TAGS = /^(br|\/p|\/div|\/tr|\/li|\/h\d)$/;
+function htmlToText(html) {
+    const lower = html.toLowerCase();
+    let out = '';
+    let i = 0;
+    while (i < html.length) {
+        const lt = html.indexOf('<', i);
+        if (lt === -1) {
+            out += html.slice(i);
+            break;
+        }
+        out += html.slice(i, lt);
+        const gt = html.indexOf('>', lt + 1);
+        if (gt === -1)
+            break;
+        const name = (lower.slice(lt + 1, gt).match(/^\/?[a-z0-9]+/) || [''])[0];
+        if (HTML_DROP_BLOCKS.has(name)) {
+            const close = lower.indexOf(`</${name}`, gt + 1);
+            if (close === -1)
+                break;
+            const closeEnd = html.indexOf('>', close);
+            if (closeEnd === -1)
+                break;
+            out += ' ';
+            i = closeEnd + 1;
+            continue;
+        }
+        out += HTML_LINE_BREAK_TAGS.test(name) ? '\n' : ' ';
+        i = gt + 1;
+    }
+    return out
+        .replace(/&nbsp;/gi, ' ')
+        .replace(/&#(\d{1,7});/g, (_, n) => String.fromCharCode(Number(n)))
+        .replace(/&#x([0-9a-f]{1,6});/gi, (_, n) => String.fromCharCode(parseInt(n, 16)))
+        .replace(/&quot;/gi, '"')
+        .replace(/&apos;|&#39;/gi, "'")
+        .replace(/&lt;/gi, '<')
+        .replace(/&gt;/gi, '>')
+        .replace(/&amp;/gi, '&')
+        .replace(/[ \t]+/g, ' ');
+}
+function decodePart(raw, encoding) {
+    const enc = String(encoding || '').toUpperCase();
+    if (enc === 'BASE64')
+        return Buffer.from(raw.replace(/\s+/g, ''), 'base64').toString('utf8');
+    if (enc === 'QUOTED-PRINTABLE') {
+        const bytes = raw.replace(/=\r?\n/g, '').replace(/=([0-9A-F]{2})/gi, (_, hex) => String.fromCharCode(parseInt(hex, 16)));
+        return Buffer.from(bytes, 'latin1').toString('utf8');
+    }
+    return raw;
+}
+function redactDigits(value) {
+    return value.replace(/\d/g, 'N').replace(/\s+/g, '_').slice(0, 60);
+}
+function emailCodeLog(kind, fields) {
+    const rest = Object.entries(fields)
+        .filter(([, v]) => v !== undefined && v !== '')
+        .map(([k, v]) => `${k}=${v}`)
+        .join(' ');
+    const line = `email-code kind=${kind}${rest ? ` ${rest}` : ''}`;
+    const info = kind === 'picked' || kind === 'snapshot' || kind === 'none' || (kind === 'lock' && fields.reason !== 'redis_unavailable_proceed');
+    if (info)
+        logger.log(line);
+    else
+        logger.warn(line);
+}
+class EmailCodeError extends Error {
+    constructor(reason, detail) {
+        super(`${reason}: ${detail}`);
+        this.reason = reason;
+        this.name = 'EmailCodeError';
+    }
+}
+exports.EmailCodeError = EmailCodeError;
 class MailReader {
     constructor(imapFactory = () => new imap_1.default({
         user: process.env.GMAIL_ADD || '',
@@ -43,15 +170,16 @@ class MailReader {
         tlsOptions: {
             rejectUnauthorized: false,
         },
-    })) {
+    }), sharedLock = new mailbox_lock_1.RedisMailboxLock()) {
         this.imapFactory = imapFactory;
+        this.sharedLock = sharedLock;
         this.imap = null;
         this.isReady = false;
         this.connectPromise = null;
         this.mailboxQueue = Promise.resolve();
     }
-    static createForTest(imapFactory) {
-        return new MailReader(imapFactory);
+    static createForTest(imapFactory, sharedLock = new mailbox_lock_1.InMemoryMailboxLock()) {
+        return new MailReader(imapFactory, sharedLock);
     }
     ensureImap() {
         if (this.imap) {
@@ -79,7 +207,7 @@ class MailReader {
         }
         return MailReader.instance;
     }
-    async runExclusive(operation) {
+    async runExclusive(operation, logTag) {
         let releaseLock = null;
         const previous = this.mailboxQueue;
         this.mailboxQueue = new Promise((resolve) => {
@@ -87,10 +215,58 @@ class MailReader {
         });
         await previous;
         try {
-            return await operation();
+            const token = await this.acquireSharedLock(logTag);
+            try {
+                return await operation();
+            }
+            finally {
+                if (token) {
+                    try {
+                        await this.sharedLock.release(token);
+                    }
+                    catch (err) {
+                        emailCodeLog('failed', { reason: 'lock_release_failed', mobile: logTag, error: redactDigits(err instanceof Error ? err.message : String(err)) });
+                    }
+                }
+            }
         }
         finally {
             releaseLock?.();
+        }
+    }
+    async acquireSharedLock(logTag) {
+        const deadline = Date.now() + MAILBOX_LOCK_WAIT_MS;
+        let waited = false;
+        for (;;) {
+            let token;
+            try {
+                token = await this.sharedLock.tryAcquire(MAILBOX_LOCK_TTL_MS);
+            }
+            catch (err) {
+                if (waited) {
+                    emailCodeLog('failed', { reason: 'lock_busy_redis_lost', mobile: logTag });
+                    throw new EmailCodeError('EMAIL_LOCK_BUSY', `lock was held elsewhere, then the lock store failed: ${err instanceof Error ? err.message : String(err)}`);
+                }
+                emailCodeLog('lock', {
+                    reason: 'redis_unavailable_proceed',
+                    mobile: logTag,
+                    error: redactDigits(err instanceof Error ? err.message : String(err)),
+                });
+                return null;
+            }
+            if (token) {
+                if (waited)
+                    emailCodeLog('lock', { reason: 'acquired_after_wait', mobile: logTag });
+                return token;
+            }
+            if (Date.now() >= deadline) {
+                emailCodeLog('failed', { reason: 'lock_busy', mobile: logTag });
+                throw new EmailCodeError('EMAIL_LOCK_BUSY', `another process held the 2FA mailbox for ${MAILBOX_LOCK_WAIT_MS / 1000}s`);
+            }
+            if (!waited)
+                emailCodeLog('lock', { reason: 'waiting', mobile: logTag });
+            waited = true;
+            await new Promise((resolve) => setTimeout(resolve, MAILBOX_LOCK_RETRY_MS));
         }
     }
     async connectToMail(timeoutMs = DEFAULT_IMAP_CONNECT_TIMEOUT_MS) {
@@ -193,122 +369,289 @@ class MailReader {
     async isMailReady() {
         return this.isReady;
     }
-    async getCode(options = {}) {
-        console.log('MailReady : ', this.isReady);
+    async snapshotMailbox(logTag) {
         if (!this.isReady || !this.imap) {
             throw new Error('Mail server is not ready');
         }
         try {
-            await this.openInbox();
-            const searchCriteria = [['FROM', 'noreply@telegram.org']];
-            const fetchOptions = { bodies: ['TEXT'], markSeen: false };
-            console.log('Inbox Opened');
-            const results = await new Promise((resolve, reject) => {
-                this.imap.search(searchCriteria, (err, foundResults) => {
-                    if (err) {
-                        console.error('Search error:', (0, parseError_1.parseError)(err));
-                        reject(err);
-                    }
-                    else {
-                        resolve(foundResults);
-                    }
-                });
-            });
-            if (results.length === 0) {
-                console.log('No new emails found');
-                return null;
+            const box = await this.openInbox();
+            let sinceUid = Number(box?.uidnext) || 0;
+            if (!sinceUid) {
+                const uids = await this.search([['FROM', TELEGRAM_SENDER]]);
+                sinceUid = (uids.length ? Math.max(...uids) : 0) + 1;
             }
-            console.log('Emails found:', results.length);
-            const candidateIds = results.slice(-10).reverse();
-            const candidates = [];
-            const fetch = this.imap.fetch(candidateIds, fetchOptions);
-            await new Promise((resolve, reject) => {
-                fetch.on('message', (msg, seqno) => {
-                    let messageBody = '';
-                    let receivedAt = null;
-                    msg.on('body', (stream) => {
-                        stream.on('data', (chunk) => {
-                            messageBody += chunk.toString('utf8');
-                        });
-                    });
-                    msg.once('attributes', (attrs) => {
-                        if (attrs?.date) {
-                            receivedAt = attrs.date instanceof Date ? attrs.date : new Date(attrs.date);
-                        }
-                    });
-                    msg.once('end', () => {
-                        const code = extractTelegramCode(messageBody, options.expectedLength);
-                        if (code && isMailFreshEnough(receivedAt, options.minReceivedAt)) {
-                            candidates.push({
-                                seqno,
-                                order: candidateIds.indexOf(seqno),
-                                code,
-                                receivedAt,
-                            });
-                        }
-                    });
-                });
-                fetch.once('error', (err) => reject(err));
-                fetch.once('end', () => {
-                    console.log('Fetched mails');
-                    resolve();
-                });
-            });
-            const match = candidates.sort((a, b) => {
-                const da = a.receivedAt ? a.receivedAt.getTime() : -Infinity;
-                const db = b.receivedAt ? b.receivedAt.getTime() : -Infinity;
-                if (db !== da)
-                    return db - da;
-                return a.order - b.order;
-            })[0];
-            if (!match) {
-                console.log('No matching Telegram verification code found');
-                return null;
-            }
-            await this.deleteMessage(match.seqno);
-            console.log('Returning result:', match.code);
-            return match.code;
+            const snapshot = { sinceUid, uidValidity: Number(box?.uidvalidity) || 0 };
+            emailCodeLog('snapshot', { mobile: logTag, uid: sinceUid });
+            return snapshot;
         }
         catch (error) {
-            console.error('Error:', error);
             this.isReady = false;
+            emailCodeLog('failed', { reason: 'snapshot_failed', mobile: logTag });
+            throw new EmailCodeError('EMAIL_SNAPSHOT_FAILED', error instanceof Error ? error.message : String(error));
+        }
+    }
+    async getCode(options) {
+        if (!this.isReady || !this.imap) {
+            throw new Error('Mail server is not ready');
+        }
+        const { snapshot, expectedLength, requestStartedAt, logTag } = options;
+        if (!snapshot || !Number.isFinite(snapshot.sinceUid) || snapshot.sinceUid <= 0) {
+            throw new Error('getCode needs a mailbox snapshot taken before the code was requested');
+        }
+        try {
+            const box = await this.openInbox();
+            const uidValidity = Number(box?.uidvalidity) || 0;
+            if (snapshot.uidValidity && uidValidity && uidValidity !== snapshot.uidValidity) {
+                emailCodeLog('failed', { reason: 'uidvalidity_changed', mobile: logTag });
+                throw new EmailCodeError('EMAIL_UIDVALIDITY_CHANGED', 'mailbox UIDs were reset since the snapshot');
+            }
+            const found = await this.search([['FROM', TELEGRAM_SENDER], ['UID', `${snapshot.sinceUid}:*`]]);
+            const uids = found.filter((uid) => uid >= snapshot.sinceUid).sort((a, b) => b - a).slice(0, MAX_CANDIDATES_PER_POLL);
+            if (uids.length === 0) {
+                emailCodeLog('none', { reason: 'no_new_mail', mobile: logTag, uid: snapshot.sinceUid });
+                return null;
+            }
+            const mails = await this.fetchMails(uids);
+            const accepted = [];
+            for (const mail of mails) {
+                const verdict = this.judgeMail(mail, snapshot, expectedLength, requestStartedAt);
+                if ('code' in verdict) {
+                    accepted.push({ uid: mail.uid, code: verdict.code });
+                }
+                else {
+                    emailCodeLog('rejected', { reason: verdict.reason, mobile: logTag, uid: mail.uid, subject: verdict.subject });
+                }
+            }
+            if (accepted.length === 0) {
+                emailCodeLog('none', { reason: 'no_valid_mail', mobile: logTag, uid: snapshot.sinceUid });
+                return null;
+            }
+            const distinct = new Set(accepted.map((a) => a.code));
+            if (distinct.size > 1) {
+                emailCodeLog('ambiguous', { reason: 'ambiguous', mobile: logTag, uid: accepted.map((a) => a.uid).join(',') });
+                throw new EmailCodeError('EMAIL_CODE_AMBIGUOUS', `${accepted.length} fresh 2FA mails carry ${distinct.size} different codes`);
+            }
+            const pick = accepted.sort((a, b) => b.uid - a.uid)[0];
+            try {
+                await this.deleteMessage(pick.uid);
+            }
+            catch (deleteError) {
+                emailCodeLog('delete_failed', {
+                    mobile: logTag,
+                    uid: pick.uid,
+                    error: redactDigits(deleteError instanceof Error ? deleteError.message : String(deleteError)),
+                });
+            }
+            emailCodeLog('picked', { mobile: logTag, uid: pick.uid });
+            return pick.code;
+        }
+        catch (error) {
+            if (!(error instanceof EmailCodeError)) {
+                console.error('Mail read error:', (0, parseError_1.parseError)(error, '', false)?.message);
+                this.isReady = false;
+            }
             throw error;
         }
     }
-    async openInbox() {
-        await new Promise((resolve, reject) => {
-            this.imap.openBox('INBOX', false, (err) => {
+    judgeMail(mail, snapshot, expectedLength, requestStartedAt) {
+        const subject = headerValue(mail.header, 'Subject');
+        const shownSubject = redactDigits(subject) || '(none)';
+        if (!(mail.uid >= snapshot.sinceUid))
+            return { reason: 'stale_uid', subject: shownSubject };
+        if (!headerValue(mail.header, 'From').toLowerCase().includes(TELEGRAM_SENDER))
+            return { reason: 'not_telegram', subject: shownSubject };
+        if (!mail.part)
+            return { reason: 'no_text_part', subject: shownSubject };
+        const decoded = decodePart(mail.body, mail.part.encoding);
+        const parsed = parseTelegram2faEmail(subject, mail.part.html ? htmlToText(decoded) : decoded, expectedLength);
+        if ('reason' in parsed)
+            return { reason: parsed.reason, subject: shownSubject };
+        const sentAt = parseMailDate(headerValue(mail.header, 'Date'));
+        if (requestStartedAt && sentAt && sentAt.getTime() < requestStartedAt.getTime() - SENT_BEFORE_REQUEST_SKEW_MS) {
+            return { reason: 'sent_before_request', subject: shownSubject };
+        }
+        return { code: parsed.code };
+    }
+    async search(criteria) {
+        return new Promise((resolve, reject) => {
+            this.imap.search(criteria, (err, foundResults) => {
                 if (err) {
-                    console.error('Open Inbox error:', (0, parseError_1.parseError)(err));
+                    console.error('Search error:', (0, parseError_1.parseError)(err, '', false)?.message);
                     reject(err);
                 }
                 else {
-                    console.log('Inbox opened');
-                    resolve();
+                    resolve(foundResults || []);
                 }
             });
         });
     }
-    async deleteMessage(seqno) {
+    async fetchMails(uids) {
+        const heads = await this.fetchRaw(uids, ['HEADER.FIELDS (FROM SUBJECT DATE)'], true);
+        const mails = heads.map((h) => ({
+            uid: h.uid,
+            header: h.bodies.HEADER || '',
+            struct: h.struct,
+            part: pickTextPart(h.struct),
+            body: '',
+        }));
+        const byPart = new Map();
+        for (const mail of mails) {
+            if (!mail.part)
+                continue;
+            const group = byPart.get(mail.part.partID) || [];
+            group.push(mail);
+            byPart.set(mail.part.partID, group);
+        }
+        for (const [partID, group] of byPart) {
+            const bodies = await this.fetchRaw(group.map((m) => m.uid), [partID], false);
+            for (const fetched of bodies) {
+                const mail = group.find((m) => m.uid === fetched.uid);
+                if (mail)
+                    mail.body = fetched.bodies.PART || '';
+            }
+        }
+        return mails;
+    }
+    async fetchRaw(uids, bodies, struct) {
+        const out = [];
+        const fetch = this.imap.fetch(uids, { bodies, struct, markSeen: false });
         await new Promise((resolve, reject) => {
-            this.imap.seq.addFlags([seqno], '\\Deleted', (flagError) => {
+            fetch.on('message', (msg) => {
+                const item = { uid: 0, struct: null, bodies: {} };
+                msg.on('body', (stream, info) => {
+                    const key = String(info?.which || '').toUpperCase().startsWith('HEADER') ? 'HEADER' : 'PART';
+                    stream.on('data', (chunk) => {
+                        const current = item.bodies[key] || '';
+                        if (current.length < MAX_PART_BYTES)
+                            item.bodies[key] = current + chunk.toString('utf8');
+                    });
+                });
+                msg.once('attributes', (attrs) => {
+                    item.uid = Number(attrs?.uid) || 0;
+                    item.struct = attrs?.struct ?? null;
+                });
+                msg.once('end', () => out.push(item));
+            });
+            fetch.once('error', (err) => reject(err));
+            fetch.once('end', () => resolve());
+        });
+        return out;
+    }
+    async openInbox() {
+        return new Promise((resolve, reject) => {
+            this.imap.openBox('INBOX', false, (err, box) => {
+                if (err) {
+                    console.error('Open Inbox error:', (0, parseError_1.parseError)(err, '', false)?.message);
+                    reject(err);
+                }
+                else {
+                    resolve(box);
+                }
+            });
+        });
+    }
+    async deleteMessage(uid) {
+        await new Promise((resolve, reject) => {
+            this.imap.addFlags([uid], '\\Deleted', (flagError) => {
                 if (flagError) {
                     reject(flagError);
                     return;
                 }
-                this.imap.expunge((expungeError) => {
+                const done = (expungeError) => {
                     if (expungeError) {
                         reject(expungeError);
                         return;
                     }
-                    console.log(`Deleted message ${seqno}`);
                     resolve();
-                });
+                };
+                const imap = this.imap;
+                if (typeof imap.serverSupports === 'function' && imap.serverSupports('UIDPLUS')) {
+                    imap.expunge([uid], done);
+                }
+                else {
+                    imap.expunge(done);
+                }
             });
         });
     }
 }
 exports.MailReader = MailReader;
+
+
+/***/ },
+
+/***/ "./src/IMap/mailbox-lock.ts"
+/*!**********************************!*\
+  !*** ./src/IMap/mailbox-lock.ts ***!
+  \**********************************/
+(__unused_webpack_module, exports, __webpack_require__) {
+
+
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.InMemoryMailboxLock = exports.RedisMailboxLock = exports.MAILBOX_LOCK_KEY = void 0;
+const crypto_1 = __webpack_require__(/*! crypto */ "crypto");
+const redisClient_1 = __webpack_require__(/*! ../utils/redisClient */ "./src/utils/redisClient.ts");
+exports.MAILBOX_LOCK_KEY = 'mailbox-lock::2fa-recovery-inbox';
+const REDIS_COMMAND_TIMEOUT_MS = 5_000;
+const RELEASE_IF_OWNER_LUA = "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end";
+async function withTimeout(promise, what) {
+    let timer;
+    try {
+        return await Promise.race([
+            promise,
+            new Promise((_, reject) => {
+                timer = setTimeout(() => reject(new Error(`${what} timed out after ${REDIS_COMMAND_TIMEOUT_MS}ms`)), REDIS_COMMAND_TIMEOUT_MS);
+                timer.unref?.();
+            }),
+        ]);
+    }
+    finally {
+        if (timer)
+            clearTimeout(timer);
+    }
+}
+class RedisMailboxLock {
+    constructor(getRedis = () => redisClient_1.RedisClient.getClient()) {
+        this.getRedis = getRedis;
+    }
+    async tryAcquire(ttlMs) {
+        const redis = this.getRedis();
+        if (redis.status !== 'ready') {
+            throw new Error(`redis not ready (status=${redis.status})`);
+        }
+        const token = (0, crypto_1.randomUUID)();
+        try {
+            const result = await withTimeout(redis.set(exports.MAILBOX_LOCK_KEY, token, 'PX', ttlMs, 'NX'), 'mailbox lock acquire');
+            return result === 'OK' ? token : null;
+        }
+        catch (error) {
+            redis.eval(RELEASE_IF_OWNER_LUA, 1, exports.MAILBOX_LOCK_KEY, token).catch(() => undefined);
+            throw error;
+        }
+    }
+    async release(token) {
+        await withTimeout(this.getRedis().eval(RELEASE_IF_OWNER_LUA, 1, exports.MAILBOX_LOCK_KEY, token), 'mailbox lock release');
+    }
+}
+exports.RedisMailboxLock = RedisMailboxLock;
+class InMemoryMailboxLock {
+    constructor() {
+        this.holder = null;
+    }
+    async tryAcquire(ttlMs) {
+        const now = Date.now();
+        if (this.holder && this.holder.expiresAt > now)
+            return null;
+        const token = (0, crypto_1.randomUUID)();
+        this.holder = { token, expiresAt: now + ttlMs };
+        return token;
+    }
+    async release(token) {
+        if (this.holder?.token === token)
+            this.holder = null;
+    }
+}
+exports.InMemoryMailboxLock = InMemoryMailboxLock;
 
 
 /***/ },
@@ -8741,6 +9084,8 @@ const generateTGConfig_1 = __webpack_require__(/*! ../utils/generateTGConfig */ 
 const tg_config_1 = __webpack_require__(/*! ../utils/tg-config */ "./src/components/Telegram/utils/tg-config.ts");
 const IMap_1 = __webpack_require__(/*! ../../../IMap/IMap */ "./src/IMap/IMap.ts");
 const monitor_util_1 = __webpack_require__(/*! ../../monitor/monitor-util */ "./src/components/monitor/monitor-util.ts");
+const EMAIL_CODE_POLLS = 6;
+const EMAIL_CODE_POLL_INTERVAL_MS = 10_000;
 function isOwnAuth(mobile, auth) {
     if (auth.current) {
         return true;
@@ -8883,36 +9228,48 @@ async function set2fa(ctx) {
             hint: 'password - India143',
             newPassword: 'Ajtdmwajt1@',
         };
+        const logTag = (0, monitor_util_1.maskMobile)(ctx.phoneNumber) || 'unknown';
         return imapService.runExclusive(async () => {
             ctx.logger.info(ctx.phoneNumber, 'Waiting for exclusive access to 2FA mailbox');
-            await imapService.connectToMail(30_000);
-            ctx.logger.info(ctx.phoneNumber, 'Mail is ready, setting 2FA');
-            const verificationStartedAt = new Date();
             try {
+                await imapService.connectToMail(30_000);
+            }
+            catch (error) {
+                (0, IMap_1.emailCodeLog)('failed', { reason: 'connect_failed', mobile: logTag });
+                throw error;
+            }
+            try {
+                const snapshot = await imapService.snapshotMailbox(logTag);
+                ctx.logger.info(ctx.phoneNumber, 'Mail is ready, setting 2FA');
+                const requestStartedAt = new Date();
+                let codeRequests = 0;
                 await ctx.client.updateTwoFaSettings({
                     isCheckPassword: false,
                     email: twoFaDetails.email,
                     hint: twoFaDetails.hint,
                     newPassword: twoFaDetails.newPassword,
                     emailCodeCallback: async (length) => {
-                        ctx.logger.info(ctx.phoneNumber, `Email code requested by Telegram (length=${length})`);
-                        const maxRetries = 4;
-                        for (let retry = 0; retry < maxRetries; retry++) {
-                            await new Promise(r => setTimeout(r, 10_000));
-                            ctx.logger.info(ctx.phoneNumber, `Checking for email code (attempt ${retry + 1}/${maxRetries})`);
+                        codeRequests++;
+                        ctx.logger.info(ctx.phoneNumber, `Email code requested by Telegram (length=${length}, request=${codeRequests})`);
+                        if (codeRequests > 1) {
+                            (0, IMap_1.emailCodeLog)('failed', { reason: 'second_request', mobile: logTag });
+                            throw new IMap_1.EmailCodeError('EMAIL_CODE_SECOND_REQUEST', 'Telegram asked for a code twice in one attempt');
+                        }
+                        for (let poll = 1; poll <= EMAIL_CODE_POLLS; poll++) {
+                            await new Promise((r) => setTimeout(r, EMAIL_CODE_POLL_INTERVAL_MS));
+                            ctx.logger.info(ctx.phoneNumber, `Checking for email code (attempt ${poll}/${EMAIL_CODE_POLLS})`);
                             if (!(await imapService.isMailReady())) {
+                                (0, IMap_1.emailCodeLog)('failed', { reason: 'connection_lost', mobile: logTag });
                                 throw new Error('Mail connection lost while waiting for code');
                             }
-                            const code = await imapService.getCode({
-                                expectedLength: length,
-                                minReceivedAt: verificationStartedAt,
-                            });
+                            const code = await imapService.getCode({ snapshot, expectedLength: length, requestStartedAt, logTag });
                             if (code) {
                                 ctx.logger.info(ctx.phoneNumber, 'Got email code');
                                 return code;
                             }
                         }
-                        throw new Error(`Failed to retrieve email code after ${maxRetries} attempts`);
+                        (0, IMap_1.emailCodeLog)('timeout', { reason: 'no_fresh_code', mobile: logTag, uid: snapshot.sinceUid });
+                        throw new IMap_1.EmailCodeError('EMAIL_CODE_TIMEOUT', `no fresh 2FA mail after ${EMAIL_CODE_POLLS} polls (${(EMAIL_CODE_POLLS * EMAIL_CODE_POLL_INTERVAL_MS) / 1000}s)`);
                     },
                     onEmailCodeError: (e) => {
                         ctx.logger.error(ctx.phoneNumber, 'Email code error:', (0, parseError_1.parseError)(e));
@@ -8925,7 +9282,7 @@ async function set2fa(ctx) {
             }
             ctx.logger.info(ctx.phoneNumber, '2FA set successfully');
             return twoFaDetails;
-        });
+        }, logTag);
     }
     else {
         ctx.logger.info(ctx.phoneNumber, 'Password already exists');
