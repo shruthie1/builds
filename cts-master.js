@@ -20210,7 +20210,7 @@ let BotsService = BotsService_1 = class BotsService {
             const deficit = this.minHealthyBotsPerCategory - liveCount;
             if (deficit <= 0)
                 continue;
-            const channelId = list[0]?.channelId;
+            const channelId = this.categoryTopUpChannelId(list);
             if (!channelId) {
                 topUpFailures.push(`${category}: below floor (${liveCount}/${this.minHealthyBotsPerCategory}) but no channelId known — skipped`);
                 continue;
@@ -20278,6 +20278,24 @@ let BotsService = BotsService_1 = class BotsService {
             }
         }
         return { toppedUp, creationAttempts, topUpFailures, proposedActions, stopPrivilegedWork };
+    }
+    categoryTopUpChannelId(list) {
+        const live = list.find(b => this.isSelectable(b) && b.channelId);
+        if (live) {
+            console.log(`[BotHealth] kind=topup_channel category=${live.category} channel=${live.channelId} source=live`);
+            return live.channelId;
+        }
+        const time = (b) => {
+            const t = b.createdAt ? new Date(b.createdAt).getTime() : NaN;
+            if (Number.isFinite(t))
+                return t;
+            const ts = typeof b._id?.getTimestamp === 'function' ? b._id.getTimestamp().getTime() : NaN;
+            return Number.isFinite(ts) ? ts : 0;
+        };
+        const newest = list.filter(b => b.channelId).sort((a, b) => time(b) - time(a))[0];
+        if (newest)
+            console.log(`[BotHealth] kind=topup_channel category=${newest.category} channel=${newest.channelId} source=newest`);
+        return newest?.channelId;
     }
     async addBotToChannelAsAdmin(channelId, botToken, botUsername) {
         const botInfo = await this.telegramService.getBotInfo(botToken);
@@ -67093,8 +67111,34 @@ function nextTarget(chatId, botToken) {
 function notifTarget(chatId = process.env.accountsChannel || "-1001801844217", botToken) {
     return nextTarget(chatId, botToken);
 }
-function ppplTarget(chatId = process.env.updatesChannel || '-1001972065816', botToken) {
-    return nextTarget(chatId, botToken);
+function clientUpdatesConfig() {
+    const [chat = '', , tokens = ''] = String(process.env.TELEGRAM_CHANNEL_CONFIG_CLIENT_UPDATES || '').split('::');
+    const list = tokens.split(',').map(t => t.trim()).filter(Boolean);
+    return chat.trim() && list.length ? { chatId: chat.trim(), tokens: list } : null;
+}
+let clientUpdatesIndex = 0;
+let lastPpplSource = '';
+function notePpplSource(source, chatId) {
+    const key = `${source}|${chatId}`;
+    if (key === lastPpplSource)
+        return;
+    lastPpplSource = key;
+    console.log(`[bot-notice] kind=pppl_source source=${source} chat=${chatId}`);
+}
+function ppplTarget(chatId, botToken) {
+    const cu = clientUpdatesConfig();
+    const target = chatId || process.env.updatesChannel || cu?.chatId;
+    if (!target)
+        throw new Error('No updates channel configured (updatesChannel / TELEGRAM_CHANNEL_CONFIG_CLIENT_UPDATES)');
+    if (!botToken && cu && target === cu.chatId) {
+        const token = cu.tokens[clientUpdatesIndex % cu.tokens.length];
+        clientUpdatesIndex = (clientUpdatesIndex + 1) % cu.tokens.length;
+        notePpplSource('client_updates_config', target);
+        return { token, chatId: target };
+    }
+    if (!botToken)
+        notePpplSource('bot_tokens', target);
+    return nextTarget(target, botToken);
 }
 
 
