@@ -45863,6 +45863,7 @@ let PaymentProofsService = PaymentProofsService_1 = class PaymentProofsService {
         this.windows = new Map();
         this.loading = new Map();
         this.gen = 0;
+        this.askDecisions = new Map();
     }
     parseQuery(q, now = Date.now()) {
         let since = now - exports.DEFAULT_WINDOW_MS;
@@ -46043,7 +46044,26 @@ let PaymentProofsService = PaymentProofsService_1 = class PaymentProofsService {
         const options = (0, payment_proofs_classify_1.reviewOptionsFromEnv)();
         (0, payment_proofs_classify_1.buildReviewModel)(everything, (chatId) => !!d.chats.get(chatId)?.marked, options);
         const users = new Map([...d.chats].map(([chatId, e]) => [chatId, [...e.rows.values()]]));
-        return { ...d, everything, views: (0, payment_proofs_views_1.buildViews)(everything, users, options) };
+        const views = (0, payment_proofs_views_1.buildViews)(everything, users, options, d.loadedAt);
+        this.logAskDecisions(views.asks);
+        return { ...d, everything, views };
+    }
+    logAskDecisions(asks) {
+        const seen = new Set();
+        for (const a of asks) {
+            seen.add(a.chatId);
+            const sig = `${a.decision}|${a.askProofIds.join(',')}|${a.earlier}`;
+            if (this.askDecisions.get(a.chatId) === sig)
+                continue;
+            this.askDecisions.set(a.chatId, sig);
+            this.logger.log(`[review-ask] decision=${a.decision} chat=${a.chatId} asks=${a.askProofIds.join(',')} reasons=${a.reasons.join(',') || '-'} earlier=${a.earlier} earlierAmount=${a.earlierAmount}`);
+        }
+        for (const chatId of [...this.askDecisions.keys()]) {
+            if (seen.has(chatId))
+                continue;
+            this.askDecisions.delete(chatId);
+            this.logger.log(`[review-ask] decision=gone chat=${chatId}`);
+        }
     }
     async patchWindows(what, apply) {
         this.gen++;
@@ -46217,7 +46237,7 @@ exports.PaymentProofsService = PaymentProofsService = PaymentProofsService_1 = _
 
 
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.REVIEW_VIEWS = void 0;
+exports.ASK_UNANSWERED_MS = exports.REVIEW_VIEWS = void 0;
 exports.isRealFakeReason = isRealFakeReason;
 exports.isHiddenEntry = isHiddenEntry;
 exports.proofCard = proofCard;
@@ -46236,6 +46256,12 @@ function isHiddenEntry(e) {
 exports.REVIEW_VIEWS = ['check', 'muted', 'refused'];
 const MIN_MS = 60_000;
 const DAY_MS = 24 * 60 * MIN_MS;
+exports.ASK_UNANSWERED_MS = 60 * MIN_MS;
+const isDetailsAsk = (x) => x.row.ask?.kind === 'old_time';
+const askOpenedMs = (x) => {
+    const t = x.row.ask?.openedAt ? new Date(x.row.ask.openedAt).getTime() : NaN;
+    return Number.isFinite(t) ? t : msOf(x.row);
+};
 const FRESH_MS = 30 * MIN_MS;
 const SKEW_MS = 5 * MIN_MS;
 const NOT_A_MISSED_CREDIT_OUTCOMES = new Set(['not_receipt', 'over_limit', 'cross_client', 'not_ours', 'repeat']);
@@ -46268,7 +46294,7 @@ function proofCard({ row, c }) {
         reviewed: c.reviewed, legacy: c.legacy, image: row.image ?? null,
     };
 }
-function buildViews(items, users, options) {
+function buildViews(items, users, options, now = Date.now()) {
     const asc = [...items].sort((a, b) => msOf(a.row) - msOf(b.row) || (String(a.row._id) < String(b.row._id) ? -1 : 1));
     const byChat = new Map();
     const shaFirstChat = new Map();
@@ -46352,12 +46378,44 @@ function buildViews(items, users, options) {
             .slice(0, slots)
             .forEach((x) => topN.add(x));
     }
+    const asks = [];
+    const overdue = new Map();
+    for (const [chat, list] of byChat) {
+        const asked = list.filter(isDetailsAsk);
+        if (!asked.length)
+            continue;
+        const creditedAfter = (t) => list.some((y) => y.c.credited && msOf(y.row) > t);
+        const open = asked.filter((x) => x.row.ask?.state === 'open' && !creditedAfter(askOpenedMs(x)));
+        const late = open.filter((x) => now - askOpenedMs(x) >= exports.ASK_UNANSWERED_MS);
+        const firstLate = late.length ? Math.min(...late.map((x) => msOf(x.row))) : null;
+        const earlier = firstLate === null ? [] : list.filter((x) => x.c.credited && msOf(x.row) < firstLate);
+        const shown = late.length ? late : open.length ? open : asked;
+        const decisionOf = () => {
+            if (!open.length)
+                return 'answered';
+            if (!late.length)
+                return 'waiting';
+            if (inMuted(chat))
+                return 'muted';
+            return earlier.length ? 'flagged' : 'no_credits';
+        };
+        const decision = decisionOf();
+        if (decision === 'flagged')
+            overdue.set(chat, { rows: late, dueMs: Math.max(...late.map((x) => askOpenedMs(x) + exports.ASK_UNANSWERED_MS)) });
+        asks.push({
+            chatId: chat, decision, askProofIds: shown.map((x) => x.c.proofId),
+            reasons: uniqSorted(shown.flatMap((x) => x.row.ask?.reasons ?? [])),
+            earlier: earlier.length, earlierAmount: earlier.reduce((s, x) => s + (x.c.amount ?? 0), 0),
+        });
+    }
     const check = [];
     for (const [chat, list] of byChat) {
         if (inMuted(chat))
             continue;
+        const asked = overdue.get(chat);
+        const reviewedHere = (x) => x.c.reviewed && (!asked || new Date(x.c.stamp.at).getTime() >= asked.dueMs);
         const creditedRows = list.filter((x) => x.c.credited);
-        const pending = creditedRows.filter((x) => !x.c.reviewed);
+        const pending = creditedRows.filter((x) => !reviewedHere(x));
         const reasons = [];
         for (const x of creditedRows) {
             for (const label of fake.get(x) ?? [])
@@ -46367,10 +46425,14 @@ function buildViews(items, users, options) {
             else if (topN.has(x))
                 reasons.push({ kind: 'high', label: `Top risk today: ${x.c.baseReasons.join('; ')}`, proofId: x.c.proofId });
         }
+        for (const x of asked?.rows ?? []) {
+            const why = (x.row.ask?.reasons ?? []).filter((r) => typeof r === 'string' && r).join(', ');
+            reasons.push({ kind: 'asked', label: why ? `Details page asked, not sent: ${why}` : 'Details page asked, not sent', proofId: x.c.proofId });
+        }
         if (!reasons.length)
             continue;
         const sum = (xs) => xs.reduce((s, x) => s + x.c.atRiskAmount, 0);
-        const reviewedCount = creditedRows.filter((x) => x.c.reviewed).length;
+        const reviewedCount = creditedRows.filter(reviewedHere).length;
         const history = list.filter((x) => x.c.credited || !x.c.repeat);
         check.push({
             chatId: chat,
@@ -46389,8 +46451,13 @@ function buildViews(items, users, options) {
             reviewed: reviewedCount > 0,
             muted: muted(chat),
             marked: false,
-            stamp: stampOfAll(history),
+            stamp: history.every(reviewedHere) ? stampOfAll(history) : null,
         });
+        if (asked && history.every(reviewedHere)) {
+            const d = asks.find((a) => a.chatId === chat);
+            if (d)
+                d.decision = 'stamped';
+        }
     }
     check.sort((a, b) => Number(b.fakeSignal) - Number(a.fakeSignal) || b.unreviewedCredited - a.unreviewedCredited || (a.chatId < b.chatId ? -1 : 1));
     const mutedEntries = [];
@@ -46471,7 +46538,7 @@ function buildViews(items, users, options) {
         }
     }
     refused.sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
-    return { check, muted: mutedEntries, refused };
+    return { check, muted: mutedEntries, refused, asks };
 }
 function looksGenuine(x) {
     const r = x.row;
