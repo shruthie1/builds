@@ -19191,6 +19191,7 @@ const users_service_1 = __webpack_require__(/*! ../users/users.service */ "./src
 const channel_category_enum_1 = __webpack_require__(/*! ./channel-category.enum */ "./src/components/bots/channel-category.enum.ts");
 const rich_message_1 = __webpack_require__(/*! ../../utils/rich-message */ "./src/utils/rich-message.ts");
 const monitor_util_1 = __webpack_require__(/*! ../monitor/monitor-util */ "./src/components/monitor/monitor-util.ts");
+const NEVER_REPLACED_LIFECYCLES = new Set(['manual_attention', 'pending_admin']);
 let BotsService = BotsService_1 = class BotsService {
     constructor(botModel, moduleRef) {
         this.botModel = botModel;
@@ -20169,7 +20170,7 @@ let BotsService = BotsService_1 = class BotsService {
                         }
                         console.warn(`[BotHealth] marked dead: @${bot.username} (${bot.category})`);
                     }
-                    deadBots.push({ username: bot.username, category: bot.category, channelId: bot.channelId, token: bot.token });
+                    deadBots.push({ username: bot.username, category: bot.category, channelId: bot.channelId, token: bot.token, lifecycle });
                 }
                 else {
                     unknown++;
@@ -20192,10 +20193,23 @@ let BotsService = BotsService_1 = class BotsService {
                 if (creationBudget <= 0 || stopPrivilegedWork)
                     break;
                 try {
+                    if (deadBot.lifecycle && NEVER_REPLACED_LIFECYCLES.has(deadBot.lifecycle)) {
+                        console.log(`[BotHealth] kind=replace_skipped reason=retired lifecycle=${deadBot.lifecycle} category=${deadBot.category} bot=@${deadBot.username} channel=${deadBot.channelId}`);
+                        continue;
+                    }
+                    const categoryBots = await this.botModel.find({ category: deadBot.category }).lean().exec();
+                    const channelId = this.categoryTopUpChannelId(categoryBots);
+                    if (!channelId) {
+                        console.log(`[BotHealth] kind=replace_skipped reason=no_channel category=${deadBot.category} bot=@${deadBot.username}`);
+                        continue;
+                    }
+                    if (channelId !== deadBot.channelId) {
+                        console.log(`[BotHealth] kind=replace_channel category=${deadBot.category} bot=@${deadBot.username} from=${deadBot.channelId} to=${channelId}`);
+                    }
                     proposedActions.push(`replace dead @${deadBot.username} in ${deadBot.category}`);
                     creationBudget--;
                     if (!options.dryRun) {
-                        const newBot = await this.replaceDeadBot(deadBot);
+                        const newBot = await this.replaceDeadBot({ ...deadBot, channelId });
                         if (newBot)
                             replaced++;
                     }
@@ -66543,36 +66557,65 @@ exports.sendBotNotice = sendBotNotice;
 const axios_1 = __importDefault(__webpack_require__(/*! axios */ "axios"));
 const logbots_1 = __webpack_require__(/*! ./logbots */ "./src/utils/logbots.ts");
 const rich_message_1 = __webpack_require__(/*! ./rich-message */ "./src/utils/rich-message.ts");
+const REJECTION = /unauthorized|chat not found|PEER_ID_INVALID|FROZEN_METHOD_INVALID|bot was kicked|not a member|not enough rights|need administrator rights|CHAT_WRITE_FORBIDDEN|bot was blocked/i;
+function isTokenOrChatRejection(error) {
+    const response = error?.response;
+    const status = Number(response?.status);
+    return status === 401 || status === 403 || REJECTION.test(String(response?.data?.description ?? ''));
+}
+const botId = (token) => String(token).split(':')[0];
+async function sendWithToken(t, input, opts, timeout) {
+    const api = (method) => `https://api.telegram.org/bot${t.token}/${method}`;
+    try {
+        const response = await axios_1.default.post(api('sendRichMessage'), { chat_id: t.chatId, rich_message: { html: (0, rich_message_1.formatRichMessageHtml)(input, { prefix: opts.prefix }) }, reply_markup: (0, rich_message_1.notificationKeyboard)(input) }, { timeout });
+        return { sent: response.data?.ok === true, data: response.data, rejected: false };
+    }
+    catch (error) {
+        const status = Number(error?.response?.status);
+        const rejected = isTokenOrChatRejection(error);
+        if (rejected || (status !== 400 && status !== 404)) {
+            console.error('Bot notice failed:', error?.response?.data?.description || error?.message);
+            return { sent: false, data: error?.response?.data, rejected };
+        }
+    }
+    try {
+        const response = await axios_1.default.post(api('sendMessage'), { chat_id: t.chatId, text: (0, rich_message_1.formatClassicNotificationHtml)(input, opts.prefix), parse_mode: 'HTML', reply_markup: (0, rich_message_1.notificationKeyboard)(input) }, { timeout });
+        return { sent: response.data?.ok === true, data: response.data, rejected: false };
+    }
+    catch (error) {
+        console.error('Bot notice fallback failed:', error?.response?.data?.description || error?.message);
+        return { sent: false, data: error?.response?.data, rejected: isTokenOrChatRejection(error) };
+    }
+}
 async function sendBotNotice(target, input, opts = {}) {
     const timeout = opts.timeout ?? 10000;
+    const pick = () => (target === 'notif' ? (0, logbots_1.notifTarget)(opts.chatId, opts.token) : (0, logbots_1.ppplTarget)(opts.chatId, opts.token));
     let t;
     try {
-        t = target === 'notif' ? (0, logbots_1.notifTarget)(opts.chatId, opts.token) : (0, logbots_1.ppplTarget)(opts.chatId, opts.token);
+        t = pick();
     }
     catch (error) {
         console.error('Bot notice skipped (no bot token):', error?.message);
         return { sent: false };
     }
-    const api = (method) => `https://api.telegram.org/bot${t.token}/${method}`;
-    try {
-        const response = await axios_1.default.post(api('sendRichMessage'), { chat_id: t.chatId, rich_message: { html: (0, rich_message_1.formatRichMessageHtml)(input, { prefix: opts.prefix }) }, reply_markup: (0, rich_message_1.notificationKeyboard)(input) }, { timeout });
-        return { sent: response.data?.ok === true, data: response.data };
+    const first = await sendWithToken(t, input, opts, timeout);
+    if (first.sent || !first.rejected)
+        return { sent: first.sent, data: first.data };
+    if (opts.token) {
+        console.warn(`[bot-notice] kind=all_tokens_failed reason=explicit_token target=${target} chat=${t.chatId} bot=${botId(t.token)}`);
+        return { sent: false, data: first.data };
     }
-    catch (error) {
-        const status = Number(error?.response?.status);
-        if (status !== 400 && status !== 404) {
-            console.error('Bot notice failed:', error?.response?.data?.description || error?.message);
-            return { sent: false, data: error?.response?.data };
-        }
+    const next = pick();
+    if (next.token === t.token) {
+        console.warn(`[bot-notice] kind=all_tokens_failed reason=single_token target=${target} chat=${t.chatId} bot=${botId(t.token)}`);
+        return { sent: false, data: first.data };
     }
-    try {
-        const response = await axios_1.default.post(api('sendMessage'), { chat_id: t.chatId, text: (0, rich_message_1.formatClassicNotificationHtml)(input, opts.prefix), parse_mode: 'HTML', reply_markup: (0, rich_message_1.notificationKeyboard)(input) }, { timeout });
-        return { sent: response.data?.ok === true, data: response.data };
+    console.warn(`[bot-notice] kind=retry_next_token target=${target} chat=${t.chatId} failed_bot=${botId(t.token)} next_bot=${botId(next.token)}`);
+    const second = await sendWithToken(next, input, opts, timeout);
+    if (!second.sent) {
+        console.warn(`[bot-notice] kind=all_tokens_failed reason=${second.rejected ? 'rejected' : 'send_failed'} target=${target} chat=${next.chatId} tried=2`);
     }
-    catch (error) {
-        console.error('Bot notice fallback failed:', error?.response?.data?.description || error?.message);
-        return { sent: false, data: error?.response?.data };
-    }
+    return { sent: second.sent, data: second.data };
 }
 
 
