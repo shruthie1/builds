@@ -19176,6 +19176,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 var BotsService_1;
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.BotsService = void 0;
+exports.configuredCategoryChannelId = configuredCategoryChannelId;
 const common_1 = __webpack_require__(/*! @nestjs/common */ "@nestjs/common");
 const core_1 = __webpack_require__(/*! @nestjs/core */ "@nestjs/core");
 const mongoose_1 = __webpack_require__(/*! @nestjs/mongoose */ "@nestjs/mongoose");
@@ -19192,6 +19193,15 @@ const channel_category_enum_1 = __webpack_require__(/*! ./channel-category.enum 
 const rich_message_1 = __webpack_require__(/*! ../../utils/rich-message */ "./src/utils/rich-message.ts");
 const monitor_util_1 = __webpack_require__(/*! ../monitor/monitor-util */ "./src/components/monitor/monitor-util.ts");
 const NEVER_REPLACED_LIFECYCLES = new Set(['manual_attention', 'pending_admin']);
+const RIGHTS_REFUSAL = /RIGHT_FORBIDDEN|CHAT_ADMIN_REQUIRED|not enough rights|ADMINS_TOO_MUCH/i;
+function configuredCategoryChannelId(category, env = process.env) {
+    for (const key of Object.keys(env).filter(k => k.startsWith('TELEGRAM_CHANNEL_CONFIG_')).sort()) {
+        const [chat = '', cat = ''] = String(env[key] || '').split('::');
+        if (cat.trim() === category && chat.trim())
+            return chat.trim();
+    }
+    return undefined;
+}
 let BotsService = BotsService_1 = class BotsService {
     constructor(botModel, moduleRef) {
         this.botModel = botModel;
@@ -20198,9 +20208,16 @@ let BotsService = BotsService_1 = class BotsService {
                         continue;
                     }
                     const categoryBots = await this.botModel.find({ category: deadBot.category }).lean().exec();
-                    const channelId = this.categoryTopUpChannelId(categoryBots);
+                    const channelId = this.categoryTopUpChannelId(deadBot.category, categoryBots);
                     if (!channelId) {
                         console.log(`[BotHealth] kind=replace_skipped reason=no_channel category=${deadBot.category} bot=@${deadBot.username}`);
+                        continue;
+                    }
+                    const pendingRights = this.rightsBlockedPending(categoryBots, channelId);
+                    if (pendingRights > 0) {
+                        const note = this.noteMintSkippedPendingRights('replace', deadBot.category, channelId, pendingRights, deadBot.username);
+                        if (!failures.includes(note))
+                            failures.push(note);
                         continue;
                     }
                     if (channelId !== deadBot.channelId) {
@@ -20581,7 +20598,7 @@ let BotsService = BotsService_1 = class BotsService {
             const deficit = this.minHealthyBotsPerCategory - liveCount;
             if (deficit <= 0)
                 continue;
-            const channelId = this.categoryTopUpChannelId(list);
+            const channelId = this.categoryTopUpChannelId(category, list);
             if (!channelId) {
                 topUpFailures.push(`${category}: below floor (${liveCount}/${this.minHealthyBotsPerCategory}) but no channelId known — skipped`);
                 continue;
@@ -20596,6 +20613,11 @@ let BotsService = BotsService_1 = class BotsService {
             if (remainingDeficit <= 0) {
                 if (reuse.reused > 0)
                     console.log(`[BotHealth] ${category}: deficit met by REUSING ${reuse.reused} existing bot(s) — no creation`);
+                continue;
+            }
+            const pendingRights = this.rightsBlockedPending(await this.botModel.find({ category }).lean().exec(), channelId);
+            if (pendingRights > 0) {
+                topUpFailures.push(this.noteMintSkippedPendingRights('topup', category, channelId, pendingRights));
                 continue;
             }
             if (!dryRun) {
@@ -20650,23 +20672,43 @@ let BotsService = BotsService_1 = class BotsService {
         }
         return { toppedUp, creationAttempts, topUpFailures, proposedActions, stopPrivilegedWork };
     }
-    categoryTopUpChannelId(list) {
-        const live = list.find(b => this.isSelectable(b) && b.channelId);
-        if (live) {
-            console.log(`[BotHealth] kind=topup_channel category=${live.category} channel=${live.channelId} source=live`);
-            return live.channelId;
+    categoryTopUpChannelId(category, list) {
+        const configured = configuredCategoryChannelId(category);
+        if (configured) {
+            console.log(`[BotHealth] kind=topup_channel category=${category} channel=${configured} source=config`);
+            return configured;
         }
+        const ms = (d) => {
+            const t = d ? new Date(d).getTime() : NaN;
+            return Number.isFinite(t) ? t : 0;
+        };
         const time = (b) => {
-            const t = b.createdAt ? new Date(b.createdAt).getTime() : NaN;
-            if (Number.isFinite(t))
+            const t = ms(b.createdAt);
+            if (t)
                 return t;
             const ts = typeof b._id?.getTimestamp === 'function' ? b._id.getTimestamp().getTime() : NaN;
             return Number.isFinite(ts) ? ts : 0;
         };
+        const verified = (b) => ms(b.lastAdminVerifiedAt) || ms(b.lastValidatedAt);
+        const live = list.filter(b => this.isSelectable(b) && b.channelId)
+            .sort((a, b) => verified(b) - verified(a) || time(b) - time(a))[0];
+        if (live) {
+            console.log(`[BotHealth] kind=topup_channel category=${category} channel=${live.channelId} source=live`);
+            return live.channelId;
+        }
         const newest = list.filter(b => b.channelId).sort((a, b) => time(b) - time(a))[0];
         if (newest)
-            console.log(`[BotHealth] kind=topup_channel category=${newest.category} channel=${newest.channelId} source=newest`);
+            console.log(`[BotHealth] kind=topup_channel category=${category} channel=${newest.channelId} source=newest`);
         return newest?.channelId;
+    }
+    rightsBlockedPending(list, channelId) {
+        return list.filter(b => b.channelId === channelId
+            && this.lifecycleOf(b) === 'pending_admin'
+            && RIGHTS_REFUSAL.test(String(b.lifecycleReason || ''))).length;
+    }
+    noteMintSkippedPendingRights(path, category, channelId, pending, bot) {
+        console.log(`[BotHealth] kind=mint_skipped reason=pending_rights path=${path} category=${category} channel=${channelId} pending=${pending}${bot ? ` bot=@${bot}` : ''}`);
+        return `${category}: ${pending} minted bot(s) still pending_admin after a rights refusal in ${channelId}; no new bot minted. Fix the promoting admin's rights; reconcile then activates them.`;
     }
     async addBotToChannelAsAdmin(channelId, botToken, botUsername) {
         const botInfo = await this.telegramService.getBotInfo(botToken);
@@ -66751,8 +66793,15 @@ async function sendBotNotice(target, input, opts = {}) {
         console.warn(`[bot-notice] kind=all_tokens_failed reason=explicit_token target=${target} chat=${t.chatId} bot=${botId(t.token)}`);
         return { sent: false, data: first.data };
     }
-    const next = pick();
-    if (next.token === t.token) {
+    let next;
+    try {
+        next = (0, logbots_1.retryTarget)(target, t);
+    }
+    catch (error) {
+        console.error('Bot notice retry skipped (no bot token):', error?.message);
+        return { sent: false, data: first.data };
+    }
+    if (!next) {
         console.warn(`[bot-notice] kind=all_tokens_failed reason=single_token target=${target} chat=${t.chatId} bot=${botId(t.token)}`);
         return { sent: false, data: first.data };
     }
@@ -67627,6 +67676,7 @@ Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.getBotToken = getBotToken;
 exports.notifTarget = notifTarget;
 exports.ppplTarget = ppplTarget;
+exports.retryTarget = retryTarget;
 const getBotTokens = () => {
     const botTokens = (process.env.BOT_TOKENS || '').split(',').filter(Boolean);
     if (botTokens.length === 0) {
@@ -67685,6 +67735,17 @@ function ppplTarget(chatId, botToken) {
     if (!botToken)
         notePpplSource('bot_tokens', target);
     return nextTarget(target, botToken);
+}
+function retryTarget(target, failed) {
+    const cu = target === 'pppl' ? clientUpdatesConfig() : null;
+    const tokens = cu && failed.chatId === cu.chatId ? cu.tokens : initializeBotTokens();
+    const start = tokens.indexOf(failed.token);
+    for (let i = 1; i <= tokens.length; i++) {
+        const token = tokens[(Math.max(start, 0) + i) % tokens.length];
+        if (token !== failed.token)
+            return { token, chatId: failed.chatId };
+    }
+    return null;
 }
 
 
