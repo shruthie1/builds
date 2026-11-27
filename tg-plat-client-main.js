@@ -37579,6 +37579,7 @@ function validateConfig(config) {
 "use strict";
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   DEFAULT_JOIN_CHANNELS: () => (/* binding */ DEFAULT_JOIN_CHANNELS),
 /* harmony export */   OwnChannelRegistry: () => (/* binding */ OwnChannelRegistry),
 /* harmony export */   collectEnvOwnChannels: () => (/* binding */ collectEnvOwnChannels),
 /* harmony export */   defaultOwnChannelMongoLoader: () => (/* binding */ defaultOwnChannelMongoLoader),
@@ -37608,7 +37609,8 @@ __webpack_require__.r(__webpack_exports__);
  *      SavedMessages, ...), plus the explicit OWN_CHANNEL_IDS list (ids or usernames, comma separated).
  *   2. Mongo `bots` collection: channelId of every bot doc, any lifecycle.
  *   3. Mongo `clients.channelLink`: each client's persona channel username.
- *   4. Runtime: ids learned by the process (rememberOwnChannelId), e.g. the private CLIENT_UPDATES
+ *   4. Built-in: DEFAULT_JOIN_CHANNELS (channels initSetup joins, e.g. miscmessages).
+ *   5. Runtime: ids learned by the process (rememberOwnChannelId), e.g. the private CLIENT_UPDATES
  *      channel resolved from CLIENT_UPDATES_INVITE.
  *   Usernames are resolved to ids through `activeChannels` / `channels`, because reaction dialogs
  *   carry no username.
@@ -37625,6 +37627,12 @@ const MIN_RETRY_MS = 60000;
 const DEFAULT_READY_TIMEOUT_MS = 10000;
 const MAX_IDS = 5000;
 const MAX_USERNAMES = 1000;
+/**
+ * Channels every tg-aut account joins at boot (initSetup). Single source: client-init builds its join list
+ * from this, and the registry treats each as own, so the leave sweep never leaves a channel we just joined.
+ * Usernames without '@'.
+ */
+const DEFAULT_JOIN_CHANNELS = ['miscmessages'];
 /** Config keys whose username-shaped value names one of our channels (unwantedvideos, SavedMessages, ...). */
 const CHANNEL_KEY_RE = /channel|chat|unwanted|saved|updates|notif|video|forward|news/i;
 const USERNAME_RE = /^[A-Za-z][A-Za-z0-9_]{3,31}$/;
@@ -37879,7 +37887,7 @@ class OwnChannelRegistry {
         try {
             const refs = collectEnvOwnChannels(this.readEnv());
             this.envIds = new Set(refs.ids.slice(0, MAX_IDS));
-            this.envUsernames = new Set(refs.usernames.slice(0, MAX_USERNAMES));
+            this.envUsernames = new Set([...DEFAULT_JOIN_CHANNELS, ...refs.usernames].slice(0, MAX_USERNAMES));
         }
         catch (error) {
             // Keep the previous env set.
@@ -65990,8 +65998,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "b90840242ca4e97ae11be72cc89ae716f8b0807a" : 0;
-    const builtAt =  true ? "2026-11-27T15:23:17.133Z" : 0;
+    const sha =  true ? "7b440a55c76b9f4085206ce568feebfcb6a14728" : 0;
+    const builtAt =  true ? "2026-11-27T16:17:35.367Z" : 0;
     return { sha, builtAt };
 }
 
@@ -131793,13 +131801,16 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _channels_channel_ops__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../channels/channel-ops */ "./src/channels/channel-ops.ts");
 /* harmony import */ var _channels_unwanted_updates_group__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../channels/unwanted-updates-group */ "./src/channels/unwanted-updates-group.ts");
 /* harmony import */ var _channels_client_updates_channel__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../channels/client-updates-channel */ "./src/channels/client-updates-channel.ts");
+/* harmony import */ var _tg_core_utils_own_channels__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! @tg/core/utils/own-channels */ "../../packages/tg-core/src/utils/own-channels.ts");
+
 
 
 
 
 
 // Constants for initialization. CLIENT_UPDATES is private since 2026-11-23: joined by invite (CLIENT_UPDATES_INVITE).
-const DEFAULT_CHANNELS = "@miscmessages";
+// The leave sweep treats every DEFAULT_JOIN_CHANNELS entry as own (own-channels.ts), so it never leaves them.
+const DEFAULT_CHANNELS = _tg_core_utils_own_channels__WEBPACK_IMPORTED_MODULE_5__.DEFAULT_JOIN_CHANNELS.map((name) => `@${name}`).join("|");
 const JOIN_GAP_MS = 3 * 60 * 1000;
 /**
  * Initialize setup
