@@ -4961,15 +4961,39 @@ const RETIRED_TABLES = new Set(["cheat_flag"]);
  * Nullable measurement columns added 2026-11-15, always the trailing columns of their table's list.
  * DEPLOY-ORDER SAFETY: a statement names them only when ANALYTICS_V2_COLUMNS is on (default) and a
  * row in the batch carries a non-null value. If the migration is not applied yet, Postgres answers
- * 42703; insertBatch re-runs the same batch without them (no row lost) and turns them off for this
- * process with one warn line (stats().droppedV2 counts rows written without them).
+ * 42703; insertBatch re-runs the same batch without them (no row lost) and turns them off for that
+ * TABLE for this process (other tables keep theirs) with one warn line (stats().droppedV2 counts rows written without them).
  */
+/** payment_event's trailing nullable columns (2026-11-19 mobile, 2026-11-23 receipt), in table-list order. */
+const PAYMENT_EXTRA_COLUMNS = ["mobile", "utr", "txn_id", "payee_upi", "payee_name", "printed_at", "app", "proof_id"];
 const V2_EXTRA_COLUMNS = {
     promotion_send: ["pick_mode", "pick_reason", "pick_score_legacy", "pick_score_v2", "pick_rank_v2", "channel_state",
         "score_version", "arm", "survival_ms", "delete_reason"],
     conversion_event: ["mobile", "dm_ts"],
     // analytics/upgrade-2026-11-19-payment-mobile.sql: the mobile that counted the payer (fake mark / void read it).
-    payment_event: ["mobile"],
+    // analytics/upgrade-2026-11-23-payment-receipt.sql: the receipt as read (reused-UTR audit). A 42703 on a receipt
+    // column drops only the receipt columns (V2_KEEP_LEVELS): `mobile` keeps writing.
+    payment_event: PAYMENT_EXTRA_COLUMNS,
+};
+/**
+ * Partial fallbacks (Codex review 2026-11-27 #4): how many leading V2_EXTRA_COLUMNS may stay when a LATER one is
+ * missing. payment_event: `mobile` (live since 2026-11-19) stays when a receipt column (2026-11-23) is missing. A table
+ * not listed here keeps all or none.
+ */
+const V2_KEEP_LEVELS = { payment_event: [1] };
+/** The extra columns that may stay after a 42703 named one of `table`'s V2_EXTRA_COLUMNS (0 = none). */
+function v2FallbackKeep(table, err, current) {
+    const cols = V2_EXTRA_COLUMNS[table] ?? [];
+    const text = describe(err);
+    const failed = cols.findIndex((c) => text.includes(`column "${c}" of relation "${table}"`));
+    const levels = (V2_KEEP_LEVELS[table] ?? []).filter((k) => failed >= 0 && k <= failed && k < current);
+    return levels.length ? Math.max(...levels) : 0;
+}
+/** The upgrade files that add each table's V2_EXTRA_COLUMNS (named in the OFF warn line). */
+const V2_UPGRADE_FILES = {
+    promotion_send: "analytics/upgrade-2026-11-15-picker-measurement.sql",
+    conversion_event: "analytics/upgrade-2026-11-15-picker-measurement.sql",
+    payment_event: "analytics/upgrade-2026-11-19-payment-mobile.sql and analytics/upgrade-2026-11-23-payment-receipt.sql",
 };
 /**
  * Per-channel reaction counters: table daily_channel_reaction (analytics/upgrade-2026-11-15-channel-reactions.sql).
@@ -5046,10 +5070,12 @@ const TABLES = {
     // legacy shape so a spool written by the previous build still replays its payments: upgradeLegacyValues
     // maps by name, so the three retired values are dropped and nothing else changes.
     payment_event: {
-        columns: ["ts", "chat_id", "client_id", "persona_id", "amount", "source", "mobile"],
+        columns: ["ts", "chat_id", "client_id", "persona_id", "amount", "source", ...PAYMENT_EXTRA_COLUMNS],
         legacyColumns: [
             ["ts", "chat_id", "client_id", "persona_id", "amount", "balance_after", "lifetime_after", "is_cheat", "source"],
             ["ts", "chat_id", "client_id", "persona_id", "amount", "source"],
+            // The 2026-11-19 list (before the receipt columns).
+            ["ts", "chat_id", "client_id", "persona_id", "amount", "source", "mobile"],
         ],
     },
     daily_client: {
@@ -5293,8 +5319,12 @@ class AnalyticsSink {
         /** Why the hourly writer is off for this process (null = on). See the header, BLAST RADIUS. */
         this.hourlyOff = null;
         this.droppedHourly = 0;
-        /** Why the measurement columns are off for this process (null = on). See V2_EXTRA_COLUMNS. */
-        this.v2Off = v2ColumnsFlagOn() ? null : "ANALYTICS_V2_COLUMNS off";
+        /** Why the measurement columns are off for every table (null = on): ANALYTICS_V2_COLUMNS. See V2_EXTRA_COLUMNS. */
+        this.v2OffAll = v2ColumnsFlagOn() ? null : "ANALYTICS_V2_COLUMNS off";
+        /** Per table: why its V2_EXTRA_COLUMNS are off for this process. A 42703 on one table never turns off another's. */
+        this.v2OffByTable = new Map();
+        /** Per table: how many leading V2_EXTRA_COLUMNS stay after a partial fallback (V2_KEEP_LEVELS); absent = all. */
+        this.v2KeepByTable = new Map();
         this.droppedV2 = 0;
         /** Why the daily_channel_reaction writer is off for this process (null = on). See CHANNEL_REACTION_TABLE. */
         this.channelReactionsOff = channelReactionsFlagOn() ? null : "ANALYTICS_CHANNEL_REACTIONS off";
@@ -5605,6 +5635,8 @@ class AnalyticsSink {
             values: [
                 row.ts ?? new Date(this.opts.now()),
                 row.chatId, row.clientId, row.personaId, row.amount, row.source ?? null, row.mobile ?? null,
+                row.utr ?? null, row.txnId ?? null, row.payeeUpi ?? null, row.payeeName ?? null,
+                validDateOrNull(row.printedAt), row.app ?? null, row.proofId ?? null,
             ],
         });
     }
@@ -6096,12 +6128,14 @@ class AnalyticsSink {
         }
         const startHourly = this.hourlyOff === null;
         let withHourly = startHourly;
-        let withV2 = this.v2Off === null;
-        let stmt = this.buildStatement(batch, withHourly, withV2);
+        const v2Off = this.v2OffAll ?? this.v2OffByTable.get(batch.table) ?? null;
+        const startKeep = v2Off !== null ? 0 : this.v2KeepByTable.get(batch.table) ?? Number.POSITIVE_INFINITY;
+        let v2Keep = startKeep;
+        let stmt = this.buildStatement(batch, withHourly, v2Keep);
         let hourlyErr = null;
         let hourlyLost = 0;
         let v2Err = null;
-        // Each fallback flips one flag once, so this runs at most three statements. A statement is one
+        // Each fallback narrows one setting (v2Keep only shrinks), so this runs at most four statements. A statement is one
         // transaction (the analytics_batch marker included), so a failed attempt leaves nothing behind.
         for (;;) {
             try {
@@ -6118,10 +6152,10 @@ class AnalyticsSink {
                     return false;
                 }
                 // Measurement columns missing (migration not applied): same rows without them. Never lose a row.
-                if (stmt?.v2 && withV2 && isV2ColumnError(err, batch.table)) {
+                if (stmt?.v2 && v2Keep > 0 && isV2ColumnError(err, batch.table)) {
                     v2Err = err;
-                    withV2 = false;
-                    stmt = this.buildStatement(batch, withHourly, false);
+                    v2Keep = v2FallbackKeep(batch.table, err, v2Keep);
+                    stmt = this.buildStatement(batch, withHourly, v2Keep);
                     continue;
                 }
                 // BLAST RADIUS (header): never let the hourly part hold back promotion_send / daily_*.
@@ -6129,17 +6163,20 @@ class AnalyticsSink {
                     hourlyErr = err;
                     hourlyLost = stmt.hourly;
                     withHourly = false;
-                    stmt = this.buildStatement(batch, false, withV2);
+                    stmt = this.buildStatement(batch, false, v2Keep);
                     continue;
                 }
                 throw err; // normal path; the flags only change after a fallback statement succeeds
             }
         }
         if (v2Err !== null) {
-            this.disableV2(v2Err);
+            if (v2Keep === 0)
+                this.disableV2(batch.table, v2Err);
+            else
+                this.limitV2(batch.table, v2Keep, v2Err);
             this.droppedV2 += v2Rows(batch);
         }
-        else if (!withV2 && this.v2Off !== null) {
+        else if (startKeep !== Number.POSITIVE_INFINITY) {
             this.droppedV2 += v2Rows(batch);
         }
         if (hourlyErr !== null) {
@@ -6150,12 +6187,23 @@ class AnalyticsSink {
         if (!startHourly)
             this.droppedHourly += hourlyDeltas(batch); // written without its hourly part
     }
-    /** Turns the measurement columns off for this process (once), with one warn line. */
-    disableV2(err) {
-        if (this.v2Off !== null)
+    /** Turns one table's measurement columns off for this process (once per table), with one warn line. */
+    disableV2(table, err) {
+        if (this.v2OffByTable.has(table))
             return;
-        this.v2Off = describe(err).slice(0, 300);
-        this.log("warn", `[analytics] picker measurement columns OFF until restart (rows keep writing without them; apply analytics/upgrade-2026-11-15-picker-measurement.sql and analytics/upgrade-2026-11-19-payment-mobile.sql): ${this.v2Off}`);
+        const why = describe(err).slice(0, 300);
+        this.v2OffByTable.set(table, why);
+        this.log("warn", `[analytics] ${table} measurement columns OFF until restart (rows keep writing without them; apply ${V2_UPGRADE_FILES[table] ?? "the analytics upgrade that adds them"}): ${why}`);
+    }
+    /** Keeps only the first `keep` measurement columns of one table for this process (V2_KEEP_LEVELS), one warn line. */
+    limitV2(table, keep, err) {
+        const was = this.v2KeepByTable.get(table);
+        if (was !== undefined && was <= keep)
+            return;
+        this.v2KeepByTable.set(table, keep);
+        const cols = V2_EXTRA_COLUMNS[table] ?? [];
+        const what = table === "payment_event" ? "receipt" : "later measurement";
+        this.log("warn", `[analytics] ${table} ${what} columns OFF until restart (${cols.slice(0, keep).join(", ")} kept; rows keep writing; apply ${V2_UPGRADE_FILES[table] ?? "the analytics upgrade that adds them"}): ${describe(err).slice(0, 300)}`);
     }
     /** Turns the daily_channel_reaction writer off for this process (once), with one warn line. */
     disableChannelReactions(err) {
@@ -6176,7 +6224,7 @@ class AnalyticsSink {
      * withHourly, hourly_client rows are left out (counted by the caller) and promotion_send is a plain
      * INSERT. Null when nothing is left to write.
      */
-    buildStatement(batch, withHourly, withV2 = false) {
+    buildStatement(batch, withHourly, v2Keep = 0) {
         const params = [batch.id];
         const inserts = [];
         let hourly = 0;
@@ -6198,7 +6246,7 @@ class AnalyticsSink {
             if (table === CHANNEL_REACTION_TABLE)
                 own = [...own].sort((a, b) => compareKey(a.values, b.values, 2));
             const shaped = counterStatementShape(table, own);
-            const projected = projectV2Columns(table, shaped.rows, withV2);
+            const projected = projectV2Columns(table, shaped.rows, v2Keep);
             v2 = v2 || projected.v2;
             const rows = projected.rows;
             const tuples = [];
@@ -7285,10 +7333,11 @@ function isHourlySchemaError(err) {
     return code === "42P01" || code === "42883" || code === "42703" || code === "42501";
 }
 /**
- * Drops the trailing measurement columns unless withV2 is on AND some row carries a non-null value
- * in them, so a batch without measurement data never names a column that may not exist yet.
+ * Keeps at most the first `keep` trailing measurement columns (Infinity = all, 0 = none), and none unless some row
+ * carries a non-null value in the kept ones, so a batch without measurement data never names a column that may not
+ * exist yet.
  */
-function projectV2Columns(table, rows, withV2) {
+function projectV2Columns(table, rows, keep) {
     const extra = V2_EXTRA_COLUMNS[table];
     if (!extra || rows.length === 0)
         return { rows, v2: false };
@@ -7297,9 +7346,12 @@ function projectV2Columns(table, rows, withV2) {
         && extra.every((c, i) => r.columns[base + i] === c));
     if (!shapeOk)
         return { rows, v2: false };
-    const carries = withV2 && rows.some((r) => r.values.slice(base).some((v) => v !== null && v !== undefined));
-    if (carries)
+    const k = Math.max(0, Math.min(extra.length, keep));
+    const carries = k > 0 && rows.some((r) => r.values.slice(base, base + k).some((v) => v !== null && v !== undefined));
+    if (carries && k === extra.length)
         return { rows, v2: true };
+    if (carries)
+        return { rows: rows.map((r) => ({ ...r, columns: r.columns.slice(0, base + k), values: r.values.slice(0, base + k) })), v2: true };
     return { rows: rows.map((r) => ({ ...r, columns: r.columns.slice(0, base), values: r.values.slice(0, base) })), v2: false };
 }
 /**
@@ -7311,12 +7363,12 @@ function projectV2Columns(table, rows, withV2) {
  * pre-2026-11-19 guess for them). The other measurement columns are known to that build and keep the
  * pre-2026-11-19 rule: dropped when empty, else in `c`.
  */
-const SPOOL_BY_NAME = { payment_event: ["mobile"] };
+const SPOOL_BY_NAME = { payment_event: PAYMENT_EXTRA_COLUMNS };
 function spoolShape(row) {
     const byName = SPOOL_BY_NAME[row.table];
     const base = byName ? row.columns.length - byName.length : 0;
     if (!byName || base <= 0 || !byName.every((c, i) => row.columns[base + i] === c)) {
-        const projected = projectV2Columns(row.table, [row], true).rows[0];
+        const projected = projectV2Columns(row.table, [row], Number.POSITIVE_INFINITY).rows[0];
         return { columns: projected.columns, values: projected.values, extra: null };
     }
     const x = {};
@@ -44071,6 +44123,323 @@ class ParkedControlRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_
 
 /***/ },
 
+/***/ "../../packages/tg-db/src/collections/payment-proof-ledger.repository.ts"
+/*!*******************************************************************************!*\
+  !*** ../../packages/tg-db/src/collections/payment-proof-ledger.repository.ts ***!
+  \*******************************************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   LEDGER_ATTEMPT_FIELDS: () => (/* binding */ LEDGER_ATTEMPT_FIELDS),
+/* harmony export */   LEDGER_KEY_INDEX: () => (/* binding */ LEDGER_KEY_INDEX),
+/* harmony export */   LEDGER_LOOKUP_LIMIT: () => (/* binding */ LEDGER_LOOKUP_LIMIT),
+/* harmony export */   LEDGER_MAX_REASONS: () => (/* binding */ LEDGER_MAX_REASONS),
+/* harmony export */   LEDGER_PENDING_INDEX: () => (/* binding */ LEDGER_PENDING_INDEX),
+/* harmony export */   LEDGER_UTR_CREDIT_INDEX: () => (/* binding */ LEDGER_UTR_CREDIT_INDEX),
+/* harmony export */   PAYMENT_PROOF_LEDGER_COLLECTION: () => (/* binding */ PAYMENT_PROOF_LEDGER_COLLECTION),
+/* harmony export */   PaymentProofLedgerRepository: () => (/* binding */ PaymentProofLedgerRepository),
+/* harmony export */   maskTail: () => (/* binding */ maskTail)
+/* harmony export */ });
+/* harmony import */ var _base_repository__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../base-repository */ "../../packages/tg-db/src/base-repository.ts");
+/* harmony import */ var _payment_reference__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./payment-reference */ "../../packages/tg-db/src/collections/payment-reference.ts");
+
+
+const PAYMENT_PROOF_LEDGER_COLLECTION = 'paymentProofLedger';
+const LEDGER_KEY_INDEX = 'proofId_1_mobile_1_unique';
+const LEDGER_UTR_CREDIT_INDEX = 'utr_1_verdict_1_credit_unique';
+/** Matches returned per lookup (the gate needs one; a few let it pick the classifying row). */
+const LEDGER_LOOKUP_LIMIT = 5;
+const LEDGER_PENDING_INDEX = 'clientId_1_lastSweptAt_1_claimedAt_1_pending';
+const LEDGER_MAX_REASONS = 8;
+/**
+ * Per-attempt fields a write removes when the new attempt does not supply them (Codex round 10 #3): an earlier
+ * attempt's UTR / txn id / file must not survive into this one's pending or credit doc and block another payment.
+ */
+const LEDGER_ATTEMPT_FIELDS = ['utr', 'utrRaw', 'txnId', 'imageSha256', 'dupCreditedAt', 'dupCreditAmount'];
+const HEX64 = /^[0-9a-f]{64}$/;
+/** A driver error for a log line: code and index name only. E11000 messages carry the key VALUE (a UTR). */
+function redact(error) {
+    const e = error;
+    const index = /index: (\S+)/.exec(String(e?.message ?? ''))?.[1];
+    return [e?.name, e?.code ?? e?.codeName, index].filter((v) => v !== undefined && v !== '').join(' ') || 'error';
+}
+function isDuplicateKey(error) {
+    const e = error;
+    return e?.code === 11000 || /E11000|duplicate key/i.test(String(e?.message ?? ''));
+}
+/** Which unique index an E11000 hit (driver: keyPattern / message). */
+function duplicateIndex(error) {
+    const e = error;
+    const kp = e?.keyPattern ? Object.keys(e.keyPattern) : [];
+    const msg = String(e?.message ?? '');
+    if (kp.includes('proofId') || msg.includes(LEDGER_KEY_INDEX))
+        return 'key';
+    if (kp.includes('utr') || msg.includes(LEDGER_UTR_CREDIT_INDEX))
+        return 'utr';
+    return 'other';
+}
+/** Last 4 characters, for logs only ("••••1234"). */
+function maskTail(v) {
+    const s = String(v ?? '');
+    return s ? `••••${s.slice(-4)}` : '-';
+}
+class PaymentProofLedgerRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_0__.BaseRepository {
+    constructor() {
+        super(...arguments);
+        this.collectionName = PAYMENT_PROOF_LEDGER_COLLECTION;
+    }
+    /**
+     * Store one screenshot's ledger doc. Idempotent per (proofId, mobile); a later verdict of the same screenshot
+     * replaces an earlier non-credit one (a held screenshot credited on its re-check), but a credit doc is never
+     * downgraded. A credit whose UTR another screenshot already holds as credited is stored as 'duplicate'
+     * (its creditedAt moved to dupCreditedAt: it WAS credited, by a path that missed the lookup, but it never blocks). Never throws.
+     */
+    async record(input) {
+        const proofId = String(input?.proofId ?? '').trim();
+        if (!proofId)
+            return 'error';
+        const mobile = typeof input.mobile === 'string' ? input.mobile.trim() : '';
+        const now = new Date();
+        const doc = {};
+        const expectClaimId = typeof input.expectClaimId === 'string' && input.expectClaimId ? input.expectClaimId : null;
+        for (const [k, v] of Object.entries(input)) {
+            if (v === undefined || v === null || v === '' || k === '_id' || k === 'createdAt' || k === 'expectClaimId')
+                continue;
+            doc[k] = v;
+        }
+        doc.proofId = proofId;
+        doc.mobile = mobile;
+        // Round 13 #2: a write under a claim stores that claim (an inserted doc carries it for the sweep's fence).
+        if (expectClaimId)
+            doc.claimId = expectClaimId;
+        doc.reasons = (input.reasons ?? []).slice(0, LEDGER_MAX_REASONS);
+        if (typeof doc.imageSha256 === 'string' && !HEX64.test(doc.imageSha256))
+            delete doc.imageSha256;
+        // Only a real, non-degenerate reference is a key (payment-reference.ts); the raw text stays in utrRaw.
+        if (doc.utr !== undefined && !(0,_payment_reference__WEBPACK_IMPORTED_MODULE_1__.isLedgerReference)(doc.utr))
+            delete doc.utr;
+        if (doc.txnId !== undefined) {
+            const t = (0,_payment_reference__WEBPACK_IMPORTED_MODULE_1__.ledgerTxnIdOf)(doc.txnId);
+            if (t)
+                doc.txnId = t;
+            else
+                delete doc.txnId;
+        }
+        // creditedAt / creditAmount belong to verdict 'credit' only.
+        if (doc.verdict !== 'credit') {
+            delete doc.creditedAt;
+            delete doc.creditAmount;
+        }
+        doc.updatedAt = now;
+        const createdAt = input.createdAt ?? now;
+        // Which doc of this key a write may replace (a doc it may not: the upsert hits the key index -> 'kept'). Never a
+        // credit. Under a claim (the recorder's expectClaimId, or the claim doc's own claimId): any non-pending doc, the
+        // pending doc holding that claim, or (a pending write with its claimedAt) an OLDER claim's pending doc; never a
+        // newer claim's live 'pending' (round 13 #2: a late write of an earlier generation never replaces the newer
+        // claim, while a newer claim takes over a pending doc its predecessor could not resolve). Any other unclaimed
+        // write (a delayed reject / hold recorder of an earlier pass) never a live 'pending' claim (Codex round 6 #3).
+        // Round 14 #1: the gate's own claim-doc write (a pending doc with its claimId, no expectClaimId) is bounded but
+        // not cancelled: landing late, it never replaces that claim's terminal reject (the release / sweep / recorder
+        // reject written meanwhile), or a released claim would block the next resend until the sweep.
+        // Round 14 #4: a credit under a claim carries claimedAt too, so it takes over an older claim's pending doc.
+        const token = expectClaimId ?? (doc.verdict === 'pending' && typeof doc.claimId === 'string' && doc.claimId ? doc.claimId : null);
+        const claimedAt = (doc.verdict === 'pending' || (doc.verdict === 'credit' && token)) && doc.claimedAt instanceof Date && Number.isFinite(doc.claimedAt.getTime()) ? doc.claimedAt : null;
+        const claimWrite = !expectClaimId && doc.verdict === 'pending' && !!token;
+        const replaceable = token
+            ? { verdict: { $ne: 'credit' }, $or: [{ verdict: { $ne: 'pending' } }, { claimId: token }, ...(claimedAt ? [{ claimedAt: { $lt: claimedAt } }] : [])], ...(claimWrite ? { $nor: [{ claimId: token, verdict: 'reject' }] } : {}) }
+            : doc.verdict === 'pending' ? { verdict: { $ne: 'credit' } } : { verdict: { $nin: ['credit', 'pending'] } };
+        const write = async (fields) => {
+            const stale = Object.fromEntries(LEDGER_ATTEMPT_FIELDS.filter((k) => !(k in fields)).map((k) => [k, '']));
+            await this.collection.updateOne({ proofId, mobile, ...replaceable }, { $set: fields, ...(Object.keys(stale).length ? { $unset: stale } : {}), $setOnInsert: { createdAt } }, { upsert: true });
+        };
+        try {
+            await write(doc);
+            return 'written';
+        }
+        catch (error) {
+            if (!isDuplicateKey(error)) {
+                this.logger.error(`[${this.collectionName}] record(${maskTail(proofId)}) failed: ${redact(error)}`);
+                return 'error';
+            }
+            const which = duplicateIndex(error);
+            // The credit doc of this very screenshot exists (filter skipped it, the upsert hit the key): it stays.
+            if (which === 'key')
+                return 'kept';
+            if (which === 'utr' && doc.verdict === 'credit') {
+                const reasons = [...doc.reasons, 'LEDGER_DUP_CREDIT'].slice(0, LEDGER_MAX_REASONS);
+                const { creditedAt, creditAmount, ...rest } = doc;
+                try {
+                    await write({
+                        ...rest, verdict: 'duplicate', reasons,
+                        ...(creditedAt !== undefined ? { dupCreditedAt: creditedAt } : {}),
+                        ...(creditAmount !== undefined ? { dupCreditAmount: creditAmount } : {}),
+                    });
+                    return 'dup_credit';
+                }
+                catch (again) {
+                    if (isDuplicateKey(again) && duplicateIndex(again) === 'key')
+                        return 'kept';
+                    this.logger.error(`[${this.collectionName}] record(${maskTail(proofId)}) as duplicate failed: ${redact(again)}`);
+                    return 'error';
+                }
+            }
+            this.logger.error(`[${this.collectionName}] record(${maskTail(proofId)}) duplicate key: ${redact(error)}`);
+            return 'error';
+        }
+    }
+    /**
+     * Earlier CREDITED screenshots (verdict credit) with this UTR, transaction id or file, in any chat, persona or
+     * client, with no time limit. A reference is looked up in both `utr` and `txnId` (one payment prints the bank RRN on
+     * one screen and the app's id on another, and the model reads either as "utr"). null = the lookup failed (the
+     * caller falls back to the 7-day checks; never blocks a credit on a ledger outage).
+     */
+    async findCreditedMatches(q) {
+        const refs = [...new Set([q.utr, q.txnId].filter((v) => typeof v === 'string' && ((0,_payment_reference__WEBPACK_IMPORTED_MODULE_1__.isLedgerReference)(v) || (0,_payment_reference__WEBPACK_IMPORTED_MODULE_1__.ledgerTxnIdOf)(v) === v)))];
+        const sha = typeof q.imageSha256 === 'string' && HEX64.test(q.imageSha256) ? q.imageSha256 : null;
+        if (refs.length === 0 && !sha)
+            return [];
+        const or = [];
+        if (refs.length)
+            or.push({ utr: { $in: refs } }, { txnId: { $in: refs } });
+        if (sha)
+            or.push({ imageSha256: sha });
+        // Two bounded reads (Codex round 3 #2): the BLOCKING docs ('credit', 'pending') first, then the inferred ones
+        // (the gate's weak log only). One read sorted on creditedAt ranked pending and inferred docs (no creditedAt)
+        // alike, so inferred docs could push a pending claim out of the limit. A stray creditedAt on any other verdict
+        // never blocks.
+        const filterOf = (verdicts) => {
+            const f = { $and: [{ $or: or }, { verdict: { $in: verdicts } }] };
+            if (q.excludeProofId)
+                f.$nor = [{ proofId: q.excludeProofId, mobile: typeof q.excludeMobile === 'string' ? q.excludeMobile : '' }];
+            return f;
+        };
+        return this.guard('findCreditedMatches', null, async () => {
+            const blocking = await this.collection
+                .find(filterOf(['credit', 'pending']), { sort: { creditedAt: -1, claimedAt: -1 } })
+                .limit(LEDGER_LOOKUP_LIMIT)
+                .toArray();
+            return blocking.map((doc) => ({ by: matchBy(doc, q.utr ?? null, q.txnId ?? null, sha), doc: doc }));
+        });
+    }
+    /**
+     * Inferred credits ('credit_inferred', backfill) with this UTR / txn id / file: the gate's weak log only, never a
+     * block. Its own read and guard (Codex round 5 #3): a failure here never hides a blocking match. null = failed.
+     */
+    async findInferredMatches(q) {
+        const refs = [...new Set([q.utr, q.txnId].filter((v) => typeof v === 'string' && ((0,_payment_reference__WEBPACK_IMPORTED_MODULE_1__.isLedgerReference)(v) || (0,_payment_reference__WEBPACK_IMPORTED_MODULE_1__.ledgerTxnIdOf)(v) === v)))];
+        const sha = typeof q.imageSha256 === 'string' && HEX64.test(q.imageSha256) ? q.imageSha256 : null;
+        if (refs.length === 0 && !sha)
+            return [];
+        const or = [];
+        if (refs.length)
+            or.push({ utr: { $in: refs } }, { txnId: { $in: refs } });
+        if (sha)
+            or.push({ imageSha256: sha });
+        const f = { $and: [{ $or: or }, { verdict: 'credit_inferred' }] };
+        if (q.excludeProofId)
+            f.$nor = [{ proofId: q.excludeProofId, mobile: typeof q.excludeMobile === 'string' ? q.excludeMobile : '' }];
+        return this.guard('findInferredMatches', null, async () => (await this.collection
+            .find(f, { sort: { inferredCreditAt: -1 } })
+            .limit(LEDGER_LOOKUP_LIMIT)
+            .toArray()).map((doc) => ({ by: matchBy(doc, q.utr ?? null, q.txnId ?? null, sha), doc: doc })));
+    }
+    /**
+     * This client's 'pending' claim docs claimed before `before` (the tg-aut resolve sweep): never-swept docs first, then
+     * the least recently swept, oldest claim first within each. null = read failed.
+     */
+    async findPendingClaims(clientId, before, limit) {
+        if (!clientId || !(before instanceof Date) || !Number.isFinite(before.getTime()))
+            return [];
+        const n = Math.max(1, Math.min(100, Math.floor(limit) || 1));
+        return this.guard('findPendingClaims', null, async () => (await this.collection
+            // Round 13 #2: only a doc with a claim id (the sweep writes nothing without one, so an unfenced doc would
+            // be re-read first on every tick).
+            .find({ verdict: 'pending', clientId, claimedAt: { $lt: before }, claimId: { $type: 'string' } }, { sort: { lastSweptAt: 1, claimedAt: 1 } })
+            .limit(n)
+            .toArray()));
+    }
+    /**
+     * Turn one doc that is STILL 'pending' into 'credit' or 'reject' (a finish that already wrote the doc wins: 'gone').
+     * A credit whose UTR another doc holds as credited is stored as 'duplicate' (dupCreditedAt), as record() does.
+     * `claimId` is required (round 13 #2): without it nothing is written ('gone'). `expectReasons` (round 13 #3): the
+     * reasons the caller read; a doc whose reasons changed since (a marker written mid-sweep) is 'gone' for it.
+     */
+    async resolvePending(proofId, mobile, verdict, reasons, credit, claimId, expectReasons) {
+        if (!proofId)
+            return 'error';
+        if (typeof claimId !== 'string' || !claimId)
+            return 'gone';
+        // claimId: only the claim the caller saw (a newer claim of the same message is 'gone' for it).
+        const filter = {
+            proofId, mobile: typeof mobile === 'string' ? mobile.trim() : '', verdict: 'pending', claimId,
+            ...(expectReasons ? (expectReasons.length ? { reasons: { $eq: expectReasons } } : { $or: [{ reasons: { $eq: [] } }, { reasons: { $exists: false } }] }) : {}),
+        };
+        const now = new Date();
+        const rs = reasons.slice(0, LEDGER_MAX_REASONS);
+        const set = (fields) => this.collection.updateOne(filter, { $set: { ...fields, updatedAt: now } });
+        const creditFields = verdict === 'credit' && credit
+            ? { creditedAt: credit.at, ...(typeof credit.amount === 'number' && credit.amount > 0 ? { creditAmount: credit.amount } : {}) }
+            : {};
+        try {
+            const res = await set({ verdict, reasons: rs, ...creditFields });
+            return res.matchedCount > 0 ? 'resolved' : 'gone';
+        }
+        catch (error) {
+            if (isDuplicateKey(error) && duplicateIndex(error) === 'utr' && verdict === 'credit') {
+                try {
+                    const dup = {
+                        verdict: 'duplicate', reasons: [...rs, 'LEDGER_DUP_CREDIT'].slice(0, LEDGER_MAX_REASONS),
+                        ...(credit ? { dupCreditedAt: credit.at } : {}),
+                        ...(typeof credit?.amount === 'number' && credit.amount > 0 ? { dupCreditAmount: credit.amount } : {}),
+                    };
+                    const res = await set(dup);
+                    return res.matchedCount > 0 ? 'dup_credit' : 'gone';
+                }
+                catch (again) {
+                    this.logger.error(`[${this.collectionName}] resolvePending(${maskTail(proofId)}) as duplicate failed: ${redact(again)}`);
+                    return 'error';
+                }
+            }
+            this.logger.error(`[${this.collectionName}] resolvePending(${maskTail(proofId)}) failed: ${redact(error)}`);
+            return 'error';
+        }
+    }
+    /** Stamp a 'pending' doc the sweep could not decide (lastSweptAt), under the claim it saw. Never throws; false = not stamped. */
+    async markSwept(proofId, mobile, claimId) {
+        if (!proofId || typeof claimId !== 'string' || !claimId)
+            return false;
+        const filter = { proofId, mobile: typeof mobile === 'string' ? mobile.trim() : '', verdict: 'pending', claimId };
+        return this.guard('markSwept', false, async () => (await this.collection.updateOne(filter, { $set: { lastSweptAt: new Date() } })).matchedCount > 0);
+    }
+    async ensureIndexes() {
+        const c = this.collection;
+        await this.guardWrite('ensureIndexes(proofId,mobile unique)', () => c.createIndex({ proofId: 1, mobile: 1 }, { name: LEDGER_KEY_INDEX, unique: true }));
+        // One credit per reference. Key {utr, verdict} (not {utr}) so it never collides with the non-unique utr index.
+        await this.guardWrite('ensureIndexes(utr credit unique)', () => c.createIndex({ utr: 1, verdict: 1 }, { name: LEDGER_UTR_CREDIT_INDEX, unique: true, partialFilterExpression: { verdict: 'credit', utr: { $type: 'string' } } }));
+        await this.guardWrite('ensureIndexes(utr)', () => c.createIndex({ utr: 1 }, { name: 'utr_1', partialFilterExpression: { utr: { $exists: true } } }));
+        await this.guardWrite('ensureIndexes(txnId)', () => c.createIndex({ txnId: 1 }, { name: 'txnId_1', partialFilterExpression: { txnId: { $exists: true } } }));
+        await this.guardWrite('ensureIndexes(imageSha256)', () => c.createIndex({ imageSha256: 1 }, { name: 'imageSha256_1', partialFilterExpression: { imageSha256: { $exists: true } } }));
+        await this.guardWrite('ensureIndexes(clientId,chatId)', () => c.createIndex({ clientId: 1, chatId: 1 }, { name: 'clientId_1_chatId_1' }));
+        // The resolve sweep's read: pending docs only (a handful at any time), so the partial index stays tiny.
+        await this.guardWrite('ensureIndexes(pending claims)', () => c.createIndex({ clientId: 1, lastSweptAt: 1, claimedAt: 1 }, { name: LEDGER_PENDING_INDEX, partialFilterExpression: { verdict: 'pending' } }));
+    }
+}
+function matchBy(doc, utr, txnId, sha) {
+    const refs = [utr, txnId].filter(Boolean);
+    if (utr && (doc.utr === utr || doc.txnId === utr))
+        return 'utr';
+    if (refs.some((r) => doc.utr === r || doc.txnId === r))
+        return 'txn';
+    if (sha && doc.imageSha256 === sha)
+        return 'image';
+    return 'utr';
+}
+
+
+/***/ },
+
 /***/ "../../packages/tg-db/src/collections/payment-proofs.repository.ts"
 /*!*************************************************************************!*\
   !*** ../../packages/tg-db/src/collections/payment-proofs.repository.ts ***!
@@ -44093,9 +44462,12 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   hexHamming: () => (/* binding */ hexHamming),
 /* harmony export */   isRealPaymentReference: () => (/* binding */ isRealPaymentReference),
 /* harmony export */   otherRealReference: () => (/* binding */ otherRealReference),
-/* harmony export */   proofKeyFilter: () => (/* binding */ proofKeyFilter)
+/* harmony export */   proofKeyFilter: () => (/* binding */ proofKeyFilter),
+/* harmony export */   servedRefsOf: () => (/* binding */ servedRefsOf)
 /* harmony export */ });
 /* harmony import */ var _base_repository__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../base-repository */ "../../packages/tg-db/src/base-repository.ts");
+/* harmony import */ var _payment_reference__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./payment-reference */ "../../packages/tg-db/src/collections/payment-reference.ts");
+
 
 /**
  * `paymentProofs`: one small row per analysed payment screenshot, used only for fraud lookups
@@ -44125,7 +44497,11 @@ const NEAR_HASH_MAX_DISTANCE = 4;
 const NOT_RECORD_ONLY = { mode: { $ne: 'record' } };
 /** The review fields recordReview sets (always $set: they describe the final outcome). */
 const REVIEW_FIELDS = ['proofId', 'verdict', 'image', 'ocr'];
-/** The Mongo filter of one screenshot's row (see ProofKey); null when chatId or profile is missing. */
+/** One normalisation for both fields (= the ledger lookup's tokens): a T-id read as UTR is the same token. */
+function servedRefsOf(c) {
+    const one = (v) => (0,_payment_reference__WEBPACK_IMPORTED_MODULE_1__.ledgerTxnIdOf)(v) ?? (0,_payment_reference__WEBPACK_IMPORTED_MODULE_1__.ledgerReferenceOf)(v);
+    return [...new Set([one(c.utr), one(c.txnId)].filter((v) => !!v))];
+}
 function proofKeyFilter(key) {
     const chatId = String(key?.chatId || '').trim();
     if (!chatId || !key.profile)
@@ -44223,6 +44599,8 @@ class PaymentProofsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_
         delete doc.servedUtr;
         delete doc.servedSha;
         delete doc.servedMin;
+        delete doc.servedRefs;
+        delete doc.servedClaim;
         delete doc.creditAmount; // credit state too: only markServed writes it (at the credit decision)
         for (const k of REVIEW_FIELDS)
             delete doc[k]; // review fields: recordReview only
@@ -44276,7 +44654,7 @@ class PaymentProofsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_
         if (typeof base.imageSha256 === 'string' && !HEX64.test(base.imageSha256))
             delete base.imageSha256;
         // 'review' = the operator's stamp: written by CMS only, never by tg-aut.
-        for (const k of ['servedAt', 'servedService', 'servedUtr', 'servedSha', 'servedMin', 'creditAmount', 'ask', 'proof', 'review'])
+        for (const k of ['servedAt', 'servedService', 'servedUtr', 'servedSha', 'servedMin', 'servedRefs', 'servedClaim', 'creditAmount', 'ask', 'proof', 'review'])
             delete base[k];
         return this.guardWrite(`recordReview(${chatId})`, async () => {
             try {
@@ -44334,6 +44712,17 @@ class PaymentProofsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_
         });
     }
     /** Newest first; backs the per-chat near-duplicate scan (default last 20). Review-only rows are not counted. */
+    /**
+     * This message's own row, read by its key (servedAt and servedClaim only). null = no such row, or the read failed.
+     * Round 14 #3: the gate's held re-check (adoptClaim) reads its row here, never through a chat scan that a busy chat
+     * can push it out of.
+     */
+    async servedStateOf(proof) {
+        const key = proofKeyFilter(proof);
+        if (!key)
+            return null;
+        return this.guard(`servedStateOf(${key.chatId})`, null, () => this.collection.findOne({ ...key, ...NOT_RECORD_ONLY }, { projection: { _id: 0, servedAt: 1, servedClaim: 1 } }));
+    }
     async recentForChat(chatId, limit = 20) {
         const id = String(chatId || '').trim();
         if (!id)
@@ -44460,9 +44849,14 @@ class PaymentProofsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_
      * A receipt with a REAL UTR that collides only on the key is another payment in the same minute and is claimed
      * without the key (otherRealReference), unless its reference is the holder's or a cut of it (nidhi1 2026-11-06:
      * `21992078` then `219920787057`, ₹25 twice). A receipt with no UTR or a short / odd one loses (owner rule 7).
+     * `claim` (the gate): this attempt's own references and claim generation. The row's utr and servedUtr become the
+     * attempt's UTR (removed when it read none: Codex round 11 #2, a recheck never reserves the first read's UTR);
+     * its UTR and transaction id go into servedRefs (one unique set, so a token read as UTR in one screenshot and as
+     * transaction id in another still collides); servedClaim fences releaseServed (round 11 #1). Without `claim`
+     * (older callers) servedUtr copies the row's own utr.
      */
-    async markServed(proof, service, creditAmount, minuteKey) {
-        const first = await this.markServedOnce(proof, service, creditAmount, minuteKey);
+    async markServed(proof, service, creditAmount, minuteKey, claim) {
+        const first = await this.markServedOnce(proof, service, creditAmount, minuteKey, claim);
         if (first !== 'duplicate_minute')
             return first;
         const key = proofKeyFilter(proof);
@@ -44474,13 +44868,15 @@ class PaymentProofsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_
             const holder = await this.collection.find({ servedMin: minuteKey }).limit(1).next();
             if (!holder) {
                 // The holder's claim was released in between (its credit failed): claim the key again, once.
-                const retry = await this.markServedOnce(proof, service, creditAmount, minuteKey);
+                const retry = await this.markServedOnce(proof, service, creditAmount, minuteKey, claim);
                 return retry === 'duplicate_minute' ? 'duplicate' : retry;
             }
-            if (!otherRealReference(mine?.utr, holder?.utr))
+            const mineUtr = claim ? (claim.utr ?? undefined) : mine?.utr;
+            const holderUtr = holder?.servedUtr ?? holder?.utr;
+            if (!otherRealReference(mineUtr, holderUtr))
                 return 'duplicate';
             // A real reference that is not the holder's: another payment in this minute (same UTR: servedUtr_unique).
-            const again = await this.markServedOnce(proof, service, creditAmount, undefined);
+            const again = await this.markServedOnce(proof, service, creditAmount, undefined, claim);
             return again === 'duplicate_minute' ? 'duplicate' : again;
         }
         catch (error) {
@@ -44488,7 +44884,7 @@ class PaymentProofsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_
             return 'error';
         }
     }
-    async markServedOnce(proof, service, creditAmount, minuteKey) {
+    async markServedOnce(proof, service, creditAmount, minuteKey, claim) {
         const key = proofKeyFilter(proof);
         if (!key)
             return 'missing';
@@ -44496,10 +44892,15 @@ class PaymentProofsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_
         try {
             const filter = key;
             const credit = Number(creditAmount);
+            const refs = claim ? servedRefsOf(claim) : [];
+            const own = claim
+                ? { utr: claim.utr ? { $literal: claim.utr } : '$$REMOVE', servedUtr: claim.utr ? { $literal: claim.utr } : '$$REMOVE',
+                    ...(refs.length ? { servedRefs: { $literal: refs } } : {}), ...(claim.claim ? { servedClaim: { $literal: claim.claim } } : {}) }
+                : { servedUtr: '$utr' };
             const res = await this.collection.updateOne({ ...filter, servedAt: { $exists: false } }, 
             // Pipeline update so servedUtr copies this row's own utr (absent when the row has none). creditAmount is
             // set here, at the credit decision, never at insert ($literal: a pipeline value is never a field path).
-            [{ $set: { servedAt: new Date(), servedService: service, servedUtr: '$utr', servedSha: '$imageSha256',
+            [{ $set: { servedAt: new Date(), servedService: service, ...own, servedSha: '$imageSha256',
                         ...(Number.isFinite(credit) && credit > 0 ? { creditAmount: { $literal: credit } } : {}),
                         ...(minuteKey ? { servedMin: { $literal: minuteKey } } : {}) } }]);
             if (res.matchedCount > 0)
@@ -44643,12 +45044,15 @@ class PaymentProofsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_
             .limit(10)
             .toArray());
     }
-    /** Close an open request. Only the first caller wins (true); a concurrent or repeated resolve gets false. */
+    /**
+     * Close an open request. Only the first caller wins (true); a concurrent or repeated resolve gets false; a store
+     * failure is null (never read as "already resolved": Codex round 9 #1).
+     */
     async resolveAsk(proof, byMsgId) {
         const key = proofKeyFilter(proof);
         if (!key)
             return false;
-        return this.guard(`resolveAsk(${key.chatId})`, false, async () => {
+        return this.guard(`resolveAsk(${key.chatId})`, null, async () => {
             const res = await this.collection.updateOne({ ...key, 'ask.state': 'open' }, { $set: { 'ask.state': 'resolved', 'ask.resolvedAt': new Date(), 'ask.resolvedByMsgId': byMsgId } });
             return res.matchedCount > 0;
         });
@@ -44668,14 +45072,18 @@ class PaymentProofsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_
     }
     /**
      * Undo markServed when the credit itself failed (service never started), so the payer's retry of the same payment
-     * is judged again instead of being called a repeat.
+     * is judged again instead of being called a repeat. true = released; false = nothing held (no row, or no
+     * servedAt); null = the write failed (the caller keeps the claim pending and retries: the ledger resolve sweep).
+     * `claim`: only that claim generation is released (Codex round 11 #1: a late or stale release never strips a
+     * newer claim of the same message).
      */
-    async releaseServed(proof) {
+    async releaseServed(proof, claim) {
         const key = proofKeyFilter(proof);
-        if (!key)
+        // Round 13 #2: a release always names its claim generation (servedClaim); without one nothing is released.
+        if (!key || typeof claim !== 'string' || !claim)
             return false;
-        return this.guard(`releaseServed(${key.chatId})`, false, async () => {
-            const res = await this.collection.updateOne({ ...key, servedAt: { $exists: true } }, { $unset: { servedAt: '', servedService: '', servedUtr: '', servedSha: '', servedMin: '', creditAmount: '' } });
+        return this.guard(`releaseServed(${key.chatId})`, null, async () => {
+            const res = await this.collection.updateOne({ ...key, servedAt: { $exists: true }, servedClaim: claim }, { $unset: { servedAt: '', servedService: '', servedUtr: '', servedSha: '', servedMin: '', servedRefs: '', servedClaim: '', creditAmount: '' } });
             return res.matchedCount > 0;
         });
     }
@@ -44727,8 +45135,77 @@ class PaymentProofsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_
         // Same guard per receipt (payee + amount + printed minute, owner payee rule 7), global: a no-UTR re-send of a
         // credited receipt loses the claim in any chat / persona (markServed).
         await this.guardWrite('ensureIndexes(servedMin unique)', () => c.createIndex({ servedMin: 1 }, { name: 'servedMin_unique', unique: true, partialFilterExpression: { servedMin: { $exists: true } } }));
+        // Same guard per payment reference (Codex round 10 #2, round 11 #4): UTR and transaction id in one multikey set,
+        // so one token is claimed once whichever field it was read in.
+        await this.guardWrite('ensureIndexes(servedRefs unique)', () => c.createIndex({ servedRefs: 1 }, { name: 'servedRefs_unique', unique: true, partialFilterExpression: { servedRefs: { $exists: true } } }));
         await this.guardWrite('ensureIndexes(ttl)', () => this.ensureTtlIndex());
     }
+}
+
+
+/***/ },
+
+/***/ "../../packages/tg-db/src/collections/payment-reference.ts"
+/*!*****************************************************************!*\
+  !*** ../../packages/tg-db/src/collections/payment-reference.ts ***!
+  \*****************************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   isDegenerateReference: () => (/* binding */ isDegenerateReference),
+/* harmony export */   isLedgerReference: () => (/* binding */ isLedgerReference),
+/* harmony export */   ledgerReferenceOf: () => (/* binding */ ledgerReferenceOf),
+/* harmony export */   ledgerTxnIdOf: () => (/* binding */ ledgerTxnIdOf),
+/* harmony export */   normalizeLedgerReference: () => (/* binding */ normalizeLedgerReference)
+/* harmony export */ });
+/**
+ * The ONE validator for every `paymentProofLedger` key (Codex review 2026-11-27 #3): tg-aut's ledger lookup
+ * (proof-gate/ledger.ts), the recorder's write and the repository (payment-proof-ledger.repository.ts), and
+ * scripts/payment-proof-ledger-backfill.cjs (which imports this file). No imports: the backfill loads it with Node's
+ * type stripping.
+ *
+ * A ledger key blocks a payer forever, so an OCR misread must never become one. Format rules are the gate's
+ * (tg-aut proof-gate/decide.ts normalizeUtr + isRealReference: 12-digit RRN, 18-digit Paytm id, PhonePe T + 20-22
+ * digits, a 12-35 character letters+digits id). On top of them a DEGENERATE value is never a key: fewer than 3 distinct
+ * digits ("000000000000", "T00000000000000000000") or a run of 8+ identical characters ("T2611230000000000000000").
+ */
+/** Uppercase, separators removed. Null for masked ("XXXX", "****"), too short, or no digits at all (= decide.ts normalizeUtr). */
+function normalizeLedgerReference(raw) {
+    if (typeof raw !== 'string')
+        return null;
+    const u = raw.replace(/[\s\-.:]/g, '').toUpperCase();
+    if (u.length < 8 || /[X*•]{3,}/.test(u) || !/\d/.test(u) || !/^[A-Z0-9]+$/.test(u))
+        return null;
+    return u;
+}
+/** All-zero / one-digit / long-run values: what a template or a misread prints, never a real reference. */
+function isDegenerateReference(ref) {
+    const digits = ref.replace(/\D/g, '');
+    if (new Set(digits).size < 3)
+        return true;
+    return /(.)\1{7,}/.test(ref);
+}
+/** A normalised reference that may be a ledger key (real format, not degenerate). */
+function isLedgerReference(ref) {
+    if (typeof ref !== 'string')
+        return false;
+    const real = /^\d{12}$/.test(ref) || /^\d{18}$/.test(ref) || /^T?\d{20,22}$/.test(ref)
+        || (/^[A-Z0-9]{12,35}$/.test(ref) && /[A-Z]/.test(ref) && /\d/.test(ref) && !/^T\d+$/.test(ref));
+    return real && !isDegenerateReference(ref);
+}
+/** The UTR as a ledger key, or null (raw OCR text in). */
+function ledgerReferenceOf(raw) {
+    const u = normalizeLedgerReference(raw);
+    return u && isLedgerReference(u) ? u : null;
+}
+/** A PhonePe transaction id (T + 20-24 digits) as a ledger key, or null. */
+function ledgerTxnIdOf(raw) {
+    if (typeof raw !== 'string')
+        return null;
+    const t = raw.replace(/\s/g, '').toUpperCase();
+    return /^T\d{20,24}$/.test(t) && !isDegenerateReference(t) ? t : null;
 }
 
 
@@ -46089,6 +46566,20 @@ class UserDataRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_2__.B
      * anywhere in the call chain must keep using the plain update path, because calling them
      * payments is exactly what makes the revenue figure 3.31x inflated.
      */
+    /**
+     * Does this chat's userData row (chatId only: profile casing differs between writers) hold one of these credit keys (creditKeys, the last CREDIT_KEY_HISTORY
+     * applied keys)? Read only, projection `_id`. null = the read failed. tg-aut proof-gate: credit evidence for a stale
+     * 'pending' paymentProofLedger doc (a crash between the credit and the ledger finish).
+     */
+    async hasCreditKey(chatId, keys) {
+        const wanted = keys.filter((k) => typeof k === 'string' && k.length > 0);
+        if (!chatId || wanted.length === 0)
+            return false;
+        return this.guard('hasCreditKey', null, async () => {
+            const doc = await this.collection.findOne({ chatId, creditKeys: { $in: wanted } }, { projection: { _id: 1 } });
+            return doc !== null;
+        });
+    }
     async creditPayment(chatId, identity, input) {
         const amount = Number(input.amount);
         if (!Number.isFinite(amount) || amount <= 0) {
@@ -46918,13 +47409,15 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _collections_stats_repository__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ./collections/stats.repository */ "../../packages/tg-db/src/collections/stats.repository.ts");
 /* harmony import */ var _collections_payment_proofs_repository__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ./collections/payment-proofs.repository */ "../../packages/tg-db/src/collections/payment-proofs.repository.ts");
 /* harmony import */ var _collections_vision_shadow_repository__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ./collections/vision-shadow.repository */ "../../packages/tg-db/src/collections/vision-shadow.repository.ts");
-/* harmony import */ var _collections_reply_failures_repository__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ./collections/reply-failures.repository */ "../../packages/tg-db/src/collections/reply-failures.repository.ts");
-/* harmony import */ var _collections_account_leases_repository__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ./collections/account-leases.repository */ "../../packages/tg-db/src/collections/account-leases.repository.ts");
-/* harmony import */ var _collections_parked_accounts_repository__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! ./collections/parked-accounts.repository */ "../../packages/tg-db/src/collections/parked-accounts.repository.ts");
-/* harmony import */ var _collections_parked_chats_repository__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! ./collections/parked-chats.repository */ "../../packages/tg-db/src/collections/parked-chats.repository.ts");
-/* harmony import */ var _collections_parked_control_repository__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! ./collections/parked-control.repository */ "../../packages/tg-db/src/collections/parked-control.repository.ts");
-/* harmony import */ var _collections_account_role_events_repository__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! ./collections/account-role-events.repository */ "../../packages/tg-db/src/collections/account-role-events.repository.ts");
-/* harmony import */ var _collections_account_health_repository__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! ./collections/account-health.repository */ "../../packages/tg-db/src/collections/account-health.repository.ts");
+/* harmony import */ var _collections_payment_proof_ledger_repository__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ./collections/payment-proof-ledger.repository */ "../../packages/tg-db/src/collections/payment-proof-ledger.repository.ts");
+/* harmony import */ var _collections_reply_failures_repository__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ./collections/reply-failures.repository */ "../../packages/tg-db/src/collections/reply-failures.repository.ts");
+/* harmony import */ var _collections_account_leases_repository__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! ./collections/account-leases.repository */ "../../packages/tg-db/src/collections/account-leases.repository.ts");
+/* harmony import */ var _collections_parked_accounts_repository__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! ./collections/parked-accounts.repository */ "../../packages/tg-db/src/collections/parked-accounts.repository.ts");
+/* harmony import */ var _collections_parked_chats_repository__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! ./collections/parked-chats.repository */ "../../packages/tg-db/src/collections/parked-chats.repository.ts");
+/* harmony import */ var _collections_parked_control_repository__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! ./collections/parked-control.repository */ "../../packages/tg-db/src/collections/parked-control.repository.ts");
+/* harmony import */ var _collections_account_role_events_repository__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! ./collections/account-role-events.repository */ "../../packages/tg-db/src/collections/account-role-events.repository.ts");
+/* harmony import */ var _collections_account_health_repository__WEBPACK_IMPORTED_MODULE_17__ = __webpack_require__(/*! ./collections/account-health.repository */ "../../packages/tg-db/src/collections/account-health.repository.ts");
+
 
 
 
@@ -46967,13 +47460,14 @@ function createRepositories(connection, logger) {
         stats: new _collections_stats_repository__WEBPACK_IMPORTED_MODULE_7__.StatsRepository(connection, logger),
         paymentProofs: new _collections_payment_proofs_repository__WEBPACK_IMPORTED_MODULE_8__.PaymentProofsRepository(connection, logger),
         visionShadow: new _collections_vision_shadow_repository__WEBPACK_IMPORTED_MODULE_9__.VisionShadowRepository(connection, logger),
-        replyFailures: new _collections_reply_failures_repository__WEBPACK_IMPORTED_MODULE_10__.ReplyFailuresRepository(connection, logger),
-        accountLeases: new _collections_account_leases_repository__WEBPACK_IMPORTED_MODULE_11__.AccountLeasesRepository(connection, logger),
-        parkedAccounts: new _collections_parked_accounts_repository__WEBPACK_IMPORTED_MODULE_12__.ParkedAccountsRepository(connection, logger),
-        parkedChats: new _collections_parked_chats_repository__WEBPACK_IMPORTED_MODULE_13__.ParkedChatsRepository(connection, logger),
-        parkedControl: new _collections_parked_control_repository__WEBPACK_IMPORTED_MODULE_14__.ParkedControlRepository(connection, logger),
-        accountRoleEvents: new _collections_account_role_events_repository__WEBPACK_IMPORTED_MODULE_15__.AccountRoleEventsRepository(connection, logger),
-        accountHealth: new _collections_account_health_repository__WEBPACK_IMPORTED_MODULE_16__.AccountHealthRepository(connection, logger),
+        paymentProofLedger: new _collections_payment_proof_ledger_repository__WEBPACK_IMPORTED_MODULE_10__.PaymentProofLedgerRepository(connection, logger),
+        replyFailures: new _collections_reply_failures_repository__WEBPACK_IMPORTED_MODULE_11__.ReplyFailuresRepository(connection, logger),
+        accountLeases: new _collections_account_leases_repository__WEBPACK_IMPORTED_MODULE_12__.AccountLeasesRepository(connection, logger),
+        parkedAccounts: new _collections_parked_accounts_repository__WEBPACK_IMPORTED_MODULE_13__.ParkedAccountsRepository(connection, logger),
+        parkedChats: new _collections_parked_chats_repository__WEBPACK_IMPORTED_MODULE_14__.ParkedChatsRepository(connection, logger),
+        parkedControl: new _collections_parked_control_repository__WEBPACK_IMPORTED_MODULE_15__.ParkedControlRepository(connection, logger),
+        accountRoleEvents: new _collections_account_role_events_repository__WEBPACK_IMPORTED_MODULE_16__.AccountRoleEventsRepository(connection, logger),
+        accountHealth: new _collections_account_health_repository__WEBPACK_IMPORTED_MODULE_17__.AccountHealthRepository(connection, logger),
     };
 }
 /**
@@ -47003,6 +47497,8 @@ async function ensureAllIndexes(repositories, logger) {
         ['stats', repositories.stats],
         ['paymentProofs', repositories.paymentProofs],
         ['visionShadow', repositories.visionShadow],
+        // No TTL; the unique (proofId, mobile) key and the one-credit-per-UTR index (creates the collection on first boot).
+        ['paymentProofLedger', repositories.paymentProofLedger],
         ['replyFailures', repositories.replyFailures],
         // P2 of the parked responder: the gcAt TTL index (creates the collection on first boot).
         ['accountLeases', repositories.accountLeases],
@@ -65494,8 +65990,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "01c93fe028281f267bbc973cde257dad9b2f3def" : 0;
-    const builtAt =  true ? "2026-11-27T07:53:04.241Z" : 0;
+    const sha =  true ? "b90840242ca4e97ae11be72cc89ae716f8b0807a" : 0;
+    const builtAt =  true ? "2026-11-27T15:23:17.133Z" : 0;
     return { sha, builtAt };
 }
 
@@ -85935,13 +86431,19 @@ class UserDataDtoCrud {
      * was indistinguishable from a re-entry and was booked only as its rise over the day's highest
      * (₹50 then ₹350 booked 50 + 300; ₹30 then ₹20 booked 30 + 0).
      */
-    async recordPaymentAttribution(chatId, confirmedAmount, ledger) {
+    async recordPaymentAttribution(chatId, confirmedAmount, ledger, receipt) {
         const normalizedChatId = String(chatId || '').trim();
         const amount = Number(confirmedAmount);
         const profile = process.env.dbcoll?.trim();
         const clientId = process.env.clientId?.trim();
         if (!normalizedChatId || !profile || !clientId || !Number.isFinite(amount) || amount < 15)
             return;
+        // The credit write did not apply (Codex round 3, coordinator 2026-11-27): no payment_event, no daily counting.
+        // The old legacy fallback booked it, and the payer's credited retry then booked the same payment again.
+        if (typeof ledger === 'object' && ledger) {
+            logger.log(`payment-event kind=skip reason=credit_${ledger.failed} chat=****${normalizedChatId.slice(-4)} amount=${Math.floor(amount)}`);
+            return;
+        }
         const roundedAmount = Math.round(amount * 100) / 100;
         const floorAmount = Math.max(0, Math.floor(roundedAmount));
         // Daily paid/revenue counting — exactly ONCE per payer per day, driven here at payment
@@ -86043,6 +86545,8 @@ class UserDataDtoCrud {
                         // (analytics/upgrade-2026-11-08-cleanup-wave3.sql; always NULL / NULL / false).
                         // Owner revenue excludes chats via payment_event.is_fake in payment_event_owner.
                         source: 'screenshot',
+                        // Receipt as read (analytics/upgrade-2026-11-23-payment-receipt.sql); nullable, absent = not read.
+                        ...receiptColumns(receipt),
                     });
             }
             catch { /* analytics is optional and must never affect payment service */ }
@@ -86498,6 +87002,16 @@ function formatAttributionDayKey(nowMs) {
         month: '2-digit',
         day: '2-digit',
     }).format(new Date(safeNow));
+}
+function receiptColumns(r) {
+    if (!r)
+        return {};
+    const text = (v, max) => (typeof v === 'string' && v.trim() ? v.trim().slice(0, max) : null);
+    const at = r.printedAt instanceof Date && Number.isFinite(r.printedAt.getTime()) ? r.printedAt : null;
+    return {
+        utr: text(r.utr, 64), txnId: text(r.txnId, 64), payeeUpi: text(r.payeeUpi, 120), payeeName: text(r.payeeName, 120),
+        printedAt: at, app: text(r.app, 40), proofId: text(r.proofId, 120),
+    };
 }
 
 
@@ -92410,7 +92924,7 @@ function startProofRecord(event, chatId, db, photoBuffer, imageDetails) {
         msgId: Number(event.message.id) || 0,
         clientId: process.env.clientId || "",
         ...receivingMobile(),
-        profile: (process.env.dbcoll || "").toLowerCase(),
+        profile: gateProfile(),
         photo: photoBuffer,
         details: imageDetails,
         rawText: String(imageDetails.text ?? ""),
@@ -92425,6 +92939,9 @@ function startProofRecord(event, chatId, db, photoBuffer, imageDetails) {
             personaNames: [...db.getOwnClientNames(), ...db.getClientFirstNames()],
         })),
         paymentMs: () => printedPaymentMs(imageDetails),
+        // The same time the gate compares (facts.timeMs = printedPaymentMs), so the ledger edit check reads one source.
+        printedMs: () => printedPaymentMs(imageDetails),
+        ledger: () => (db.getRepositories?.()?.paymentProofLedger ?? null),
     });
 }
 /** handleMyPayment's reject (its ops title) -> the review outcome and reason code. */
@@ -92491,7 +93008,7 @@ async function fraudDeadlineOnTouch(client, chatId) {
         if (!due)
             return { fired: false, blocked };
         const label = (due.ask?.reasons ?? []).join(',') || 'fraud';
-        const own = (process.env.dbcoll || '').toLowerCase();
+        const own = gateProfile();
         await paymentFlowWith(client, chatId, db, Number(due.amount) || 0)
             .fraudBlockDue({ chatId, profile: due.profile, msgId: due.telegramMsgId, ...(due.clientId ? { clientId: due.clientId } : {}), ...(due.mobile ? { mobile: due.mobile } : {}), label, quiet: due.profile !== own, ...(due.ask?.openedAt ? { openedAtMs: new Date(due.ask.openedAt).getTime() } : {}) });
         return { fired: true, blocked: true };
@@ -92517,7 +93034,7 @@ function screenshotRef(event, chatId, photoBuffer, imageDetails, paymentMs) {
         msgId: Number(event.message.id) || 0,
         clientId: process.env.clientId || "",
         ...receivingMobile(),
-        profile: (process.env.dbcoll || "").toLowerCase(),
+        profile: gateProfile(),
         photo: photoBuffer,
         details: imageDetails,
         paymentMs,
@@ -92525,6 +93042,57 @@ function screenshotRef(event, chatId, photoBuffer, imageDetails, paymentMs) {
         ...(vision?.timeRelative ? { timeRelative: true } : {}),
         ...(vision?.ocrText ? { ocrText: vision.ocrText } : {}),
     };
+}
+/** The receipt columns of this screenshot's payment_event row (analytics/upgrade-2026-11-23-payment-receipt.sql). */
+function paymentReceiptOf(event, chatId, imageDetails) {
+    const printed = (0,_payments_payment_time__WEBPACK_IMPORTED_MODULE_20__.parsePaymentTime)(imageDetails.time || "", new Date(), imageDetails.text)?.getTime();
+    return {
+        utr: (0,_payments_proof_gate_decide__WEBPACK_IMPORTED_MODULE_42__.normalizeUtr)(imageDetails.utr),
+        txnId: (0,_payments_proof_archive_verdict__WEBPACK_IMPORTED_MODULE_18__.txnIdOf)(imageDetails.text) ?? null,
+        payeeUpi: imageDetails.payeeUpiId || null,
+        payeeName: imageDetails.payeeName || imageDetails.payeeBankingName || null,
+        printedAt: typeof printed === "number" && Number.isFinite(printed) ? new Date(printed) : null,
+        app: (0,_payments_vision_shadow__WEBPACK_IMPORTED_MODULE_16__.proofVisionOf)(imageDetails)?.app || null,
+        proofId: (0,_payments_proof_archive_verdict__WEBPACK_IMPORTED_MODULE_18__.proofIdOf)(process.env.clientId || "", chatId, Number(event.message.id) || 0),
+    };
+}
+/**
+ * The persona of this process as the payment gate, the review record and the ledger store it: trimmed and lowercased
+ * (one normaliser; the userData row keeps dbcoll trimmed, which is why the ledger's credit-evidence read filters on
+ * chatId + the account credit key only, never on this value).
+ */
+function gateProfile() {
+    return (process.env.dbcoll || "").trim().toLowerCase();
+}
+/** A credit write that definitely did not apply (nothing written): its claim is released and it grants nothing. */
+/** The fields a new service cycle writes (ladder cycleStartUpdate), as on `row`; absent as null (round 16 rollback). */
+const CYCLE_FIELDS = ['cycleVideoBase', 'fullShow', 'secondShow', 'cyclePaid', 'showsPaidTo'];
+function cycleFieldsOf(row) {
+    return Object.fromEntries(CYCLE_FIELDS.map((k) => [k, row[k] ?? null]));
+}
+function isDefiniteCreditFailure(credit) {
+    return credit === 'no-row' || credit === 'unavailable' || credit === 'invalid-amount';
+}
+/** The userData fields creditPayment writes (UserDataRepository.creditPayment), as on `row`; absent stays absent. */
+const CREDIT_FIELDS = ['payAmount', 'lifetimePaid', 'lifetimeCredits', 'lastPaidAt', 'creditKeys'];
+function creditFieldsOf(row) {
+    const out = {};
+    for (const k of CREDIT_FIELDS)
+        if (row && k in row)
+            out[k] = row[k];
+    return out;
+}
+function withCreditFields(row, fields) {
+    if (!row)
+        return row;
+    const out = { ...row };
+    for (const k of CREDIT_FIELDS) {
+        if (k in fields)
+            out[k] = fields[k];
+        else
+            delete out[k];
+    }
+    return out;
 }
 /** Payment moment as printed (no AM/PM correction): used where the time check did not run. */
 function printedPaymentMs(imageDetails) {
@@ -92916,26 +93484,24 @@ async function handleRepeatPayment(event, chatId, imageDetails, userDetails, amo
  * payment attribution (stats2 counting + the payment_event row, spooled to disk at enqueue by the analytics sink).
  * Proof arpitha2-6675736514-7400 (₹150) lost its payment_event row when the process crashed after the call started;
  * every tg-aut SIGSEGV since 11-01 hung right after a call started. Nothing here sends a message, so the user sees
- * the same replies in the same order. resetStatesOnPayment (before this) already noted the credit moment and ended a
- * call pause, so creditPaymentOutcome's endCallPause changes nothing for the call that follows. Its payAmount $max is
+ * the same replies in the same order. It runs first in the valid-payment branch (Codex round 5 #2, before
+ * resetStatesOnPayment, which ends a call pause too); the rows the later writes return get their pre-credit credit
+ * fields back (withCreditFields), so the service path reads what it read before. Its payAmount $max is
  * overwritten by the service writes (initiateCall, the demo / call-link updates) and re-raised to the tier by
  * finishValidPaymentCredit, as before. Returns the attribution's ledger outcome.
  */
-async function creditAndAttributePayment(event, chatId, db, amount, gateIdentified = false, gateClaimed = false) {
+async function creditAndAttributePayment(event, chatId, db, amount, gateIdentified = false, gateClaimed = false, receipt) {
     // The authoritative ledger write: every valid payment converges here. It adds what the payAmount writes cannot:
     //   - `lifetimePaid`, only ever raised (the sum of payments since 2026-10-22), while highestPayAmount can drop
     //     (ladder tooHighDropUpdate, showDeliveredUpdate at the cycle's end);
     //   - idempotency keyed on the screenshot message: the credit paths run in scheduleProcessImageTask callbacks
     //     (a setTimeout wrapper with no dedupe), so one screenshot could otherwise credit twice.
     // The ledger outcome decides what revenue books: a NEW key whose payment identity the proof gate claimed (UTR or
-    // picture hash) books its full amount, a replayed key books nothing. Everything else (no gate identity: a
-    // re-screenshot of the same payment has a new message id; nothing written; the write threw) is left undefined:
-    // the legacy rise-over-highest rule, which never double-books.
+    // picture hash) books its full amount, a replayed key books nothing, a write that definitely did not apply books
+    // nothing. A thrown write and an applied credit without a gate identity (a re-screenshot of the same payment has a
+    // new message id) are left undefined: the legacy rise-over-highest rule, which never double-books.
     let credit;
     if ((0,_tg_vision__WEBPACK_IMPORTED_MODULE_49__.isCreditableAmount)(amount)) {
-        creditedSeq.delete(chatId);
-        creditedSeq.set(chatId, ++holdSeq);
-        capMap(creditedSeq);
         try {
             // lifetimePaid (2026-10-22): the amount paid, summed when the gate claimed this payment's identity; otherwise only
             // raised (a re-screenshot of the same payment has a new message id, so the key alone cannot stop a double count).
@@ -92955,10 +93521,23 @@ async function creditAndAttributePayment(event, chatId, db, amount, gateIdentifi
         // One greppable line per ledger decision (owner 2026-11-19): which keys were checked, what the gate said, the result.
         logger.log(`[credit-key] chat ****${String(chatId).slice(-4)} msg ${event.message.id} key=account legacy=${gateClaimed ? 'skipped' : 'checked'} `
             + `gate=${gateClaimed ? (gateIdentified ? 'won-identified' : 'won') : 'not-claimed'} ledger=${credit ?? 'error'}`);
+        // The held-image "credited since" marker (Codex round 6 #1): only a credit that applied, replayed or may have
+        // applied (a throw). A definite failure credited nothing, so a held screenshot of this chat still runs.
+        if (!isDefiniteCreditFailure(credit)) {
+            creditedSeq.delete(chatId);
+            creditedSeq.set(chatId, ++holdSeq);
+            capMap(creditedSeq);
+        }
     }
-    const ledger = credit === 'duplicate' ? 'duplicate' : credit === 'applied' && gateIdentified ? 'applied' : undefined;
+    // payment_event (coordinator 2026-11-27, review round 5 ruling 2): a credit write that definitely did not apply
+    // ('no-row', 'unavailable', 'invalid-amount') passes its outcome and books nothing. A thrown write keeps the legacy
+    // rule (undefined): its claim stays, so a resend is a repeat and cannot book again. The legacy rule also covers an
+    // applied credit without a gate-claimed identity (mode 'max') and an amount the credit write never takes.
+    const ledger = credit === 'duplicate' ? 'duplicate'
+        : credit === 'applied' ? (gateIdentified ? 'applied' : undefined)
+            : isDefiniteCreditFailure(credit) ? { failed: credit } : undefined;
     try {
-        await db.recordPaymentAttribution(chatId, amount, ledger);
+        await db.recordPaymentAttribution(chatId, amount, ledger, receipt);
     }
     catch (error) {
         // Payment service must not be withheld because analytics is unavailable.
@@ -93050,7 +93629,53 @@ async function processImage(event) {
     // The ledger credit and payment_event row are on record (creditAndAttributePayment): the claim (servedAt) stays even if
     // the service then throws, so a re-send of this payment is a repeat (owed service answered), never a second credit.
     let creditRecorded = false;
-    const keepCreditClaim = () => { releaseClaim = undefined; creditRecorded = true; };
+    // The ledger doc of this screenshot becomes a 'credit' (reuse of its UTR / file rejected forever) only on a credit
+    // that was APPLIED (Codex review 2026-11-27 #1). Any other outcome (the write threw: undefined; 'no-row',
+    // 'unavailable', 'invalid-amount'; 'duplicate' = this message's key was applied by an earlier run, whose own ledger doc
+    // is the credit) keeps the claim as before, but the ledger records no 'credit' (reject CREDIT_NOT_RECORDED,
+    // non-blocking), so the payer's retry of that UTR is never blocked by it.
+    // Codex review 2026-11-27 round 3 #1: a DEFINITE failure ('no-row', 'unavailable', 'invalid-amount': nothing was
+    // written) frees the claim now, so the payer's fresh retry of the same payment is judged again (and credited) instead
+    // of being called a repeat by the 7-day served row. An unknown result (the write threw: undefined) keeps the claim
+    // (it may have applied), as do 'applied' and 'duplicate' (a confirmed replay of this message's credit).
+    /** Returns whether a definite failure's claim was released (null: nothing to release). */
+    const keepCreditClaim = async (amount, credit) => {
+        const release = releaseClaim;
+        releaseClaim = undefined;
+        const definiteFailure = isDefiniteCreditFailure(credit);
+        creditRecorded = !definiteFailure;
+        // A definite failure frees its claim first (Codex round 10 #1: the ledger follows what the release did).
+        let released = null;
+        if (definiteFailure && release) {
+            released = false;
+            try {
+                released = Boolean(await release());
+            }
+            catch (releaseError) {
+                (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_21__.parseError)(releaseError, "[ProcessImage] releasing the payment claim failed", false);
+            }
+            logger.warn(`payment-ledger kind=claim_released chat=••••${String(event.message.chatId ?? "").slice(-4)} msg=${event.message.id} outcome=${credit} released=${released}`);
+        }
+        // Codex round 5 #1: an unknown result under a gate claim leaves the 'pending' claim doc for the resolve sweep (the
+        // write may have applied); a released definite failure is a reject carrying CLAIM_RELEASED. Round 12 #5: the two
+        // pending cases are marked apart: a thrown / replayed credit is SERVED (SERVED_AFTER_THROW, never released), a
+        // definite failure whose release failed granted nothing (RELEASE_FAILED, the sweep retries the release).
+        const servedUnknown = Boolean(release) && credit !== 'applied' && !definiteFailure;
+        const releaseFailed = Boolean(release) && definiteFailure && released === false;
+        const unknownUnderClaim = servedUnknown || releaseFailed;
+        if (credit === 'applied')
+            proof?.creditRecorded(amount);
+        else {
+            if (servedUnknown)
+                proof?.creditUnknown();
+            else if (releaseFailed)
+                proof?.creditReleaseFailed();
+            else if (released)
+                proof?.creditReleased();
+            logger.warn(`payment-ledger kind=credit_unrecorded chat=••••${String(event.message.chatId ?? "").slice(-4)} msg=${event.message.id} ledger_verdict=${unknownUnderClaim ? 'pending' : 'reject'} outcome=${credit ?? 'error'}`);
+        }
+        return released;
+    };
     // This screenshot's review record (payments/proof-archive); written in the finally below, after every reply.
     let proof;
     const initiateCallKeepingClaim = async (...args) => {
@@ -93164,6 +93789,13 @@ async function processImage(event) {
         let resendAnswered = false;
         const judgePaymentFirst = callOwed && amount > 11 && (0,_tg_vision__WEBPACK_IMPORTED_MODULE_49__.isCreditableAmount)(amount)
             && reachesPaymentGate(imageDetails, sanitizedData, event.message?.text);
+        /** The call owed before this picture, after the picture was judged (the row is read again). */
+        const owedCallAfterJudging = async () => {
+            const latest = await db.read(chatId);
+            if (latest && latest.canReply !== 0 && (0,_payments_service_eligibility__WEBPACK_IMPORTED_MODULE_3__.canProceedWithService)(latest)) {
+                await (0,_calls_call_initiation__WEBPACK_IMPORTED_MODULE_29__.proceedWithCall)(latest, chatId, "Image Processed");
+            }
+        };
         if (callOwed && !judgePaymentFirst) {
             const callRequested = await (0,_calls_call_initiation__WEBPACK_IMPORTED_MODULE_29__.proceedWithCall)(userDetails, chatId, "Image Processed");
             if (callRequested) {
@@ -93255,6 +93887,9 @@ async function processImage(event) {
                                     }
                                     const isPaymentProperlyMine = "verdict" in judged ? judged.verdict : null;
                                     releaseClaim = "verdict" in judged ? judged.release : undefined;
+                                    const finaliseCredit = "verdict" in judged ? judged.finalise : undefined;
+                                    if (session && releaseClaim)
+                                        proof.claimed(session.ledgerClaimId, session.ledgerClaimedAtMs);
                                     // The gate claimed this payment's own identity (UTR / picture hash): its full amount is new revenue.
                                     const gateIdentified = Boolean(session && releaseClaim && (session.facts.utr || session.facts.dHash));
                                     // The gate won the claim of this screenshot (with or without a payment identity).
@@ -93273,13 +93908,82 @@ async function processImage(event) {
                                     }
                                     if (isPaymentProperlyMine?.isvalid) {
                                         logger.log("Valid payment confirmed and processed.");
-                                        // Smart state reset based on payment
-                                        const oldPayAmount = userDetails.payAmount;
+                                        // Credit first (Codex round 5 #2): a credit write that definitely did not apply ('no-row',
+                                        // 'unavailable', 'invalid-amount') released its claim, so it must grant nothing: no state reset, no
+                                        // tier / cycle / bought write, no service, no reply. The payer's resend is judged again.
                                         // Read before this credit raises highestPayAmount: a used-up payer (no show left at their pay)
-                                        // starts a new service cycle below, or the credited call would bail and the payer get silence.
+                                        // starts a new service cycle, or the credited call would bail and the payer get silence.
                                         const usedUpBeforeCredit = (0,_payments_service_eligibility__WEBPACK_IMPORTED_MODULE_3__.serviceUsedUp)(userDetails);
                                         // Same chat, within 30 min, nothing delivered since the earlier credited payment(s): route at the sum.
                                         const tierAmount = tierAmountFor(chatId, userDetails, amount, `msg:${event.message.id}`);
+                                        // Round 16: a used-up payer's new service cycle is written BEFORE the credit (the order before the
+                                        // ledger change). A failed cycle write is a definite failure: the claim is released, nothing is
+                                        // credited, and the resend is judged again. A definite credit failure after it rolls the cycle
+                                        // fields back. No recovery state: the credit never stands without its cycle.
+                                        const cycleFirst = usedUpBeforeCredit && !(tierAmount !== payAmount && tierAmount < _payments_ladder__WEBPACK_IMPORTED_MODULE_5__.PAID_MIN) && tierAmount >= _payments_ladder__WEBPACK_IMPORTED_MODULE_5__.DEMO_GRANT_MIN && tierAmount <= _tg_vision__WEBPACK_IMPORTED_MODULE_49__.MAX_PAYMENT_AMOUNT;
+                                        let cycleRow = null;
+                                        const cycleBefore = cycleFirst ? cycleFieldsOf(userDetails) : null;
+                                        if (cycleFirst) {
+                                            try {
+                                                cycleRow = await (0,_payments_service_cycle__WEBPACK_IMPORTED_MODULE_6__.startServiceCycle)(chatId, tierAmount);
+                                            }
+                                            catch (cycleError) {
+                                                logger.warn(`[payment-gate] kind=cycle_write_failed err=${cycleError?.name ?? 'Error'} chat=••••${chatId.slice(-4)} msg=${event.message.id} amount=${tierAmount}`);
+                                                const cycleReleased = await keepCreditClaim(amount, 'unavailable');
+                                                await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_31__.notifyChat)(chatId, { title: 'Credit failed', summary: `Valid payment not credited: the used-up payer's new service cycle could not be saved; the user was told nothing. ${cycleReleased === false ? 'The claim release FAILED: a resend may be judged already paid; check by hand.' : 'A resend is judged again.'}`, fields: [fact('Amount read', amount), fact('Routed as', tierAmount), fact('Msg', event.message.id)] }).catch(() => undefined);
+                                                if (judgePaymentFirst && !resendAnswered)
+                                                    await owedCallAfterJudging();
+                                                return;
+                                            }
+                                        }
+                                        const credit = await creditAndAttributePayment(event, chatId, db, amount, gateIdentified, gateClaimed, paymentReceiptOf(event, chatId, imageDetails));
+                                        const released = await keepCreditClaim(amount, credit);
+                                        if (isDefiniteCreditFailure(credit)) {
+                                            logger.warn(`[payment-gate] kind=credit_failed outcome=${credit} chat=••••${chatId.slice(-4)} msg=${event.message.id} amount=${amount}`);
+                                            // Round 16: nothing is granted: the cycle written above is rolled back to the fields it replaced.
+                                            let rollback = '';
+                                            if (cycleBefore) {
+                                                let rolledBack = false;
+                                                try {
+                                                    await db.update(chatId, cycleBefore);
+                                                    rolledBack = true;
+                                                }
+                                                catch (rollbackError) {
+                                                    (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_21__.parseError)(rollbackError, "[ProcessImage] rolling back the service cycle failed", false);
+                                                }
+                                                logger.warn(`[payment-gate] kind=cycle_rollback result=${rolledBack ? 'ok' : 'failed'} chat=••••${chatId.slice(-4)} msg=${event.message.id}`);
+                                                rollback = rolledBack ? ' The new service cycle was rolled back.' : ' The new service cycle could NOT be rolled back: the payer may get one cycle free; check by hand.';
+                                            }
+                                            await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_31__.notifyChat)(chatId, { title: 'Credit failed', summary: `Valid payment not credited (${credit}); the user was told nothing. ${released === false ? 'The claim release FAILED: a resend may be judged already paid; check by hand.' : 'A resend is judged again.'}${rollback}`, fields: [{ label: 'Amount read', value: amount, code: false }, { label: 'Msg', value: event.message.id, code: false }] });
+                                            // Codex round 8 #1: nothing is granted for this screenshot, but a call owed before it still goes out.
+                                            // A used-up payer (cycleBefore) was owed nothing; a cycle whose rollback failed must not ring.
+                                            if (judgePaymentFirst && !resendAnswered && !cycleBefore)
+                                                await owedCallAfterJudging();
+                                            return;
+                                        }
+                                        // What this credit answers (confirmed ask, open fake warnings, the flow's block) closes only now.
+                                        await finaliseCredit?.();
+                                        // The rows the writes below return carry this credit's fields; the service path keeps reading them
+                                        // as before the credit (it ran right before each service until now), so they are put back.
+                                        const seenBeforeCredit = creditFieldsOf(userDetails);
+                                        const beforeCredit = (row) => withCreditFields(row, seenBeforeCredit);
+                                        // The payment is credited (its claim stays): a throw in a later entitlement write must not cost the payer
+                                        // the service (coordinator 2026-11-27, pin C66). Logged, then the service runs on the local values.
+                                        // Not used for the service-cycle write: it runs before the credit (round 16, above).
+                                        const entitlement = async (field, write, local) => {
+                                            try {
+                                                return beforeCredit(await write());
+                                            }
+                                            catch (writeError) {
+                                                logger.warn(`[payment-gate] kind=entitlement_write_failed field=${field} err=${writeError?.name ?? 'Error'} chat=••••${chatId.slice(-4)} msg=${event.message.id}`);
+                                                // The service runs on local values; the stored row misses this write (shows can be under-served
+                                                // later): ops restore it by hand.
+                                                await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_31__.notifyChat)(chatId, { title: 'Entitlement write failed', summary: `Payment credited and served, but '${field}' was not saved. Restore it by hand.`, fields: [fact('Field', field), fact('Amount', tierAmount), fact('Msg', event.message.id)] }).catch(() => undefined);
+                                                return local;
+                                            }
+                                        };
+                                        // Smart state reset based on payment
+                                        const oldPayAmount = userDetails.payAmount;
                                         endedUnserved.delete(chatId); // only this payment's own outcome may arm the next sum
                                         if (tierAmount !== amount) {
                                             logger.log(`[ProcessImage] ${chatId}: unserved payments add up: routing ${amount} as ${tierAmount}`);
@@ -93289,7 +93993,7 @@ async function processImage(event) {
                                         // The free complaint show is once per chat for NON-payers (graceFlag): one given before this payment
                                         // must not deny this payer the complaint re-show of the show they now paid for (journey CS7).
                                         if (userDetails.graceFlag)
-                                            userDetails = await db.update(chatId, { graceFlag: false });
+                                            userDetails = await entitlement('graceFlag', () => db.update(chatId, { graceFlag: false }), { ...userDetails, graceFlag: false });
                                         // Check if this is an upgrade
                                         if (tierAmount > oldPayAmount && oldPayAmount > 0) {
                                             (0,_conversation_state_state_reset__WEBPACK_IMPORTED_MODULE_36__.resetStatesOnUpgrade)(chatId, userDetails, oldPayAmount, tierAmount);
@@ -93298,38 +94002,31 @@ async function processImage(event) {
                                         // highestPayAmount.
                                         const bought = (0,_payments_ladder__WEBPACK_IMPORTED_MODULE_5__.paymentShowsUpdate)(userDetails, tierAmount);
                                         if (tierAmount > userDetails.highestPayAmount) {
-                                            userDetails = await db.updateSingleKey(chatId, _data_user_data_crud__WEBPACK_IMPORTED_MODULE_0__.user.highestPayAmount, tierAmount);
+                                            userDetails = await entitlement('highestPayAmount', () => db.updateSingleKey(chatId, _data_user_data_crud__WEBPACK_IMPORTED_MODULE_0__.user.highestPayAmount, tierAmount), { ...userDetails, highestPayAmount: tierAmount });
                                         }
                                         // Payment before call (2026-11-08): the ledger credit and the payment_event row are on record before any
-                                        // service starts, so a crash during the call cannot lose them (creditAndAttributePayment). It runs AFTER
-                                        // the cycle / bought writes below (whose returned row the service path reads: the credit's payAmount
-                                        // $max must not reach it) and right before each branch's service, so every decision sees what it saw before.
-                                        let credit;
+                                        // service starts (creditAndAttributePayment, above), so a crash during the call cannot lose them.
                                         // tierAmount sums this chat's unserved receipts (each below the credit limit): ₹600 + ₹600 is served, so
                                         // the read range bounds it, not the per-receipt credit limit.
                                         if (tierAmount !== payAmount && tierAmount < _payments_ladder__WEBPACK_IMPORTED_MODULE_5__.PAID_MIN) {
-                                            credit = await creditAndAttributePayment(event, chatId, db, amount, gateIdentified, gateClaimed);
-                                            keepCreditClaim();
                                             await handleLowAmountPayment(event, chatId, db, imageDetails, userDetails, tierAmount, payAmount, isWithinPastTenMinutesImage, userChatState, initiateCallKeepingClaim);
                                         }
                                         else if (tierAmount >= _payments_ladder__WEBPACK_IMPORTED_MODULE_5__.DEMO_GRANT_MIN && tierAmount <= _tg_vision__WEBPACK_IMPORTED_MODULE_49__.MAX_PAYMENT_AMOUNT) {
                                             if (usedUpBeforeCredit) {
+                                                // The new service cycle was written before the credit (cycleFirst, same condition).
                                                 logger.log(`[used-up-credit] ${chatId}: new service cycle at ₹${tierAmount}`);
-                                                userDetails = await (0,_payments_service_cycle__WEBPACK_IMPORTED_MODULE_6__.startServiceCycle)(chatId, tierAmount);
+                                                if (cycleRow)
+                                                    userDetails = { ...userDetails, ...cycleFieldsOf(cycleRow) };
                                             }
                                             else if (bought && (0,_payments_ladder__WEBPACK_IMPORTED_MODULE_5__.canStartService)(userDetails, tierAmount)) {
                                                 // It rings a show without the repeat-payment handling (one still owed, or the high tier): what it
                                                 // bought is stored here; otherwise handleRepeatPayment stores it.
                                                 logger.log(`[payment-shows] ${chatId}: ₹${tierAmount} bought ${JSON.stringify(bought)}`);
-                                                userDetails = await db.update(chatId, bought);
+                                                userDetails = await entitlement('bought', () => db.update(chatId, bought), { ...userDetails, ...bought });
                                             }
-                                            credit = await creditAndAttributePayment(event, chatId, db, amount, gateIdentified, gateClaimed);
-                                            keepCreditClaim();
                                             await handlePaidServiceAmount(event, chatId, db, imageDetails, userDetails, tierAmount, payAmount, text, isWithinPastTenMinutesImage, userChatState, initiateCallKeepingClaim, serviceStarted);
                                         }
                                         else {
-                                            credit = await creditAndAttributePayment(event, chatId, db, amount, gateIdentified, gateClaimed);
-                                            keepCreditClaim();
                                             await (0,_telegram_delete_messages__WEBPACK_IMPORTED_MODULE_7__.deleteMessage)(event);
                                             await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_31__.notifyChat)(chatId, {
                                                 title: 'Pic deleted',
@@ -93405,36 +94102,37 @@ async function processImage(event) {
                 await replyToNonPaymentPicture(event, chatId, imageDetails, userDetails);
             }
         }
-        if (judgePaymentFirst && !serviceSent && !resendAnswered) {
-            // Rejected, held, repeat or credited without a service: the call owed before this picture still goes out.
-            const latest = await db.read(chatId);
-            if (latest && latest.canReply !== 0 && (0,_payments_service_eligibility__WEBPACK_IMPORTED_MODULE_3__.canProceedWithService)(latest)) {
-                await (0,_calls_call_initiation__WEBPACK_IMPORTED_MODULE_29__.proceedWithCall)(latest, chatId, "Image Processed");
-            }
-        }
+        // Rejected, held, repeat or credited without a service: the call owed before this picture still goes out.
+        if (judgePaymentFirst && !serviceSent && !resendAnswered)
+            await owedCallAfterJudging();
         releaseClaim = undefined;
         await _telegram_client_access__WEBPACK_IMPORTED_MODULE_33__.TelegramManager.getInstance().dialogManager.markAsRead(event.message);
     }
     catch (error) {
         (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_21__.parseError)(error, "Error Processing image");
         const failedChat = event.message?.chatId?.toString?.() ?? "";
-        await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_31__.notifyChat)(failedChat, {
-            title: 'Pic process fail',
-            summary: releaseClaim ? 'Payment was valid; credit claim released.' : creditRecorded ? 'Payment was credited; the claim stays (a re-send is not credited again).' : undefined,
-            severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_22__.NotificationSeverity.ERROR,
-            fields: [fact('Error', String(error?.message ?? error).slice(0, 200))],
-        });
+        // Release first, so the notice says what happened (Codex round 10 #1: a failed release keeps the paymentProofs claim).
+        let released = null;
         if (releaseClaim) {
             const release = releaseClaim;
             releaseClaim = undefined;
+            released = false;
             try {
-                await release();
-                logger.warn(`[ProcessImage] credit failed after the claim: claim released, a retry of this payment is judged again`);
+                released = Boolean(await release());
             }
             catch (releaseError) {
                 (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_21__.parseError)(releaseError, "[ProcessImage] releasing the payment claim failed", false);
             }
+            logger.warn(`[ProcessImage] credit failed after the claim: released=${released}${released ? ', a retry of this payment is judged again' : ''}`);
         }
+        await (0,_outbound_chat_notice__WEBPACK_IMPORTED_MODULE_31__.notifyChat)(failedChat, {
+            title: 'Pic process fail',
+            summary: released === true ? 'Payment was valid; credit claim released.'
+                : released === false ? 'Payment was valid; the claim release FAILED: a resend may be judged already paid; check by hand.'
+                    : creditRecorded ? 'Payment was credited; the claim stays (a re-send is not credited again).' : undefined,
+            severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_22__.NotificationSeverity.ERROR,
+            fields: [fact('Error', String(error?.message ?? error).slice(0, 200))],
+        });
         proof?.fallback("other", ["PROCESSING_ERROR"]);
     }
     finally {
@@ -93666,31 +94364,32 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var telegram_Helpers__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! telegram/Helpers */ "telegram/Helpers");
 /* harmony import */ var telegram_Helpers__WEBPACK_IMPORTED_MODULE_7___default = /*#__PURE__*/__webpack_require__.n(telegram_Helpers__WEBPACK_IMPORTED_MODULE_7__);
 /* harmony import */ var _data_user_data_crud__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ../data/user-data-crud */ "./src/data/user-data-crud.ts");
-/* harmony import */ var _conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ../conversation/messages/pick-one */ "./src/conversation/messages/pick-one.ts");
-/* harmony import */ var _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ../conversation/messages/standard-messages */ "./src/conversation/messages/standard-messages.ts");
-/* harmony import */ var _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! @tg/core/utils/TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
-/* harmony import */ var _telegram_mark_as_read__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! ../telegram/mark-as-read */ "./src/telegram/mark-as-read.ts");
-/* harmony import */ var _conversation_inbound_event_aggregation__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! ../conversation/inbound/event-aggregation */ "./src/conversation/inbound/event-aggregation.ts");
-/* harmony import */ var _tg_channel_state__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! @tg/channel-state */ "../../packages/tg-channel-state/src/index.ts");
-/* harmony import */ var _telegram_client_access__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! ../telegram/client-access */ "./src/telegram/client-access.ts");
-/* harmony import */ var _telegram_check_tg_health__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! ../telegram/check-tg-health */ "./src/telegram/check-tg-health.ts");
-/* harmony import */ var _tg_core_health__WEBPACK_IMPORTED_MODULE_17__ = __webpack_require__(/*! @tg/core/health */ "../../packages/tg-core/src/health.ts");
-/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_18__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
-/* harmony import */ var _tg_core_utils_readbleTimeDifference__WEBPACK_IMPORTED_MODULE_19__ = __webpack_require__(/*! @tg/core/utils/readbleTimeDifference */ "../../packages/tg-core/src/utils/readbleTimeDifference.ts");
-/* harmony import */ var _outbound_flood_gate__WEBPACK_IMPORTED_MODULE_20__ = __webpack_require__(/*! ../outbound/flood-gate */ "./src/outbound/flood-gate.ts");
-/* harmony import */ var _health_service_health__WEBPACK_IMPORTED_MODULE_21__ = __webpack_require__(/*! ../health/service-health */ "./src/health/service-health.ts");
-/* harmony import */ var _tg_core_utils_Redis_Redis_Client__WEBPACK_IMPORTED_MODULE_22__ = __webpack_require__(/*! @tg/core/utils/Redis/Redis.Client */ "../../packages/tg-core/src/utils/Redis/Redis.Client.ts");
-/* harmony import */ var _replier__WEBPACK_IMPORTED_MODULE_23__ = __webpack_require__(/*! ../replier */ "./src/replier/index.ts");
-/* harmony import */ var _services_cloudinaryService__WEBPACK_IMPORTED_MODULE_24__ = __webpack_require__(/*! ../services/cloudinaryService */ "./src/services/cloudinaryService.ts");
-/* harmony import */ var _parked_accounts__WEBPACK_IMPORTED_MODULE_25__ = __webpack_require__(/*! ./parked-accounts */ "./src/jobs/parked-accounts.ts");
-/* harmony import */ var _tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_26__ = __webpack_require__(/*! @tg/core/utils/dc-ip-family */ "../../packages/tg-core/src/utils/dc-ip-family.ts");
-/* harmony import */ var _promotion_promo_health_log__WEBPACK_IMPORTED_MODULE_27__ = __webpack_require__(/*! ../promotion/promo-health-log */ "./src/promotion/promo-health-log.ts");
-/* harmony import */ var _tg_channel_state_channel_message_promotions_orchestrator_promo_health_ladder__WEBPACK_IMPORTED_MODULE_28__ = __webpack_require__(/*! @tg/channel-state/channel-message-promotions/orchestrator/promo-health-ladder */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/promo-health-ladder.ts");
-/* harmony import */ var _config_runtime_config__WEBPACK_IMPORTED_MODULE_29__ = __webpack_require__(/*! ../config/runtime-config */ "./src/config/runtime-config.ts");
-/* harmony import */ var _telegram_setup_client__WEBPACK_IMPORTED_MODULE_30__ = __webpack_require__(/*! ../telegram/setup-client */ "./src/telegram/setup-client.ts");
-/* harmony import */ var _telegram_spam_state__WEBPACK_IMPORTED_MODULE_31__ = __webpack_require__(/*! ../telegram/spam-state */ "./src/telegram/spam-state.ts");
-/* harmony import */ var _tg_core_utils_fetchWithTimeout__WEBPACK_IMPORTED_MODULE_32__ = __webpack_require__(/*! @tg/core/utils/fetchWithTimeout */ "../../packages/tg-core/src/utils/fetchWithTimeout.ts");
-/* harmony import */ var _tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_33__ = __webpack_require__(/*! @tg/core/utils/user-scope */ "../../packages/tg-core/src/utils/user-scope.ts");
+/* harmony import */ var _payments_proof_gate_gate__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ../payments/proof-gate/gate */ "./src/payments/proof-gate/gate.ts");
+/* harmony import */ var _conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ../conversation/messages/pick-one */ "./src/conversation/messages/pick-one.ts");
+/* harmony import */ var _conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ../conversation/messages/standard-messages */ "./src/conversation/messages/standard-messages.ts");
+/* harmony import */ var _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! @tg/core/utils/TelegramBots.config */ "../../packages/tg-core/src/utils/TelegramBots.config.ts");
+/* harmony import */ var _telegram_mark_as_read__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! ../telegram/mark-as-read */ "./src/telegram/mark-as-read.ts");
+/* harmony import */ var _conversation_inbound_event_aggregation__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! ../conversation/inbound/event-aggregation */ "./src/conversation/inbound/event-aggregation.ts");
+/* harmony import */ var _tg_channel_state__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! @tg/channel-state */ "../../packages/tg-channel-state/src/index.ts");
+/* harmony import */ var _telegram_client_access__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! ../telegram/client-access */ "./src/telegram/client-access.ts");
+/* harmony import */ var _telegram_check_tg_health__WEBPACK_IMPORTED_MODULE_17__ = __webpack_require__(/*! ../telegram/check-tg-health */ "./src/telegram/check-tg-health.ts");
+/* harmony import */ var _tg_core_health__WEBPACK_IMPORTED_MODULE_18__ = __webpack_require__(/*! @tg/core/health */ "../../packages/tg-core/src/health.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_19__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _tg_core_utils_readbleTimeDifference__WEBPACK_IMPORTED_MODULE_20__ = __webpack_require__(/*! @tg/core/utils/readbleTimeDifference */ "../../packages/tg-core/src/utils/readbleTimeDifference.ts");
+/* harmony import */ var _outbound_flood_gate__WEBPACK_IMPORTED_MODULE_21__ = __webpack_require__(/*! ../outbound/flood-gate */ "./src/outbound/flood-gate.ts");
+/* harmony import */ var _health_service_health__WEBPACK_IMPORTED_MODULE_22__ = __webpack_require__(/*! ../health/service-health */ "./src/health/service-health.ts");
+/* harmony import */ var _tg_core_utils_Redis_Redis_Client__WEBPACK_IMPORTED_MODULE_23__ = __webpack_require__(/*! @tg/core/utils/Redis/Redis.Client */ "../../packages/tg-core/src/utils/Redis/Redis.Client.ts");
+/* harmony import */ var _replier__WEBPACK_IMPORTED_MODULE_24__ = __webpack_require__(/*! ../replier */ "./src/replier/index.ts");
+/* harmony import */ var _services_cloudinaryService__WEBPACK_IMPORTED_MODULE_25__ = __webpack_require__(/*! ../services/cloudinaryService */ "./src/services/cloudinaryService.ts");
+/* harmony import */ var _parked_accounts__WEBPACK_IMPORTED_MODULE_26__ = __webpack_require__(/*! ./parked-accounts */ "./src/jobs/parked-accounts.ts");
+/* harmony import */ var _tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_27__ = __webpack_require__(/*! @tg/core/utils/dc-ip-family */ "../../packages/tg-core/src/utils/dc-ip-family.ts");
+/* harmony import */ var _promotion_promo_health_log__WEBPACK_IMPORTED_MODULE_28__ = __webpack_require__(/*! ../promotion/promo-health-log */ "./src/promotion/promo-health-log.ts");
+/* harmony import */ var _tg_channel_state_channel_message_promotions_orchestrator_promo_health_ladder__WEBPACK_IMPORTED_MODULE_29__ = __webpack_require__(/*! @tg/channel-state/channel-message-promotions/orchestrator/promo-health-ladder */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/promo-health-ladder.ts");
+/* harmony import */ var _config_runtime_config__WEBPACK_IMPORTED_MODULE_30__ = __webpack_require__(/*! ../config/runtime-config */ "./src/config/runtime-config.ts");
+/* harmony import */ var _telegram_setup_client__WEBPACK_IMPORTED_MODULE_31__ = __webpack_require__(/*! ../telegram/setup-client */ "./src/telegram/setup-client.ts");
+/* harmony import */ var _telegram_spam_state__WEBPACK_IMPORTED_MODULE_32__ = __webpack_require__(/*! ../telegram/spam-state */ "./src/telegram/spam-state.ts");
+/* harmony import */ var _tg_core_utils_fetchWithTimeout__WEBPACK_IMPORTED_MODULE_33__ = __webpack_require__(/*! @tg/core/utils/fetchWithTimeout */ "../../packages/tg-core/src/utils/fetchWithTimeout.ts");
+/* harmony import */ var _tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_34__ = __webpack_require__(/*! @tg/core/utils/user-scope */ "../../packages/tg-core/src/utils/user-scope.ts");
 
 
 
@@ -93726,7 +94425,8 @@ __webpack_require__.r(__webpack_exports__);
 
 
 
-const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_18__.Logger("tg-aut:jobs");
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_19__.Logger("tg-aut:jobs");
 /** Owner rule 2026-11-20 (no env knobs): a promotion-health pause lasts 30 min, then promotions are retried. */
 const PROMO_HEALTH_PAUSE_MS = 30 * 60 * 1000;
 /** Consecutive failed retries before the main is swapped. */
@@ -93851,8 +94551,8 @@ function promoSwapRetryMs(result) {
     if (Number.isFinite(remaining) && remaining > 0)
         return remaining;
     if (result.status === 'no_candidate' && result.moreCandidatesPending === true)
-        return _telegram_setup_client__WEBPACK_IMPORTED_MODULE_30__.SETUP_CLIENT_PENDING_BACKOFF_MS;
-    return _telegram_setup_client__WEBPACK_IMPORTED_MODULE_30__.SETUP_CLIENT_BACKOFF_MS;
+        return _telegram_setup_client__WEBPACK_IMPORTED_MODULE_31__.SETUP_CLIENT_PENDING_BACKOFF_MS;
+    return _telegram_setup_client__WEBPACK_IMPORTED_MODULE_31__.SETUP_CLIENT_BACKOFF_MS;
 }
 function promoHealthCause(check, stats, gate) {
     const slug = (text) => text.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 48) || 'unhealthy';
@@ -93925,9 +94625,9 @@ class JobManager {
     }
     async notifyError(message) {
         try {
-            const sent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_11__.BotConfig.getInstance().sendMessage(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_11__.ChannelCategory.ACCOUNT_NOTIFICATIONS, {
+            const sent = await _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_12__.BotConfig.getInstance().sendMessage(_tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_12__.ChannelCategory.ACCOUNT_NOTIFICATIONS, {
                 title: "JobManager Error",
-                severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_11__.NotificationSeverity.ERROR,
+                severity: _tg_core_utils_TelegramBots_config__WEBPACK_IMPORTED_MODULE_12__.NotificationSeverity.ERROR,
                 summary: message,
                 tags: ["job-manager", "recovery"],
             });
@@ -93987,17 +94687,17 @@ class JobManager {
             this.scheduleDailyResetJob();
             this.startPeriodicChecks();
             // Parked responder for the swapped-out main (design 2026-11-05 §7.2, P4): kill switch + live-build gate inside.
-            (0,_parked_accounts__WEBPACK_IMPORTED_MODULE_25__.startParkedAccounts)();
+            (0,_parked_accounts__WEBPACK_IMPORTED_MODULE_26__.startParkedAccounts)();
             // Initial setup - MEMORY OPTIMIZATION: Store timeout reference for cleanup
             const initialSetupTimeout = setTimeout(async () => {
                 try {
-                    if (!(await _telegram_client_access__WEBPACK_IMPORTED_MODULE_15__.TelegramManager.instanceExist())) {
+                    if (!(await _telegram_client_access__WEBPACK_IMPORTED_MODULE_16__.TelegramManager.instanceExist())) {
                         this.log('warn', 'Initial setup skipped: Telegram instance not available');
                         return;
                     }
-                    const telegramManager = _telegram_client_access__WEBPACK_IMPORTED_MODULE_15__.TelegramManager.getInstance();
+                    const telegramManager = _telegram_client_access__WEBPACK_IMPORTED_MODULE_16__.TelegramManager.getInstance();
                     // Chats an earlier process had buffered but not answered go first (they are still unread).
-                    await (0,_telegram_mark_as_read__WEBPACK_IMPORTED_MODULE_12__.MarkAsRead)(telegramManager.client, true, await (0,_conversation_inbound_event_aggregation__WEBPACK_IMPORTED_MODULE_13__.takeRestoredInboundChats)());
+                    await (0,_telegram_mark_as_read__WEBPACK_IMPORTED_MODULE_13__.MarkAsRead)(telegramManager.client, true, await (0,_conversation_inbound_event_aggregation__WEBPACK_IMPORTED_MODULE_14__.takeRestoredInboundChats)());
                     const promotor = telegramManager.promotorInstance;
                     if (promotor) {
                         await promotor.startPromotion();
@@ -94035,14 +94735,14 @@ class JobManager {
             // don't all hit Telegram at the exact same second
             await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_7__.sleep)(this.instanceJitterMs);
             await this.executeJob('assure', async () => {
-                if (!(await _telegram_client_access__WEBPACK_IMPORTED_MODULE_15__.TelegramManager.instanceExist())) {
+                if (!(await _telegram_client_access__WEBPACK_IMPORTED_MODULE_16__.TelegramManager.instanceExist())) {
                     throw new Error('Telegram instance not available');
                 }
                 const hour = new Date().getHours();
-                const msg = (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_9__.pickOneMsg)(_conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_10__.assureMsgArray);
-                await (0,_outbound_campaigns_respond_to_paid_people__WEBPACK_IMPORTED_MODULE_4__.respToPaidPplfn)(_telegram_client_access__WEBPACK_IMPORTED_MODULE_15__.TelegramManager.getClient(), msg ? 6000 : 24000, msg, false, true, false);
+                const msg = (0,_conversation_messages_pick_one__WEBPACK_IMPORTED_MODULE_10__.pickOneMsg)(_conversation_messages_standard_messages__WEBPACK_IMPORTED_MODULE_11__.assureMsgArray);
+                await (0,_outbound_campaigns_respond_to_paid_people__WEBPACK_IMPORTED_MODULE_4__.respToPaidPplfn)(_telegram_client_access__WEBPACK_IMPORTED_MODULE_16__.TelegramManager.getClient(), msg ? 6000 : 24000, msg, false, true, false);
                 // Trigger promotion after assure
-                const promotor = _telegram_client_access__WEBPACK_IMPORTED_MODULE_15__.TelegramManager.getInstance().promotorInstance;
+                const promotor = _telegram_client_access__WEBPACK_IMPORTED_MODULE_16__.TelegramManager.getInstance().promotorInstance;
                 if (promotor) {
                     await promotor.startPromotion();
                 }
@@ -94062,10 +94762,10 @@ class JobManager {
         const job = node_schedule__WEBPACK_IMPORTED_MODULE_6___default().scheduleJob('15 7,13,16,21,23 * * *', async () => {
             await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_7__.sleep)(this.instanceJitterMs);
             await this.executeJob('paymentReminder', async () => {
-                if (!(await _telegram_client_access__WEBPACK_IMPORTED_MODULE_15__.TelegramManager.instanceExist())) {
+                if (!(await _telegram_client_access__WEBPACK_IMPORTED_MODULE_16__.TelegramManager.instanceExist())) {
                     throw new Error('Telegram instance not available');
                 }
-                await (0,_outbound_campaigns_ask_to_pay__WEBPACK_IMPORTED_MODULE_2__.asktoPay)(_telegram_client_access__WEBPACK_IMPORTED_MODULE_15__.TelegramManager.getInstance().client, 3000);
+                await (0,_outbound_campaigns_ask_to_pay__WEBPACK_IMPORTED_MODULE_2__.asktoPay)(_telegram_client_access__WEBPACK_IMPORTED_MODULE_16__.TelegramManager.getInstance().client, 3000);
             });
         });
         this.jobs.set('paymentReminder', job);
@@ -94131,6 +94831,9 @@ class JobManager {
                     // Non-sending tasks can run in parallel
                     const tasks = [];
                     tasks.push(_data_user_data_crud__WEBPACK_IMPORTED_MODULE_8__.UserDataDtoCrud.getInstance().processPendingPaymentAttributions().then(() => undefined));
+                    // Payment-proof ledger: this client's 'pending' claim docs over 5 min old become credit / reject from
+                    // the credit evidence while it is fresh (proof-gate/gate.ts resolvePendingClaims; never throws).
+                    tasks.push(this.resolvePendingLedgerClaims());
                     if (checkCount % 2 === 1) {
                         tasks.push(this.checkPromotionHealth(tickStartedAt));
                     }
@@ -94154,12 +94857,12 @@ class JobManager {
         // Initial health check after 30 seconds - MEMORY OPTIMIZATION: Store timeout reference
         const healthCheckTimeout = setTimeout(async () => {
             try {
-                if (!(await _telegram_client_access__WEBPACK_IMPORTED_MODULE_15__.TelegramManager.instanceExist())) {
+                if (!(await _telegram_client_access__WEBPACK_IMPORTED_MODULE_16__.TelegramManager.instanceExist())) {
                     this.log('warn', 'Initial health check skipped: Telegram instance not available');
                     return;
                 }
-                const telegramManager = _telegram_client_access__WEBPACK_IMPORTED_MODULE_15__.TelegramManager.getInstance();
-                await (0,_telegram_check_tg_health__WEBPACK_IMPORTED_MODULE_16__.checktghealth)(telegramManager.client, telegramManager.mobile);
+                const telegramManager = _telegram_client_access__WEBPACK_IMPORTED_MODULE_16__.TelegramManager.getInstance();
+                await (0,_telegram_check_tg_health__WEBPACK_IMPORTED_MODULE_17__.checktghealth)(telegramManager.client, telegramManager.mobile);
             }
             catch (error) {
                 (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, 'JobManager.initialHealthCheck', false);
@@ -94179,9 +94882,9 @@ class JobManager {
     }
     async logMcpAnalyticsSnapshot() {
         try {
-            if (!(await _telegram_client_access__WEBPACK_IMPORTED_MODULE_15__.TelegramManager.instanceExist()))
+            if (!(await _telegram_client_access__WEBPACK_IMPORTED_MODULE_16__.TelegramManager.instanceExist()))
                 return;
-            const telegramManager = _telegram_client_access__WEBPACK_IMPORTED_MODULE_15__.TelegramManager.getInstance();
+            const telegramManager = _telegram_client_access__WEBPACK_IMPORTED_MODULE_16__.TelegramManager.getInstance();
             const promotor = telegramManager.promotorInstance;
             const reactor = telegramManager.reactorInstance;
             const dialogManager = telegramManager.dialogManager;
@@ -94202,10 +94905,10 @@ class JobManager {
                 mobile: telegramManager.mobile || 'unknown',
                 uptimeSec: Math.floor((now - this.startTime) / 1000),
                 floodGate: {
-                    open: !_outbound_flood_gate__WEBPACK_IMPORTED_MODULE_20__.floodGate.isPaused(now),
-                    remainingSec: Math.ceil(_outbound_flood_gate__WEBPACK_IMPORTED_MODULE_20__.floodGate.remainingMs(now) / 1000),
-                    refusedChats: _outbound_flood_gate__WEBPACK_IMPORTED_MODULE_20__.floodGate.refusedCount(),
-                    peerFloodHits15m: _outbound_flood_gate__WEBPACK_IMPORTED_MODULE_20__.floodGate.recentHits(now),
+                    open: !_outbound_flood_gate__WEBPACK_IMPORTED_MODULE_21__.floodGate.isPaused(now),
+                    remainingSec: Math.ceil(_outbound_flood_gate__WEBPACK_IMPORTED_MODULE_21__.floodGate.remainingMs(now) / 1000),
+                    refusedChats: _outbound_flood_gate__WEBPACK_IMPORTED_MODULE_21__.floodGate.refusedCount(),
+                    peerFloodHits15m: _outbound_flood_gate__WEBPACK_IMPORTED_MODULE_21__.floodGate.recentHits(now),
                 },
                 promotions: promotionStats ? {
                     active: promotor?.isPromotionActive?.() ?? false,
@@ -94253,13 +94956,13 @@ class JobManager {
         }
     }
     async checkPromotions() {
-        const infrastructureHealth = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_21__.buildTgAutHealthSnapshot)();
-        const infrastructureRecoveryPlan = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_17__.createHealthRecoveryPlan)(infrastructureHealth);
-        const telegramHealth = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_17__.findHealthCheck)(infrastructureHealth, 'telegram.connection');
-        const databaseHealth = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_17__.findHealthCheck)(infrastructureHealth, 'database.mongo');
-        const redisHealth = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_17__.findHealthCheck)(infrastructureHealth, 'redis.connection');
-        const cloudinaryHealth = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_17__.findHealthCheck)(infrastructureHealth, 'cloudinary');
-        const connectionRetryHealth = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_17__.findHealthCheck)(infrastructureHealth, 'connection.retry');
+        const infrastructureHealth = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_22__.buildTgAutHealthSnapshot)();
+        const infrastructureRecoveryPlan = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_18__.createHealthRecoveryPlan)(infrastructureHealth);
+        const telegramHealth = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_18__.findHealthCheck)(infrastructureHealth, 'telegram.connection');
+        const databaseHealth = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_18__.findHealthCheck)(infrastructureHealth, 'database.mongo');
+        const redisHealth = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_18__.findHealthCheck)(infrastructureHealth, 'redis.connection');
+        const cloudinaryHealth = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_18__.findHealthCheck)(infrastructureHealth, 'cloudinary');
+        const connectionRetryHealth = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_18__.findHealthCheck)(infrastructureHealth, 'connection.retry');
         this.logServiceHealth('TG', telegramHealth);
         this.logServiceHealth('DB', databaseHealth);
         this.logServiceHealth('REDIS', redisHealth);
@@ -94269,12 +94972,12 @@ class JobManager {
         await this.recoverRedisIfNeeded(infrastructureRecoveryPlan.actions.some((action) => action.component === 'redis.connection'), redisHealth);
         await this.recoverCloudinaryIfNeeded(infrastructureRecoveryPlan.actions.some((action) => action.component === 'cloudinary'), cloudinaryHealth);
         await this.recoverTelegramConnectionIfNeeded(infrastructureRecoveryPlan.actions.some((action) => action.component === 'telegram.connection'), telegramHealth);
-        if (!(await _telegram_client_access__WEBPACK_IMPORTED_MODULE_15__.TelegramManager.instanceExist()))
+        if (!(await _telegram_client_access__WEBPACK_IMPORTED_MODULE_16__.TelegramManager.instanceExist()))
             return;
-        const telegramManager = _telegram_client_access__WEBPACK_IMPORTED_MODULE_15__.TelegramManager.getInstance();
-        const earlyPromotionHealth = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_17__.findHealthCheck)(infrastructureHealth, 'promotion.engine');
-        const earlyReactionHealth = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_17__.findHealthCheck)(infrastructureHealth, 'reaction.service');
-        const earlyReplierHealth = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_17__.findHealthCheck)(infrastructureHealth, 'telegram.replier');
+        const telegramManager = _telegram_client_access__WEBPACK_IMPORTED_MODULE_16__.TelegramManager.getInstance();
+        const earlyPromotionHealth = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_18__.findHealthCheck)(infrastructureHealth, 'promotion.engine');
+        const earlyReactionHealth = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_18__.findHealthCheck)(infrastructureHealth, 'reaction.service');
+        const earlyReplierHealth = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_18__.findHealthCheck)(infrastructureHealth, 'telegram.replier');
         const reactionRecoveryHandled = await this.recoverReactionIfNeeded(telegramManager, infrastructureRecoveryPlan.actions.some((action) => action.component === 'reaction.service'), earlyReactionHealth);
         const replierRecoveryHandled = this.recoverReplierIfNeeded(infrastructureRecoveryPlan.actions.some((action) => action.component === 'telegram.replier'), earlyReplierHealth);
         let promotor = telegramManager.promotorInstance;
@@ -94355,7 +95058,7 @@ class JobManager {
             this.log('warn', `Paid-user stats read failed; continuing health recovery with empty counters: ${error instanceof Error ? error.message : String(error)}`);
             paidUserStats = { count: 0 };
         }
-        const promotionHaltedByPaidUserLimit = (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_14__.isPaidUserLimitReached)(paidUserStats);
+        const promotionHaltedByPaidUserLimit = (0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_15__.isPaidUserLimitReached)(paidUserStats);
         if (promotionHaltedByPaidUserLimit) {
             this.log('warn', 'Paid-user limits reached, stopping promotion loop before continuing health recovery');
             await this.stopPromotionsForPaidUserLimit(promotor);
@@ -94386,11 +95089,11 @@ class JobManager {
         const runnerFailures = messageStats.runnerHealth?.consecutiveRunnerFailures ?? 0;
         const supervisorInactive = (runnerStatus === 'running' || runnerStatus === 'stopping') && !runnerActive && !promotor.isPromotionActive();
         this.log('debug', `PROMO counters | main ${lastMainMsgAgoMin >= 0 ? `${lastMainMsgAgoMin}m` : 'never'} | follow ${lastFollowUpMsgAgoMin >= 0 ? `${lastFollowUpMsgAgoMin}m` : 'never'} | any ${lastAnyMsgAgoMin >= 0 ? `${lastAnyMsgAgoMin}m` : 'never'} | sent ${messageStats.successCount} | failed ${messageStats.totalFailed} | ch ${messageStats.channelsTotal} | q ${runnerQueueSize} | streak ${messageStats.failStreak} | runner ${runnerStatus}${supervisorInactive ? ':inactive' : ''} | restarts ${messageStats.runnerHealth?.restartCount ?? 0} | runnerFailures ${runnerFailures}`);
-        const healthSnapshot = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_21__.buildTgAutHealthSnapshot)();
-        const recoveryPlan = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_17__.createHealthRecoveryPlan)(healthSnapshot);
-        const promotionHealth = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_17__.findHealthCheck)(healthSnapshot, 'promotion.engine');
-        const reactionHealth = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_17__.findHealthCheck)(healthSnapshot, 'reaction.service');
-        const replierHealth = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_17__.findHealthCheck)(healthSnapshot, 'telegram.replier');
+        const healthSnapshot = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_22__.buildTgAutHealthSnapshot)();
+        const recoveryPlan = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_18__.createHealthRecoveryPlan)(healthSnapshot);
+        const promotionHealth = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_18__.findHealthCheck)(healthSnapshot, 'promotion.engine');
+        const reactionHealth = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_18__.findHealthCheck)(healthSnapshot, 'reaction.service');
+        const replierHealth = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_18__.findHealthCheck)(healthSnapshot, 'telegram.replier');
         this.logServiceHealth('PROMO', promotionHealth);
         this.logServiceHealth('REACT', reactionHealth);
         this.logServiceHealth('REPLIER', replierHealth);
@@ -94399,7 +95102,7 @@ class JobManager {
         }
         // Recover channels whose safety block has cooled down (three days).
         try {
-            const recovered = await _tg_channel_state__WEBPACK_IMPORTED_MODULE_14__.ChannelIntelligenceService.getInstance().recoverStaleBlockedChannels();
+            const recovered = await _tg_channel_state__WEBPACK_IMPORTED_MODULE_15__.ChannelIntelligenceService.getInstance().recoverStaleBlockedChannels();
             if (recovered > 0)
                 this.log('info', `Recovered ${recovered} stale blocked channels`);
         }
@@ -94416,8 +95119,8 @@ class JobManager {
             // permanent-failure handoff (and its swap). A promotion-health failure swaps only through the pause
             // cycle in checkPromotionHealth (3 failed retries, no payer active in 6 h).
             try {
-                await (0,_telegram_check_tg_health__WEBPACK_IMPORTED_MODULE_16__.checktghealth)(_telegram_client_access__WEBPACK_IMPORTED_MODULE_15__.TelegramManager.getClient(), telegramManager.mobile, false, {
-                    onPermanentFailure: (error, handled) => this.log('warn', (0,_promotion_promo_health_log__WEBPACK_IMPORTED_MODULE_27__.promoHealthLine)('paused_fault', telegramManager.mobile, {
+                await (0,_telegram_check_tg_health__WEBPACK_IMPORTED_MODULE_17__.checktghealth)(_telegram_client_access__WEBPACK_IMPORTED_MODULE_16__.TelegramManager.getClient(), telegramManager.mobile, false, {
+                    onPermanentFailure: (error, handled) => this.log('warn', (0,_promotion_promo_health_log__WEBPACK_IMPORTED_MODULE_28__.promoHealthLine)('paused_fault', telegramManager.mobile, {
                         error: error instanceof Error ? error.message : String(error),
                         handoff: handled,
                     })),
@@ -94435,7 +95138,7 @@ class JobManager {
         if (recoveryPlan.actions.some((action) => action.component === 'promotion.engine')) {
             try {
                 if (promotedStats?.isActive) {
-                    await (0,_telegram_check_tg_health__WEBPACK_IMPORTED_MODULE_16__.checktghealth)(_telegram_client_access__WEBPACK_IMPORTED_MODULE_15__.TelegramManager.getClient(), telegramManager.mobile);
+                    await (0,_telegram_check_tg_health__WEBPACK_IMPORTED_MODULE_17__.checktghealth)(_telegram_client_access__WEBPACK_IMPORTED_MODULE_16__.TelegramManager.getClient(), telegramManager.mobile);
                     if (runnerStatus !== 'running' && runnerStatus !== 'stopping' || supervisorInactive) {
                         await promotor.startPromotion({ force: true });
                         this.log('warn', `Promotion supervisor start requested due to inactivity; previousStatus=${runnerStatus}${supervisorInactive ? ':inactive' : ''} 🔄`);
@@ -94489,7 +95192,7 @@ class JobManager {
     }
     logStalePromoWrite(write, mobile, expected) {
         // The stored promoteStats changed after it was read (daily reset, /promote, good news, a paid-user-limit halt).
-        this.log('warn', (0,_promotion_promo_health_log__WEBPACK_IMPORTED_MODULE_27__.promoHealthLine)('stale_write_skipped', mobile, { write, failedRetries: expected?.failedRetries ?? 0 }));
+        this.log('warn', (0,_promotion_promo_health_log__WEBPACK_IMPORTED_MODULE_28__.promoHealthLine)('stale_write_skipped', mobile, { write, failedRetries: expected?.failedRetries ?? 0 }));
     }
     promoteRepo() {
         const repositories = _data_user_data_crud__WEBPACK_IMPORTED_MODULE_8__.UserDataDtoCrud.getInstance().getRepositories();
@@ -94499,7 +95202,7 @@ class JobManager {
     }
     currentMobile() {
         try {
-            return String(_telegram_client_access__WEBPACK_IMPORTED_MODULE_15__.TelegramManager.getInstance().mobile ?? process.env.mobile ?? '');
+            return String(_telegram_client_access__WEBPACK_IMPORTED_MODULE_16__.TelegramManager.getInstance().mobile ?? process.env.mobile ?? '');
         }
         catch {
             return String(process.env.mobile ?? '');
@@ -94533,11 +95236,11 @@ class JobManager {
         catch (error) {
             (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, `JobManager.${source}ActivatePromotions`);
         }
-        this.log('info', (0,_promotion_promo_health_log__WEBPACK_IMPORTED_MODULE_27__.promoHealthLine)(kind, this.currentMobile(), { source, ...fields, wasPaused, persisted }));
+        this.log('info', (0,_promotion_promo_health_log__WEBPACK_IMPORTED_MODULE_28__.promoHealthLine)(kind, this.currentMobile(), { source, ...fields, wasPaused, persisted }));
         if (!persisted)
             return false;
-        if (await _telegram_client_access__WEBPACK_IMPORTED_MODULE_15__.TelegramManager.instanceExist()) {
-            const promotor = _telegram_client_access__WEBPACK_IMPORTED_MODULE_15__.TelegramManager.getInstance().promotorInstance;
+        if (await _telegram_client_access__WEBPACK_IMPORTED_MODULE_16__.TelegramManager.instanceExist()) {
+            const promotor = _telegram_client_access__WEBPACK_IMPORTED_MODULE_16__.TelegramManager.getInstance().promotorInstance;
             if (promotor) {
                 await promotor.startPromotion();
             }
@@ -94599,11 +95302,11 @@ class JobManager {
      */
     async checkPromotionHealth(tickStartedAt = Date.now()) {
         try {
-            if (!(await _telegram_client_access__WEBPACK_IMPORTED_MODULE_15__.TelegramManager.instanceExist()))
+            if (!(await _telegram_client_access__WEBPACK_IMPORTED_MODULE_16__.TelegramManager.instanceExist()))
                 return;
             const db = _data_user_data_crud__WEBPACK_IMPORTED_MODULE_8__.UserDataDtoCrud.getInstance();
             const promotedStats = await db.readPromoteStats();
-            const promotor = _telegram_client_access__WEBPACK_IMPORTED_MODULE_15__.TelegramManager.getInstance().promotorInstance;
+            const promotor = _telegram_client_access__WEBPACK_IMPORTED_MODULE_16__.TelegramManager.getInstance().promotorInstance;
             if (!promotor)
                 return;
             if (!promotedStats) {
@@ -94632,9 +95335,9 @@ class JobManager {
             }
             const messageStats = promotor.getStats();
             const daysLeft = (0,_conversation_reply_switch__WEBPACK_IMPORTED_MODULE_0__.daysLeftForRelease)();
-            const healthSnapshot = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_21__.buildTgAutHealthSnapshot)();
-            const recoveryPlan = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_17__.createHealthRecoveryPlan)(healthSnapshot);
-            const promotionHealth = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_17__.findHealthCheck)(healthSnapshot, 'promotion.engine');
+            const healthSnapshot = await (0,_health_service_health__WEBPACK_IMPORTED_MODULE_22__.buildTgAutHealthSnapshot)();
+            const recoveryPlan = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_18__.createHealthRecoveryPlan)(healthSnapshot);
+            const promotionHealth = (0,_tg_core_health__WEBPACK_IMPORTED_MODULE_18__.findHealthCheck)(healthSnapshot, 'promotion.engine');
             if (pause) {
                 if (pause.retriedAt === null) {
                     // Active with a cycle this job never retried: someone else resumed it (CMS, an older build).
@@ -94668,17 +95371,17 @@ class JobManager {
             if (outcome === 'stale')
                 return;
             const persisted = outcome === 'written';
-            this.log('warn', (0,_promotion_promo_health_log__WEBPACK_IMPORTED_MODULE_27__.promoHealthLine)('pause', mobile, { reason, failStreak: messageStats.failStreak, untilMin: PROMO_HEALTH_PAUSE_MS / 60000, persisted }));
+            this.log('warn', (0,_promotion_promo_health_log__WEBPACK_IMPORTED_MODULE_28__.promoHealthLine)('pause', mobile, { reason, failStreak: messageStats.failStreak, untilMin: PROMO_HEALTH_PAUSE_MS / 60000, persisted }));
             // Not persisted: the flag is still on, so the next tick tries again; nothing to report as paused.
             if (!persisted)
                 return;
-            const today = (0,_tg_channel_state_channel_message_promotions_orchestrator_promo_health_ladder__WEBPACK_IMPORTED_MODULE_28__.promoIstDay)(now);
+            const today = (0,_tg_channel_state_channel_message_promotions_orchestrator_promo_health_ladder__WEBPACK_IMPORTED_MODULE_29__.promoIstDay)(now);
             if (this.promoPauseAlertDay === today) {
-                this.log('info', (0,_promotion_promo_health_log__WEBPACK_IMPORTED_MODULE_27__.promoHealthLine)('alert_suppressed', mobile, { reason: 'already_alerted_today' }));
+                this.log('info', (0,_promotion_promo_health_log__WEBPACK_IMPORTED_MODULE_28__.promoHealthLine)('alert_suppressed', mobile, { reason: 'already_alerted_today' }));
                 return;
             }
             this.promoPauseAlertDay = today;
-            await this.notifyError(`Promotions failing! Promotions paused 30 min on this main, then retried; swap after ${PROMO_HEALTH_MAX_FAILED_RETRIES} failed retries when no payer is active ⏸️\n\nLast update: ${(0,_tg_core_utils_readbleTimeDifference__WEBPACK_IMPORTED_MODULE_19__.getReadableTimeDifference)(lastUpdatedTimeStamp)}\nHealth: ${promotionHealth?.summary ?? 'unhealthy'}\nIssues: ${(promotionHealth?.issues ?? []).join(', ') || 'none'}\nFailed streak: ${messageStats.failStreak}\nTotal Failed: ${messageStats.totalFailed}\nSuccess: ${messageStats.successCount}\nDeleted: ${messageStats.deletedCount}\nDaysLeft: ${daysLeft}`);
+            await this.notifyError(`Promotions failing! Promotions paused 30 min on this main, then retried; swap after ${PROMO_HEALTH_MAX_FAILED_RETRIES} failed retries when no payer is active ⏸️\n\nLast update: ${(0,_tg_core_utils_readbleTimeDifference__WEBPACK_IMPORTED_MODULE_20__.getReadableTimeDifference)(lastUpdatedTimeStamp)}\nHealth: ${promotionHealth?.summary ?? 'unhealthy'}\nIssues: ${(promotionHealth?.issues ?? []).join(', ') || 'none'}\nFailed streak: ${messageStats.failStreak}\nTotal Failed: ${messageStats.totalFailed}\nSuccess: ${messageStats.successCount}\nDeleted: ${messageStats.deletedCount}\nDaysLeft: ${daysLeft}`);
         }
         catch (error) {
             (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, 'JobManager.promotionHealth');
@@ -94697,7 +95400,7 @@ class JobManager {
         const cycleFields = pause ? {} : { reason: 'no_cycle' };
         let held = null;
         try {
-            if ((0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_14__.isPaidUserLimitReached)(await _data_user_data_crud__WEBPACK_IMPORTED_MODULE_8__.UserDataDtoCrud.getInstance().getTodayPaidUsers()))
+            if ((0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_15__.isPaidUserLimitReached)(await _data_user_data_crud__WEBPACK_IMPORTED_MODULE_8__.UserDataDtoCrud.getInstance().getTodayPaidUsers()))
                 held = 'paid_user_limit';
         }
         catch (error) {
@@ -94709,7 +95412,7 @@ class JobManager {
             const holdKey = `${pause ? `${pause.mobile}:${pause.pausedAt}` : `no_cycle:${mobile}`}:${held}`;
             if (this.promoRetryHoldLogged !== holdKey) {
                 this.promoRetryHoldLogged = holdKey;
-                this.log('info', (0,_promotion_promo_health_log__WEBPACK_IMPORTED_MODULE_27__.promoHealthLine)('retry', mobile, { source: 'retry', attempt, held, ...cycleFields }));
+                this.log('info', (0,_promotion_promo_health_log__WEBPACK_IMPORTED_MODULE_28__.promoHealthLine)('retry', mobile, { source: 'retry', attempt, held, ...cycleFields }));
             }
             return;
         }
@@ -94725,7 +95428,7 @@ class JobManager {
     /** The engine's cumulative send counters now, tagged with this process; null when unreadable. */
     promoRetryBase() {
         try {
-            const stats = _telegram_client_access__WEBPACK_IMPORTED_MODULE_15__.TelegramManager.getInstance().promotorInstance?.getStats();
+            const stats = _telegram_client_access__WEBPACK_IMPORTED_MODULE_16__.TelegramManager.getInstance().promotorInstance?.getStats();
             if (!stats)
                 return null;
             return { proc: this.promoHealthProc, success: Number(stats.successCount) || 0, failed: Number(stats.totalFailed) || 0 };
@@ -94801,7 +95504,7 @@ class JobManager {
         catch (error) {
             (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, 'JobManager.promoHealthRetryRebase', false);
         }
-        this.log('info', (0,_promotion_promo_health_log__WEBPACK_IMPORTED_MODULE_27__.promoHealthLine)('retry_rebase', mobile, {
+        this.log('info', (0,_promotion_promo_health_log__WEBPACK_IMPORTED_MODULE_28__.promoHealthLine)('retry_rebase', mobile, {
             reason, failedRetries: pause.failedRetries, success: retryBase.success, failed: retryBase.failed,
             sinceRetryMin: pause.retriedAt === null ? undefined : Math.floor((now - pause.retriedAt) / 60000), persisted,
         }));
@@ -94821,7 +95524,7 @@ class JobManager {
         const { now, mobile } = ctx;
         const result = this.promoRetryEvidence(pause, ctx.messageStats, this.promoRestartMode(promotor));
         if (result.kind === 'pending') {
-            this.log('info', (0,_promotion_promo_health_log__WEBPACK_IMPORTED_MODULE_27__.promoHealthLine)('retry_wait', mobile, { failedRetries: pause.failedRetries, evidence: 'restore_pending' }));
+            this.log('info', (0,_promotion_promo_health_log__WEBPACK_IMPORTED_MODULE_28__.promoHealthLine)('retry_wait', mobile, { failedRetries: pause.failedRetries, evidence: 'restore_pending' }));
             return 'wait';
         }
         if (result.kind === 'rebase') {
@@ -94881,7 +95584,7 @@ class JobManager {
         else if (now + PROMO_HEALTH_TICK_SLACK_MS >= retriedAt + PROMO_HEALTH_RETRY_VERDICT_MS) {
             const block = await this.promoRetryBlock(retriedAt, now, ctx.messageStats);
             if (block.held) {
-                this.log('info', (0,_promotion_promo_health_log__WEBPACK_IMPORTED_MODULE_27__.promoHealthLine)('retry_wait', mobile, { failedRetries: pause.failedRetries, ...fields, held: block.held, quiet: block.quiet }));
+                this.log('info', (0,_promotion_promo_health_log__WEBPACK_IMPORTED_MODULE_28__.promoHealthLine)('retry_wait', mobile, { failedRetries: pause.failedRetries, ...fields, held: block.held, quiet: block.quiet }));
                 return 'wait';
             }
             failure = block.blocked ?? 'runner_dead';
@@ -94891,7 +95594,7 @@ class JobManager {
             await this.handleFailedRetry(promotor, pause, { ...ctx, reason: failure, evidence: quiet !== null || failure === 'runner_dead' ? { ...fields, quiet } : fields });
             return 'failed';
         }
-        this.log('info', (0,_promotion_promo_health_log__WEBPACK_IMPORTED_MODULE_27__.promoHealthLine)('retry_wait', mobile, {
+        this.log('info', (0,_promotion_promo_health_log__WEBPACK_IMPORTED_MODULE_28__.promoHealthLine)('retry_wait', mobile, {
             failedRetries: pause.failedRetries,
             ...fields,
             windowLeftMin: Math.ceil((retriedAt + PROMO_HEALTH_RETRY_VERDICT_MS - now) / 60000),
@@ -94921,7 +95624,7 @@ class JobManager {
         const last = runner?.lastQuiet ?? null;
         const own = last && Number(last.at) >= retriedAt ? last : null;
         const quiet = own && typeof own.quiet === 'string' ? own.quiet : null;
-        const fresh = !!own && now - Number(own.at) <= _tg_channel_state_channel_message_promotions_orchestrator_promo_health_ladder__WEBPACK_IMPORTED_MODULE_28__.PROMO_LADDER.quietMaxAgeMs;
+        const fresh = !!own && now - Number(own.at) <= _tg_channel_state_channel_message_promotions_orchestrator_promo_health_ladder__WEBPACK_IMPORTED_MODULE_29__.PROMO_LADDER.quietMaxAgeMs;
         if (fresh && promoRetryHoldsQuiet(own))
             return { held: `quiet_${own.quiet}`, quiet };
         // A fresh mobile-side block (no_eligible_mobile, a dry no_eligible_channel pool): a failed retry, named so.
@@ -94933,7 +95636,7 @@ class JobManager {
             return { held: 'rest', quiet };
         }
         try {
-            if ((0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_14__.isPaidUserLimitReached)(await _data_user_data_crud__WEBPACK_IMPORTED_MODULE_8__.UserDataDtoCrud.getInstance().getTodayPaidUsers()))
+            if ((0,_tg_channel_state__WEBPACK_IMPORTED_MODULE_15__.isPaidUserLimitReached)(await _data_user_data_crud__WEBPACK_IMPORTED_MODULE_8__.UserDataDtoCrud.getInstance().getTodayPaidUsers()))
                 return { held: 'paid_user_limit', quiet };
         }
         catch (error) {
@@ -94955,11 +95658,11 @@ class JobManager {
         catch (error) {
             (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, 'JobManager.promoHealthClearPause');
         }
-        this.log('info', (0,_promotion_promo_health_log__WEBPACK_IMPORTED_MODULE_27__.promoHealthLine)('resume', mobile, { source: 'retry', reason, failedRetries: pause.failedRetries, ...fields, persisted }));
+        this.log('info', (0,_promotion_promo_health_log__WEBPACK_IMPORTED_MODULE_28__.promoHealthLine)('resume', mobile, { source: 'retry', reason, failedRetries: pause.failedRetries, ...fields, persisted }));
     }
     /** A cycle left by the previous main: clear it, and resume promotions if they are still paused by it. */
     async endPromoHealthCycleForNewMain(pause, paused) {
-        const fields = { reason: 'main_changed', previous: (0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_26__.maskMobile)(pause.mobile), failedRetries: pause.failedRetries };
+        const fields = { reason: 'main_changed', previous: (0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_27__.maskMobile)(pause.mobile), failedRetries: pause.failedRetries };
         if (paused) {
             await this.resumePromotions('main_changed', null, 'resume', fields, { pause });
             return;
@@ -94975,7 +95678,7 @@ class JobManager {
         catch (error) {
             (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, 'JobManager.promoHealthClearPause');
         }
-        this.log('info', (0,_promotion_promo_health_log__WEBPACK_IMPORTED_MODULE_27__.promoHealthLine)('resume', this.currentMobile(), { source: 'main_changed', ...fields, wasPaused: false, persisted }));
+        this.log('info', (0,_promotion_promo_health_log__WEBPACK_IMPORTED_MODULE_28__.promoHealthLine)('resume', this.currentMobile(), { source: 'main_changed', ...fields, wasPaused: false, persisted }));
     }
     /** Promotions are on but the cycle was never retried by this job: someone else resumed it. Clear it, count 0. */
     async endExternallyResumedCycle(pause, mobile) {
@@ -94990,7 +95693,7 @@ class JobManager {
         catch (error) {
             (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, 'JobManager.promoHealthClearPause');
         }
-        this.log('info', (0,_promotion_promo_health_log__WEBPACK_IMPORTED_MODULE_27__.promoHealthLine)('resume', mobile, { source: 'external', reason: 'active_without_retry', failedRetries: pause.failedRetries, persisted }));
+        this.log('info', (0,_promotion_promo_health_log__WEBPACK_IMPORTED_MODULE_28__.promoHealthLine)('resume', mobile, { source: 'external', reason: 'active_without_retry', failedRetries: pause.failedRetries, persisted }));
     }
     /**
      * Writes a no-pause hold cycle (promotions stay active; isActive is not written), conditional on the cycle read
@@ -95023,7 +95726,7 @@ class JobManager {
         const outcome = await this.writePromoHold(next, { pause: null, isActive: true }, 'gate_hold');
         if (outcome === 'stale')
             return;
-        this.log('warn', (0,_promotion_promo_health_log__WEBPACK_IMPORTED_MODULE_27__.promoHealthLine)('gate_hold', mobile, {
+        this.log('warn', (0,_promotion_promo_health_log__WEBPACK_IMPORTED_MODULE_28__.promoHealthLine)('gate_hold', mobile, {
             state: 'start', reason: 'ban_rate', failedRetries: 0, gateFailed: gate?.failed, gateTotal: gate?.total,
             windowMin: PROMO_HEALTH_GATE_WINDOW_MS / 60000, persisted: outcome === 'written', swap: outcome === 'written' ? 'now' : 'next_check',
         }));
@@ -95043,7 +95746,7 @@ class JobManager {
         if (this.promoGateStartLogged === key)
             return;
         this.promoGateStartLogged = key;
-        this.log('warn', (0,_promotion_promo_health_log__WEBPACK_IMPORTED_MODULE_27__.promoHealthLine)('gate_hold', mobile, {
+        this.log('warn', (0,_promotion_promo_health_log__WEBPACK_IMPORTED_MODULE_28__.promoHealthLine)('gate_hold', mobile, {
             state: 'start', from: 'retry', reason: 'ban_rate', failedRetries: pause.failedRetries, ...fields,
             gateFailed: gate?.failed, gateTotal: gate?.total, swap,
         }));
@@ -95060,7 +95763,7 @@ class JobManager {
         if (now + PROMO_HEALTH_TICK_SLACK_MS < this.promoHoldSummary.at + PROMO_HEALTH_HOLD_SUMMARY_MS)
             return;
         this.promoHoldSummary = { key, at: now };
-        this.log('info', (0,_promotion_promo_health_log__WEBPACK_IMPORTED_MODULE_27__.promoHealthLine)('hold_summary', mobile, fields));
+        this.log('info', (0,_promotion_promo_health_log__WEBPACK_IMPORTED_MODULE_28__.promoHealthLine)('hold_summary', mobile, fields));
     }
     /**
      * The retry failed (judgeRetry). Below PROMO_HEALTH_MAX_FAILED_RETRIES: pause again. At or past it: swap through
@@ -95080,7 +95783,7 @@ class JobManager {
             }, { pause }, 'repause');
             if (outcome === 'stale')
                 return;
-            this.log('warn', (0,_promotion_promo_health_log__WEBPACK_IMPORTED_MODULE_27__.promoHealthLine)('repause', mobile, { reason, failedRetries, ...evidence, untilMin: PROMO_HEALTH_PAUSE_MS / 60000, persisted: outcome === 'written' }));
+            this.log('warn', (0,_promotion_promo_health_log__WEBPACK_IMPORTED_MODULE_28__.promoHealthLine)('repause', mobile, { reason, failedRetries, ...evidence, untilMin: PROMO_HEALTH_PAUSE_MS / 60000, persisted: outcome === 'written' }));
         };
         // Gate-only (owner 2026-11-20, review H1): never paused; a new gate window starts with the count kept.
         const nextGateWindow = async () => {
@@ -95089,7 +95792,7 @@ class JobManager {
             }, { pause }, 'gate_hold');
             if (outcome === 'stale')
                 return;
-            this.log('warn', (0,_promotion_promo_health_log__WEBPACK_IMPORTED_MODULE_27__.promoHealthLine)('gate_hold', mobile, {
+            this.log('warn', (0,_promotion_promo_health_log__WEBPACK_IMPORTED_MODULE_28__.promoHealthLine)('gate_hold', mobile, {
                 state: 'window_failed', reason, failedRetries, ...evidence, nextMin: PROMO_HEALTH_GATE_WINDOW_MS / 60000, persisted: outcome === 'written',
             }));
         };
@@ -95105,7 +95808,7 @@ class JobManager {
             }, { pause }, 'swap_wait');
             if (outcome === 'stale')
                 return;
-            this.log('warn', (0,_promotion_promo_health_log__WEBPACK_IMPORTED_MODULE_27__.promoHealthLine)('swap_held', mobile, { reason: status, failedRetries, paused: false, retryMin: Math.ceil(retryMs / 60000), persisted: outcome === 'written' }));
+            this.log('warn', (0,_promotion_promo_health_log__WEBPACK_IMPORTED_MODULE_28__.promoHealthLine)('swap_held', mobile, { reason: status, failedRetries, paused: false, retryMin: Math.ceil(retryMs / 60000), persisted: outcome === 'written' }));
         };
         if (!ctx.noPause && failedRetries < PROMO_HEALTH_MAX_FAILED_RETRIES) {
             await repause();
@@ -95114,7 +95817,7 @@ class JobManager {
         // Gate only: no payer hold (owner 2026-11-20); the old main's payers get the new main from the parked responder.
         const payer = ctx.noPause ? { active: false, lastAt: null } : await this.creditedPayerActive(now);
         if (payer.active) {
-            this.log('warn', (0,_promotion_promo_health_log__WEBPACK_IMPORTED_MODULE_27__.promoHealthLine)('swap_held', mobile, {
+            this.log('warn', (0,_promotion_promo_health_log__WEBPACK_IMPORTED_MODULE_28__.promoHealthLine)('swap_held', mobile, {
                 reason: payer.error ? 'payer_check_failed' : 'payer_active',
                 failedRetries,
                 payerAgoMin: payer.lastAt ? Math.floor((now - payer.lastAt) / 60000) : null,
@@ -95124,16 +95827,16 @@ class JobManager {
             return;
         }
         const clientId = process.env.clientId || 'unknown';
-        const budget = await (0,_tg_channel_state_channel_message_promotions_orchestrator_promo_health_ladder__WEBPACK_IMPORTED_MODULE_28__.readPromoSwapBudget)(_tg_core_utils_Redis_Redis_Client__WEBPACK_IMPORTED_MODULE_22__.RedisClient, 'tgaut', clientId, now);
+        const budget = await (0,_tg_channel_state_channel_message_promotions_orchestrator_promo_health_ladder__WEBPACK_IMPORTED_MODULE_29__.readPromoSwapBudget)(_tg_core_utils_Redis_Redis_Client__WEBPACK_IMPORTED_MODULE_23__.RedisClient, 'tgaut', clientId, now);
         if ('reason' in budget) {
-            this.log('warn', (0,_promotion_promo_health_log__WEBPACK_IMPORTED_MODULE_27__.promoHealthLine)('swap_held', mobile, { reason: budget.reason, failedRetries, detail: budget.detail }));
+            this.log('warn', (0,_promotion_promo_health_log__WEBPACK_IMPORTED_MODULE_28__.promoHealthLine)('swap_held', mobile, { reason: budget.reason, failedRetries, detail: budget.detail }));
             await repause();
             return;
         }
-        const runtimeBase = (0,_config_runtime_config__WEBPACK_IMPORTED_MODULE_29__.getRuntimeConfigBaseOrNull)();
+        const runtimeBase = (0,_config_runtime_config__WEBPACK_IMPORTED_MODULE_30__.getRuntimeConfigBaseOrNull)();
         if (!runtimeBase) {
             this.log('error', 'Cannot trigger setupClient rotation: runtime config base is missing');
-            this.log('warn', (0,_promotion_promo_health_log__WEBPACK_IMPORTED_MODULE_27__.promoHealthLine)('swap', mobile, { swapped: false, status: 'no_runtime_base', failedRetries }));
+            this.log('warn', (0,_promotion_promo_health_log__WEBPACK_IMPORTED_MODULE_28__.promoHealthLine)('swap', mobile, { swapped: false, status: 'no_runtime_base', failedRetries }));
             await repause();
             return;
         }
@@ -95149,74 +95852,74 @@ class JobManager {
         let charged;
         let incremented = false;
         try {
-            charged = await (0,_tg_channel_state_channel_message_promotions_orchestrator_promo_health_ladder__WEBPACK_IMPORTED_MODULE_28__.notePromoSwap)({
-                get: (key) => _tg_core_utils_Redis_Redis_Client__WEBPACK_IMPORTED_MODULE_22__.RedisClient.get(key),
+            charged = await (0,_tg_channel_state_channel_message_promotions_orchestrator_promo_health_ladder__WEBPACK_IMPORTED_MODULE_29__.notePromoSwap)({
+                get: (key) => _tg_core_utils_Redis_Redis_Client__WEBPACK_IMPORTED_MODULE_23__.RedisClient.get(key),
                 incr: async (key) => {
-                    const count = await _tg_core_utils_Redis_Redis_Client__WEBPACK_IMPORTED_MODULE_22__.RedisClient.incr(key);
+                    const count = await _tg_core_utils_Redis_Redis_Client__WEBPACK_IMPORTED_MODULE_23__.RedisClient.incr(key);
                     incremented = true;
                     return count;
                 },
-                expire: (key, seconds) => _tg_core_utils_Redis_Redis_Client__WEBPACK_IMPORTED_MODULE_22__.RedisClient.expire(key, seconds),
+                expire: (key, seconds) => _tg_core_utils_Redis_Redis_Client__WEBPACK_IMPORTED_MODULE_23__.RedisClient.expire(key, seconds),
             }, budget);
         }
         catch (error) {
             (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, 'JobManager.promoLadderSwapBudget', false);
             if (incremented)
                 await this.refundPromoSwap(budget.key);
-            this.log('warn', (0,_promotion_promo_health_log__WEBPACK_IMPORTED_MODULE_27__.promoHealthLine)('swap_held', mobile, {
+            this.log('warn', (0,_promotion_promo_health_log__WEBPACK_IMPORTED_MODULE_28__.promoHealthLine)('swap_held', mobile, {
                 reason: 'budget_unavailable', failedRetries, budget: incremented ? 'refunded' : undefined,
                 detail: error instanceof Error ? error.message : String(error),
             }));
             await repause();
             return;
         }
-        if (charged > _tg_channel_state_channel_message_promotions_orchestrator_promo_health_ladder__WEBPACK_IMPORTED_MODULE_28__.PROMO_LADDER.swapsPerIstDay) {
+        if (charged > _tg_channel_state_channel_message_promotions_orchestrator_promo_health_ladder__WEBPACK_IMPORTED_MODULE_29__.PROMO_LADDER.swapsPerIstDay) {
             // Another swap took the last slot between the read and the charge.
             await this.refundPromoSwap(budget.key);
-            this.log('warn', (0,_promotion_promo_health_log__WEBPACK_IMPORTED_MODULE_27__.promoHealthLine)('swap_held', mobile, { reason: 'daily_cap', failedRetries, detail: `ist_day=${(0,_tg_channel_state_channel_message_promotions_orchestrator_promo_health_ladder__WEBPACK_IMPORTED_MODULE_28__.promoIstDay)(now)} swaps=${charged - 1}/${_tg_channel_state_channel_message_promotions_orchestrator_promo_health_ladder__WEBPACK_IMPORTED_MODULE_28__.PROMO_LADDER.swapsPerIstDay}` }));
+            this.log('warn', (0,_promotion_promo_health_log__WEBPACK_IMPORTED_MODULE_28__.promoHealthLine)('swap_held', mobile, { reason: 'daily_cap', failedRetries, detail: `ist_day=${(0,_tg_channel_state_channel_message_promotions_orchestrator_promo_health_ladder__WEBPACK_IMPORTED_MODULE_29__.promoIstDay)(now)} swaps=${charged - 1}/${_tg_channel_state_channel_message_promotions_orchestrator_promo_health_ladder__WEBPACK_IMPORTED_MODULE_29__.PROMO_LADDER.swapsPerIstDay}` }));
             await repause();
             return;
         }
         const swapReason = `Promotion health check failed: retry ${reason} (landed=${evidence.landed}, failed=${evidence.failed} since the retry), failStreak=${messageStats.failStreak}, failedRetries=${failedRetries}`;
-        const url = `${runtimeBase}/setupClient/${process.env.clientId}?archiveOld=true&days=${(0,_telegram_spam_state__WEBPACK_IMPORTED_MODULE_31__.clampSwapRestDays)((0,_telegram_spam_state__WEBPACK_IMPORTED_MODULE_31__.swapDaysForCurrentSpamState)())}&formalities=true&reason=${encodeURIComponent(swapReason)}`;
+        const url = `${runtimeBase}/setupClient/${process.env.clientId}?archiveOld=true&days=${(0,_telegram_spam_state__WEBPACK_IMPORTED_MODULE_32__.clampSwapRestDays)((0,_telegram_spam_state__WEBPACK_IMPORTED_MODULE_32__.swapDaysForCurrentSpamState)())}&formalities=true&reason=${encodeURIComponent(swapReason)}`;
         let setupResult;
         // Logged before the request: a swap that succeeds restarts this process before the swapped=true line.
         // A request the local backoff answers never reaches CMS (review L5).
         const swapOptions = { flatNoCandidateRetry: true };
-        this.log('warn', (0,_promotion_promo_health_log__WEBPACK_IMPORTED_MODULE_27__.promoHealthLine)('swap', mobile, { state: (0,_telegram_setup_client__WEBPACK_IMPORTED_MODULE_30__.setupClientSuppressed)(swapOptions) ? 'suppressed_local' : 'requested', failedRetries, budget: 'charged', cause: ctx.noPause ? 'ban_gate' : undefined }));
+        this.log('warn', (0,_promotion_promo_health_log__WEBPACK_IMPORTED_MODULE_28__.promoHealthLine)('swap', mobile, { state: (0,_telegram_setup_client__WEBPACK_IMPORTED_MODULE_31__.setupClientSuppressed)(swapOptions) ? 'suppressed_local' : 'requested', failedRetries, budget: 'charged', cause: ctx.noPause ? 'ban_gate' : undefined }));
         try {
             // Owner 2026-11-21: a promo-health swap that gets no_candidate retries every 2 h and never stops.
-            setupResult = await (0,_telegram_setup_client__WEBPACK_IMPORTED_MODULE_30__.requestClientSetup)(url, _tg_core_utils_fetchWithTimeout__WEBPACK_IMPORTED_MODULE_32__.fetchWithTimeout, process.env.clientId, swapOptions);
+            setupResult = await (0,_telegram_setup_client__WEBPACK_IMPORTED_MODULE_31__.requestClientSetup)(url, _tg_core_utils_fetchWithTimeout__WEBPACK_IMPORTED_MODULE_33__.fetchWithTimeout, process.env.clientId, swapOptions);
         }
         catch (error) {
             // No clear answer (timeout, no response, invalid contract): CMS may have swapped; the charge stays.
             (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, 'JobManager.promoHealthSwapRequest', false);
-            this.log('warn', (0,_promotion_promo_health_log__WEBPACK_IMPORTED_MODULE_27__.promoHealthLine)('swap', mobile, { swapped: false, status: 'request_error', failedRetries, budget: 'charged', cause: ctx.noPause ? 'ban_gate' : undefined, error: error instanceof Error ? error.message : String(error) }));
+            this.log('warn', (0,_promotion_promo_health_log__WEBPACK_IMPORTED_MODULE_28__.promoHealthLine)('swap', mobile, { swapped: false, status: 'request_error', failedRetries, budget: 'charged', cause: ctx.noPause ? 'ban_gate' : undefined, error: error instanceof Error ? error.message : String(error) }));
             // Gate only: no pause loop, no swap storm (the next request waits SETUP_CLIENT_BACKOFF_MS and the shared
             // backoff). Any other cause pauses again, as before.
             if (ctx.noPause)
-                await waitForSwap('request_error', _telegram_setup_client__WEBPACK_IMPORTED_MODULE_30__.SETUP_CLIENT_BACKOFF_MS);
+                await waitForSwap('request_error', _telegram_setup_client__WEBPACK_IMPORTED_MODULE_31__.SETUP_CLIENT_BACKOFF_MS);
             else
                 await pauseAgain();
             return;
         }
         if (!setupResult.swapped)
             await this.refundPromoSwap(budget.key);
-        this.log('warn', (0,_promotion_promo_health_log__WEBPACK_IMPORTED_MODULE_27__.promoHealthLine)('swap', mobile, {
+        this.log('warn', (0,_promotion_promo_health_log__WEBPACK_IMPORTED_MODULE_28__.promoHealthLine)('swap', mobile, {
             swapped: setupResult.swapped,
             status: setupResult.status,
             failedRetries,
-            newMobile: setupResult.swapped ? (0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_26__.maskMobile)(setupResult.newMobile) : undefined,
+            newMobile: setupResult.swapped ? (0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_27__.maskMobile)(setupResult.newMobile) : undefined,
             budget: setupResult.swapped ? 'charged' : 'refunded',
             cause: ctx.noPause ? 'ban_gate' : undefined,
         }));
         const lastUpdatedTimeStamp = Number(ctx.promotionHealth?.metadata?.durableLastUpdatedAt ?? ctx.promotedStats.lastUpdatedTimeStamp ?? 0);
         const why = ctx.noPause ? 'at once, ban gate tripped (no payer hold)' : `after ${failedRetries} failed retries, no payer active in 6 h`;
-        const alertMsg = `Promotions failing! Rotating user ${why} 🔄\n\nLast update: ${(0,_tg_core_utils_readbleTimeDifference__WEBPACK_IMPORTED_MODULE_19__.getReadableTimeDifference)(lastUpdatedTimeStamp)}\nHealth: ${ctx.promotionHealth?.summary ?? 'unhealthy'}\nIssues: ${(ctx.promotionHealth?.issues ?? []).join(', ') || 'none'}\nRetry: ${reason}, landed ${evidence.landed}, failed ${evidence.failed} since the retry\nFailed streak: ${messageStats.failStreak}\nTotal Failed: ${messageStats.totalFailed}\nSuccess: ${messageStats.successCount}\nDeleted: ${messageStats.deletedCount}\nDaysLeft: ${ctx.daysLeft}`;
+        const alertMsg = `Promotions failing! Rotating user ${why} 🔄\n\nLast update: ${(0,_tg_core_utils_readbleTimeDifference__WEBPACK_IMPORTED_MODULE_20__.getReadableTimeDifference)(lastUpdatedTimeStamp)}\nHealth: ${ctx.promotionHealth?.summary ?? 'unhealthy'}\nIssues: ${(ctx.promotionHealth?.issues ?? []).join(', ') || 'none'}\nRetry: ${reason}, landed ${evidence.landed}, failed ${evidence.failed} since the retry\nFailed streak: ${messageStats.failStreak}\nTotal Failed: ${messageStats.totalFailed}\nSuccess: ${messageStats.successCount}\nDeleted: ${messageStats.deletedCount}\nDaysLeft: ${ctx.daysLeft}`;
         // Alert only when a rotation request actually went out, and only on the first no_candidate of a streak (review M1).
         const streak = Number(setupResult.noCandidateStreak ?? 0);
         if (setupResult.status === 'no_candidate' && streak > 1) {
-            this.log('warn', (0,_promotion_promo_health_log__WEBPACK_IMPORTED_MODULE_27__.promoHealthLine)('alert_suppressed', mobile, { reason: 'no_candidate_streak', streak, failedRetries }));
+            this.log('warn', (0,_promotion_promo_health_log__WEBPACK_IMPORTED_MODULE_28__.promoHealthLine)('alert_suppressed', mobile, { reason: 'no_candidate_streak', streak, failedRetries }));
         }
         else if (!setupResult.suppressedLocally) {
             await this.notifyError(`${alertMsg}\n\nResult: ${setupResult.status}`);
@@ -95226,7 +95929,7 @@ class JobManager {
             if (setupResult.status === 'no_candidate') {
                 const retryMs = promoSwapRetryMs(setupResult);
                 // From the response time, not the tick start (review L6).
-                this.log('warn', (0,_promotion_promo_health_log__WEBPACK_IMPORTED_MODULE_27__.promoHealthLine)('swap_backoff', mobile, { next: new Date(Date.now() + retryMs).toISOString(), reason: 'no_candidate', retryMin: Math.ceil(retryMs / 60000), streak: setupResult.noCandidateStreak }));
+                this.log('warn', (0,_promotion_promo_health_log__WEBPACK_IMPORTED_MODULE_28__.promoHealthLine)('swap_backoff', mobile, { next: new Date(Date.now() + retryMs).toISOString(), reason: 'no_candidate', retryMin: Math.ceil(retryMs / 60000), streak: setupResult.noCandidateStreak }));
             }
             if (ctx.noPause)
                 await waitForSwap(setupResult.status, promoSwapRetryMs(setupResult));
@@ -95234,7 +95937,7 @@ class JobManager {
                 await pauseAgain();
             return;
         }
-        this.log('info', `Promotion rotation completed 🔄 ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_26__.maskMobile)(setupResult.existingMobile)} → ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_26__.maskMobile)(setupResult.newMobile)}`);
+        this.log('info', `Promotion rotation completed 🔄 ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_27__.maskMobile)(setupResult.existingMobile)} → ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_27__.maskMobile)(setupResult.newMobile)}`);
         try {
             // A swap resets the count. promotions stay active, as before 2026-11-19, so the new main starts sending.
             if (!(await this.promoteRepo().setPromoHealthPause(process.env.clientId, null, { expect: { pause } }))) {
@@ -95248,7 +95951,7 @@ class JobManager {
     /** Gives back one charged ladder swap (the request returned without a swap). */
     async refundPromoSwap(key) {
         try {
-            await _tg_core_utils_Redis_Redis_Client__WEBPACK_IMPORTED_MODULE_22__.RedisClient.decr(key);
+            await _tg_core_utils_Redis_Redis_Client__WEBPACK_IMPORTED_MODULE_23__.RedisClient.decr(key);
         }
         catch (error) {
             (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, 'JobManager.promoLadderSwapRefund', false);
@@ -95263,7 +95966,7 @@ class JobManager {
      */
     async creditedPayerActive(now) {
         try {
-            const row = await this.promoteRepo().findRecentCreditedPayer((0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_33__.currentScopeIdentity)(), now - PROMO_HEALTH_PAYER_QUIET_MS);
+            const row = await this.promoteRepo().findRecentCreditedPayer((0,_tg_core_utils_user_scope__WEBPACK_IMPORTED_MODULE_34__.currentScopeIdentity)(), now - PROMO_HEALTH_PAYER_QUIET_MS);
             const lastAt = Number(row?.lastMsgTimeStamp ?? 0) || null;
             return { active: row !== null, lastAt };
         }
@@ -95287,8 +95990,8 @@ class JobManager {
     }
     /** Flow v3 P7 `restart_runner`: stop + forced start, counted in the restart ledger. */
     async restartPromoRunner(promotor, reason, now = Date.now()) {
-        const mobile = String(_telegram_client_access__WEBPACK_IMPORTED_MODULE_15__.TelegramManager.getInstance().mobile ?? process.env.mobile ?? '');
-        this.log('warn', `promo health restart_runner | ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_26__.maskMobile)(mobile)} | reason=${reason}`);
+        const mobile = String(_telegram_client_access__WEBPACK_IMPORTED_MODULE_16__.TelegramManager.getInstance().mobile ?? process.env.mobile ?? '');
+        this.log('warn', `promo health restart_runner | ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_27__.maskMobile)(mobile)} | reason=${reason}`);
         try {
             await promotor.stopPromotions?.();
             await promotor.startPromotion({ force: true });
@@ -95296,7 +95999,7 @@ class JobManager {
         catch (error) {
             (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, 'JobManager.promoHealthRestart', false);
         }
-        _tg_channel_state_channel_message_promotions_orchestrator_promo_health_ladder__WEBPACK_IMPORTED_MODULE_28__.promoRestartLedger.note(`on:${mobile}`, 'health', now);
+        _tg_channel_state_channel_message_promotions_orchestrator_promo_health_ladder__WEBPACK_IMPORTED_MODULE_29__.promoRestartLedger.note(`on:${mobile}`, 'health', now);
     }
     logServiceHealth(label, check) {
         if (!check) {
@@ -95313,7 +96016,7 @@ class JobManager {
         }
         try {
             this.log('warn', `Redis unhealthy (${check?.issues.join('; ') || check?.summary || 'service health requested recovery'}) - reconnecting 🔄`);
-            const result = await _tg_core_utils_Redis_Redis_Client__WEBPACK_IMPORTED_MODULE_22__.RedisClient.forceReconnect();
+            const result = await _tg_core_utils_Redis_Redis_Client__WEBPACK_IMPORTED_MODULE_23__.RedisClient.forceReconnect();
             this.log(result.success ? 'info' : 'warn', `Redis recovery result: ${result.message}`);
         }
         catch (error) {
@@ -95339,7 +96042,7 @@ class JobManager {
         }
         try {
             this.log('warn', `Cloudinary unhealthy (${check?.issues.join('; ') || check?.summary || 'service health requested recovery'}) - initializing 🔄`);
-            const service = await _services_cloudinaryService__WEBPACK_IMPORTED_MODULE_24__["default"].getInstance();
+            const service = await _services_cloudinaryService__WEBPACK_IMPORTED_MODULE_25__["default"].getInstance();
             this.log(service ? 'info' : 'warn', `Cloudinary recovery result: ${service ? 'initialized' : 'initializer returned no service'}`);
         }
         catch (error) {
@@ -95353,22 +96056,22 @@ class JobManager {
         try {
             this.log('warn', `Telegram connection unhealthy (${check?.issues.join('; ') || check?.summary || 'service health requested recovery'}) - reconnecting 🔄`);
             if (check?.metadata?.connected === true && check.metadata.rpcHealthy === false) {
-                const recovered = await _telegram_client_access__WEBPACK_IMPORTED_MODULE_15__.TelegramManager.recoverRuntime();
+                const recovered = await _telegram_client_access__WEBPACK_IMPORTED_MODULE_16__.TelegramManager.recoverRuntime();
                 this.log(recovered ? 'info' : 'warn', `Telegram runtime recovery result: ${recovered ? 'rehydrated' : 'not recovered'}`);
                 return;
             }
-            const connected = await _telegram_client_access__WEBPACK_IMPORTED_MODULE_15__.TelegramManager.ensureConnected();
-            if (connected && await _telegram_client_access__WEBPACK_IMPORTED_MODULE_15__.TelegramManager.instanceExist()) {
+            const connected = await _telegram_client_access__WEBPACK_IMPORTED_MODULE_16__.TelegramManager.ensureConnected();
+            if (connected && await _telegram_client_access__WEBPACK_IMPORTED_MODULE_16__.TelegramManager.instanceExist()) {
                 this.log('info', 'Telegram recovery result: connected');
                 return;
             }
-            if (!(await _telegram_client_access__WEBPACK_IMPORTED_MODULE_15__.TelegramManager.instanceExist())) {
+            if (!(await _telegram_client_access__WEBPACK_IMPORTED_MODULE_16__.TelegramManager.instanceExist())) {
                 this.log('warn', `Telegram ${connected ? 'client is connected but not started' : 'reconnect returned false'} and no started manager is registered; starting singleton manager 🔄`);
-                const manager = _telegram_client_access__WEBPACK_IMPORTED_MODULE_15__.TelegramManager.getInstance();
+                const manager = _telegram_client_access__WEBPACK_IMPORTED_MODULE_16__.TelegramManager.getInstance();
                 await manager.startTg();
                 let startedAndConnected = false;
                 try {
-                    startedAndConnected = (await _telegram_client_access__WEBPACK_IMPORTED_MODULE_15__.TelegramManager.instanceExist()) && Boolean(_telegram_client_access__WEBPACK_IMPORTED_MODULE_15__.TelegramManager.getClient()?.connected);
+                    startedAndConnected = (await _telegram_client_access__WEBPACK_IMPORTED_MODULE_16__.TelegramManager.instanceExist()) && Boolean(_telegram_client_access__WEBPACK_IMPORTED_MODULE_16__.TelegramManager.getClient()?.connected);
                 }
                 catch {
                     startedAndConnected = false;
@@ -95406,7 +96109,7 @@ class JobManager {
             return true;
         }
         this.log('warn', `Replier unhealthy (${check.issues.join('; ') || check.summary}) - starting forced loop 🔄`);
-        void (0,_replier__WEBPACK_IMPORTED_MODULE_23__.replier)(true).catch((error) => {
+        void (0,_replier__WEBPACK_IMPORTED_MODULE_24__.replier)(true).catch((error) => {
             (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, 'JobManager.replierRecovery');
         });
         return true;
@@ -95481,10 +96184,22 @@ class JobManager {
             this.log('warn', `${serviceName} runtime repair failed: ${error instanceof Error ? error.message : String(error)}`);
         }
     }
+    async resolvePendingLedgerClaims() {
+        try {
+            const db = _data_user_data_crud__WEBPACK_IMPORTED_MODULE_8__.UserDataDtoCrud.getInstance();
+            const gate = (0,_payments_proof_gate_gate__WEBPACK_IMPORTED_MODULE_9__.proofGateFrom)(() => db.getRepositories());
+            const r = await gate.resolvePendingClaims(process.env.clientId || '');
+            if (r.credit + r.reject + r.unknown + r.failed + r.gone > 0)
+                this.log('info', `payment-ledger kind=pending_sweep credit=${r.credit} reject=${r.reject} unknown=${r.unknown} failed=${r.failed} gone=${r.gone}`);
+        }
+        catch (error) {
+            (0,_tg_core_utils_parseError__WEBPACK_IMPORTED_MODULE_5__.parseError)(error, 'resolvePendingLedgerClaims', false);
+        }
+    }
     async runMarkAsRead() {
-        if (!(await _telegram_client_access__WEBPACK_IMPORTED_MODULE_15__.TelegramManager.instanceExist()))
+        if (!(await _telegram_client_access__WEBPACK_IMPORTED_MODULE_16__.TelegramManager.instanceExist()))
             return;
-        await (0,_telegram_mark_as_read__WEBPACK_IMPORTED_MODULE_12__.MarkAsRead)(_telegram_client_access__WEBPACK_IMPORTED_MODULE_15__.TelegramManager.getClient(), false);
+        await (0,_telegram_mark_as_read__WEBPACK_IMPORTED_MODULE_13__.MarkAsRead)(_telegram_client_access__WEBPACK_IMPORTED_MODULE_16__.TelegramManager.getClient(), false);
     }
     /**
      * Run memory cleanup to prevent memory leaks
@@ -95550,7 +96265,7 @@ class JobManager {
     stopJobs() {
         this.log('info', 'Stopping all jobs... 🛑');
         this.isShuttingDown = true;
-        (0,_parked_accounts__WEBPACK_IMPORTED_MODULE_25__.stopParkedAccounts)();
+        (0,_parked_accounts__WEBPACK_IMPORTED_MODULE_26__.stopParkedAccounts)();
         // Cancel scheduled jobs
         this.jobs.forEach((job, name) => {
             job.cancel();
@@ -95584,8 +96299,8 @@ class JobManager {
             // Wait for current operations to complete
             await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_7__.sleep)(5000);
             // Cleanup promotor
-            if (_telegram_client_access__WEBPACK_IMPORTED_MODULE_15__.TelegramManager.instanceExist()) {
-                const telegramManager = _telegram_client_access__WEBPACK_IMPORTED_MODULE_15__.TelegramManager.getInstance();
+            if (_telegram_client_access__WEBPACK_IMPORTED_MODULE_16__.TelegramManager.instanceExist()) {
+                const telegramManager = _telegram_client_access__WEBPACK_IMPORTED_MODULE_16__.TelegramManager.getInstance();
                 if (telegramManager.promotorInstance) {
                     await telegramManager.promotorInstance.stopPromotions();
                     telegramManager.promotorInstance.cleanup();
@@ -107924,9 +108639,12 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ });
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
 /* harmony import */ var _proof_gate_decide__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../proof-gate/decide */ "./src/payments/proof-gate/decide.ts");
-/* harmony import */ var _verdict__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./verdict */ "./src/payments/proof-archive/verdict.ts");
-/* harmony import */ var _store__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ./store */ "./src/payments/proof-archive/store.ts");
-/* harmony import */ var _sweep__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ./sweep */ "./src/payments/proof-archive/sweep.ts");
+/* harmony import */ var _proof_gate_ledger__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../proof-gate/ledger */ "./src/payments/proof-gate/ledger.ts");
+/* harmony import */ var _fingerprint__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../fingerprint */ "./src/payments/fingerprint.ts");
+/* harmony import */ var _payment_time__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../payment-time */ "./src/payments/payment-time.ts");
+/* harmony import */ var _verdict__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ./verdict */ "./src/payments/proof-archive/verdict.ts");
+/* harmony import */ var _store__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ./store */ "./src/payments/proof-archive/store.ts");
+/* harmony import */ var _sweep__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ./sweep */ "./src/payments/proof-archive/sweep.ts");
 /**
  * One payment screenshot's review record (contract section 1): collects the outcome the payment path reached, then
  * writes the paymentProofs review fields (`proofId`, `verdict`, `image`, `ocr`; a row of its own, mode 'record', when
@@ -107935,6 +108653,9 @@ __webpack_require__.r(__webpack_exports__);
  * Never changes a reply: `finish()` is called fire-and-forget after the path has answered, every write is bounded in
  * time, nothing throws, and a disk failure only leaves `image.stored` false.
  */
+
+
+
 
 
 
@@ -107957,12 +108678,39 @@ function bounded(work, fallback, what) {
 class ProofRecord {
     constructor(input) {
         this.result = null;
+        /** Set by creditRecorded(): the credit (ledger + payment_event) was recorded at this amount. */
+        this.credit = null;
         this.finished = null;
         this.input = input;
     }
     /** The outcome the payment path reached (the last call wins: a later, more specific step overrides). */
     outcome(outcome, reasons = []) {
         this.result = { outcome, reasons: [...reasons] };
+    }
+    /**
+     * The credit was recorded (processImage keepCreditClaim): only then is the ledger doc a 'credit' that blocks a
+     * later reuse of this UTR / txn id / file.
+     */
+    creditRecorded(amount, atMs = Date.now()) {
+        if (Number.isFinite(amount) && amount > 0)
+            this.credit = { amount, atMs };
+    }
+    /**
+     * The credit write threw, or this message's key was already applied, and the payer is SERVED: the pending claim doc
+     * is marked SERVED_AFTER_THROW (the sweep never releases it).
+     */
+    creditUnknown() { this.creditState = 'unknown'; }
+    /** A definite failure (nothing granted) whose claim release failed: pending, marked RELEASE_FAILED for the sweep. */
+    creditReleaseFailed() { this.creditState = 'release_failed'; }
+    /** The credit write definitely did not apply and the claim was released. */
+    creditReleased() { this.creditState = 'released'; }
+    /** The gate's ledger claim id of this screenshot (GateSession.ledgerClaimId) and its claimedAt (ledgerClaimedAtMs). */
+    claimed(claimId, claimedAtMs) {
+        if (!claimId)
+            return;
+        this.claimId = claimId;
+        if (typeof claimedAtMs === 'number' && Number.isFinite(claimedAtMs))
+            this.claimedAtMs = claimedAtMs;
     }
     /** An outcome only when none was set yet. */
     fallback(outcome, reasons = []) {
@@ -107994,9 +108742,9 @@ class ProofRecord {
         }
         if (!Buffer.isBuffer(i.photo) || i.photo.length === 0)
             return null;
-        const proofId = (0,_verdict__WEBPACK_IMPORTED_MODULE_2__.proofIdOf)(i.clientId, i.chatId, i.msgId);
+        const proofId = (0,_verdict__WEBPACK_IMPORTED_MODULE_5__.proofIdOf)(i.clientId, i.chatId, i.msgId);
         if (!proofId) {
-            (0,_store__WEBPACK_IMPORTED_MODULE_3__.warnDiskOnce)('record', new Error(`no proof id for client "${i.clientId}" chat ${i.chatId} msg ${i.msgId}`));
+            (0,_store__WEBPACK_IMPORTED_MODULE_6__.warnDiskOnce)('record', new Error(`no proof id for client "${i.clientId}" chat ${i.chatId} msg ${i.msgId}`));
             return null;
         }
         let payee = 'unknown';
@@ -108006,10 +108754,10 @@ class ProofRecord {
         catch {
             payee = 'unknown';
         }
-        const verdict = (0,_verdict__WEBPACK_IMPORTED_MODULE_2__.buildVerdict)({ outcome: this.result.outcome, reasons: this.result.reasons, payee, vision: i.vision });
-        const { mime, ext } = (0,_verdict__WEBPACK_IMPORTED_MODULE_2__.sniffImage)(i.photo);
-        const image = { host: i.clientId, bytes: i.photo.length, mime, sha256: (0,_verdict__WEBPACK_IMPORTED_MODULE_2__.sha256Hex)(i.photo), stored: false };
-        const ocr = (0,_verdict__WEBPACK_IMPORTED_MODULE_2__.ocrFieldsOf)(i.details, i.vision, i.rawText, i.caption);
+        const verdict = (0,_verdict__WEBPACK_IMPORTED_MODULE_5__.buildVerdict)({ outcome: this.result.outcome, reasons: this.result.reasons, payee, vision: i.vision });
+        const { mime, ext } = (0,_verdict__WEBPACK_IMPORTED_MODULE_5__.sniffImage)(i.photo);
+        const image = { host: i.clientId, bytes: i.photo.length, mime, sha256: (0,_verdict__WEBPACK_IMPORTED_MODULE_5__.sha256Hex)(i.photo), stored: false };
+        const ocr = (0,_verdict__WEBPACK_IMPORTED_MODULE_5__.ocrFieldsOf)(i.details, i.vision, i.rawText, i.caption);
         let store = null;
         try {
             store = i.store();
@@ -108045,9 +108793,10 @@ class ProofRecord {
         const rowWritten = store?.recordReview
             ? await bounded(store.recordReview(row), false, `recordReview(${proofId})`)
             : false;
-        (0,_sweep__WEBPACK_IMPORTED_MODULE_4__.startProofSweeper)();
-        const write = i.writeFiles ?? _store__WEBPACK_IMPORTED_MODULE_3__.writeProofFiles;
-        const sidecar = (0,_verdict__WEBPACK_IMPORTED_MODULE_2__.buildSidecar)({
+        await this.writeLedger({ proofId, verdict, ocr, sha256: image.sha256, utr, amount, store: i });
+        (0,_sweep__WEBPACK_IMPORTED_MODULE_7__.startProofSweeper)();
+        const write = i.writeFiles ?? _store__WEBPACK_IMPORTED_MODULE_6__.writeProofFiles;
+        const sidecar = (0,_verdict__WEBPACK_IMPORTED_MODULE_5__.buildSidecar)({
             proofId, clientId: i.clientId, chatId: i.chatId, msgId: i.msgId, receivedAtMs: i.receivedAtMs,
             image, details: i.details, rawText: i.rawText, vision: i.vision, verdict,
         });
@@ -108056,13 +108805,80 @@ class ProofRecord {
             stored = await write({ proofId, clientId: i.clientId, receivedAtMs: i.receivedAtMs, ext, image: i.photo, sidecar });
         }
         catch (error) {
-            (0,_store__WEBPACK_IMPORTED_MODULE_3__.warnDiskOnce)(`write ${proofId}`, error);
+            (0,_store__WEBPACK_IMPORTED_MODULE_6__.warnDiskOnce)(`write ${proofId}`, error);
             stored = false;
         }
         if (stored && rowWritten && store?.markProofStored) {
             await bounded(store.markProofStored({ chatId: i.chatId, profile: i.profile, clientId: i.clientId, ...(i.mobile ? { mobile: i.mobile } : {}), telegramMsgId: i.msgId }), false, `markProofStored(${proofId})`);
         }
         return { proofId, verdict, rowWritten, stored };
+    }
+    /** The permanent ledger doc (no TTL). Bounded, never throws, never changes a reply. */
+    async writeLedger(a) {
+        const i = a.store;
+        let ledger = null;
+        try {
+            ledger = i.ledger?.();
+        }
+        catch {
+            ledger = null;
+        }
+        if (!ledger)
+            return;
+        const mapped = (0,_proof_gate_ledger__WEBPACK_IMPORTED_MODULE_2__.ledgerVerdictOf)(a.verdict.outcome, this.credit !== null, a.verdict.reasons, this.creditState);
+        if (!mapped) {
+            const why = a.verdict.reasons.includes('DUPLICATE_UPDATE') ? 'DUPLICATE_UPDATE' : null;
+            if (why)
+                logger.log(`payment-ledger kind=write result=skipped reason=${why} proof=••••${a.proofId.slice(-4)} chat=••••${i.chatId.slice(-4)}`);
+            return;
+        }
+        let dHash = null;
+        try {
+            dHash = (0,_fingerprint__WEBPACK_IMPORTED_MODULE_3__.imageFingerprint)(i.photo).dHash;
+        }
+        catch {
+            dHash = null;
+        }
+        let printed = null;
+        try {
+            printed = i.printedMs?.() ?? null;
+        }
+        catch {
+            printed = null;
+        }
+        const txnTime = a.ocr.txnId ? (0,_payment_time__WEBPACK_IMPORTED_MODULE_4__.phonePeTxnTimeMs)(a.ocr.txnId) : null;
+        const d = i.details;
+        const credit = mapped.verdict === 'credit' ? this.credit : null;
+        const doc = {
+            proofId: a.proofId, mobile: i.mobile ?? '', clientId: i.clientId, profile: i.profile, chatId: i.chatId, msgId: i.msgId,
+            receivedAt: new Date(i.receivedAtMs),
+            app: a.ocr.app, screenType: a.ocr.screen,
+            ...(Number.isFinite(a.amount) && a.amount > 0 ? { amount: a.amount } : {}),
+            payeeName: d.payeeName || d.payeeBankingName || undefined,
+            payeeUpi: d.payeeUpiId || undefined,
+            payerName: a.ocr.payerName, payerUpi: a.ocr.payerUpiId, note: a.ocr.note,
+            ...(printed !== null && Number.isFinite(printed) ? { printedTime: printed } : {}),
+            ...(a.utr ? { utr: a.utr } : {}),
+            utrRaw: typeof d.utr === 'string' ? d.utr.slice(0, 64) : undefined,
+            txnId: a.ocr.txnId,
+            ...(txnTime !== null ? { txnTime } : {}),
+            imageSha256: a.sha256,
+            ...(dHash ? { imageDHash: dHash } : {}),
+            verdict: mapped.verdict, outcome: a.verdict.outcome,
+            reasons: mapped.extraReasons ? [...a.verdict.reasons, ...mapped.extraReasons] : a.verdict.reasons,
+            ...(credit ? { creditAmount: credit.amount, creditedAt: new Date(credit.atMs) } : {}),
+            // Round 13 #4: a pending doc always carries claimedAt (the claim doc's, else the receive time): when the
+            // gate's claim write failed, this write inserts the doc, and the sweep reads only docs with claimedAt.
+            // Round 14 #4: a credit under this run's claim carries it too, so it may take over an older claim's
+            // unresolved pending doc when this claim's own claim-doc write failed (repository record(), $lt branch).
+            ...(mapped.verdict === 'pending' || (mapped.verdict === 'credit' && this.claimId) ? { claimedAt: new Date(this.claimedAtMs ?? i.receivedAtMs) } : {}),
+            visionModel: i.vision?.model ?? i.vision?.provider ?? undefined,
+            source: 'tg-aut',
+            // Under this run's claim only: a newer claim of the same message (a re-run) is never overwritten ('kept').
+            ...(this.claimId ? { expectClaimId: this.claimId } : {}),
+        };
+        const result = await bounded(ledger.record(doc), 'error', `ledger.record(••••${a.proofId.slice(-4)})`);
+        logger.log((0,_proof_gate_ledger__WEBPACK_IMPORTED_MODULE_2__.ledgerWriteLine)({ result, verdict: mapped.verdict, proofId: a.proofId, chatId: i.chatId, utr: a.utr }));
     }
 }
 
@@ -110505,24 +111321,27 @@ __webpack_require__.r(__webpack_exports__);
 const REPEAT_BY = { file: 'screenshot file', utr: 'UTR + amount', picture: 'picture + amount + time', time: 'amount + time (no UTR)', payee: 'amount + payee + minute (no UTR)', race: 'payment' };
 /**
  * Messages whose claim may have landed while its answer was lost and could not be undone (release failed): held, never
- * credited. Their re-check's `again` is their own claim, not a duplicate update (R3). Per process, bounded; a restart in
- * between loses it (the re-check then reports "Dupe ignored" to ops).
+ * credited. Their re-check's `again` is their own claim, not a duplicate update (R3). The value is that claim's
+ * generation (GateSession.claimToken): the re-check takes it over only while the row still holds it (round 13 #1). Per
+ * process, bounded; a restart in between loses it (the re-check then reports "Dupe ignored" to ops).
  */
 const UNSETTLED_CLAIMS_CAP = 500;
-const unsettledClaims = new Set();
+const unsettledClaims = new Map();
 const claimKey = (f) => `${f.chatId}/${f.profile}/${f.msgId}`;
-function markUnsettledClaim(f) {
+function markUnsettledClaim(f, token) {
     unsettledClaims.delete(claimKey(f));
-    unsettledClaims.add(claimKey(f));
+    unsettledClaims.set(claimKey(f), token);
     while (unsettledClaims.size > UNSETTLED_CLAIMS_CAP) {
-        const oldest = unsettledClaims.values().next().value;
+        const oldest = unsettledClaims.keys().next().value;
         if (oldest === undefined)
             break;
         unsettledClaims.delete(oldest);
     }
 }
 function takeUnsettledClaim(f) {
-    return unsettledClaims.delete(claimKey(f));
+    const token = unsettledClaims.get(claimKey(f));
+    unsettledClaims.delete(claimKey(f));
+    return token;
 }
 /** proof-check BLOCK reasons that rest on text printed on the screenshot (not on model judgement). */
 const TEXT_PROVEN_BLOCKS = new Set(['DISCLAIMER_LONG', 'DISCLAIMER_SHORT', 'BLOCKLIST_A', 'AI_WATERMARK']);
@@ -110764,8 +111583,7 @@ class PaymentFlow {
      * is credited instead of being dropped as a duplicate update.
      */
     async settleUnavailableClaim(session) {
-        const since = session.claimStartedAt ?? Number.POSITIVE_INFINITY;
-        const state = await session.claimState(since);
+        const state = await session.claimState();
         if (state === 'mine') {
             this.io.warn(`[payment-gate] ${session.facts.chatId}/${session.facts.msgId}: claim answer lost, but its write landed: crediting`);
             return 'won';
@@ -110781,8 +111599,8 @@ class PaymentFlow {
         catch {
             released = false;
         }
-        if (!released) {
-            markUnsettledClaim(session.facts);
+        if (!released && session.claimToken) {
+            markUnsettledClaim(session.facts, session.claimToken);
             this.io.warn(`[payment-gate] ${session.facts.chatId}/${session.facts.msgId}: claim state unknown and the undo failed: held; the re-check credits its own landed claim`);
         }
         return 'unavailable';
@@ -110867,8 +111685,17 @@ class PaymentFlow {
         const unsettled = takeUnsettledClaim(session.facts);
         if (claim === 'again' && unsettled) {
             // This message's own claim landed on an earlier pass whose answer was lost and could not be undone (R3).
-            this.io.warn(`[payment-gate] ${session.facts.chatId}/${session.facts.msgId}: the claim of an earlier held pass had landed: crediting now`);
-            claim = 'won';
+            // Round 13 #1: credited only under that very claim generation (the row still holds it): the credit, its
+            // release and the sweep then act on it. Another generation's claim stays a duplicate update.
+            const adopted = await session.adoptClaim(unsettled);
+            if (adopted === null) {
+                markUnsettledClaim(session.facts, unsettled);
+                return this.holdForStore(session, 'claim');
+            }
+            if (adopted) {
+                this.io.warn(`[payment-gate] ${session.facts.chatId}/${session.facts.msgId}: the claim of an earlier held pass had landed: crediting now`);
+                claim = 'won';
+            }
         }
         if (claim === 'lost') {
             this.note('repeat', ['CREDIT_RACE_LOST']);
@@ -110898,22 +111725,57 @@ class PaymentFlow {
             await notify({ title: 'Dupe ignored' });
             return { handled: true };
         }
-        if (confirmed) {
-            await session.resolve(confirmed);
-            await notify({ title: 'Paid via 2nd pic', fields: [{ label: 'Answered', value: confirmed.ask?.kind === 'fraud' ? 'fake warning' : 'details-page request', code: false }] });
-        }
-        // A real, credited payment answers every open fake warning of this chat: close them so the delayed block never
-        // fires (fraudBlockDue also checks for this credit, K1). Only a block THIS flow set is lifted.
-        const { closed, gateBlocked } = await session.resolveOpenFraudAsks();
-        this.io.fraudCleared?.();
-        const unblock = blocked && (gateBlocked || !!confirmed?.ask?.blockedAt);
-        if (unblock)
-            await this.io.unblock();
-        if (closed > 0 || unblock) {
-            this.io.warn(`[payment-gate] ${session.facts.chatId}: real payment credited, ${closed} fake warning(s) closed${unblock ? ', unblocked' : ''}`);
-            await this.io.notifyOps({ title: unblock ? 'Unblocked' : 'Warning closed', fields: [{ label: 'Warnings closed', value: closed, code: false }] });
-        }
-        return { handled: false, verdict, release: () => session.release() };
+        // Never throws (Codex round 8 #2): the payment is credited, so a failing step is logged and the service goes on.
+        // A store failure (null resolve, unreadable ask list) is a failed step, never "already resolved" (round 9 #1).
+        const finalise = async () => {
+            const failedSteps = [];
+            const fail = (step, err) => {
+                failedSteps.push(step);
+                this.io.warn(`[payment-gate] kind=finalise_failed step=${step} err=${err} chat=••••${session.facts.chatId.slice(-4)} msg=${session.facts.msgId}`);
+            };
+            const attempt = async (step, work) => {
+                try {
+                    return await work();
+                }
+                catch (error) {
+                    fail(step, error?.name ?? 'Error');
+                    return undefined;
+                }
+            };
+            if (confirmed) {
+                const resolved = await attempt('resolve_confirmed', () => session.resolve(confirmed));
+                if (resolved === null)
+                    fail('resolve_confirmed', 'store_failed');
+                // Announced only when this payment closed it (false: another screenshot already answered it).
+                if (resolved === true) {
+                    await attempt('notify', () => notify({ title: 'Paid via 2nd pic', fields: [{ label: 'Answered', value: confirmed.ask?.kind === 'fraud' ? 'fake warning' : 'details-page request', code: false }] }));
+                }
+            }
+            // A real, credited payment answers every open fake warning of this chat: close them so the delayed block never
+            // fires (fraudBlockDue also checks for this credit, K1). Only a block THIS flow set is lifted.
+            const asks = await attempt('close_fraud_asks', () => session.resolveOpenFraudAsks());
+            if (asks?.failed)
+                fail('close_fraud_asks', 'store_failed');
+            const closed = asks?.closed ?? 0;
+            this.io.fraudCleared?.();
+            const unblock = blocked && (!!asks?.gateBlocked || !!confirmed?.ask?.blockedAt);
+            let unblocked = false;
+            if (unblock)
+                unblocked = (await attempt('unblock', async () => { await this.io.unblock(); return true; })) === true;
+            if (closed > 0 || unblocked) {
+                this.io.warn(`[payment-gate] ${session.facts.chatId}: real payment credited, ${closed} fake warning(s) closed${unblocked ? ', unblocked' : ''}`);
+                await attempt('notify', () => this.io.notifyOps({ title: unblocked ? 'Unblocked' : 'Warning closed', fields: [{ label: 'Warnings closed', value: closed, code: false }] }));
+            }
+            if (failedSteps.length === 0)
+                return;
+            // Ops restore it by hand (a resend hits the kept claim and does not retry it).
+            const stillBlocked = failedSteps.includes('unblock');
+            try {
+                await this.io.notifyOps({ title: 'Finalise failed', summary: `Payment credited, but step '${[...new Set(failedSteps)].join("', '")}' failed${stillBlocked ? ': the user is still blocked, unblock by hand' : ''}.` });
+            }
+            catch { /* the log lines above stand */ }
+        };
+        return { handled: false, verdict, release: () => session.release(), finalise };
     }
 }
 
@@ -110936,13 +111798,18 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   STORE_TIMEOUT_MS: () => (/* binding */ STORE_TIMEOUT_MS),
 /* harmony export */   proofGateFrom: () => (/* binding */ proofGateFrom)
 /* harmony export */ });
-/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
-/* harmony import */ var _decide__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./decide */ "./src/payments/proof-gate/decide.ts");
-/* harmony import */ var _payment_time__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../payment-time */ "./src/payments/payment-time.ts");
-/* harmony import */ var _resend__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ./resend */ "./src/payments/proof-gate/resend.ts");
-/* harmony import */ var _shadow__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ./shadow */ "./src/payments/proof-gate/shadow.ts");
-/* harmony import */ var _chat_fakes__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ./chat-fakes */ "./src/payments/proof-gate/chat-fakes.ts");
-/* harmony import */ var _history__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ./history */ "./src/payments/proof-gate/history.ts");
+/* harmony import */ var node_crypto__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! node:crypto */ "node:crypto");
+/* harmony import */ var node_crypto__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(node_crypto__WEBPACK_IMPORTED_MODULE_0__);
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _decide__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./decide */ "./src/payments/proof-gate/decide.ts");
+/* harmony import */ var _payment_time__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../payment-time */ "./src/payments/payment-time.ts");
+/* harmony import */ var _resend__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ./resend */ "./src/payments/proof-gate/resend.ts");
+/* harmony import */ var _shadow__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ./shadow */ "./src/payments/proof-gate/shadow.ts");
+/* harmony import */ var _chat_fakes__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ./chat-fakes */ "./src/payments/proof-gate/chat-fakes.ts");
+/* harmony import */ var _history__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ./history */ "./src/payments/proof-gate/history.ts");
+/* harmony import */ var _ledger__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ./ledger */ "./src/payments/proof-gate/ledger.ts");
+/* harmony import */ var _credit_key__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ../credit-key */ "./src/payments/credit-key.ts");
+/* harmony import */ var _proof_archive_verdict__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ../proof-archive/verdict */ "./src/payments/proof-archive/verdict.ts");
 /**
  * Payment-screenshot gate: the I/O around ./decide over the `paymentProofs` collection (one row per payment
  * screenshot, 90-day TTL, shared by every persona process). Every call is time-bounded. No store configured at all
@@ -110957,7 +111824,11 @@ __webpack_require__.r(__webpack_exports__);
 
 
 
-const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_0__.Logger('tg-aut:proof-gate');
+
+
+
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_1__.Logger('tg-aut:proof-gate');
 /** A payment reply must not wait on a slow database. */
 const STORE_TIMEOUT_MS = 4000;
 /**
@@ -110987,11 +111858,17 @@ function withTimeout(work, ms, fallback, what) {
 class GateSession {
     constructor(deps, store, facts, creditAmount) {
         /** The post-rules holds as check() read them (history.ts). */
-        this.holds = _history__WEBPACK_IMPORTED_MODULE_6__.NO_HOLDS;
+        this.holds = _history__WEBPACK_IMPORTED_MODULE_7__.NO_HOLDS;
         /** The open asks check() read (undefined = not read yet, null = the read failed). */
         this.openRows = undefined;
         /** When the last claim() started (claimState tells this claim's landed write from an earlier one). */
         this.claimStartedAt = null;
+        /** This session's ledger claim id (the 'pending' doc's claimId), set by ledgerClaim(). */
+        this.ledgerClaimId = null;
+        /** This session's paymentProofs claim generation (servedClaim), also the ledger claimId. */
+        this.claimToken = null;
+        /** When this session's ledger claim doc was written (its claimedAt; the recorder's pending doc carries the same). */
+        this.ledgerClaimedAtMs = null;
         this.deps = deps;
         this.store = store;
         this.facts = facts;
@@ -111020,9 +111897,9 @@ class GateSession {
         // with a readable time.
         const minuteMs = f.timeMs !== null ? Math.floor(f.timeMs / 60000) * 60000 : null;
         const payment = minuteMs !== null && f.amount > 0
-            ? { amount: f.amount, sinceMs: (0,_payment_time__WEBPACK_IMPORTED_MODULE_2__.istDayStartMs)(f.arrivalMs ?? this.deps.now()), fromMs: minuteMs, toMs: minuteMs + 60000 }
+            ? { amount: f.amount, sinceMs: (0,_payment_time__WEBPACK_IMPORTED_MODULE_3__.istDayStartMs)(f.arrivalMs ?? this.deps.now()), fromMs: minuteMs, toMs: minuteMs + 60000 }
             : null;
-        const [served, recent, credited, suspect, open] = await Promise.all([
+        const [served, recent, credited, suspect, open, ledger] = await Promise.all([
             this.bound(this.store.servedCandidates({
                 ...this.key,
                 ...(f.utr ? { utr: f.utr } : {}), imageSha256: f.sha256, ...(f.dHash ? { imageHash: f.dHash } : {}),
@@ -111032,13 +111909,93 @@ class GateSession {
             this.creditedRows(),
             this.suspectRows(),
             this.readOpenAsks(),
+            this.ledgerHits(),
         ]);
         this.openRows = open;
         if (recent)
             this.logFraudShadow(recent);
-        const result = (0,_history__WEBPACK_IMPORTED_MODULE_6__.historyVerdict)(f, { served, recent, credited, suspect, open }, this.deps.now(), process.env.name ?? null);
+        const result = (0,_history__WEBPACK_IMPORTED_MODULE_7__.historyVerdict)(f, { served, recent, credited, suspect, open, ledger }, this.deps.now(), process.env.name ?? null);
+        if (result.ledgerHit)
+            logger.warn((0,_ledger__WEBPACK_IMPORTED_MODULE_8__.dupHitLine)(result.ledgerHit, f.chatId));
+        else {
+            const weak = (0,_ledger__WEBPACK_IMPORTED_MODULE_8__.weakLedgerHit)(ledger);
+            if (weak)
+                logger.warn((0,_ledger__WEBPACK_IMPORTED_MODULE_8__.dupHitWeakLine)(weak, f.chatId));
+        }
         this.holds = result.holds;
         return result.verdict;
+    }
+    /**
+     * Earlier CREDITED screenshots in the permanent ledger with this UTR / txn id / file (any chat, no time limit).
+     * [] without a ledger or lookup keys. A failure or timeout is logged and read as [] (never blocks a credit: the
+     * 7-day checks still run; owner decides if that should change).
+     */
+    async ledgerHits() {
+        let ledger = null;
+        try {
+            ledger = this.deps.ledger?.() ?? null;
+        }
+        catch {
+            ledger = null;
+        }
+        if (!ledger)
+            return [];
+        const f = this.facts;
+        const q = (0,_ledger__WEBPACK_IMPORTED_MODULE_8__.ledgerLookupOf)(f, f.clientId ? (0,_proof_archive_verdict__WEBPACK_IMPORTED_MODULE_10__.proofIdOf)(f.clientId, f.chatId, f.msgId) : null);
+        if (!q)
+            return [];
+        // Codex round 5 #3: the inferred read (weak log only) runs apart, bounded on its own; a blocking hit is returned
+        // without waiting for it, so its failure or stall never hides a confirmed match.
+        const inferredRead = ledger.findInferredMatches
+            ? withTimeout(ledger.findInferredMatches(q), this.deps.timeoutMs, null, `ledger.findInferredMatches(••••${f.chatId.slice(-4)}/${f.msgId})`)
+            : Promise.resolve([]);
+        const hits = await withTimeout(ledger.findCreditedMatches(q), this.deps.timeoutMs, null, `ledger.findCreditedMatches(••••${f.chatId.slice(-4)}/${f.msgId})`);
+        if (hits === null) {
+            logger.warn((0,_ledger__WEBPACK_IMPORTED_MODULE_8__.lookupFailedLine)(f.chatId));
+            return [];
+        }
+        const now = this.deps.now();
+        const kept = [];
+        for (const hit of hits) {
+            // Round 13 #4: a payer served after a thrown credit blocks however old its pending doc is (a resend is a repeat).
+            if (!(0,_ledger__WEBPACK_IMPORTED_MODULE_8__.isStalePending)(hit, now) || (hit.doc.reasons ?? []).includes(_ledger__WEBPACK_IMPORTED_MODULE_8__.SERVED_AFTER_THROW)) {
+                kept.push(hit);
+                continue;
+            }
+            const evidence = await creditEvidenceOf(this.deps, hit.doc);
+            logger.log((0,_ledger__WEBPACK_IMPORTED_MODULE_8__.pendingStaleLine)(hit, evidence, f.chatId));
+            if (evidence)
+                kept.push(hit);
+        }
+        if (kept.some((h) => h.doc.verdict !== 'credit_inferred'))
+            return kept;
+        return [...kept, ...((await inferredRead) ?? [])];
+    }
+    /**
+     * The ledger claim doc (verdict 'pending'), written right after this session's paymentProofs claim and BEFORE the
+     * credit write, so a crash between the credit and the recorder's finish still leaves a doc. Bounded, never throws,
+     * never blocks the credit (a ledger outage logs result=error).
+     */
+    async ledgerClaim() {
+        let ledger = null;
+        try {
+            ledger = this.deps.ledger?.() ?? null;
+        }
+        catch {
+            ledger = null;
+        }
+        const f = this.facts;
+        const proofId = f.clientId ? (0,_proof_archive_verdict__WEBPACK_IMPORTED_MODULE_10__.proofIdOf)(f.clientId, f.chatId, f.msgId) : null;
+        if (!ledger?.record || !proofId)
+            return;
+        const claimId = this.claimToken ?? (0,node_crypto__WEBPACK_IMPORTED_MODULE_0__.randomUUID)();
+        // Round 13 #2: the claim id scopes every later write even when this write's answer is lost (it may have
+        // landed). A write under a claim replaces any non-pending doc of this key (an earlier pass's reject) or the
+        // pending doc holding this claim, never another claim's pending (repository record()).
+        this.ledgerClaimId = claimId;
+        this.ledgerClaimedAtMs = this.deps.now();
+        const result = await withTimeout(ledger.record((0,_ledger__WEBPACK_IMPORTED_MODULE_8__.ledgerClaimDoc)(f, proofId, this.ledgerClaimedAtMs, claimId)), this.deps.timeoutMs, 'error', `ledger.claim(••••${proofId.slice(-4)})`);
+        logger.log((0,_ledger__WEBPACK_IMPORTED_MODULE_8__.claimLine)(result, proofId, f.chatId));
     }
     /**
      * Fraud shadow checks (shadow.ts, owner 2026-11-14): LOG ONLY, over the rows check() already read. Never throws and
@@ -111047,9 +112004,9 @@ class GateSession {
     logFraudShadow(recent) {
         try {
             const f = this.facts;
-            const codes = (0,_shadow__WEBPACK_IMPORTED_MODULE_4__.fraudShadowCodes)(f, f.timeText, recent, this.deps.now());
+            const codes = (0,_shadow__WEBPACK_IMPORTED_MODULE_5__.fraudShadowCodes)(f, f.timeText, recent, this.deps.now());
             const clientId = process.env.clientId || f.profile;
-            for (const line of (0,_shadow__WEBPACK_IMPORTED_MODULE_4__.fraudShadowLines)(codes, { chatId: f.chatId, clientId, msgId: f.msgId, amount: f.amount }))
+            for (const line of (0,_shadow__WEBPACK_IMPORTED_MODULE_5__.fraudShadowLines)(codes, { chatId: f.chatId, clientId, msgId: f.msgId, amount: f.amount }))
                 logger.info(line);
         }
         catch { /* log-only */ }
@@ -111067,7 +112024,7 @@ class GateSession {
     async creditedRows() {
         if (!this.store.creditedForChat)
             return undefined;
-        const since = new Date((this.facts.arrivalMs ?? this.deps.now()) - _resend__WEBPACK_IMPORTED_MODULE_3__.RESEND_LOOKBACK_MS);
+        const since = new Date((this.facts.arrivalMs ?? this.deps.now()) - _resend__WEBPACK_IMPORTED_MODULE_4__.RESEND_LOOKBACK_MS);
         return this.bound(this.store.creditedForChat(this.facts.chatId, since, CHAT_CREDITED_SCAN), null, 'creditedForChat');
     }
     /**
@@ -111077,11 +112034,11 @@ class GateSession {
     async suspectRows() {
         if (!this.store.suspectRowsForChat)
             return [];
-        return this.bound(this.store.suspectRowsForChat(this.facts.chatId, _chat_fakes__WEBPACK_IMPORTED_MODULE_5__.SUSPECT_REASONS, CHAT_CREDITED_SCAN), null, 'suspectRowsForChat');
+        return this.bound(this.store.suspectRowsForChat(this.facts.chatId, _chat_fakes__WEBPACK_IMPORTED_MODULE_6__.SUSPECT_REASONS, CHAT_CREDITED_SCAN), null, 'suspectRowsForChat');
     }
     /** Open requests of this user on every persona (answer window), newest first; null on failure. */
     async readOpenAsks() {
-        const since = new Date(this.deps.now() - _decide__WEBPACK_IMPORTED_MODULE_1__.ASK_ANSWER_WINDOW_MS);
+        const since = new Date(this.deps.now() - _decide__WEBPACK_IMPORTED_MODULE_2__.ASK_ANSWER_WINDOW_MS);
         return this.bound(this.store.openAsks(this.facts.chatId, since), null, 'openAsks');
     }
     /** Open requests of this user on every persona as check() read them (one read per screenshot); [] when unread. */
@@ -111093,7 +112050,7 @@ class GateSession {
     /** An earlier fake/edited warning from this user (any persona) is still in its grace period. */
     async fraudGraceOpen() {
         const now = this.deps.now();
-        return (await this.openAsks()).some((r) => !this.isOwnRow(r) && (0,_decide__WEBPACK_IMPORTED_MODULE_1__.fraudGraceOpen)(r, now));
+        return (await this.openAsks()).some((r) => !this.isOwnRow(r) && (0,_decide__WEBPACK_IMPORTED_MODULE_2__.fraudGraceOpen)(r, now));
     }
     /** The holds check() found, raised by flow.ts only after the credit rules accepted (history.ts PostRulesHolds). */
     postRulesHolds() {
@@ -111110,29 +112067,38 @@ class GateSession {
     async openAsk(kind, reasons) {
         return this.bound(this.store.openAsk(this.key, kind, reasons), false, 'openAsk');
     }
-    /** Close the request this screenshot answered. Only one screenshot can win it. */
+    /** Close the request this screenshot answered. Only one screenshot can win it. null = store failure or timeout. */
     async resolve(asked) {
-        return this.bound(this.store.resolveAsk(asked, this.facts.msgId), false, 'resolveAsk');
+        return this.bound(this.store.resolveAsk(asked, this.facts.msgId), null, 'resolveAsk');
     }
     /**
      * A credited payment closes every open fake/edited warning of this user, on every persona (the delayed block then
      * does nothing), and every held-screenshot request (`held`: answered by this payment). `closed` counts the
      * warnings; `gateBlocked` = one of them had blocked the user, so the block this flow set may be lifted.
+     * `failed` (Codex round 9 #1): the ask list was unreadable, or a resolve failed in the store (not "another caller
+     * resolved it"). A blocked fraud ask whose resolve failed still counts for `gateBlocked`: the payer is credited.
      */
     async resolveOpenFraudAsks() {
         let closed = 0;
         let gateBlocked = false;
-        for (const r of await this.openAsks()) {
+        if (this.openRows === undefined)
+            this.openRows = await this.readOpenAsks();
+        let failed = this.openRows === null;
+        for (const r of this.openRows ?? []) {
             const kind = r.ask?.kind;
             if ((kind !== 'fraud' && kind !== 'held') || r.ask?.state !== 'open' || this.isOwnRow(r))
                 continue;
-            if (await this.resolve(r) && kind === 'fraud') {
+            const resolved = await this.resolve(r);
+            if (resolved === null)
+                failed = true;
+            if (kind !== 'fraud' || resolved === false)
+                continue;
+            if (resolved)
                 closed += 1;
-                if (r.ask?.blockedAt)
-                    gateBlocked = true;
-            }
+            if (r.ask?.blockedAt)
+                gateBlocked = true;
         }
-        return { closed, gateBlocked };
+        return { closed, gateBlocked, failed };
     }
     /** The fake/edited flow blocked the user over this screenshot's warning. */
     async markBlocked() {
@@ -111146,41 +112112,97 @@ class GateSession {
     async claim() {
         // creditAmount goes on the row WITH servedAt (data-model review 2026-10-25): written at the credit decision,
         // never at begin, so a row carries it only when it was credited, and release removes both.
-        const minuteKey = (0,_decide__WEBPACK_IMPORTED_MODULE_1__.servedMinuteKey)(this.facts);
+        const minuteKey = (0,_decide__WEBPACK_IMPORTED_MODULE_2__.servedMinuteKey)(this.facts);
         this.claimStartedAt = this.deps.now();
-        const r = await this.bound(this.store.markServed(this.key, 'other', this.creditAmount, minuteKey ?? undefined), 'error', 'markServed');
+        // Codex round 10 #2 / round 11 #1, #2, #4: this attempt's own UTR and transaction id are the claim keys
+        // (servedUtr, servedRefs_unique), and the claim generation (= the ledger claimId) fences every release.
+        this.claimToken = (0,node_crypto__WEBPACK_IMPORTED_MODULE_0__.randomUUID)();
+        const r = await this.bound(this.store.markServed(this.key, 'other', this.creditAmount, minuteKey ?? undefined, { utr: this.facts.utr ?? null, txnId: this.facts.txnId ?? null, claim: this.claimToken }), 'error', 'markServed');
         if (r === 'duplicate')
             return 'lost';
         if (r === 'already_served')
             return 'again';
-        if (r === 'served')
+        if (r === 'served') {
+            await this.ledgerClaim();
             return 'won';
+        }
         logger.warn(`[proof-gate] claim ${this.facts.chatId}/${this.facts.msgId} -> ${r}; not crediting, held for a re-check (fail closed)`);
         return 'unavailable';
     }
-    /**
-     * After a claim came back `unavailable` (the write errored or timed out, and may still have landed): re-read this
-     * message's own row (recentForChat, bounded). `mine` = it is served at or after `sinceMs` (this claim landed: credit);
-     * `earlier` = served before `sinceMs` (an earlier claim of this same message); `free` = the row is there and not
-     * served (nothing landed); null = the row could not be read or found (undetermined).
-     */
-    async claimState(sinceMs) {
+    /** This message's own row (recentForChat, bounded); null = unreadable or not found. */
+    async ownRow(what) {
         if (!this.store.recentForChat)
             return null;
-        const rows = await this.bound(this.store.recentForChat(this.facts.chatId, CHAT_SERVED_SCAN), null, 'recentForChat(claim)');
-        const own = (rows ?? []).find((r) => this.isOwnRow(r));
+        const rows = await this.bound(this.store.recentForChat(this.facts.chatId, CHAT_SERVED_SCAN), null, what);
+        return (rows ?? []).find((r) => this.isOwnRow(r)) ?? null;
+    }
+    /**
+     * After a claim came back `unavailable` (the write errored or timed out, and may still have landed): re-read this
+     * message's own row. `mine` = it holds this session's claim generation (servedClaim = claimToken: this claim landed,
+     * credit); `earlier` = served under another generation (an earlier or concurrent claim of this same message, or a
+     * row served by an older build); `free` = the row is there and not served (nothing landed); null = the row could not
+     * be read or found (undetermined). Round 13 #1: ownership is the token, never the served time.
+     */
+    async claimState() {
+        const own = await this.ownRow('recentForChat(claim)');
         if (!own)
             return null;
         if (!own.servedAt)
             return 'free';
-        const served = new Date(own.servedAt).getTime();
-        if (!Number.isFinite(served))
-            return null;
-        return served >= sinceMs ? 'mine' : 'earlier';
+        if (!this.claimToken || own.servedClaim !== this.claimToken)
+            return 'earlier';
+        await this.ledgerClaim();
+        return 'mine';
     }
-    /** The credit failed after the claim (service never started): free the claim so a retry is judged again. */
+    /**
+     * Round 13 #1: a held re-check of a message whose earlier claim (generation `token`, this process) may have landed
+     * while its answer was lost and its undo failed. true = the row still holds that very generation: this session
+     * takes it over (claimToken, ledger claim) so its credit, release and the sweep act under it; false = served under
+     * another generation (or not served): not ours; null = the row could not be read.
+     */
+    async adoptClaim(token) {
+        // Round 14 #3: read this message's row by its key; the 50-row chat scan can miss it in a busy chat (held again,
+        // re-checked again). The scan stays only for a store without the key read.
+        const own = this.store.servedStateOf
+            ? await this.bound(this.store.servedStateOf(this.key), null, 'servedStateOf(adopt)')
+            : await this.ownRow('recentForChat(adopt)');
+        if (!own)
+            return null;
+        if (!own.servedAt || own.servedClaim !== token)
+            return false;
+        this.claimToken = token;
+        await this.ledgerClaim();
+        return true;
+    }
+    /**
+     * The credit failed after the claim (definitely not applied, or threw before any service): free the claim so a retry
+     * is judged again. The ledger claim doc ('pending', which blocks for 1 h) becomes a non-blocking reject with it.
+     */
     async release() {
-        return this.bound(this.store.releaseServed(this.key), false, 'releaseServed');
+        // Round 13 #2: every release names its claim generation; without one nothing is released.
+        const token = this.claimToken;
+        const released = token ? await this.bound(this.store.releaseServed(this.key, token), null, 'releaseServed') : false;
+        const f0 = this.facts;
+        if (!released) {
+            // Codex round 10 #1: the paymentProofs row may still hold servedAt and the claim keys (the payer's resend is
+            // then judged served), so the ledger doc is NOT released: it stays 'pending' for the resolve sweep.
+            logger.warn(`payment-ledger kind=claim_release result=release_failed ledger_verdict=pending chat=••••${f0.chatId.slice(-4)} msg=${f0.msgId}`);
+            return false;
+        }
+        let ledger = null;
+        try {
+            ledger = this.deps.ledger?.() ?? null;
+        }
+        catch {
+            ledger = null;
+        }
+        const f = this.facts;
+        const proofId = f.clientId ? (0,_proof_archive_verdict__WEBPACK_IMPORTED_MODULE_10__.proofIdOf)(f.clientId, f.chatId, f.msgId) : null;
+        if (ledger?.resolvePending && proofId && token) {
+            const result = await withTimeout(ledger.resolvePending(proofId, f.mobile ?? '', 'reject', ['CLAIM_RELEASED'], undefined, token), this.deps.timeoutMs, 'error', `ledger.release(••••${proofId.slice(-4)})`);
+            logger.log(`payment-ledger kind=claim_release result=${result} proof=••••${proofId.slice(-4)} chat=••••${f.chatId.slice(-4)}`);
+        }
+        return released;
     }
 }
 class ProofGate {
@@ -111225,10 +112247,10 @@ class ProofGate {
         if (!store)
             return false;
         const now = this.deps.now();
-        const rows = await withTimeout(store.openAsks(chatId, new Date(now - _decide__WEBPACK_IMPORTED_MODULE_1__.ASK_ANSWER_WINDOW_MS)), this.deps.timeoutMs, null, `openAsks(${chatId})`);
-        return (rows ?? []).some((r) => (kind === 'gate-blocked' ? (0,_decide__WEBPACK_IMPORTED_MODULE_1__.gateBlockAnswerable)(r, now)
-            : kind === 'impossible-reference' ? (0,_decide__WEBPACK_IMPORTED_MODULE_1__.impossibleReferenceAskOpen)(r, now)
-                : kind === 'fraud' ? (0,_decide__WEBPACK_IMPORTED_MODULE_1__.fraudAskAnswerable)(r, now) : (0,_decide__WEBPACK_IMPORTED_MODULE_1__.askAnswerable)(r, now, kind)));
+        const rows = await withTimeout(store.openAsks(chatId, new Date(now - _decide__WEBPACK_IMPORTED_MODULE_2__.ASK_ANSWER_WINDOW_MS)), this.deps.timeoutMs, null, `openAsks(${chatId})`);
+        return (rows ?? []).some((r) => (kind === 'gate-blocked' ? (0,_decide__WEBPACK_IMPORTED_MODULE_2__.gateBlockAnswerable)(r, now)
+            : kind === 'impossible-reference' ? (0,_decide__WEBPACK_IMPORTED_MODULE_2__.impossibleReferenceAskOpen)(r, now)
+                : kind === 'fraud' ? (0,_decide__WEBPACK_IMPORTED_MODULE_2__.fraudAskAnswerable)(r, now) : (0,_decide__WEBPACK_IMPORTED_MODULE_2__.askAnswerable)(r, now, kind)));
     }
     /**
      * The fraud deadline, read from Mongo on a touch (any persona): this user's open fake warnings (24 h), the first
@@ -111240,9 +112262,9 @@ class ProofGate {
         if (!store)
             return { due: null, blocked: false };
         const now = this.deps.now();
-        const rows = await withTimeout(store.openAsks(chatId, new Date(now - _decide__WEBPACK_IMPORTED_MODULE_1__.ASK_ANSWER_WINDOW_MS)), this.deps.timeoutMs, null, `openAsks(${chatId})`);
-        const open = (rows ?? []).filter((r) => (0,_decide__WEBPACK_IMPORTED_MODULE_1__.fraudAskAnswerable)(r, now));
-        return { due: open.find((r) => (0,_decide__WEBPACK_IMPORTED_MODULE_1__.fraudDeadlinePassed)(r, now)) ?? null, blocked: open.some((r) => !!r.ask?.blockedAt) };
+        const rows = await withTimeout(store.openAsks(chatId, new Date(now - _decide__WEBPACK_IMPORTED_MODULE_2__.ASK_ANSWER_WINDOW_MS)), this.deps.timeoutMs, null, `openAsks(${chatId})`);
+        const open = (rows ?? []).filter((r) => (0,_decide__WEBPACK_IMPORTED_MODULE_2__.fraudAskAnswerable)(r, now));
+        return { due: open.find((r) => (0,_decide__WEBPACK_IMPORTED_MODULE_2__.fraudDeadlinePassed)(r, now)) ?? null, blocked: open.some((r) => !!r.ask?.blockedAt) };
     }
     /**
      * K1: this user's newest credited row (any persona) created at or after `sinceMs`; false = none; null = the read
@@ -111261,8 +112283,94 @@ class ProofGate {
     async resolveAsk(key, byMsgId) {
         const store = safeStore(this.deps);
         if (!store)
-            return false;
-        return withTimeout(store.resolveAsk(key, byMsgId), this.deps.timeoutMs, false, `resolveAsk(${key.chatId})`);
+            return null;
+        return withTimeout(store.resolveAsk(key, byMsgId), this.deps.timeoutMs, null, `resolveAsk(${key.chatId})`);
+    }
+    /**
+     * The resolve sweep (Codex round 3 #2, job tick): this client's 'pending' claim docs older than PENDING_RESOLVE_MS
+     * become 'credit' when the persona row holds the screenshot's credit key (the credit applied, the finish was lost),
+     * else 'reject' (never applied). Unknown evidence leaves the doc pending (the lookup's 1 h fallback decides). Only a
+     * still-pending doc is rewritten (the finish wins a race). Never throws.
+     */
+    async resolvePendingClaims(clientId) {
+        // Round 14 #6: `gone` = the doc was no longer this pending claim (resolved, re-claimed or its reasons changed
+        // meanwhile): nothing written, counted apart from credit and reject.
+        const out = { credit: 0, reject: 0, unknown: 0, failed: 0, gone: 0 };
+        let ledger = null;
+        try {
+            ledger = this.deps.ledger?.() ?? null;
+        }
+        catch {
+            ledger = null;
+        }
+        if (!clientId || !ledger?.findPendingClaims || !ledger.resolvePending)
+            return out;
+        const before = new Date(this.deps.now() - _ledger__WEBPACK_IMPORTED_MODULE_8__.PENDING_RESOLVE_MS);
+        const docs = await withTimeout(ledger.findPendingClaims(clientId, before, _ledger__WEBPACK_IMPORTED_MODULE_8__.PENDING_RESOLVE_BATCH), this.deps.timeoutMs, null, 'ledger.findPendingClaims');
+        if (!docs) {
+            out.failed += 1;
+            return out;
+        }
+        const startedAt = this.deps.now();
+        for (const d of docs) {
+            // Codex round 5 residual b: bounded per tick; the rest wait for the next one.
+            if (this.deps.now() - startedAt > _ledger__WEBPACK_IMPORTED_MODULE_8__.PENDING_RESOLVE_BUDGET_MS)
+                break;
+            const claimed0 = d.claimedAt ? new Date(d.claimedAt) : before;
+            if ((d.reasons ?? []).includes(_ledger__WEBPACK_IMPORTED_MODULE_8__.SERVED_AFTER_THROW)) {
+                // Round 12 #5: the payer was served after a thrown credit. Never released; resolved to a blocking
+                // 'credit' (the legacy rule: a resend is a repeat), whatever the credit key says.
+                const result = await withTimeout(ledger.resolvePending(d.proofId, d.mobile ?? '', 'credit', ['CLAIM_RESOLVED', _ledger__WEBPACK_IMPORTED_MODULE_8__.SERVED_AFTER_THROW], { at: claimed0, ...(typeof d.amount === 'number' ? { amount: d.amount } : {}) }, d.claimId, d.reasons ?? []), this.deps.timeoutMs, 'error', `ledger.resolvePending(••••${d.proofId.slice(-4)})`);
+                if (result === 'error')
+                    out.failed += 1;
+                else if (result === 'gone')
+                    out.gone += 1;
+                else
+                    out.credit += 1;
+                logger.log((0,_ledger__WEBPACK_IMPORTED_MODULE_8__.pendingResolvedLine)(d, 'credit', result));
+                continue;
+            }
+            const evidence = await creditEvidenceOf(this.deps, d);
+            if (evidence === null) {
+                // Stamped (lastSweptAt): the next sweep reads the least recently swept docs first, so undecidable ones
+                // never starve newer claims.
+                out.unknown += 1;
+                if (ledger.markSwept)
+                    await withTimeout(ledger.markSwept(d.proofId, d.mobile ?? '', d.claimId), this.deps.timeoutMs, false, `ledger.markSwept(••••${d.proofId.slice(-4)})`);
+                logger.log((0,_ledger__WEBPACK_IMPORTED_MODULE_8__.pendingResolvedLine)(d, 'unknown', 'left_pending'));
+                continue;
+            }
+            const verdict = evidence ? 'credit' : 'reject';
+            // Round 11b: a reject first frees this message's paymentProofs claim (a release that failed earlier keeps
+            // servedAt and the claim keys, so the payer's honest resend is judged served). Only once that worked (or
+            // nothing was held) does the doc become reject; a failure leaves it pending for the next tick.
+            // Round 12 #5: only a definite failure whose release failed (RELEASE_FAILED: nothing was granted) is released
+            // here; a crash leaves no marker (a service may have run), so its claim is never freed by the sweep.
+            let released = false;
+            if (!evidence && (d.reasons ?? []).includes(_ledger__WEBPACK_IMPORTED_MODULE_8__.RELEASE_FAILED)) {
+                released = await sweepRelease(this.deps, d);
+                if (released === null) {
+                    out.failed += 1;
+                    if (ledger.markSwept)
+                        await withTimeout(ledger.markSwept(d.proofId, d.mobile ?? '', d.claimId), this.deps.timeoutMs, false, `ledger.markSwept(••••${d.proofId.slice(-4)})`);
+                    logger.log((0,_ledger__WEBPACK_IMPORTED_MODULE_8__.pendingResolvedLine)(d, 'reject', 'left_pending'));
+                    continue;
+                }
+            }
+            const claimed = d.claimedAt ? new Date(d.claimedAt) : before;
+            const result = await withTimeout(ledger.resolvePending(d.proofId, d.mobile ?? '', verdict, evidence ? ['CLAIM_RESOLVED'] : ['CREDIT_NOT_RECORDED', 'CLAIM_RESOLVED', ...(released ? ['CLAIM_RELEASED'] : [])], 
+            // Round 13 #3: only while the doc still has the reasons this sweep read (a SERVED_AFTER_THROW or
+            // RELEASE_FAILED marker written during the evidence read leaves it pending for the next tick).
+            evidence ? { at: claimed, ...(typeof d.amount === 'number' ? { amount: d.amount } : {}) } : undefined, d.claimId, d.reasons ?? []), this.deps.timeoutMs, 'error', `ledger.resolvePending(••••${d.proofId.slice(-4)})`);
+            if (result === 'error')
+                out.failed += 1;
+            else if (result === 'gone')
+                out.gone += 1;
+            else
+                out[verdict] += 1;
+            logger.log((0,_ledger__WEBPACK_IMPORTED_MODULE_8__.pendingResolvedLine)(d, verdict, result));
+        }
+        return out;
     }
     /** The delayed block fired over this warning. */
     async markAskBlocked(key) {
@@ -111271,6 +112379,42 @@ class ProofGate {
             return false;
         return withTimeout(store.markAskBlocked(key), this.deps.timeoutMs, false, `markAskBlocked(${key.chatId})`);
     }
+}
+/** Did a pending doc's credit apply? Its receiving persona row holds the screenshot's account credit key. null = unknown. */
+async function creditEvidenceOf(deps, d) {
+    let ev = null;
+    try {
+        ev = deps.creditEvidence?.() ?? null;
+    }
+    catch {
+        ev = null;
+    }
+    if (!ev)
+        return null;
+    const key = (0,_credit_key__WEBPACK_IMPORTED_MODULE_9__.screenshotCreditKey)(d.msgId, { clientId: d.clientId, mobile: d.mobile ?? '' });
+    return withTimeout(ev.hasCreditKey(d.chatId, [key]), deps.timeoutMs, null, `hasCreditKey(••••${d.chatId.slice(-4)})`);
+}
+/**
+ * The sweep's release of a rejected pending claim's paymentProofs row (same message key; only a row still holding
+ * servedAt changes). true = released, false = nothing held, null = no store / store failure / timeout.
+ */
+async function sweepRelease(deps, d) {
+    const store = safeStore(deps);
+    const key = { chatId: d.chatId, profile: d.profile, telegramMsgId: d.msgId, ...(d.clientId ? { clientId: d.clientId } : {}), ...(d.mobile ? { mobile: d.mobile } : {}) };
+    let r = null;
+    // No claim id: nothing this sweep can fence, so nothing is released (every claim doc of this build carries one).
+    if (!d.claimId)
+        r = false;
+    else if (store) {
+        try {
+            r = await withTimeout(store.releaseServed(key, d.claimId), deps.timeoutMs, null, `sweep.releaseServed(••••${d.proofId.slice(-4)})`);
+        }
+        catch {
+            r = null;
+        }
+    }
+    logger.log(`payment-ledger kind=sweep_release result=${r === null ? 'failed' : 'ok'} held=${r === null ? 'unknown' : r} proof=••••${d.proofId.slice(-4)} chat=••••${d.chatId.slice(-4)}`);
+    return r;
 }
 function safeStore(deps) {
     try {
@@ -111284,6 +112428,11 @@ function safeStore(deps) {
 function proofGateFrom(getRepositories) {
     return new ProofGate({
         store: () => (getRepositories()?.paymentProofs ?? null),
+        ledger: () => (getRepositories()?.paymentProofLedger ?? null),
+        creditEvidence: () => {
+            const u = getRepositories()?.userData;
+            return typeof u?.hasCreditKey === 'function' ? u : null;
+        },
         now: Date.now,
         timeoutMs: STORE_TIMEOUT_MS,
     });
@@ -111317,6 +112466,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _decide__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./decide */ "./src/payments/proof-gate/decide.ts");
 /* harmony import */ var _resend__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./resend */ "./src/payments/proof-gate/resend.ts");
 /* harmony import */ var _chat_fakes__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./chat-fakes */ "./src/payments/proof-gate/chat-fakes.ts");
+/* harmony import */ var _ledger__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ./ledger */ "./src/payments/proof-gate/ledger.ts");
 /**
  * What this user's history says about one payment screenshot: ONE pure decision over ONE read batch (gate.ts check()).
  * Order (rewrite 2026-11-14, docs/PAYMENT-SCREENSHOT-FLOW.md section 0): the same payment credited before, or held by the gate in
@@ -111325,6 +112475,7 @@ __webpack_require__.r(__webpack_exports__);
  * R1, same minute other amount, R2, re-send ask) for outcome.ts to raise after the credit rules accepted, and the clock-lag fact
  * that lets a leniency accept credit (clockLagVouch).
  */
+
 
 
 
@@ -111503,6 +112654,10 @@ function historyVerdict(f, rows, nowMs, ownName) {
     const servedVerdict = (0,_decide__WEBPACK_IMPORTED_MODULE_0__.classifyAgainstServed)(f, served, chatServed, nowMs);
     if (servedVerdict.kind !== 'clear')
         return { verdict: servedVerdict, holds: NO_HOLDS, open, resend: none };
+    // Behind the 7-day rows: the same UTR / txn id / file credited before in the permanent ledger (ledger.ts).
+    const ledgerHit = (0,_ledger__WEBPACK_IMPORTED_MODULE_3__.classifyLedger)(f, rows.ledger, nowMs);
+    if (ledgerHit)
+        return { verdict: ledgerHit.verdict, holds: NO_HOLDS, open, resend: none, ledgerHit };
     const creditedRows = credited ?? recent;
     const resend = (0,_resend__WEBPACK_IMPORTED_MODULE_1__.decideResend)(f, creditedRows, nowMs, ownName);
     if (resend.kind === 'edited')
@@ -111547,6 +112702,270 @@ function historyVerdict(f, rows, nowMs, ownName) {
             return { verdict: { kind: 'needs-real-page', ask: 'old_time', reasons: ['IMPOSSIBLE_REFERENCE'] }, holds, open, resend };
     }
     return { verdict: servedVerdict, holds, open, resend };
+}
+
+
+/***/ },
+
+/***/ "./src/payments/proof-gate/ledger.ts"
+/*!*******************************************!*\
+  !*** ./src/payments/proof-gate/ledger.ts ***!
+  \*******************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   PENDING_RESOLVE_BATCH: () => (/* binding */ PENDING_RESOLVE_BATCH),
+/* harmony export */   PENDING_RESOLVE_BUDGET_MS: () => (/* binding */ PENDING_RESOLVE_BUDGET_MS),
+/* harmony export */   PENDING_RESOLVE_MS: () => (/* binding */ PENDING_RESOLVE_MS),
+/* harmony export */   PENDING_STALE_MS: () => (/* binding */ PENDING_STALE_MS),
+/* harmony export */   RELEASE_FAILED: () => (/* binding */ RELEASE_FAILED),
+/* harmony export */   SERVED_AFTER_THROW: () => (/* binding */ SERVED_AFTER_THROW),
+/* harmony export */   claimLine: () => (/* binding */ claimLine),
+/* harmony export */   classifyLedger: () => (/* binding */ classifyLedger),
+/* harmony export */   dupHitLine: () => (/* binding */ dupHitLine),
+/* harmony export */   dupHitWeakLine: () => (/* binding */ dupHitWeakLine),
+/* harmony export */   isStalePending: () => (/* binding */ isStalePending),
+/* harmony export */   ledgerClaimDoc: () => (/* binding */ ledgerClaimDoc),
+/* harmony export */   ledgerLookupOf: () => (/* binding */ ledgerLookupOf),
+/* harmony export */   ledgerVerdictOf: () => (/* binding */ ledgerVerdictOf),
+/* harmony export */   ledgerWriteLine: () => (/* binding */ ledgerWriteLine),
+/* harmony export */   lookupFailedLine: () => (/* binding */ lookupFailedLine),
+/* harmony export */   pendingResolvedLine: () => (/* binding */ pendingResolvedLine),
+/* harmony export */   pendingStaleLine: () => (/* binding */ pendingStaleLine),
+/* harmony export */   weakLedgerHit: () => (/* binding */ weakLedgerHit)
+/* harmony export */ });
+/* harmony import */ var _tg_db_collections_payment_reference__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! @tg/db/collections/payment-reference */ "../../packages/tg-db/src/collections/payment-reference.ts");
+/* harmony import */ var _decide__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./decide */ "./src/payments/proof-gate/decide.ts");
+/**
+ * The permanent payment-proof ledger (tg-db `paymentProofLedger`, no TTL), tg-aut side.
+ *
+ * Read: the gate (gate.ts check) looks up earlier CREDITED screenshots by UTR, transaction id and file hash in every
+ * chat, persona and client, with no time limit. It is an extra layer BEHIND the 7-day paymentProofs checks
+ * (classifyAgainstServed runs first): a match is judged by the same rules (repeat / edited), so the user sees the same
+ * replies as for a reuse inside 7 days. Live divya2 ****0527: ₹350 UTR ****8831 credited 3 Nov, the same UTR on an
+ * edited ₹150 screenshot credited again 23 Nov after the paymentProofs row expired.
+ * A ledger outage never blocks a credit: the lookup falls back to the 7-day checks (`kind=lookup_failed`).
+ * Rejected / fake ledger docs never block anything here (the 7-day checks and chat-fakes.ts judge those as today).
+ * Inferred credits (`credit_inferred`, backfilled from visionShadow by pairing with payment_event; no creditedAt) never
+ * block either: a match on one only is logged (`kind=dup_hit_weak`) and the payment goes on as today.
+ *
+ * Write: proof-archive/recorder.ts, after the reply, one doc per screenshot that reached a payment verdict.
+ */
+
+
+/**
+ * Crash window (Codex review 2026-11-27 #2, coordinator decision): the gate writes a 'pending' claim doc right after its
+ * paymentProofs claim (markServed, BEFORE the credit write); the recorder's finish turns it into 'credit' (applied) or
+ * a reject. A pending doc younger than PENDING_STALE_MS blocks like a credit (servedUtr_unique serialises it anyway). An
+ * older one is a crash leftover: it blocks only when the receiving persona's userData row holds this screenshot's credit
+ * key (the credit applied before the crash); otherwise it is ignored (the crash came before the credit).
+ */
+const PENDING_STALE_MS = 60 * 60000;
+/**
+ * The lookup keys of one screenshot; null = nothing worth a lookup. Only real, non-degenerate references are keys
+ * (tg-db payment-reference.ts, the same validator the write and the backfill use). This screenshot's own doc is
+ * excluded by the ledger's unique key (proofId + mobile).
+ */
+function ledgerLookupOf(f, ownProofId) {
+    const utr = (0,_tg_db_collections_payment_reference__WEBPACK_IMPORTED_MODULE_0__.isLedgerReference)(f.utr) ? f.utr : null;
+    const txnId = (0,_tg_db_collections_payment_reference__WEBPACK_IMPORTED_MODULE_0__.ledgerTxnIdOf)(f.txnId);
+    const imageSha256 = typeof f.sha256 === 'string' && /^[0-9a-f]{64}$/.test(f.sha256) ? f.sha256 : null;
+    if (!utr && !txnId && !imageSha256)
+        return null;
+    return { utr, txnId, imageSha256, excludeProofId: ownProofId, excludeMobile: f.mobile ?? '' };
+}
+/** A ledger doc as a paymentProofs-shaped served row (classifyAgainstServed reads these fields). */
+function rowOf(hit) {
+    const d = hit.doc;
+    return {
+        chatId: d.chatId, profile: d.profile, telegramMsgId: d.msgId, clientId: d.clientId,
+        ...(d.mobile ? { mobile: d.mobile } : {}),
+        ...(typeof d.amount === 'number' ? { amount: d.amount } : {}),
+        ...(d.utr ? { utr: d.utr } : {}),
+        ...(d.imageSha256 ? { imageSha256: d.imageSha256 } : {}),
+        ...(d.imageDHash ? { imageHash: d.imageDHash } : {}),
+        ...(d.payeeUpi ? { payeeUpiId: d.payeeUpi } : {}),
+        ...(d.payeeName ? { payeeName: d.payeeName } : {}),
+        ...(typeof d.printedTime === 'number' ? { time: { state: 'known', epochMs: d.printedTime } } : {}),
+        ...(d.creditedAt || d.claimedAt ? { servedAt: d.creditedAt ?? d.claimedAt } : {}),
+        ...(d.receivedAt ? { createdAt: d.receivedAt } : {}),
+    };
+}
+/**
+ * Judge this screenshot against earlier credited ledger docs with the 7-day rules (classifyAgainstServed): same file or
+ * same UTR at the same / a lower amount = repeat, the same UTR at a HIGHER amount = edited. A match those rules do not
+ * classify (the reference sits in the other field, or only the txn id matches) is the same payment: a repeat.
+ * null = no match.
+ */
+function classifyLedger(f, all, nowMs) {
+    const hits = (all ?? []).filter((h) => isCredited(h) && !isOwnDoc(h, f));
+    if (hits.length === 0)
+        return null;
+    const rows = hits.map(rowOf);
+    const matches = hits.map((h, i) => ({ by: h.by === 'image' ? 'imageSha256' : 'utr', distance: 0, doc: rows[i] }));
+    const verdict = (0,_decide__WEBPACK_IMPORTED_MODULE_1__.classifyAgainstServed)(f, matches, [], nowMs);
+    if (verdict.kind !== 'clear') {
+        const at = rows.indexOf(verdict.matched);
+        const hit = hits[at >= 0 ? at : 0];
+        return decided(corroboratedEdit(f, verdict, hit), verdict, hit);
+    }
+    const hit = hits[0];
+    const row = rows[0];
+    // The same payment by its other reference (txn id, or the reference in the other field) at a HIGHER amount is an
+    // edit, as for a UTR match (classifyAgainstServed): same or lower amount = repeat.
+    if (hit.by !== 'image' && typeof row.amount === 'number' && f.amount > row.amount && !(0,_decide__WEBPACK_IMPORTED_MODULE_1__.sameAmount)(row.amount, f.amount)) {
+        const edited = { kind: 'edited', reason: 'UTR_REUSED_OTHER_AMOUNT', matched: row };
+        return decided(corroboratedEdit(f, edited, hit), edited, hit);
+    }
+    return { verdict: repeatOf(f, hit, row), hit };
+}
+function decided(v, before, hit) {
+    return { verdict: v, hit, ...(before.kind === 'edited' && v.kind !== 'edited' ? { downgraded: 'edited' } : {}) };
+}
+function repeatOf(f, hit, row) {
+    return { kind: 'repeat', by: hit.by === 'image' ? 'file' : 'utr', sameChat: row.chatId === f.chatId && row.profile === f.profile, matched: row };
+}
+/**
+ * Codex review 2026-11-27 #3: a reference-only match at a HIGHER amount is the fraud verdict only when a second field
+ * agrees (payee UPI, payee name, or the printed time within a minute): an OCR misread that happens to equal an old
+ * credited reference must not call an honest payer a cheat. Without one it is a repeat (never credited either).
+ */
+function corroboratedEdit(f, v, hit) {
+    if (v.kind !== 'edited' || v.reason !== 'UTR_REUSED_OTHER_AMOUNT')
+        return v;
+    const d = hit.doc;
+    const upi = (0,_decide__WEBPACK_IMPORTED_MODULE_1__.normalizePayeeUpi)(f.payeeUpiId ?? null);
+    const name = (0,_decide__WEBPACK_IMPORTED_MODULE_1__.normalizePayeeName)(f.payeeName ?? null);
+    const samePayee = (!!upi && upi === (0,_decide__WEBPACK_IMPORTED_MODULE_1__.normalizePayeeUpi)(d.payeeUpi ?? null)) || (!!name && name === (0,_decide__WEBPACK_IMPORTED_MODULE_1__.normalizePayeeName)(d.payeeName ?? null));
+    const sameTime = typeof d.printedTime === 'number' && typeof f.timeMs === 'number' && Math.abs(d.printedTime - f.timeMs) <= 60000;
+    return samePayee || sameTime ? v : repeatOf(f, hit, v.matched);
+}
+/**
+ * A credit: verdict 'credit' (an applied credit, with creditedAt), or a 'pending' claim the gate kept (a fresh one, or a
+ * stale one with credit evidence: GateSession.ledgerHits drops the others). Any other verdict never blocks.
+ */
+function isCredited(h) {
+    return (h.doc.verdict === 'credit' && !!h.doc.creditedAt) || (h.doc.verdict === 'pending' && !!h.doc.claimedAt);
+}
+/** The claim doc (verdict 'pending') the gate writes right after its paymentProofs claim, before the credit write. */
+function ledgerClaimDoc(f, proofId, nowMs, claimId) {
+    return {
+        proofId, mobile: f.mobile ?? '', clientId: f.clientId ?? '', profile: f.profile, chatId: f.chatId, msgId: f.msgId,
+        receivedAt: new Date(f.arrivalMs ?? nowMs),
+        ...(Number.isFinite(f.amount) && f.amount > 0 ? { amount: f.amount } : {}),
+        ...(f.utr ? { utr: f.utr } : {}), ...(f.txnId ? { txnId: f.txnId } : {}),
+        ...(f.sha256 ? { imageSha256: f.sha256 } : {}), ...(f.dHash ? { imageDHash: f.dHash } : {}),
+        ...(f.payeeUpiId ? { payeeUpi: f.payeeUpiId } : {}), ...(f.payeeName ? { payeeName: f.payeeName } : {}),
+        ...(typeof f.timeMs === 'number' ? { printedTime: f.timeMs } : {}),
+        verdict: 'pending', reasons: [], claimedAt: new Date(nowMs), source: 'tg-aut',
+        // This claim's id: release, the sweep and the recorder change the doc only while it still holds this claim.
+        ...(claimId ? { claimId } : {}),
+    };
+}
+/**
+ * The resolve sweep (Codex round 3 #2): a 'pending' doc older than this is turned into credit or reject from the credit
+ * evidence while it is fresh (creditKeys keeps only the last 20 keys). Well past the credit write (seconds after the
+ * claim), well before the 1 h stale fallback.
+ */
+const PENDING_RESOLVE_MS = 5 * 60000;
+/** Pending docs one sweep resolves at most (oldest first; the rest wait for the next tick). */
+const PENDING_RESOLVE_BATCH = 20;
+/**
+ * Wall-clock budget of one sweep (Codex round 5 residual b): each doc costs up to two bounded calls, so 20 stalled docs
+ * could hold the 5-min job tick for minutes. Docs left over wait for the next tick.
+ */
+const PENDING_RESOLVE_BUDGET_MS = 60000;
+function pendingResolvedLine(doc, verdict, result) {
+    return `payment-ledger kind=pending_resolved verdict=${verdict} result=${result} proof=${tail(doc.proofId)} chat=${tail(doc.chatId)}`;
+}
+/** Stale pending doc (older than PENDING_STALE_MS): only credit evidence lets it block. */
+function isStalePending(h, nowMs) {
+    if (h.doc.verdict !== 'pending')
+        return false;
+    const t = h.doc.claimedAt instanceof Date ? h.doc.claimedAt.getTime() : new Date(h.doc.claimedAt ?? NaN).getTime();
+    return !Number.isFinite(t) || nowMs - t >= PENDING_STALE_MS;
+}
+function pendingStaleLine(hit, evidence, chatId) {
+    return `payment-ledger kind=pending_stale orig_client=${hit.doc.clientId} orig_chat=${tail(hit.doc.chatId)} `
+        + `evidence=${evidence === null ? 'unknown' : evidence ? 'yes' : 'no'} action=${evidence ? 'block' : 'ignore'} chat=${tail(chatId)}`;
+}
+function claimLine(result, proofId, chatId) {
+    return `payment-ledger kind=claim result=${result} proof=${tail(proofId)} chat=${tail(chatId)}`;
+}
+/** This screenshot's own doc (the ledger's unique key: proofId = client-chat-msg, plus mobile). */
+function isOwnDoc(h, f) {
+    const d = h.doc;
+    return d.chatId === f.chatId && d.msgId === f.msgId && (!f.clientId || d.clientId === f.clientId) && (d.mobile ?? '') === (f.mobile ?? '');
+}
+/** The first inferred-credit match when no real credit matched (log only, never blocks). */
+function weakLedgerHit(all) {
+    if (!all || all.some(isCredited))
+        return null;
+    return all.find((h) => h.doc.verdict === 'credit_inferred') ?? null;
+}
+const tail = (v) => {
+    const s = String(v ?? '');
+    return s ? `••••${s.slice(-4)}` : '-';
+};
+function iso(v) {
+    const t = v instanceof Date ? v.getTime() : typeof v === 'string' || typeof v === 'number' ? new Date(v).getTime() : NaN;
+    return Number.isFinite(t) ? new Date(t).toISOString() : '-';
+}
+/** `payment-ledger kind=dup_hit ...` (chat ids masked to the last 4; no UTR printed). */
+function dupHitLine(d, chatId) {
+    const o = d.hit.doc;
+    return `payment-ledger kind=dup_hit by=${d.hit.by} verdict=${d.verdict.kind} orig_client=${o.clientId} orig_chat=${tail(o.chatId)} `
+        + `orig_at=${iso(o.creditedAt ?? o.receivedAt)} chat=${tail(chatId)}${d.downgraded ? ` downgraded=${d.downgraded}` : ''}`;
+}
+/** `payment-ledger kind=dup_hit_weak ...`: only an inferred credit matched; the payment goes on (no UTR printed). */
+function dupHitWeakLine(hit, chatId) {
+    const o = hit.doc;
+    return `payment-ledger kind=dup_hit_weak by=${hit.by} orig_client=${o.clientId} orig_chat=${tail(o.chatId)} `
+        + `orig_at=${iso(o.receivedAt)} chat=${tail(chatId)} action=proceed`;
+}
+function lookupFailedLine(chatId) {
+    return `payment-ledger kind=lookup_failed chat=${tail(chatId)} fallback=7d-checks`;
+}
+/** Pending-doc markers (round 12 #5): the sweep never releases a served claim, and releases only a failed release. */
+const SERVED_AFTER_THROW = 'SERVED_AFTER_THROW';
+const RELEASE_FAILED = 'RELEASE_FAILED';
+/**
+ * The review outcome as a ledger verdict. null = not written. 'credited' is a credit only when the credit was recorded
+ * (processImage keepCreditClaim). A definite failure that released its claim is a reject (CREDIT_NOT_RECORDED,
+ * CLAIM_RELEASED), so the payer's retry of that UTR is never blocked by it. An unknown result is not written: the
+ * gate's 'pending' claim doc stays and the resolve sweep decides from the credit evidence (Codex round 5 #1).
+ */
+function ledgerVerdictOf(outcome, creditRecorded, reasons = [], creditState) {
+    // Reviewer 2026-11-27 #1: a duplicate update of a claimed message (claim 'again', e.g. the same message re-analysed
+    // after a restart) proves nothing about the credit. Writing reject here would overwrite the first run's 'pending'
+    // claim (record() replaces any non-credit doc) and an applied credit would stop blocking. No write: the first run's
+    // doc stays, and the resolve sweep turns a pending one into credit / reject from the credit evidence.
+    if (outcome === 'credited' && !creditRecorded && reasons.includes('DUPLICATE_UPDATE'))
+        return null;
+    // Round 12 #5: the pending claim doc records what happened, so the sweep can tell a served claim (never released,
+    // resolved to a blocking 'credit': a resend is a repeat, the legacy rule) from a definite failure whose release
+    // failed (released by the sweep). A crash leaves no marker: the sweep never releases it.
+    if (outcome === 'credited' && !creditRecorded && creditState === 'unknown')
+        return { verdict: 'pending', extraReasons: [SERVED_AFTER_THROW] };
+    if (outcome === 'credited' && !creditRecorded && creditState === 'release_failed')
+        return { verdict: 'pending', extraReasons: ['CREDIT_NOT_RECORDED', RELEASE_FAILED] };
+    switch (outcome) {
+        case 'credited':
+            if (creditRecorded)
+                return { verdict: 'credit' };
+            return { verdict: 'reject', extraReasons: creditState === 'released' ? ['CREDIT_NOT_RECORDED', 'CLAIM_RELEASED'] : ['CREDIT_NOT_RECORDED'] };
+        case 'repeat': return { verdict: 'duplicate' };
+        case 'old_time': return { verdict: 'old' };
+        case 'fake_blocked':
+        case 'fraud_ask': return { verdict: 'fake' };
+        case 'not_receipt': return null;
+        default: return { verdict: 'reject' };
+    }
+}
+function ledgerWriteLine(r) {
+    return `payment-ledger kind=write result=${r.result} verdict=${r.verdict} proof=${tail(r.proofId)} chat=${tail(r.chatId)} utr=${tail(r.utr)}`;
 }
 
 
