@@ -216,15 +216,39 @@ const RETIRED_TABLES = new Set(["cheat_flag"]);
  * Nullable measurement columns added 2026-11-15, always the trailing columns of their table's list.
  * DEPLOY-ORDER SAFETY: a statement names them only when ANALYTICS_V2_COLUMNS is on (default) and a
  * row in the batch carries a non-null value. If the migration is not applied yet, Postgres answers
- * 42703; insertBatch re-runs the same batch without them (no row lost) and turns them off for this
- * process with one warn line (stats().droppedV2 counts rows written without them).
+ * 42703; insertBatch re-runs the same batch without them (no row lost) and turns them off for that
+ * TABLE for this process (other tables keep theirs) with one warn line (stats().droppedV2 counts rows written without them).
  */
+/** payment_event's trailing nullable columns (2026-11-19 mobile, 2026-11-23 receipt), in table-list order. */
+const PAYMENT_EXTRA_COLUMNS = ["mobile", "utr", "txn_id", "payee_upi", "payee_name", "printed_at", "app", "proof_id"];
 const V2_EXTRA_COLUMNS = {
     promotion_send: ["pick_mode", "pick_reason", "pick_score_legacy", "pick_score_v2", "pick_rank_v2", "channel_state",
         "score_version", "arm", "survival_ms", "delete_reason"],
     conversion_event: ["mobile", "dm_ts"],
     // analytics/upgrade-2026-11-19-payment-mobile.sql: the mobile that counted the payer (fake mark / void read it).
-    payment_event: ["mobile"],
+    // analytics/upgrade-2026-11-23-payment-receipt.sql: the receipt as read (reused-UTR audit). A 42703 on a receipt
+    // column drops only the receipt columns (V2_KEEP_LEVELS): `mobile` keeps writing.
+    payment_event: PAYMENT_EXTRA_COLUMNS,
+};
+/**
+ * Partial fallbacks (Codex review 2026-11-27 #4): how many leading V2_EXTRA_COLUMNS may stay when a LATER one is
+ * missing. payment_event: `mobile` (live since 2026-11-19) stays when a receipt column (2026-11-23) is missing. A table
+ * not listed here keeps all or none.
+ */
+const V2_KEEP_LEVELS = { payment_event: [1] };
+/** The extra columns that may stay after a 42703 named one of `table`'s V2_EXTRA_COLUMNS (0 = none). */
+function v2FallbackKeep(table, err, current) {
+    const cols = V2_EXTRA_COLUMNS[table] ?? [];
+    const text = describe(err);
+    const failed = cols.findIndex((c) => text.includes(`column "${c}" of relation "${table}"`));
+    const levels = (V2_KEEP_LEVELS[table] ?? []).filter((k) => failed >= 0 && k <= failed && k < current);
+    return levels.length ? Math.max(...levels) : 0;
+}
+/** The upgrade files that add each table's V2_EXTRA_COLUMNS (named in the OFF warn line). */
+const V2_UPGRADE_FILES = {
+    promotion_send: "analytics/upgrade-2026-11-15-picker-measurement.sql",
+    conversion_event: "analytics/upgrade-2026-11-15-picker-measurement.sql",
+    payment_event: "analytics/upgrade-2026-11-19-payment-mobile.sql and analytics/upgrade-2026-11-23-payment-receipt.sql",
 };
 /**
  * Per-channel reaction counters: table daily_channel_reaction (analytics/upgrade-2026-11-15-channel-reactions.sql).
@@ -301,10 +325,12 @@ const TABLES = {
     // legacy shape so a spool written by the previous build still replays its payments: upgradeLegacyValues
     // maps by name, so the three retired values are dropped and nothing else changes.
     payment_event: {
-        columns: ["ts", "chat_id", "client_id", "persona_id", "amount", "source", "mobile"],
+        columns: ["ts", "chat_id", "client_id", "persona_id", "amount", "source", ...PAYMENT_EXTRA_COLUMNS],
         legacyColumns: [
             ["ts", "chat_id", "client_id", "persona_id", "amount", "balance_after", "lifetime_after", "is_cheat", "source"],
             ["ts", "chat_id", "client_id", "persona_id", "amount", "source"],
+            // The 2026-11-19 list (before the receipt columns).
+            ["ts", "chat_id", "client_id", "persona_id", "amount", "source", "mobile"],
         ],
     },
     daily_client: {
@@ -548,8 +574,12 @@ class AnalyticsSink {
         /** Why the hourly writer is off for this process (null = on). See the header, BLAST RADIUS. */
         this.hourlyOff = null;
         this.droppedHourly = 0;
-        /** Why the measurement columns are off for this process (null = on). See V2_EXTRA_COLUMNS. */
-        this.v2Off = v2ColumnsFlagOn() ? null : "ANALYTICS_V2_COLUMNS off";
+        /** Why the measurement columns are off for every table (null = on): ANALYTICS_V2_COLUMNS. See V2_EXTRA_COLUMNS. */
+        this.v2OffAll = v2ColumnsFlagOn() ? null : "ANALYTICS_V2_COLUMNS off";
+        /** Per table: why its V2_EXTRA_COLUMNS are off for this process. A 42703 on one table never turns off another's. */
+        this.v2OffByTable = new Map();
+        /** Per table: how many leading V2_EXTRA_COLUMNS stay after a partial fallback (V2_KEEP_LEVELS); absent = all. */
+        this.v2KeepByTable = new Map();
         this.droppedV2 = 0;
         /** Why the daily_channel_reaction writer is off for this process (null = on). See CHANNEL_REACTION_TABLE. */
         this.channelReactionsOff = channelReactionsFlagOn() ? null : "ANALYTICS_CHANNEL_REACTIONS off";
@@ -860,6 +890,8 @@ class AnalyticsSink {
             values: [
                 row.ts ?? new Date(this.opts.now()),
                 row.chatId, row.clientId, row.personaId, row.amount, row.source ?? null, row.mobile ?? null,
+                row.utr ?? null, row.txnId ?? null, row.payeeUpi ?? null, row.payeeName ?? null,
+                validDateOrNull(row.printedAt), row.app ?? null, row.proofId ?? null,
             ],
         });
     }
@@ -1351,12 +1383,14 @@ class AnalyticsSink {
         }
         const startHourly = this.hourlyOff === null;
         let withHourly = startHourly;
-        let withV2 = this.v2Off === null;
-        let stmt = this.buildStatement(batch, withHourly, withV2);
+        const v2Off = this.v2OffAll ?? this.v2OffByTable.get(batch.table) ?? null;
+        const startKeep = v2Off !== null ? 0 : this.v2KeepByTable.get(batch.table) ?? Number.POSITIVE_INFINITY;
+        let v2Keep = startKeep;
+        let stmt = this.buildStatement(batch, withHourly, v2Keep);
         let hourlyErr = null;
         let hourlyLost = 0;
         let v2Err = null;
-        // Each fallback flips one flag once, so this runs at most three statements. A statement is one
+        // Each fallback narrows one setting (v2Keep only shrinks), so this runs at most four statements. A statement is one
         // transaction (the analytics_batch marker included), so a failed attempt leaves nothing behind.
         for (;;) {
             try {
@@ -1373,10 +1407,10 @@ class AnalyticsSink {
                     return false;
                 }
                 // Measurement columns missing (migration not applied): same rows without them. Never lose a row.
-                if (stmt?.v2 && withV2 && isV2ColumnError(err, batch.table)) {
+                if (stmt?.v2 && v2Keep > 0 && isV2ColumnError(err, batch.table)) {
                     v2Err = err;
-                    withV2 = false;
-                    stmt = this.buildStatement(batch, withHourly, false);
+                    v2Keep = v2FallbackKeep(batch.table, err, v2Keep);
+                    stmt = this.buildStatement(batch, withHourly, v2Keep);
                     continue;
                 }
                 // BLAST RADIUS (header): never let the hourly part hold back promotion_send / daily_*.
@@ -1384,17 +1418,20 @@ class AnalyticsSink {
                     hourlyErr = err;
                     hourlyLost = stmt.hourly;
                     withHourly = false;
-                    stmt = this.buildStatement(batch, false, withV2);
+                    stmt = this.buildStatement(batch, false, v2Keep);
                     continue;
                 }
                 throw err; // normal path; the flags only change after a fallback statement succeeds
             }
         }
         if (v2Err !== null) {
-            this.disableV2(v2Err);
+            if (v2Keep === 0)
+                this.disableV2(batch.table, v2Err);
+            else
+                this.limitV2(batch.table, v2Keep, v2Err);
             this.droppedV2 += v2Rows(batch);
         }
-        else if (!withV2 && this.v2Off !== null) {
+        else if (startKeep !== Number.POSITIVE_INFINITY) {
             this.droppedV2 += v2Rows(batch);
         }
         if (hourlyErr !== null) {
@@ -1405,12 +1442,23 @@ class AnalyticsSink {
         if (!startHourly)
             this.droppedHourly += hourlyDeltas(batch); // written without its hourly part
     }
-    /** Turns the measurement columns off for this process (once), with one warn line. */
-    disableV2(err) {
-        if (this.v2Off !== null)
+    /** Turns one table's measurement columns off for this process (once per table), with one warn line. */
+    disableV2(table, err) {
+        if (this.v2OffByTable.has(table))
             return;
-        this.v2Off = describe(err).slice(0, 300);
-        this.log("warn", `[analytics] picker measurement columns OFF until restart (rows keep writing without them; apply analytics/upgrade-2026-11-15-picker-measurement.sql and analytics/upgrade-2026-11-19-payment-mobile.sql): ${this.v2Off}`);
+        const why = describe(err).slice(0, 300);
+        this.v2OffByTable.set(table, why);
+        this.log("warn", `[analytics] ${table} measurement columns OFF until restart (rows keep writing without them; apply ${V2_UPGRADE_FILES[table] ?? "the analytics upgrade that adds them"}): ${why}`);
+    }
+    /** Keeps only the first `keep` measurement columns of one table for this process (V2_KEEP_LEVELS), one warn line. */
+    limitV2(table, keep, err) {
+        const was = this.v2KeepByTable.get(table);
+        if (was !== undefined && was <= keep)
+            return;
+        this.v2KeepByTable.set(table, keep);
+        const cols = V2_EXTRA_COLUMNS[table] ?? [];
+        const what = table === "payment_event" ? "receipt" : "later measurement";
+        this.log("warn", `[analytics] ${table} ${what} columns OFF until restart (${cols.slice(0, keep).join(", ")} kept; rows keep writing; apply ${V2_UPGRADE_FILES[table] ?? "the analytics upgrade that adds them"}): ${describe(err).slice(0, 300)}`);
     }
     /** Turns the daily_channel_reaction writer off for this process (once), with one warn line. */
     disableChannelReactions(err) {
@@ -1431,7 +1479,7 @@ class AnalyticsSink {
      * withHourly, hourly_client rows are left out (counted by the caller) and promotion_send is a plain
      * INSERT. Null when nothing is left to write.
      */
-    buildStatement(batch, withHourly, withV2 = false) {
+    buildStatement(batch, withHourly, v2Keep = 0) {
         const params = [batch.id];
         const inserts = [];
         let hourly = 0;
@@ -1453,7 +1501,7 @@ class AnalyticsSink {
             if (table === CHANNEL_REACTION_TABLE)
                 own = [...own].sort((a, b) => compareKey(a.values, b.values, 2));
             const shaped = counterStatementShape(table, own);
-            const projected = projectV2Columns(table, shaped.rows, withV2);
+            const projected = projectV2Columns(table, shaped.rows, v2Keep);
             v2 = v2 || projected.v2;
             const rows = projected.rows;
             const tuples = [];
@@ -2540,10 +2588,11 @@ function isHourlySchemaError(err) {
     return code === "42P01" || code === "42883" || code === "42703" || code === "42501";
 }
 /**
- * Drops the trailing measurement columns unless withV2 is on AND some row carries a non-null value
- * in them, so a batch without measurement data never names a column that may not exist yet.
+ * Keeps at most the first `keep` trailing measurement columns (Infinity = all, 0 = none), and none unless some row
+ * carries a non-null value in the kept ones, so a batch without measurement data never names a column that may not
+ * exist yet.
  */
-function projectV2Columns(table, rows, withV2) {
+function projectV2Columns(table, rows, keep) {
     const extra = V2_EXTRA_COLUMNS[table];
     if (!extra || rows.length === 0)
         return { rows, v2: false };
@@ -2552,9 +2601,12 @@ function projectV2Columns(table, rows, withV2) {
         && extra.every((c, i) => r.columns[base + i] === c));
     if (!shapeOk)
         return { rows, v2: false };
-    const carries = withV2 && rows.some((r) => r.values.slice(base).some((v) => v !== null && v !== undefined));
-    if (carries)
+    const k = Math.max(0, Math.min(extra.length, keep));
+    const carries = k > 0 && rows.some((r) => r.values.slice(base, base + k).some((v) => v !== null && v !== undefined));
+    if (carries && k === extra.length)
         return { rows, v2: true };
+    if (carries)
+        return { rows: rows.map((r) => ({ ...r, columns: r.columns.slice(0, base + k), values: r.values.slice(0, base + k) })), v2: true };
     return { rows: rows.map((r) => ({ ...r, columns: r.columns.slice(0, base), values: r.values.slice(0, base) })), v2: false };
 }
 /**
@@ -2566,12 +2618,12 @@ function projectV2Columns(table, rows, withV2) {
  * pre-2026-11-19 guess for them). The other measurement columns are known to that build and keep the
  * pre-2026-11-19 rule: dropped when empty, else in `c`.
  */
-const SPOOL_BY_NAME = { payment_event: ["mobile"] };
+const SPOOL_BY_NAME = { payment_event: PAYMENT_EXTRA_COLUMNS };
 function spoolShape(row) {
     const byName = SPOOL_BY_NAME[row.table];
     const base = byName ? row.columns.length - byName.length : 0;
     if (!byName || base <= 0 || !byName.every((c, i) => row.columns[base + i] === c)) {
-        const projected = projectV2Columns(row.table, [row], true).rows[0];
+        const projected = projectV2Columns(row.table, [row], Number.POSITIVE_INFINITY).rows[0];
         return { columns: projected.columns, values: projected.values, extra: null };
     }
     const x = {};
@@ -37451,6 +37503,322 @@ class ParkedControlRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_
 
 /***/ },
 
+/***/ "../../packages/tg-db/src/collections/payment-proof-ledger.repository.ts"
+/*!*******************************************************************************!*\
+  !*** ../../packages/tg-db/src/collections/payment-proof-ledger.repository.ts ***!
+  \*******************************************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   LEDGER_ATTEMPT_FIELDS: () => (/* binding */ LEDGER_ATTEMPT_FIELDS),
+/* harmony export */   LEDGER_KEY_INDEX: () => (/* binding */ LEDGER_KEY_INDEX),
+/* harmony export */   LEDGER_LOOKUP_LIMIT: () => (/* binding */ LEDGER_LOOKUP_LIMIT),
+/* harmony export */   LEDGER_MAX_REASONS: () => (/* binding */ LEDGER_MAX_REASONS),
+/* harmony export */   LEDGER_PENDING_INDEX: () => (/* binding */ LEDGER_PENDING_INDEX),
+/* harmony export */   LEDGER_UTR_CREDIT_INDEX: () => (/* binding */ LEDGER_UTR_CREDIT_INDEX),
+/* harmony export */   PAYMENT_PROOF_LEDGER_COLLECTION: () => (/* binding */ PAYMENT_PROOF_LEDGER_COLLECTION),
+/* harmony export */   PaymentProofLedgerRepository: () => (/* binding */ PaymentProofLedgerRepository),
+/* harmony export */   maskTail: () => (/* binding */ maskTail)
+/* harmony export */ });
+/* harmony import */ var _base_repository__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../base-repository */ "../../packages/tg-db/src/base-repository.ts");
+/* harmony import */ var _payment_reference__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./payment-reference */ "../../packages/tg-db/src/collections/payment-reference.ts");
+
+
+const PAYMENT_PROOF_LEDGER_COLLECTION = 'paymentProofLedger';
+const LEDGER_KEY_INDEX = 'proofId_1_mobile_1_unique';
+const LEDGER_UTR_CREDIT_INDEX = 'utr_1_verdict_1_credit_unique';
+/** Matches returned per lookup (the gate needs one; a few let it pick the classifying row). */
+const LEDGER_LOOKUP_LIMIT = 5;
+const LEDGER_PENDING_INDEX = 'clientId_1_lastSweptAt_1_claimedAt_1_pending';
+const LEDGER_MAX_REASONS = 8;
+/**
+ * Per-attempt fields a write removes when the new attempt does not supply them (Codex round 10 #3): an earlier
+ * attempt's UTR / txn id / file must not survive into this one's pending or credit doc and block another payment.
+ */
+const LEDGER_ATTEMPT_FIELDS = ['utr', 'utrRaw', 'txnId', 'imageSha256', 'dupCreditedAt', 'dupCreditAmount'];
+const HEX64 = /^[0-9a-f]{64}$/;
+/** A driver error for a log line: code and index name only. E11000 messages carry the key VALUE (a UTR). */
+function redact(error) {
+    const e = error;
+    const index = /index: (\S+)/.exec(String(e?.message ?? ''))?.[1];
+    return [e?.name, e?.code ?? e?.codeName, index].filter((v) => v !== undefined && v !== '').join(' ') || 'error';
+}
+function isDuplicateKey(error) {
+    const e = error;
+    return e?.code === 11000 || /E11000|duplicate key/i.test(String(e?.message ?? ''));
+}
+/** Which unique index an E11000 hit (driver: keyPattern / message). */
+function duplicateIndex(error) {
+    const e = error;
+    const kp = e?.keyPattern ? Object.keys(e.keyPattern) : [];
+    const msg = String(e?.message ?? '');
+    if (kp.includes('proofId') || msg.includes(LEDGER_KEY_INDEX))
+        return 'key';
+    if (kp.includes('utr') || msg.includes(LEDGER_UTR_CREDIT_INDEX))
+        return 'utr';
+    return 'other';
+}
+/** Last 4 characters, for logs only ("••••1234"). */
+function maskTail(v) {
+    const s = String(v ?? '');
+    return s ? `••••${s.slice(-4)}` : '-';
+}
+class PaymentProofLedgerRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_0__.BaseRepository {
+    constructor() {
+        super(...arguments);
+        this.collectionName = PAYMENT_PROOF_LEDGER_COLLECTION;
+    }
+    /**
+     * Store one screenshot's ledger doc. Idempotent per (proofId, mobile); a later verdict of the same screenshot
+     * replaces an earlier non-credit one (a held screenshot credited on its re-check), but a credit doc is never
+     * downgraded. A credit whose UTR another screenshot already holds as credited is stored as 'duplicate'
+     * (its creditedAt moved to dupCreditedAt: it WAS credited, by a path that missed the lookup, but it never blocks). Never throws.
+     */
+    async record(input) {
+        const proofId = String(input?.proofId ?? '').trim();
+        if (!proofId)
+            return 'error';
+        const mobile = typeof input.mobile === 'string' ? input.mobile.trim() : '';
+        const now = new Date();
+        const doc = {};
+        const expectClaimId = typeof input.expectClaimId === 'string' && input.expectClaimId ? input.expectClaimId : null;
+        for (const [k, v] of Object.entries(input)) {
+            if (v === undefined || v === null || v === '' || k === '_id' || k === 'createdAt' || k === 'expectClaimId')
+                continue;
+            doc[k] = v;
+        }
+        doc.proofId = proofId;
+        doc.mobile = mobile;
+        // Round 13 #2: a write under a claim stores that claim (an inserted doc carries it for the sweep's fence).
+        if (expectClaimId)
+            doc.claimId = expectClaimId;
+        doc.reasons = (input.reasons ?? []).slice(0, LEDGER_MAX_REASONS);
+        if (typeof doc.imageSha256 === 'string' && !HEX64.test(doc.imageSha256))
+            delete doc.imageSha256;
+        // Only a real, non-degenerate reference is a key (payment-reference.ts); the raw text stays in utrRaw.
+        if (doc.utr !== undefined && !(0,_payment_reference__WEBPACK_IMPORTED_MODULE_1__.isLedgerReference)(doc.utr))
+            delete doc.utr;
+        if (doc.txnId !== undefined) {
+            const t = (0,_payment_reference__WEBPACK_IMPORTED_MODULE_1__.ledgerTxnIdOf)(doc.txnId);
+            if (t)
+                doc.txnId = t;
+            else
+                delete doc.txnId;
+        }
+        // creditedAt / creditAmount belong to verdict 'credit' only.
+        if (doc.verdict !== 'credit') {
+            delete doc.creditedAt;
+            delete doc.creditAmount;
+        }
+        doc.updatedAt = now;
+        const createdAt = input.createdAt ?? now;
+        // Which doc of this key a write may replace (a doc it may not: the upsert hits the key index -> 'kept'). Never a
+        // credit. Under a claim (the recorder's expectClaimId, or the claim doc's own claimId): any non-pending doc, the
+        // pending doc holding that claim, or (a pending write with its claimedAt) an OLDER claim's pending doc; never a
+        // newer claim's live 'pending' (round 13 #2: a late write of an earlier generation never replaces the newer
+        // claim, while a newer claim takes over a pending doc its predecessor could not resolve). Any other unclaimed
+        // write (a delayed reject / hold recorder of an earlier pass) never a live 'pending' claim (Codex round 6 #3).
+        // Round 14 #1: the gate's own claim-doc write (a pending doc with its claimId, no expectClaimId) is bounded but
+        // not cancelled: landing late, it never replaces that claim's terminal reject (the release / sweep / recorder
+        // reject written meanwhile), or a released claim would block the next resend until the sweep.
+        // Round 14 #4: a credit under a claim carries claimedAt too, so it takes over an older claim's pending doc.
+        const token = expectClaimId ?? (doc.verdict === 'pending' && typeof doc.claimId === 'string' && doc.claimId ? doc.claimId : null);
+        const claimedAt = (doc.verdict === 'pending' || (doc.verdict === 'credit' && token)) && doc.claimedAt instanceof Date && Number.isFinite(doc.claimedAt.getTime()) ? doc.claimedAt : null;
+        const claimWrite = !expectClaimId && doc.verdict === 'pending' && !!token;
+        const replaceable = token
+            ? { verdict: { $ne: 'credit' }, $or: [{ verdict: { $ne: 'pending' } }, { claimId: token }, ...(claimedAt ? [{ claimedAt: { $lt: claimedAt } }] : [])], ...(claimWrite ? { $nor: [{ claimId: token, verdict: 'reject' }] } : {}) }
+            : doc.verdict === 'pending' ? { verdict: { $ne: 'credit' } } : { verdict: { $nin: ['credit', 'pending'] } };
+        const write = async (fields) => {
+            const stale = Object.fromEntries(LEDGER_ATTEMPT_FIELDS.filter((k) => !(k in fields)).map((k) => [k, '']));
+            await this.collection.updateOne({ proofId, mobile, ...replaceable }, { $set: fields, ...(Object.keys(stale).length ? { $unset: stale } : {}), $setOnInsert: { createdAt } }, { upsert: true });
+        };
+        try {
+            await write(doc);
+            return 'written';
+        }
+        catch (error) {
+            if (!isDuplicateKey(error)) {
+                this.logger.error(`[${this.collectionName}] record(${maskTail(proofId)}) failed: ${redact(error)}`);
+                return 'error';
+            }
+            const which = duplicateIndex(error);
+            // The credit doc of this very screenshot exists (filter skipped it, the upsert hit the key): it stays.
+            if (which === 'key')
+                return 'kept';
+            if (which === 'utr' && doc.verdict === 'credit') {
+                const reasons = [...doc.reasons, 'LEDGER_DUP_CREDIT'].slice(0, LEDGER_MAX_REASONS);
+                const { creditedAt, creditAmount, ...rest } = doc;
+                try {
+                    await write({
+                        ...rest, verdict: 'duplicate', reasons,
+                        ...(creditedAt !== undefined ? { dupCreditedAt: creditedAt } : {}),
+                        ...(creditAmount !== undefined ? { dupCreditAmount: creditAmount } : {}),
+                    });
+                    return 'dup_credit';
+                }
+                catch (again) {
+                    if (isDuplicateKey(again) && duplicateIndex(again) === 'key')
+                        return 'kept';
+                    this.logger.error(`[${this.collectionName}] record(${maskTail(proofId)}) as duplicate failed: ${redact(again)}`);
+                    return 'error';
+                }
+            }
+            this.logger.error(`[${this.collectionName}] record(${maskTail(proofId)}) duplicate key: ${redact(error)}`);
+            return 'error';
+        }
+    }
+    /**
+     * Earlier CREDITED screenshots (verdict credit) with this UTR, transaction id or file, in any chat, persona or
+     * client, with no time limit. A reference is looked up in both `utr` and `txnId` (one payment prints the bank RRN on
+     * one screen and the app's id on another, and the model reads either as "utr"). null = the lookup failed (the
+     * caller falls back to the 7-day checks; never blocks a credit on a ledger outage).
+     */
+    async findCreditedMatches(q) {
+        const refs = [...new Set([q.utr, q.txnId].filter((v) => typeof v === 'string' && ((0,_payment_reference__WEBPACK_IMPORTED_MODULE_1__.isLedgerReference)(v) || (0,_payment_reference__WEBPACK_IMPORTED_MODULE_1__.ledgerTxnIdOf)(v) === v)))];
+        const sha = typeof q.imageSha256 === 'string' && HEX64.test(q.imageSha256) ? q.imageSha256 : null;
+        if (refs.length === 0 && !sha)
+            return [];
+        const or = [];
+        if (refs.length)
+            or.push({ utr: { $in: refs } }, { txnId: { $in: refs } });
+        if (sha)
+            or.push({ imageSha256: sha });
+        // Two bounded reads (Codex round 3 #2): the BLOCKING docs ('credit', 'pending') first, then the inferred ones
+        // (the gate's weak log only). One read sorted on creditedAt ranked pending and inferred docs (no creditedAt)
+        // alike, so inferred docs could push a pending claim out of the limit. A stray creditedAt on any other verdict
+        // never blocks.
+        const filterOf = (verdicts) => {
+            const f = { $and: [{ $or: or }, { verdict: { $in: verdicts } }] };
+            if (q.excludeProofId)
+                f.$nor = [{ proofId: q.excludeProofId, mobile: typeof q.excludeMobile === 'string' ? q.excludeMobile : '' }];
+            return f;
+        };
+        return this.guard('findCreditedMatches', null, async () => {
+            const blocking = await this.collection
+                .find(filterOf(['credit', 'pending']), { sort: { creditedAt: -1, claimedAt: -1 } })
+                .limit(LEDGER_LOOKUP_LIMIT)
+                .toArray();
+            return blocking.map((doc) => ({ by: matchBy(doc, q.utr ?? null, q.txnId ?? null, sha), doc: doc }));
+        });
+    }
+    /**
+     * Inferred credits ('credit_inferred', backfill) with this UTR / txn id / file: the gate's weak log only, never a
+     * block. Its own read and guard (Codex round 5 #3): a failure here never hides a blocking match. null = failed.
+     */
+    async findInferredMatches(q) {
+        const refs = [...new Set([q.utr, q.txnId].filter((v) => typeof v === 'string' && ((0,_payment_reference__WEBPACK_IMPORTED_MODULE_1__.isLedgerReference)(v) || (0,_payment_reference__WEBPACK_IMPORTED_MODULE_1__.ledgerTxnIdOf)(v) === v)))];
+        const sha = typeof q.imageSha256 === 'string' && HEX64.test(q.imageSha256) ? q.imageSha256 : null;
+        if (refs.length === 0 && !sha)
+            return [];
+        const or = [];
+        if (refs.length)
+            or.push({ utr: { $in: refs } }, { txnId: { $in: refs } });
+        if (sha)
+            or.push({ imageSha256: sha });
+        const f = { $and: [{ $or: or }, { verdict: 'credit_inferred' }] };
+        if (q.excludeProofId)
+            f.$nor = [{ proofId: q.excludeProofId, mobile: typeof q.excludeMobile === 'string' ? q.excludeMobile : '' }];
+        return this.guard('findInferredMatches', null, async () => (await this.collection
+            .find(f, { sort: { inferredCreditAt: -1 } })
+            .limit(LEDGER_LOOKUP_LIMIT)
+            .toArray()).map((doc) => ({ by: matchBy(doc, q.utr ?? null, q.txnId ?? null, sha), doc: doc })));
+    }
+    /**
+     * This client's 'pending' claim docs claimed before `before` (the tg-aut resolve sweep): never-swept docs first, then
+     * the least recently swept, oldest claim first within each. null = read failed.
+     */
+    async findPendingClaims(clientId, before, limit) {
+        if (!clientId || !(before instanceof Date) || !Number.isFinite(before.getTime()))
+            return [];
+        const n = Math.max(1, Math.min(100, Math.floor(limit) || 1));
+        return this.guard('findPendingClaims', null, async () => (await this.collection
+            // Round 13 #2: only a doc with a claim id (the sweep writes nothing without one, so an unfenced doc would
+            // be re-read first on every tick).
+            .find({ verdict: 'pending', clientId, claimedAt: { $lt: before }, claimId: { $type: 'string' } }, { sort: { lastSweptAt: 1, claimedAt: 1 } })
+            .limit(n)
+            .toArray()));
+    }
+    /**
+     * Turn one doc that is STILL 'pending' into 'credit' or 'reject' (a finish that already wrote the doc wins: 'gone').
+     * A credit whose UTR another doc holds as credited is stored as 'duplicate' (dupCreditedAt), as record() does.
+     * `claimId` is required (round 13 #2): without it nothing is written ('gone'). `expectReasons` (round 13 #3): the
+     * reasons the caller read; a doc whose reasons changed since (a marker written mid-sweep) is 'gone' for it.
+     */
+    async resolvePending(proofId, mobile, verdict, reasons, credit, claimId, expectReasons) {
+        if (!proofId)
+            return 'error';
+        if (typeof claimId !== 'string' || !claimId)
+            return 'gone';
+        // claimId: only the claim the caller saw (a newer claim of the same message is 'gone' for it).
+        const filter = {
+            proofId, mobile: typeof mobile === 'string' ? mobile.trim() : '', verdict: 'pending', claimId,
+            ...(expectReasons ? (expectReasons.length ? { reasons: { $eq: expectReasons } } : { $or: [{ reasons: { $eq: [] } }, { reasons: { $exists: false } }] }) : {}),
+        };
+        const now = new Date();
+        const rs = reasons.slice(0, LEDGER_MAX_REASONS);
+        const set = (fields) => this.collection.updateOne(filter, { $set: { ...fields, updatedAt: now } });
+        const creditFields = verdict === 'credit' && credit
+            ? { creditedAt: credit.at, ...(typeof credit.amount === 'number' && credit.amount > 0 ? { creditAmount: credit.amount } : {}) }
+            : {};
+        try {
+            const res = await set({ verdict, reasons: rs, ...creditFields });
+            return res.matchedCount > 0 ? 'resolved' : 'gone';
+        }
+        catch (error) {
+            if (isDuplicateKey(error) && duplicateIndex(error) === 'utr' && verdict === 'credit') {
+                try {
+                    const dup = {
+                        verdict: 'duplicate', reasons: [...rs, 'LEDGER_DUP_CREDIT'].slice(0, LEDGER_MAX_REASONS),
+                        ...(credit ? { dupCreditedAt: credit.at } : {}),
+                        ...(typeof credit?.amount === 'number' && credit.amount > 0 ? { dupCreditAmount: credit.amount } : {}),
+                    };
+                    const res = await set(dup);
+                    return res.matchedCount > 0 ? 'dup_credit' : 'gone';
+                }
+                catch (again) {
+                    this.logger.error(`[${this.collectionName}] resolvePending(${maskTail(proofId)}) as duplicate failed: ${redact(again)}`);
+                    return 'error';
+                }
+            }
+            this.logger.error(`[${this.collectionName}] resolvePending(${maskTail(proofId)}) failed: ${redact(error)}`);
+            return 'error';
+        }
+    }
+    /** Stamp a 'pending' doc the sweep could not decide (lastSweptAt), under the claim it saw. Never throws; false = not stamped. */
+    async markSwept(proofId, mobile, claimId) {
+        if (!proofId || typeof claimId !== 'string' || !claimId)
+            return false;
+        const filter = { proofId, mobile: typeof mobile === 'string' ? mobile.trim() : '', verdict: 'pending', claimId };
+        return this.guard('markSwept', false, async () => (await this.collection.updateOne(filter, { $set: { lastSweptAt: new Date() } })).matchedCount > 0);
+    }
+    async ensureIndexes() {
+        const c = this.collection;
+        await this.guardWrite('ensureIndexes(proofId,mobile unique)', () => c.createIndex({ proofId: 1, mobile: 1 }, { name: LEDGER_KEY_INDEX, unique: true }));
+        // One credit per reference. Key {utr, verdict} (not {utr}) so it never collides with the non-unique utr index.
+        await this.guardWrite('ensureIndexes(utr credit unique)', () => c.createIndex({ utr: 1, verdict: 1 }, { name: LEDGER_UTR_CREDIT_INDEX, unique: true, partialFilterExpression: { verdict: 'credit', utr: { $type: 'string' } } }));
+        await this.guardWrite('ensureIndexes(utr)', () => c.createIndex({ utr: 1 }, { name: 'utr_1', partialFilterExpression: { utr: { $exists: true } } }));
+        await this.guardWrite('ensureIndexes(txnId)', () => c.createIndex({ txnId: 1 }, { name: 'txnId_1', partialFilterExpression: { txnId: { $exists: true } } }));
+        await this.guardWrite('ensureIndexes(imageSha256)', () => c.createIndex({ imageSha256: 1 }, { name: 'imageSha256_1', partialFilterExpression: { imageSha256: { $exists: true } } }));
+        await this.guardWrite('ensureIndexes(clientId,chatId)', () => c.createIndex({ clientId: 1, chatId: 1 }, { name: 'clientId_1_chatId_1' }));
+        // The resolve sweep's read: pending docs only (a handful at any time), so the partial index stays tiny.
+        await this.guardWrite('ensureIndexes(pending claims)', () => c.createIndex({ clientId: 1, lastSweptAt: 1, claimedAt: 1 }, { name: LEDGER_PENDING_INDEX, partialFilterExpression: { verdict: 'pending' } }));
+    }
+}
+function matchBy(doc, utr, txnId, sha) {
+    const refs = [utr, txnId].filter(Boolean);
+    if (utr && (doc.utr === utr || doc.txnId === utr))
+        return 'utr';
+    if (refs.some((r) => doc.utr === r || doc.txnId === r))
+        return 'txn';
+    if (sha && doc.imageSha256 === sha)
+        return 'image';
+    return 'utr';
+}
+
+
+/***/ },
+
 /***/ "../../packages/tg-db/src/collections/payment-proofs.repository.ts"
 /*!*************************************************************************!*\
   !*** ../../packages/tg-db/src/collections/payment-proofs.repository.ts ***!
@@ -37472,9 +37840,12 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   hexHamming: () => (/* binding */ hexHamming),
 /* harmony export */   isRealPaymentReference: () => (/* binding */ isRealPaymentReference),
 /* harmony export */   otherRealReference: () => (/* binding */ otherRealReference),
-/* harmony export */   proofKeyFilter: () => (/* binding */ proofKeyFilter)
+/* harmony export */   proofKeyFilter: () => (/* binding */ proofKeyFilter),
+/* harmony export */   servedRefsOf: () => (/* binding */ servedRefsOf)
 /* harmony export */ });
 /* harmony import */ var _base_repository__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../base-repository */ "../../packages/tg-db/src/base-repository.ts");
+/* harmony import */ var _payment_reference__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./payment-reference */ "../../packages/tg-db/src/collections/payment-reference.ts");
+
 
 /**
  * `paymentProofs`: one small row per analysed payment screenshot, used only for fraud lookups
@@ -37504,7 +37875,11 @@ const NEAR_HASH_MAX_DISTANCE = 4;
 const NOT_RECORD_ONLY = { mode: { $ne: 'record' } };
 /** The review fields recordReview sets (always $set: they describe the final outcome). */
 const REVIEW_FIELDS = ['proofId', 'verdict', 'image', 'ocr'];
-/** The Mongo filter of one screenshot's row (see ProofKey); null when chatId or profile is missing. */
+/** One normalisation for both fields (= the ledger lookup's tokens): a T-id read as UTR is the same token. */
+function servedRefsOf(c) {
+    const one = (v) => (0,_payment_reference__WEBPACK_IMPORTED_MODULE_1__.ledgerTxnIdOf)(v) ?? (0,_payment_reference__WEBPACK_IMPORTED_MODULE_1__.ledgerReferenceOf)(v);
+    return [...new Set([one(c.utr), one(c.txnId)].filter((v) => !!v))];
+}
 function proofKeyFilter(key) {
     const chatId = String(key?.chatId || '').trim();
     if (!chatId || !key.profile)
@@ -37602,6 +37977,8 @@ class PaymentProofsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_
         delete doc.servedUtr;
         delete doc.servedSha;
         delete doc.servedMin;
+        delete doc.servedRefs;
+        delete doc.servedClaim;
         delete doc.creditAmount; // credit state too: only markServed writes it (at the credit decision)
         for (const k of REVIEW_FIELDS)
             delete doc[k]; // review fields: recordReview only
@@ -37655,7 +38032,7 @@ class PaymentProofsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_
         if (typeof base.imageSha256 === 'string' && !HEX64.test(base.imageSha256))
             delete base.imageSha256;
         // 'review' = the operator's stamp: written by CMS only, never by tg-aut.
-        for (const k of ['servedAt', 'servedService', 'servedUtr', 'servedSha', 'servedMin', 'creditAmount', 'ask', 'proof', 'review'])
+        for (const k of ['servedAt', 'servedService', 'servedUtr', 'servedSha', 'servedMin', 'servedRefs', 'servedClaim', 'creditAmount', 'ask', 'proof', 'review'])
             delete base[k];
         return this.guardWrite(`recordReview(${chatId})`, async () => {
             try {
@@ -37713,6 +38090,17 @@ class PaymentProofsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_
         });
     }
     /** Newest first; backs the per-chat near-duplicate scan (default last 20). Review-only rows are not counted. */
+    /**
+     * This message's own row, read by its key (servedAt and servedClaim only). null = no such row, or the read failed.
+     * Round 14 #3: the gate's held re-check (adoptClaim) reads its row here, never through a chat scan that a busy chat
+     * can push it out of.
+     */
+    async servedStateOf(proof) {
+        const key = proofKeyFilter(proof);
+        if (!key)
+            return null;
+        return this.guard(`servedStateOf(${key.chatId})`, null, () => this.collection.findOne({ ...key, ...NOT_RECORD_ONLY }, { projection: { _id: 0, servedAt: 1, servedClaim: 1 } }));
+    }
     async recentForChat(chatId, limit = 20) {
         const id = String(chatId || '').trim();
         if (!id)
@@ -37839,9 +38227,14 @@ class PaymentProofsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_
      * A receipt with a REAL UTR that collides only on the key is another payment in the same minute and is claimed
      * without the key (otherRealReference), unless its reference is the holder's or a cut of it (nidhi1 2026-11-06:
      * `21992078` then `219920787057`, ₹25 twice). A receipt with no UTR or a short / odd one loses (owner rule 7).
+     * `claim` (the gate): this attempt's own references and claim generation. The row's utr and servedUtr become the
+     * attempt's UTR (removed when it read none: Codex round 11 #2, a recheck never reserves the first read's UTR);
+     * its UTR and transaction id go into servedRefs (one unique set, so a token read as UTR in one screenshot and as
+     * transaction id in another still collides); servedClaim fences releaseServed (round 11 #1). Without `claim`
+     * (older callers) servedUtr copies the row's own utr.
      */
-    async markServed(proof, service, creditAmount, minuteKey) {
-        const first = await this.markServedOnce(proof, service, creditAmount, minuteKey);
+    async markServed(proof, service, creditAmount, minuteKey, claim) {
+        const first = await this.markServedOnce(proof, service, creditAmount, minuteKey, claim);
         if (first !== 'duplicate_minute')
             return first;
         const key = proofKeyFilter(proof);
@@ -37853,13 +38246,15 @@ class PaymentProofsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_
             const holder = await this.collection.find({ servedMin: minuteKey }).limit(1).next();
             if (!holder) {
                 // The holder's claim was released in between (its credit failed): claim the key again, once.
-                const retry = await this.markServedOnce(proof, service, creditAmount, minuteKey);
+                const retry = await this.markServedOnce(proof, service, creditAmount, minuteKey, claim);
                 return retry === 'duplicate_minute' ? 'duplicate' : retry;
             }
-            if (!otherRealReference(mine?.utr, holder?.utr))
+            const mineUtr = claim ? (claim.utr ?? undefined) : mine?.utr;
+            const holderUtr = holder?.servedUtr ?? holder?.utr;
+            if (!otherRealReference(mineUtr, holderUtr))
                 return 'duplicate';
             // A real reference that is not the holder's: another payment in this minute (same UTR: servedUtr_unique).
-            const again = await this.markServedOnce(proof, service, creditAmount, undefined);
+            const again = await this.markServedOnce(proof, service, creditAmount, undefined, claim);
             return again === 'duplicate_minute' ? 'duplicate' : again;
         }
         catch (error) {
@@ -37867,7 +38262,7 @@ class PaymentProofsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_
             return 'error';
         }
     }
-    async markServedOnce(proof, service, creditAmount, minuteKey) {
+    async markServedOnce(proof, service, creditAmount, minuteKey, claim) {
         const key = proofKeyFilter(proof);
         if (!key)
             return 'missing';
@@ -37875,10 +38270,15 @@ class PaymentProofsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_
         try {
             const filter = key;
             const credit = Number(creditAmount);
+            const refs = claim ? servedRefsOf(claim) : [];
+            const own = claim
+                ? { utr: claim.utr ? { $literal: claim.utr } : '$$REMOVE', servedUtr: claim.utr ? { $literal: claim.utr } : '$$REMOVE',
+                    ...(refs.length ? { servedRefs: { $literal: refs } } : {}), ...(claim.claim ? { servedClaim: { $literal: claim.claim } } : {}) }
+                : { servedUtr: '$utr' };
             const res = await this.collection.updateOne({ ...filter, servedAt: { $exists: false } }, 
             // Pipeline update so servedUtr copies this row's own utr (absent when the row has none). creditAmount is
             // set here, at the credit decision, never at insert ($literal: a pipeline value is never a field path).
-            [{ $set: { servedAt: new Date(), servedService: service, servedUtr: '$utr', servedSha: '$imageSha256',
+            [{ $set: { servedAt: new Date(), servedService: service, ...own, servedSha: '$imageSha256',
                         ...(Number.isFinite(credit) && credit > 0 ? { creditAmount: { $literal: credit } } : {}),
                         ...(minuteKey ? { servedMin: { $literal: minuteKey } } : {}) } }]);
             if (res.matchedCount > 0)
@@ -38022,12 +38422,15 @@ class PaymentProofsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_
             .limit(10)
             .toArray());
     }
-    /** Close an open request. Only the first caller wins (true); a concurrent or repeated resolve gets false. */
+    /**
+     * Close an open request. Only the first caller wins (true); a concurrent or repeated resolve gets false; a store
+     * failure is null (never read as "already resolved": Codex round 9 #1).
+     */
     async resolveAsk(proof, byMsgId) {
         const key = proofKeyFilter(proof);
         if (!key)
             return false;
-        return this.guard(`resolveAsk(${key.chatId})`, false, async () => {
+        return this.guard(`resolveAsk(${key.chatId})`, null, async () => {
             const res = await this.collection.updateOne({ ...key, 'ask.state': 'open' }, { $set: { 'ask.state': 'resolved', 'ask.resolvedAt': new Date(), 'ask.resolvedByMsgId': byMsgId } });
             return res.matchedCount > 0;
         });
@@ -38047,14 +38450,18 @@ class PaymentProofsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_
     }
     /**
      * Undo markServed when the credit itself failed (service never started), so the payer's retry of the same payment
-     * is judged again instead of being called a repeat.
+     * is judged again instead of being called a repeat. true = released; false = nothing held (no row, or no
+     * servedAt); null = the write failed (the caller keeps the claim pending and retries: the ledger resolve sweep).
+     * `claim`: only that claim generation is released (Codex round 11 #1: a late or stale release never strips a
+     * newer claim of the same message).
      */
-    async releaseServed(proof) {
+    async releaseServed(proof, claim) {
         const key = proofKeyFilter(proof);
-        if (!key)
+        // Round 13 #2: a release always names its claim generation (servedClaim); without one nothing is released.
+        if (!key || typeof claim !== 'string' || !claim)
             return false;
-        return this.guard(`releaseServed(${key.chatId})`, false, async () => {
-            const res = await this.collection.updateOne({ ...key, servedAt: { $exists: true } }, { $unset: { servedAt: '', servedService: '', servedUtr: '', servedSha: '', servedMin: '', creditAmount: '' } });
+        return this.guard(`releaseServed(${key.chatId})`, null, async () => {
+            const res = await this.collection.updateOne({ ...key, servedAt: { $exists: true }, servedClaim: claim }, { $unset: { servedAt: '', servedService: '', servedUtr: '', servedSha: '', servedMin: '', servedRefs: '', servedClaim: '', creditAmount: '' } });
             return res.matchedCount > 0;
         });
     }
@@ -38106,8 +38513,76 @@ class PaymentProofsRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_
         // Same guard per receipt (payee + amount + printed minute, owner payee rule 7), global: a no-UTR re-send of a
         // credited receipt loses the claim in any chat / persona (markServed).
         await this.guardWrite('ensureIndexes(servedMin unique)', () => c.createIndex({ servedMin: 1 }, { name: 'servedMin_unique', unique: true, partialFilterExpression: { servedMin: { $exists: true } } }));
+        // Same guard per payment reference (Codex round 10 #2, round 11 #4): UTR and transaction id in one multikey set,
+        // so one token is claimed once whichever field it was read in.
+        await this.guardWrite('ensureIndexes(servedRefs unique)', () => c.createIndex({ servedRefs: 1 }, { name: 'servedRefs_unique', unique: true, partialFilterExpression: { servedRefs: { $exists: true } } }));
         await this.guardWrite('ensureIndexes(ttl)', () => this.ensureTtlIndex());
     }
+}
+
+
+/***/ },
+
+/***/ "../../packages/tg-db/src/collections/payment-reference.ts"
+/*!*****************************************************************!*\
+  !*** ../../packages/tg-db/src/collections/payment-reference.ts ***!
+  \*****************************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   isDegenerateReference: () => (/* binding */ isDegenerateReference),
+/* harmony export */   isLedgerReference: () => (/* binding */ isLedgerReference),
+/* harmony export */   ledgerReferenceOf: () => (/* binding */ ledgerReferenceOf),
+/* harmony export */   ledgerTxnIdOf: () => (/* binding */ ledgerTxnIdOf),
+/* harmony export */   normalizeLedgerReference: () => (/* binding */ normalizeLedgerReference)
+/* harmony export */ });
+/**
+ * The ONE validator for every `paymentProofLedger` key (Codex review 2026-11-27 #3): tg-aut's ledger lookup
+ * (proof-gate/ledger.ts), the recorder's write and the repository (payment-proof-ledger.repository.ts), and
+ * scripts/payment-proof-ledger-backfill.cjs (which imports this file). No imports: the backfill loads it with Node's
+ * type stripping.
+ *
+ * A ledger key blocks a payer forever, so an OCR misread must never become one. Format rules are the gate's
+ * (tg-aut proof-gate/decide.ts normalizeUtr + isRealReference: 12-digit RRN, 18-digit Paytm id, PhonePe T + 20-22
+ * digits, a 12-35 character letters+digits id). On top of them a DEGENERATE value is never a key: fewer than 3 distinct
+ * digits ("000000000000", "T00000000000000000000") or a run of 8+ identical characters ("T2611230000000000000000").
+ */
+/** Uppercase, separators removed. Null for masked ("XXXX", "****"), too short, or no digits at all (= decide.ts normalizeUtr). */
+function normalizeLedgerReference(raw) {
+    if (typeof raw !== 'string')
+        return null;
+    const u = raw.replace(/[\s\-.:]/g, '').toUpperCase();
+    if (u.length < 8 || /[X*•]{3,}/.test(u) || !/\d/.test(u) || !/^[A-Z0-9]+$/.test(u))
+        return null;
+    return u;
+}
+/** All-zero / one-digit / long-run values: what a template or a misread prints, never a real reference. */
+function isDegenerateReference(ref) {
+    const digits = ref.replace(/\D/g, '');
+    if (new Set(digits).size < 3)
+        return true;
+    return /(.)\1{7,}/.test(ref);
+}
+/** A normalised reference that may be a ledger key (real format, not degenerate). */
+function isLedgerReference(ref) {
+    if (typeof ref !== 'string')
+        return false;
+    const real = /^\d{12}$/.test(ref) || /^\d{18}$/.test(ref) || /^T?\d{20,22}$/.test(ref)
+        || (/^[A-Z0-9]{12,35}$/.test(ref) && /[A-Z]/.test(ref) && /\d/.test(ref) && !/^T\d+$/.test(ref));
+    return real && !isDegenerateReference(ref);
+}
+/** The UTR as a ledger key, or null (raw OCR text in). */
+function ledgerReferenceOf(raw) {
+    const u = normalizeLedgerReference(raw);
+    return u && isLedgerReference(u) ? u : null;
+}
+/** A PhonePe transaction id (T + 20-24 digits) as a ledger key, or null. */
+function ledgerTxnIdOf(raw) {
+    if (typeof raw !== 'string')
+        return null;
+    const t = raw.replace(/\s/g, '').toUpperCase();
+    return /^T\d{20,24}$/.test(t) && !isDegenerateReference(t) ? t : null;
 }
 
 
@@ -39463,6 +39938,20 @@ class UserDataRepository extends _base_repository__WEBPACK_IMPORTED_MODULE_2__.B
      * anywhere in the call chain must keep using the plain update path, because calling them
      * payments is exactly what makes the revenue figure 3.31x inflated.
      */
+    /**
+     * Does this chat's userData row (chatId only: profile casing differs between writers) hold one of these credit keys (creditKeys, the last CREDIT_KEY_HISTORY
+     * applied keys)? Read only, projection `_id`. null = the read failed. tg-aut proof-gate: credit evidence for a stale
+     * 'pending' paymentProofLedger doc (a crash between the credit and the ledger finish).
+     */
+    async hasCreditKey(chatId, keys) {
+        const wanted = keys.filter((k) => typeof k === 'string' && k.length > 0);
+        if (!chatId || wanted.length === 0)
+            return false;
+        return this.guard('hasCreditKey', null, async () => {
+            const doc = await this.collection.findOne({ chatId, creditKeys: { $in: wanted } }, { projection: { _id: 1 } });
+            return doc !== null;
+        });
+    }
     async creditPayment(chatId, identity, input) {
         const amount = Number(input.amount);
         if (!Number.isFinite(amount) || amount <= 0) {
@@ -40286,13 +40775,15 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _collections_stats_repository__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ./collections/stats.repository */ "../../packages/tg-db/src/collections/stats.repository.ts");
 /* harmony import */ var _collections_payment_proofs_repository__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ./collections/payment-proofs.repository */ "../../packages/tg-db/src/collections/payment-proofs.repository.ts");
 /* harmony import */ var _collections_vision_shadow_repository__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ./collections/vision-shadow.repository */ "../../packages/tg-db/src/collections/vision-shadow.repository.ts");
-/* harmony import */ var _collections_reply_failures_repository__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ./collections/reply-failures.repository */ "../../packages/tg-db/src/collections/reply-failures.repository.ts");
-/* harmony import */ var _collections_account_leases_repository__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ./collections/account-leases.repository */ "../../packages/tg-db/src/collections/account-leases.repository.ts");
-/* harmony import */ var _collections_parked_accounts_repository__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! ./collections/parked-accounts.repository */ "../../packages/tg-db/src/collections/parked-accounts.repository.ts");
-/* harmony import */ var _collections_parked_chats_repository__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! ./collections/parked-chats.repository */ "../../packages/tg-db/src/collections/parked-chats.repository.ts");
-/* harmony import */ var _collections_parked_control_repository__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! ./collections/parked-control.repository */ "../../packages/tg-db/src/collections/parked-control.repository.ts");
-/* harmony import */ var _collections_account_role_events_repository__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! ./collections/account-role-events.repository */ "../../packages/tg-db/src/collections/account-role-events.repository.ts");
-/* harmony import */ var _collections_account_health_repository__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! ./collections/account-health.repository */ "../../packages/tg-db/src/collections/account-health.repository.ts");
+/* harmony import */ var _collections_payment_proof_ledger_repository__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! ./collections/payment-proof-ledger.repository */ "../../packages/tg-db/src/collections/payment-proof-ledger.repository.ts");
+/* harmony import */ var _collections_reply_failures_repository__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! ./collections/reply-failures.repository */ "../../packages/tg-db/src/collections/reply-failures.repository.ts");
+/* harmony import */ var _collections_account_leases_repository__WEBPACK_IMPORTED_MODULE_12__ = __webpack_require__(/*! ./collections/account-leases.repository */ "../../packages/tg-db/src/collections/account-leases.repository.ts");
+/* harmony import */ var _collections_parked_accounts_repository__WEBPACK_IMPORTED_MODULE_13__ = __webpack_require__(/*! ./collections/parked-accounts.repository */ "../../packages/tg-db/src/collections/parked-accounts.repository.ts");
+/* harmony import */ var _collections_parked_chats_repository__WEBPACK_IMPORTED_MODULE_14__ = __webpack_require__(/*! ./collections/parked-chats.repository */ "../../packages/tg-db/src/collections/parked-chats.repository.ts");
+/* harmony import */ var _collections_parked_control_repository__WEBPACK_IMPORTED_MODULE_15__ = __webpack_require__(/*! ./collections/parked-control.repository */ "../../packages/tg-db/src/collections/parked-control.repository.ts");
+/* harmony import */ var _collections_account_role_events_repository__WEBPACK_IMPORTED_MODULE_16__ = __webpack_require__(/*! ./collections/account-role-events.repository */ "../../packages/tg-db/src/collections/account-role-events.repository.ts");
+/* harmony import */ var _collections_account_health_repository__WEBPACK_IMPORTED_MODULE_17__ = __webpack_require__(/*! ./collections/account-health.repository */ "../../packages/tg-db/src/collections/account-health.repository.ts");
+
 
 
 
@@ -40335,13 +40826,14 @@ function createRepositories(connection, logger) {
         stats: new _collections_stats_repository__WEBPACK_IMPORTED_MODULE_7__.StatsRepository(connection, logger),
         paymentProofs: new _collections_payment_proofs_repository__WEBPACK_IMPORTED_MODULE_8__.PaymentProofsRepository(connection, logger),
         visionShadow: new _collections_vision_shadow_repository__WEBPACK_IMPORTED_MODULE_9__.VisionShadowRepository(connection, logger),
-        replyFailures: new _collections_reply_failures_repository__WEBPACK_IMPORTED_MODULE_10__.ReplyFailuresRepository(connection, logger),
-        accountLeases: new _collections_account_leases_repository__WEBPACK_IMPORTED_MODULE_11__.AccountLeasesRepository(connection, logger),
-        parkedAccounts: new _collections_parked_accounts_repository__WEBPACK_IMPORTED_MODULE_12__.ParkedAccountsRepository(connection, logger),
-        parkedChats: new _collections_parked_chats_repository__WEBPACK_IMPORTED_MODULE_13__.ParkedChatsRepository(connection, logger),
-        parkedControl: new _collections_parked_control_repository__WEBPACK_IMPORTED_MODULE_14__.ParkedControlRepository(connection, logger),
-        accountRoleEvents: new _collections_account_role_events_repository__WEBPACK_IMPORTED_MODULE_15__.AccountRoleEventsRepository(connection, logger),
-        accountHealth: new _collections_account_health_repository__WEBPACK_IMPORTED_MODULE_16__.AccountHealthRepository(connection, logger),
+        paymentProofLedger: new _collections_payment_proof_ledger_repository__WEBPACK_IMPORTED_MODULE_10__.PaymentProofLedgerRepository(connection, logger),
+        replyFailures: new _collections_reply_failures_repository__WEBPACK_IMPORTED_MODULE_11__.ReplyFailuresRepository(connection, logger),
+        accountLeases: new _collections_account_leases_repository__WEBPACK_IMPORTED_MODULE_12__.AccountLeasesRepository(connection, logger),
+        parkedAccounts: new _collections_parked_accounts_repository__WEBPACK_IMPORTED_MODULE_13__.ParkedAccountsRepository(connection, logger),
+        parkedChats: new _collections_parked_chats_repository__WEBPACK_IMPORTED_MODULE_14__.ParkedChatsRepository(connection, logger),
+        parkedControl: new _collections_parked_control_repository__WEBPACK_IMPORTED_MODULE_15__.ParkedControlRepository(connection, logger),
+        accountRoleEvents: new _collections_account_role_events_repository__WEBPACK_IMPORTED_MODULE_16__.AccountRoleEventsRepository(connection, logger),
+        accountHealth: new _collections_account_health_repository__WEBPACK_IMPORTED_MODULE_17__.AccountHealthRepository(connection, logger),
     };
 }
 /**
@@ -40371,6 +40863,8 @@ async function ensureAllIndexes(repositories, logger) {
         ['stats', repositories.stats],
         ['paymentProofs', repositories.paymentProofs],
         ['visionShadow', repositories.visionShadow],
+        // No TTL; the unique (proofId, mobile) key and the one-credit-per-UTR index (creates the collection on first boot).
+        ['paymentProofLedger', repositories.paymentProofLedger],
         ['replyFailures', repositories.replyFailures],
         // P2 of the parked responder: the gcAt TTL index (creates the collection on first boot).
         ['accountLeases', repositories.accountLeases],
@@ -54901,8 +55395,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "01c93fe028281f267bbc973cde257dad9b2f3def" : 0;
-    const builtAt =  true ? "2026-11-27T07:52:56.773Z" : 0;
+    const sha =  true ? "b90840242ca4e97ae11be72cc89ae716f8b0807a" : 0;
+    const builtAt =  true ? "2026-11-27T15:23:20.269Z" : 0;
     return { sha, builtAt };
 }
 
