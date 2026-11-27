@@ -4635,25 +4635,29 @@ function holdSigchld(ntgLib, options = {}) {
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   ConversionAttributionService: () => (/* binding */ ConversionAttributionService),
+/* harmony export */   DM_TIME_SLACK_MS: () => (/* binding */ DM_TIME_SLACK_MS),
+/* harmony export */   dm2hVerdict: () => (/* binding */ dm2hVerdict),
 /* harmony export */   normalizeAttributionChannelIds: () => (/* binding */ normalizeAttributionChannelIds)
 /* harmony export */ });
-/* harmony import */ var _utils_channel_id__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../utils/channel-id */ "../../packages/tg-channel-state/src/channel-message-promotions/utils/channel-id.ts");
-/* harmony import */ var _tg_analytics__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! @tg/analytics */ "../../packages/tg-analytics/src/index.ts");
-/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
-/* harmony import */ var _utils_guards__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../../utils/guards */ "../../packages/tg-channel-state/src/utils/guards.ts");
+/* harmony import */ var _selection_picker__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../selection/picker */ "../../packages/tg-channel-state/src/channel-message-promotions/selection/picker.ts");
+/* harmony import */ var _utils_channel_id__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../utils/channel-id */ "../../packages/tg-channel-state/src/channel-message-promotions/utils/channel-id.ts");
+/* harmony import */ var _tg_analytics__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! @tg/analytics */ "../../packages/tg-analytics/src/index.ts");
+/* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _utils_guards__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../../utils/guards */ "../../packages/tg-channel-state/src/utils/guards.ts");
 /**
  * Conversion Attribution Service — common-chat based ROI.
  *
  * When tg-aut gets a new user DM, this service attributes the conversion
- * to every valid common channel. Redis is used only for the short-lived,
- * per-channel conversion claims; a channel does not need a recent promotion
- * send record to receive attribution credit.
+ * to every valid common channel. Redis holds the per-channel conversion claims and (DMs) the first
+ * channel allocation, both for 25 h; a channel does not need a recent promotion send record to
+ * receive DMs.credited / v2.dm credit (the DM score's m2 does: see loadDm2hAllocation).
  */
 
 
 
 
-const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_2__.Logger("tg-channel-state:conversion-attribution");
+
+const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_3__.Logger("tg-channel-state:conversion-attribution");
 class ConversionAttributionService {
     constructor(intelligenceService, tracker) {
         if (!isIntelligenceServiceLike(intelligenceService)) {
@@ -4666,7 +4670,7 @@ class ConversionAttributionService {
         this.tracker = tracker;
     }
     static init(intelligenceService, tracker, options = {}) {
-        if (!ConversionAttributionService.instance || (0,_utils_guards__WEBPACK_IMPORTED_MODULE_3__.shouldReplace)(options)) {
+        if (!ConversionAttributionService.instance || (0,_utils_guards__WEBPACK_IMPORTED_MODULE_4__.shouldReplace)(options)) {
             ConversionAttributionService.instance = new ConversionAttributionService(intelligenceService, tracker);
         }
         return ConversionAttributionService.instance;
@@ -4679,6 +4683,82 @@ class ConversionAttributionService {
     }
     static reset() {
         ConversionAttributionService.instance = undefined;
+    }
+    /**
+     * The DM's channel allocation: the stored first one, else read this client's sends in the DM's 2 h
+     * window and store the allocation (SET NX; a racing path gets the stored one back). Throws when a
+     * read or the store fails, before any claim. src: alloc = stored earlier, redis = read now,
+     * none = no client id or a tracker without send history (no dm2h credit).
+     */
+    async loadDm2hAllocation(conversionId, clientId, channelIds, dmAtMs) {
+        const tracker = this.tracker;
+        const canAllocate = typeof tracker.getConversionAllocation === 'function' && typeof tracker.claimConversionAllocation === 'function';
+        if (canAllocate) {
+            const stored = await tracker.getConversionAllocation(conversionId);
+            if (stored)
+                return fromAllocation(stored, 'alloc');
+        }
+        const hit = new Map();
+        let src = 'none';
+        if (clientId && typeof tracker.getClientSends === 'function') {
+            // Accepted race (owner, 2026-11-27): a send whose history write lands after this read (it can
+            // trail the DM by well under a second, since the runner writes it right after Telegram returns)
+            // is missed and the allocation freezes without it. Rare, and DM credit is a statistical signal.
+            const sends = await tracker.getClientSends(clientId, channelIds, { fromMs: dmAtMs - _selection_picker__WEBPACK_IMPORTED_MODULE_0__.DM2H_WINDOW_MS, toMs: dmAtMs + DM_TIME_SLACK_MS });
+            src = 'redis';
+            for (const channelId of channelIds) {
+                const verdict = dm2hVerdict(sends.get(channelId), dmAtMs);
+                if (verdict.dm2h)
+                    hit.set(channelId, verdict.arm);
+            }
+        }
+        // Never store an empty set: a later lookup that finds channels must still be able to allocate.
+        if (!canAllocate || channelIds.length === 0)
+            return { channels: channelIds, hit, src };
+        const allocation = {
+            ch: channelIds,
+            hit: Object.fromEntries([...hit].map(([id, arm]) => [id, arm ?? ''])),
+        };
+        const held = await tracker.claimConversionAllocation(conversionId, allocation);
+        if (held === allocation)
+            return { channels: channelIds, hit, src };
+        return fromAllocation(held, 'alloc');
+    }
+    /**
+     * True when the claim is held by a path that has not finished (a tracker without states: false).
+     * Never throws: an unreadable state counts as in flight (retry later), and the caller must not
+     * release a claim it does not hold.
+     */
+    async claimInFlight(channelClaimId) {
+        const tracker = this.tracker;
+        if (typeof tracker.conversionClaimState !== 'function')
+            return false;
+        try {
+            return (await tracker.conversionClaimState(channelClaimId)) !== 'done';
+        }
+        catch {
+            return true;
+        }
+    }
+    /**
+     * Mark this owner's claim done. False (logged) when the write failed or the claim is no longer
+     * ours: the caller reports the channel failed. Its pending claim then expires in 10 min and a retry
+     * re-credits it (a rare double increment, accepted: owner rule on rare collisions).
+     */
+    async markClaimDone(channelClaimId, token) {
+        const tracker = this.tracker;
+        if (typeof tracker.completeConversion !== 'function')
+            return true;
+        try {
+            const done = await tracker.completeConversion(channelClaimId, token === true ? undefined : token);
+            if (done === false)
+                logger.warn(`conversion claim done-mark lost: ${channelClaimId} is no longer ours`);
+            return done !== false;
+        }
+        catch (error) {
+            logger.warn(`conversion claim done-mark failed for ${channelClaimId}`, error);
+            return false;
+        }
     }
     /**
      * Attribute a conversion to source channels using common chat IDs.
@@ -4706,7 +4786,9 @@ class ConversionAttributionService {
     }
     async attributeConversion(commonChatIds, conversionId, weightPerChannel, context) {
         const uniqueChatIds = normalizeAttributionChannelIds(commonChatIds);
-        if (uniqueChatIds.length === 0) {
+        // A DM retry whose fresh lookup is empty still finishes a stored allocation (loadDm2hAllocation
+        // reads it first); with none stored, an empty lookup is a plain no-op as before.
+        if (uniqueChatIds.length === 0 && conversionId.startsWith('payment:')) {
             return { discoveredChannelIds: [], attributedChannels: [], failedChannelIds: [] };
         }
         try {
@@ -4728,20 +4810,70 @@ class ConversionAttributionService {
             const conversionClientId = typeof context?.clientId === 'string' && context.clientId.trim()
                 ? context.clientId.trim()
                 : null;
-            for (const channelId of uniqueChatIds) {
-                const channelClaimId = `${conversionId}:${channelId}`;
+            // DM score gate (2026-11-27): a DM counts toward v2.m2 only on channels where THIS client
+            // delivered within 2 h before the DM (and toward v2.am.<arm> when that was a main send), split
+            // 1/n over those n channels. A shared membership alone still gets DMs.credited / v2.dm as
+            // before, but no dm2h credit. The first allocation (channel set + dm2h split) is stored, so
+            // retries and the other path (direct vs routed) credit exactly that.
+            const dmAtMs = typeof context?.dmAtMs === 'number' && Number.isFinite(context.dmAtMs) && context.dmAtMs > 0
+                ? context.dmAtMs
+                : Date.now();
+            let gate = null;
+            if (kind === 'dm') {
                 try {
-                    if (!await this.tracker.claimConversion(channelClaimId))
+                    gate = await this.loadDm2hAllocation(conversionId, conversionClientId, uniqueChatIds, dmAtMs);
+                }
+                catch (error) {
+                    // No claim is taken: the caller keeps its retry state and a later attempt reads again.
+                    logger.warn(`dm2h kind=gate src=error client=${conversionClientId ?? 'none'} channels=${uniqueChatIds.length}; nothing claimed`, error);
+                    // allocationFailed: retryable even when the fresh lookup was empty (no channel to list).
+                    return { discoveredChannelIds: uniqueChatIds, attributedChannels: [], failedChannelIds: uniqueChatIds, allocationFailed: true };
+                }
+            }
+            const creditChannels = gate ? gate.channels : uniqueChatIds;
+            if (creditChannels.length === 0) {
+                return { discoveredChannelIds: [], attributedChannels: [], failedChannelIds: [] };
+            }
+            const share = gate && gate.hit.size > 0 ? 1 / gate.hit.size : 1;
+            let gateHits = 0;
+            const armHits = {};
+            for (const channelId of creditChannels) {
+                const channelClaimId = `${conversionId}:${channelId}`;
+                // The owner token of this attempt's claim (true: a tracker without tokens). Only a claim this
+                // attempt holds is ever released.
+                let token = false;
+                try {
+                    token = await this.tracker.claimConversion(channelClaimId);
+                    if (!token) {
+                        // Held by another path: finished = skip; still in flight = report it failed so this caller
+                        // keeps its retry state (the holder's write may yet fail and release the claim).
+                        if (await this.claimInFlight(channelClaimId))
+                            failedChannelIds.push(channelId);
                         continue;
-                    await this.intelligenceService.recordDMConversion(channelId, normalizedWeight, kind);
-                    attributions.push({ channelId, weight: normalizedWeight });
+                    }
+                    const verdict = gate && gate.hit.has(channelId)
+                        ? { dm2h: true, arm: gate.hit.get(channelId) ?? null, share }
+                        : { dm2h: false, arm: null };
+                    await this.intelligenceService.recordDMConversion(channelId, normalizedWeight, kind, verdict);
+                    const done = await this.markClaimDone(channelClaimId, token);
+                    // Credited in Mongo either way; never released after this point (that would invite an
+                    // immediate double). A failed done-mark is reported failed so the caller retries later.
+                    token = false;
+                    if (verdict.dm2h)
+                        gateHits += 1;
+                    if (verdict.arm)
+                        armHits[verdict.arm] = (armHits[verdict.arm] ?? 0) + 1;
+                    if (done)
+                        attributions.push({ channelId, weight: normalizedWeight });
+                    else
+                        failedChannelIds.push(channelId);
                     // Mirror into the OPTIONAL analytics store, AFTER the claim succeeded so a retry cannot
                     // double-count — `claimConversion` is what makes this exactly-once. `conversionId` groups
                     // the whole fan-out, which is what makes a multi-channel conversion reconstructable later;
                     // Mongo only keeps the per-channel running total, never the grouping.
                     // Wrapped: attribution must not break because an optional sink misbehaved.
                     try {
-                        (0,_tg_analytics__WEBPACK_IMPORTED_MODULE_1__.getAnalytics)().recordConversion({
+                        (0,_tg_analytics__WEBPACK_IMPORTED_MODULE_2__.getAnalytics)().recordConversion({
                             conversionId,
                             chatId: conversionChatId,
                             channelId,
@@ -4761,7 +4893,9 @@ class ConversionAttributionService {
                     logger.warn(`conversion attribution failed for channel ${channelId}`, error);
                     failedChannelIds.push(channelId);
                     try {
-                        await this.tracker.releaseConversion(channelClaimId);
+                        // Only this attempt's own claim; a throw before or during the claim owns nothing.
+                        if (token)
+                            await this.tracker.releaseConversion(channelClaimId, typeof token === 'string' ? token : undefined);
                     }
                     catch {
                         // The claim TTL bounds a failed release. Keep the channel in the
@@ -4769,13 +4903,60 @@ class ConversionAttributionService {
                     }
                 }
             }
-            return { discoveredChannelIds: uniqueChatIds, attributedChannels: attributions, failedChannelIds };
+            if (gate) {
+                logger.info([
+                    'dm2h kind=gate',
+                    `client=${conversionClientId ?? 'none'}`,
+                    `channels=${creditChannels.length}`,
+                    `common=${uniqueChatIds.length}`,
+                    `share=${share.toFixed(2)}`,
+                    `credited=${attributions.length}`,
+                    `hit=${gateHits}`,
+                    `arm=${Object.entries(armHits).sort().map(([arm, n]) => `${arm}:${n}`).join(',') || 'none'}`,
+                    `src=${gate.src}`,
+                ].join(' '));
+            }
+            // The frozen set (first allocation), so callers persist what was credited.
+            return { discoveredChannelIds: creditChannels, attributedChannels: attributions, failedChannelIds };
         }
         catch (error) {
             logger.warn(`conversion attribution failed for ${uniqueChatIds.length} channel(s)`, error);
             return { discoveredChannelIds: uniqueChatIds, attributedChannels: [], failedChannelIds: uniqueChatIds };
         }
     }
+}
+/**
+ * A DM's send time comes from Telegram in whole seconds (direct path: date x 1000), so a send earlier
+ * in that same second can carry a larger ms time. The upper bound allows the rest of the second.
+ */
+const DM_TIME_SLACK_MS = 999;
+function fromAllocation(allocation, src) {
+    const hit = new Map();
+    for (const [id, arm] of Object.entries(allocation.hit))
+        hit.set(id, (0,_selection_picker__WEBPACK_IMPORTED_MODULE_0__.isMessageArm)(arm) ? arm : null);
+    return { channels: allocation.ch, hit, src };
+}
+/**
+ * dm2h: some delivered send by this client at most 2 h BEFORE the DM (a send after the DM never earns
+ * it; the DM's own second counts as before it, see DM_TIME_SLACK_MS). arm: the arm of the latest main send in that window.
+ */
+function dm2hVerdict(send, dmAtMs) {
+    if (!send || !Array.isArray(send.sends))
+        return { dm2h: false, arm: null };
+    let dm2h = false;
+    let arm = null;
+    let armAt = -1;
+    for (const entry of send.sends) {
+        const age = dmAtMs - entry.atMs;
+        if (!(age >= -DM_TIME_SLACK_MS && age <= _selection_picker__WEBPACK_IMPORTED_MODULE_0__.DM2H_WINDOW_MS))
+            continue;
+        dm2h = true;
+        if (entry.arm && entry.atMs > armAt) {
+            arm = entry.arm;
+            armAt = entry.atMs;
+        }
+    }
+    return { dm2h, arm };
 }
 function normalizeWeight(value) {
     if (!Number.isFinite(value) || value <= 0)
@@ -4792,19 +4973,19 @@ function normalizeAttributionChannelIds(value) {
 }
 function normalizeCommonChatId(value) {
     if (typeof value === 'string')
-        return (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_0__.normalizeChannelId)(value) ?? '';
+        return (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_1__.normalizeChannelId)(value) ?? '';
     if (typeof value === 'number') {
-        return Number.isSafeInteger(value) ? (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_0__.normalizeChannelId)(String(value)) ?? '' : '';
+        return Number.isSafeInteger(value) ? (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_1__.normalizeChannelId)(String(value)) ?? '' : '';
     }
     if (typeof value === 'bigint')
-        return (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_0__.normalizeChannelId)(value.toString()) ?? '';
+        return (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_1__.normalizeChannelId)(value.toString()) ?? '';
     return '';
 }
 function isIntelligenceServiceLike(value) {
-    return (0,_utils_guards__WEBPACK_IMPORTED_MODULE_3__.isRecord)(value) && typeof value['recordDMConversion'] === 'function';
+    return (0,_utils_guards__WEBPACK_IMPORTED_MODULE_4__.isRecord)(value) && typeof value['recordDMConversion'] === 'function';
 }
 function isTrackerLike(value) {
-    return (0,_utils_guards__WEBPACK_IMPORTED_MODULE_3__.isRecord)(value)
+    return (0,_utils_guards__WEBPACK_IMPORTED_MODULE_4__.isRecord)(value)
         && typeof value['claimConversion'] === 'function'
         && typeof value['releaseConversion'] === 'function';
 }
@@ -4952,6 +5133,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   RECENT_DELETE_BLOCK: () => (/* binding */ RECENT_DELETE_BLOCK),
 /* harmony export */   deletionRingCode: () => (/* binding */ deletionRingCode),
 /* harmony export */   isAccountSpecificError: () => (/* binding */ isAccountSpecificError),
+/* harmony export */   isBanError: () => (/* binding */ isBanError),
 /* harmony export */   readRecentDeleteBlockMode: () => (/* binding */ readRecentDeleteBlockMode),
 /* harmony export */   recentDeleteBlockDecision: () => (/* binding */ recentDeleteBlockDecision)
 /* harmony export */ });
@@ -5027,6 +5209,12 @@ function readRecentDeleteBlockMode(env = process.env) {
 function ringPush(code) {
     return { 'v2.recent': { $each: [code], $slice: -_selection_picker__WEBPACK_IMPORTED_MODULE_7__.V2_RECENT_RING_SIZE } };
 }
+/** A refusal that promotion_send records as 'banned' (outcome-recording.ts). */
+function isBanError(errorType) {
+    return typeof errorType === 'string' && errorType.toUpperCase().includes('USER_BANNED_IN_CHANNEL');
+}
+/** Every top-level field of the frozen shape except messagePool (batchGetForSelection). */
+const SELECTION_PROJECTION = { channelId: 1, timestamps: 1, outcomes: 1, exploration: 1, safety: 1, DMs: 1, v2: 1 };
 class ChannelIntelligenceService {
     constructor(collection) {
         if (!isCollectionLike(collection)) {
@@ -5070,6 +5258,20 @@ class ChannelIntelligenceService {
             return [];
         const rows = await readCursorArray(this.collection.find({ channelId: { $in: safeChannelIds } }, { projection: { channelId: 1, outcomes: 1, DMs: 1, safety: 1, timestamps: 1, v2: 1 } }));
         return rows.filter((row) => (0,_utils_guards__WEBPACK_IMPORTED_MODULE_6__.isRecord)(row) && typeof row.channelId === 'string');
+    }
+    /**
+     * Selection-only read: every field except messagePool (selection never reads it; it is most of a
+     * doc's bytes), returned with an empty pool so the frozen shape check still applies. Message
+     * planning reloads the full doc per send (get), so nothing downstream sees the empty pool.
+     */
+    async batchGetForSelection(channelIds) {
+        const safeChannelIds = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_4__.normalizeChannelIds)(channelIds);
+        if (safeChannelIds.length === 0)
+            return [];
+        const rows = await readCursorArray(this.collection.find({ channelId: { $in: safeChannelIds } }, { projection: SELECTION_PROJECTION }));
+        return rows
+            .map((row) => ((0,_utils_guards__WEBPACK_IMPORTED_MODULE_6__.isRecord)(row) ? { ...row, messagePool: [] } : row))
+            .filter(_channel_intelligence_schema__WEBPACK_IMPORTED_MODULE_0__.isChannelIntelligence);
     }
     async batchGet(channelIds) {
         const safeChannelIds = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_4__.normalizeChannelIds)(channelIds);
@@ -5426,12 +5628,13 @@ class ChannelIntelligenceService {
         poolLog.warn('retry-exhausted', { chan: safeChannelId, path: 'sync-pool-states' });
     }
     // --- Outcome recording ---
-    async recordSuccess(channelId, _isFollowup) {
+    async recordSuccess(channelId, isFollowup, arm = null) {
         const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_4__.normalizeChannelId)(channelId);
         if (!safeChannelId)
             return;
         await this.ensureDoc(safeChannelId);
         const now = Date.now();
+        const w = (0,_selection_picker__WEBPACK_IMPORTED_MODULE_7__.anchoredWeight)(now);
         await this.collection.updateOne({ channelId: safeChannelId }, {
             $set: {
                 'timestamps.lastPromotionAtMs': now,
@@ -5439,8 +5642,18 @@ class ChannelIntelligenceService {
                 'safety.consecutiveErrors': 0,
             },
             // v2 decayed delivered (picker v2sf `dl`); every delivered send, follow-ups included, like
-            // promotion_send 'delivered' rows the backtest counted.
-            ...(v2WritesOn() ? { $inc: { 'v2.dl': (0,_selection_picker__WEBPACK_IMPORTED_MODULE_7__.anchoredWeight)(now) } } : {}),
+            // promotion_send 'delivered' rows the backtest counted. d2 / a2: the DM score's own delivered
+            // and attempts (2026-11-27), counted from this build on. ad.<arm>: main sends per message arm.
+            ...(v2WritesOn() ? {
+                $inc: {
+                    'v2.dl': w,
+                    'v2.d2': w,
+                    // n2: never decayed, so the DM score's switch to dm2h is sticky (selection/picker.ts).
+                    'v2.n2': 1,
+                    'v2.a2': w,
+                    ...(!isFollowup && (0,_selection_picker__WEBPACK_IMPORTED_MODULE_7__.isMessageArm)(arm) ? { [`v2.ad.${arm}`]: w } : {}),
+                },
+            } : {}),
         });
     }
     /** Record a validated message survival independently of the bounded reusable-message pool. */
@@ -5554,10 +5767,19 @@ class ChannelIntelligenceService {
                 'safety.lastErrorAtMs': now,
             },
             // v2 `fl`: every refused attempt (banned + failed rows in promotion_send), account-level too.
+            // DM score (2026-11-27): a2 counts the attempt; b2 counts bans only (USER_BANNED_IN_CHANNEL,
+            // the promotion_send 'banned' outcome), which fl cannot tell apart from other refusals.
+            // Known (review M3, accepted for now): Telegram also returns USER_BANNED_IN_CHANNEL for an
+            // account-level limit, so b2 can charge a channel for the account's state; and a2 counts
+            // FLOOD_WAIT refusals as attempts. Both hit every channel a limited account tries alike.
             ...((accountOnly && !v2WritesOn()) ? {} : {
                 $inc: {
                     ...(accountOnly ? {} : { 'safety.consecutiveErrors': 1 }),
-                    ...(v2WritesOn() ? { 'v2.fl': (0,_selection_picker__WEBPACK_IMPORTED_MODULE_7__.anchoredWeight)(now) } : {}),
+                    ...(v2WritesOn() ? {
+                        'v2.fl': (0,_selection_picker__WEBPACK_IMPORTED_MODULE_7__.anchoredWeight)(now),
+                        'v2.a2': (0,_selection_picker__WEBPACK_IMPORTED_MODULE_7__.anchoredWeight)(now),
+                        ...(isBanError(safeErrorType) ? { 'v2.b2': (0,_selection_picker__WEBPACK_IMPORTED_MODULE_7__.anchoredWeight)(now) } : {}),
+                    } : {}),
                 },
             }),
         });
@@ -5568,14 +5790,20 @@ class ChannelIntelligenceService {
     // --- Conversion recording (ROI) ---
     /**
      * Record a STAGE-1 channel->DM open with one atomic attribution update.
+     * `gate` (DM only, 2026-11-27): dm2h = this client delivered on this channel within 2 h before the
+     * DM, so the DM also counts in v2.m2 (the DM score); arm = the message arm of that main send, so it
+     * counts in v2.am.<arm>. A membership-only DM (no such send) moves neither.
      */
-    async recordDMConversion(channelId, fractionalWeight, kind = 'dm') {
+    async recordDMConversion(channelId, fractionalWeight, kind = 'dm', gate = {}) {
         const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_4__.normalizeChannelId)(channelId);
         if (!safeChannelId)
             return;
         const weight = this.normalizeFractionalWeight(fractionalWeight);
         if (weight === null)
             return;
+        // share = 1 / (channels that earned dm2h for this conversion), so one DM adds at most 1 unit of
+        // m2 (and of am.<arm>) in total. DMs.credited / v2.dm stay a full unit per channel (membership).
+        const share = typeof gate?.share === 'number' && Number.isFinite(gate.share) && gate.share > 0 ? Math.min(1, gate.share) : 1;
         await this.ensureDoc(safeChannelId);
         const now = Date.now();
         await this.collection.updateOne({ channelId: safeChannelId }, {
@@ -5583,6 +5811,11 @@ class ChannelIntelligenceService {
                 'DMs.credited': weight,
                 // v2 keeps DMs and payments apart (DMs.credited mixes them): v2sf reads only `dm`.
                 ...(v2WritesOn() ? { [kind === 'payment' ? 'v2.pay' : 'v2.dm']: (0,_selection_picker__WEBPACK_IMPORTED_MODULE_7__.anchoredWeight)(now, weight) } : {}),
+                // v2.dn: the same DM as v2.dm, counted only from this build on, so the fallback scale
+                // (sum m2 / sum dn) compares two counters of the same era.
+                ...(v2WritesOn() && kind === 'dm' ? { 'v2.dn': (0,_selection_picker__WEBPACK_IMPORTED_MODULE_7__.anchoredWeight)(now, weight) } : {}),
+                ...(v2WritesOn() && kind === 'dm' && gate?.dm2h === true ? { 'v2.m2': (0,_selection_picker__WEBPACK_IMPORTED_MODULE_7__.anchoredWeight)(now, weight * share) } : {}),
+                ...(v2WritesOn() && kind === 'dm' && (0,_selection_picker__WEBPACK_IMPORTED_MODULE_7__.isMessageArm)(gate?.arm) ? { [`v2.am.${gate.arm}`]: (0,_selection_picker__WEBPACK_IMPORTED_MODULE_7__.anchoredWeight)(now, weight * share) } : {}),
             },
             $set: { 'DMs.updatedAtMs': now, 'timestamps.updatedAtMs': now },
         });
@@ -6248,6 +6481,21 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   CHANNEL_INTELLIGENCE_ROOT_FIELDS: () => (/* reexport safe */ _channel_intelligence__WEBPACK_IMPORTED_MODULE_1__.CHANNEL_INTELLIGENCE_ROOT_FIELDS),
 /* harmony export */   ChannelIntelligenceService: () => (/* reexport safe */ _channel_intelligence__WEBPACK_IMPORTED_MODULE_1__.ChannelIntelligenceService),
 /* harmony export */   ConversionAttributionService: () => (/* reexport safe */ _attribution__WEBPACK_IMPORTED_MODULE_0__.ConversionAttributionService),
+/* harmony export */   DEFAULT_PICKER_MODE: () => (/* reexport safe */ _selection__WEBPACK_IMPORTED_MODULE_9__.DEFAULT_PICKER_MODE),
+/* harmony export */   DM2H_MIN_DELIVERED: () => (/* reexport safe */ _selection__WEBPACK_IMPORTED_MODULE_9__.DM2H_MIN_DELIVERED),
+/* harmony export */   DM2H_WINDOW_MS: () => (/* reexport safe */ _selection__WEBPACK_IMPORTED_MODULE_9__.DM2H_WINDOW_MS),
+/* harmony export */   DM_BAN_PRIOR_ATTEMPTS: () => (/* reexport safe */ _selection__WEBPACK_IMPORTED_MODULE_9__.DM_BAN_PRIOR_ATTEMPTS),
+/* harmony export */   DM_BAN_PRIOR_BANS: () => (/* reexport safe */ _selection__WEBPACK_IMPORTED_MODULE_9__.DM_BAN_PRIOR_BANS),
+/* harmony export */   DM_BASE_RATE: () => (/* reexport safe */ _selection__WEBPACK_IMPORTED_MODULE_9__.DM_BASE_RATE),
+/* harmony export */   DM_EXPLORE_SHARE: () => (/* reexport safe */ _selection__WEBPACK_IMPORTED_MODULE_9__.DM_EXPLORE_SHARE),
+/* harmony export */   DM_FALLBACK_BAN_MIN_ATTEMPTS: () => (/* reexport safe */ _selection__WEBPACK_IMPORTED_MODULE_9__.DM_FALLBACK_BAN_MIN_ATTEMPTS),
+/* harmony export */   DM_FALLBACK_SCALE_MIN: () => (/* reexport safe */ _selection__WEBPACK_IMPORTED_MODULE_9__.DM_FALLBACK_SCALE_MIN),
+/* harmony export */   DM_FALLBACK_SCALE_MIN_DN: () => (/* reexport safe */ _selection__WEBPACK_IMPORTED_MODULE_9__.DM_FALLBACK_SCALE_MIN_DN),
+/* harmony export */   DM_FALLBACK_SCALE_MIN_DOCS: () => (/* reexport safe */ _selection__WEBPACK_IMPORTED_MODULE_9__.DM_FALLBACK_SCALE_MIN_DOCS),
+/* harmony export */   DM_LOW_TRY_DELIVERED: () => (/* reexport safe */ _selection__WEBPACK_IMPORTED_MODULE_9__.DM_LOW_TRY_DELIVERED),
+/* harmony export */   DM_SCORE_K: () => (/* reexport safe */ _selection__WEBPACK_IMPORTED_MODULE_9__.DM_SCORE_K),
+/* harmony export */   DM_SCORE_VERSION: () => (/* reexport safe */ _selection__WEBPACK_IMPORTED_MODULE_9__.DM_SCORE_VERSION),
+/* harmony export */   MESSAGE_ARMS: () => (/* reexport safe */ _selection__WEBPACK_IMPORTED_MODULE_9__.MESSAGE_ARMS),
 /* harmony export */   MESSAGE_SAFETY: () => (/* reexport safe */ _pool__WEBPACK_IMPORTED_MODULE_6__.MESSAGE_SAFETY),
 /* harmony export */   MESSAGE_SOURCES: () => (/* reexport safe */ _pool__WEBPACK_IMPORTED_MODULE_6__.MESSAGE_SOURCES),
 /* harmony export */   PICKER_SCORE_TIMEOUT_DEFAULT_MS: () => (/* reexport safe */ _selection__WEBPACK_IMPORTED_MODULE_9__.PICKER_SCORE_TIMEOUT_DEFAULT_MS),
@@ -6286,6 +6534,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   V2_RECENT_RING_SIZE: () => (/* reexport safe */ _selection__WEBPACK_IMPORTED_MODULE_9__.V2_RECENT_RING_SIZE),
 /* harmony export */   V2_SCORE_VERSION: () => (/* reexport safe */ _selection__WEBPACK_IMPORTED_MODULE_9__.V2_SCORE_VERSION),
 /* harmony export */   addPoolOutcomeTotals: () => (/* reexport safe */ _pool__WEBPACK_IMPORTED_MODULE_6__.addPoolOutcomeTotals),
+/* harmony export */   aggregateArmStats: () => (/* reexport safe */ _selection__WEBPACK_IMPORTED_MODULE_9__.aggregateArmStats),
 /* harmony export */   anchoredWeight: () => (/* reexport safe */ _selection__WEBPACK_IMPORTED_MODULE_9__.anchoredWeight),
 /* harmony export */   annotatePicks: () => (/* reexport safe */ _selection__WEBPACK_IMPORTED_MODULE_9__.annotatePicks),
 /* harmony export */   arm: () => (/* reexport safe */ _selection__WEBPACK_IMPORTED_MODULE_9__.arm),
@@ -6302,6 +6551,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   computeAccountDeletionRate: () => (/* reexport safe */ _pool__WEBPACK_IMPORTED_MODULE_6__.computeAccountDeletionRate),
 /* harmony export */   computeAccountFailureRate: () => (/* reexport safe */ _pool__WEBPACK_IMPORTED_MODULE_6__.computeAccountFailureRate),
 /* harmony export */   computeAccountHealth: () => (/* reexport safe */ _pool__WEBPACK_IMPORTED_MODULE_6__.computeAccountHealth),
+/* harmony export */   computeDmScore: () => (/* reexport safe */ _selection__WEBPACK_IMPORTED_MODULE_9__.computeDmScore),
 /* harmony export */   computePercentileRank: () => (/* reexport safe */ _pool__WEBPACK_IMPORTED_MODULE_6__.computePercentileRank),
 /* harmony export */   computeV2sf: () => (/* reexport safe */ _selection__WEBPACK_IMPORTED_MODULE_9__.computeV2sf),
 /* harmony export */   countPoolSurvivors: () => (/* reexport safe */ _policy__WEBPACK_IMPORTED_MODULE_5__.countPoolSurvivors),
@@ -6310,6 +6560,13 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   decayAnchored: () => (/* reexport safe */ _selection__WEBPACK_IMPORTED_MODULE_9__.decayAnchored),
 /* harmony export */   deletionRate: () => (/* reexport safe */ _pool__WEBPACK_IMPORTED_MODULE_6__.deletionRate),
 /* harmony export */   deriveProvenBySource: () => (/* reexport safe */ _pool__WEBPACK_IMPORTED_MODULE_6__.deriveProvenBySource),
+/* harmony export */   dmChannelScore: () => (/* reexport safe */ _selection__WEBPACK_IMPORTED_MODULE_9__.dmChannelScore),
+/* harmony export */   dmDeliveredCount: () => (/* reexport safe */ _selection__WEBPACK_IMPORTED_MODULE_9__.dmDeliveredCount),
+/* harmony export */   dmExploreShareFor: () => (/* reexport safe */ _selection__WEBPACK_IMPORTED_MODULE_9__.dmExploreShareFor),
+/* harmony export */   dmFallbackScale: () => (/* reexport safe */ _selection__WEBPACK_IMPORTED_MODULE_9__.dmFallbackScale),
+/* harmony export */   dmScoreConfigFor: () => (/* reexport safe */ _selection__WEBPACK_IMPORTED_MODULE_9__.dmScoreConfigFor),
+/* harmony export */   dmScoreKFor: () => (/* reexport safe */ _selection__WEBPACK_IMPORTED_MODULE_9__.dmScoreKFor),
+/* harmony export */   dmScoreParts: () => (/* reexport safe */ _selection__WEBPACK_IMPORTED_MODULE_9__.dmScoreParts),
 /* harmony export */   evaluateDeletionPolicy: () => (/* reexport safe */ _policy__WEBPACK_IMPORTED_MODULE_5__.evaluateDeletionPolicy),
 /* harmony export */   evaluateFollowUpScheduling: () => (/* reexport safe */ _policy__WEBPACK_IMPORTED_MODULE_5__.evaluateFollowUpScheduling),
 /* harmony export */   evaluatePromotionChannelEligibility: () => (/* reexport safe */ _policy__WEBPACK_IMPORTED_MODULE_5__.evaluatePromotionChannelEligibility),
@@ -6322,7 +6579,9 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   hasFailureRateEvidence: () => (/* reexport safe */ _pool__WEBPACK_IMPORTED_MODULE_6__.hasFailureRateEvidence),
 /* harmony export */   hasV2Data: () => (/* reexport safe */ _selection__WEBPACK_IMPORTED_MODULE_9__.hasV2Data),
 /* harmony export */   isChannelIntelligence: () => (/* reexport safe */ _channel_intelligence__WEBPACK_IMPORTED_MODULE_1__.isChannelIntelligence),
+/* harmony export */   isDm2hSourced: () => (/* reexport safe */ _selection__WEBPACK_IMPORTED_MODULE_9__.isDm2hSourced),
 /* harmony export */   isLifetimeDeadChannel: () => (/* reexport safe */ _selection__WEBPACK_IMPORTED_MODULE_9__.isLifetimeDeadChannel),
+/* harmony export */   isMessageArm: () => (/* reexport safe */ _selection__WEBPACK_IMPORTED_MODULE_9__.isMessageArm),
 /* harmony export */   isMessageSource: () => (/* reexport safe */ _pool__WEBPACK_IMPORTED_MODULE_6__.isMessageSource),
 /* harmony export */   isPoolEntry: () => (/* reexport safe */ _pool__WEBPACK_IMPORTED_MODULE_6__.isPoolEntry),
 /* harmony export */   isPoolMessageIndex: () => (/* reexport safe */ _pool__WEBPACK_IMPORTED_MODULE_6__.isPoolMessageIndex),
@@ -8267,6 +8526,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   recordPoolOutcome: () => (/* binding */ recordPoolOutcome),
 /* harmony export */   recordSeedProbeIfLearning: () => (/* binding */ recordSeedProbeIfLearning),
 /* harmony export */   recordSendAnalytics: () => (/* binding */ recordSendAnalytics),
+/* harmony export */   recordSendHistory: () => (/* binding */ recordSendHistory),
 /* harmony export */   recordSuccess: () => (/* binding */ recordSuccess),
 /* harmony export */   resolveCandidateStrategy: () => (/* binding */ resolveCandidateStrategy),
 /* harmony export */   resolveQueuedPoolSource: () => (/* binding */ resolveQueuedPoolSource)
@@ -8275,8 +8535,10 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _pool__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../../pool */ "../../packages/tg-channel-state/src/channel-message-promotions/pool/index.ts");
 /* harmony import */ var _pool_pool_types__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../../pool/pool-types */ "../../packages/tg-channel-state/src/channel-message-promotions/pool/pool-types.ts");
 /* harmony import */ var _pool_error_classification__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ../../pool/error-classification */ "../../packages/tg-channel-state/src/channel-message-promotions/pool/error-classification.ts");
-/* harmony import */ var _tg_analytics__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! @tg/analytics */ "../../packages/tg-analytics/src/index.ts");
-/* harmony import */ var _normalize__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ./normalize */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/normalize.ts");
+/* harmony import */ var _selection_picker__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../../selection/picker */ "../../packages/tg-channel-state/src/channel-message-promotions/selection/picker.ts");
+/* harmony import */ var _tg_analytics__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! @tg/analytics */ "../../packages/tg-analytics/src/index.ts");
+/* harmony import */ var _normalize__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ./normalize */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/normalize.ts");
+
 
 
 
@@ -8333,7 +8595,7 @@ function recordSendAnalytics(host, channel, candidate, result, outcome, channelI
         const survivalMs = typeof extra?.survivalMs === 'number' && Number.isFinite(extra.survivalMs) && extra.survivalMs >= 0
             ? Math.min(Math.round(extra.survivalMs), 2147483647)
             : null;
-        (0,_tg_analytics__WEBPACK_IMPORTED_MODULE_4__.getAnalytics)().recordPromotionSend({
+        (0,_tg_analytics__WEBPACK_IMPORTED_MODULE_5__.getAnalytics)().recordPromotionSend({
             clientId: account?.clientId ?? '',
             mobile: account?.mobile ?? '',
             channelId: channelIdOverride ?? channel?.channelId ?? '',
@@ -8361,15 +8623,41 @@ function recordSendAnalytics(host, channel, candidate, result, outcome, channelI
         /* analytics must never affect a promotion send */
     }
 }
-async function recordSuccess(host, channel, candidate, result, isFollowUp, percentiles, aggressive) {
+/** The message arm of a main send (legacy / custom / ai); follow-ups carry no arm. */
+function sentArm(candidate, result, isFollowUp) {
+    const sentSource = isFollowUp ? null : analyticsMessageFields(candidate, result).messageSource;
+    return (0,_selection_picker__WEBPACK_IMPORTED_MODULE_4__.isMessageArm)(sentSource) ? sentSource : null;
+}
+/**
+ * The dm2h send history write (Redis), run by the runner right after Telegram confirms the send and
+ * before the budget settlement, cooldown, queue, hook and Mongo writes, so a DM that arrives while
+ * those are pending already sees this send. `deliveredAtMs` is the time the send returned.
+ */
+async function recordSendHistory(host, channel, candidate, result, isFollowUp, deliveredAtMs) {
+    if (!host.options.attributionEnabled)
+        return 'off';
+    try {
+        await host.options.account.recordSend(channel.channelId, sentArm(candidate, result, isFollowUp), deliveredAtMs);
+        return 'ok';
+    }
+    catch (error) {
+        host.log('warn', `Promotion attribution record failed after local success accounting; ${host.formatChannel(channel)} error=${host.normalizeError(error)}`);
+        return 'fail';
+    }
+}
+async function recordSuccess(host, channel, candidate, result, isFollowUp, percentiles, aggressive, 
+// Set when the runner already tried the send history (recordSendHistory) at send return. A 'fail'
+// there is retried here once, with that same delivery time; null = written here, stamped now.
+early = null) {
+    const deliveredAtMs = early?.deliveredAtMs ?? Date.now();
     const strategy = host.resolveCandidateStrategy(candidate);
-    const availableMessageIds = (0,_normalize__WEBPACK_IMPORTED_MODULE_5__.normalizeAvailableMessageIds)(channel.availableMsgs);
+    const availableMessageIds = (0,_normalize__WEBPACK_IMPORTED_MODULE_6__.normalizeAvailableMessageIds)(channel.availableMsgs);
     const poolSource = host.resolveQueuedPoolSource(result, isFollowUp);
     host.recordSendAnalytics(channel, candidate, result, 'delivered', undefined, undefined, { pick: host.pickAnnotationFor(channel.channelId, isFollowUp) });
     let durabilityFailure = null;
     await host.recordSeedProbeIfLearning(channel, candidate, result, isFollowUp);
-    if ((0,_normalize__WEBPACK_IMPORTED_MODULE_5__.isValidMessageId)(result.messageId)) {
-        const poolMode = (0,_normalize__WEBPACK_IMPORTED_MODULE_5__.resolveCandidatePoolMode)(candidate, isFollowUp);
+    if ((0,_normalize__WEBPACK_IMPORTED_MODULE_6__.isValidMessageId)(result.messageId)) {
+        const poolMode = (0,_normalize__WEBPACK_IMPORTED_MODULE_6__.resolveCandidatePoolMode)(candidate, isFollowUp);
         const sentAt = Date.now();
         const queuedMessage = {
             channelId: channel.channelId,
@@ -8412,24 +8700,22 @@ async function recordSuccess(host, channel, candidate, result, isFollowUp, perce
     host.health.lastSuccessfulSendAt = Date.now();
     await host.callHook('onSendSuccess', () => host.adapter.onSendSuccess?.(channel, result, isFollowUp));
     let intelligenceStatus = 'ok';
-    let attributionStatus = host.options.attributionEnabled ? 'ok' : 'off';
+    const attributionStatus = early && early.status !== 'fail'
+        ? early.status
+        : await recordSendHistory(host, channel, candidate, result, isFollowUp, deliveredAtMs);
     const poolStatus = 'skipped';
     const pacingStatus = 'skipped';
+    // The message arm of a main send, for the per-arm delivered counters.
+    const arm = sentArm(candidate, result, isFollowUp);
+    // Mode dm: log the arm actually delivered (any lane: arm pick, prior, restricted, exhausted).
+    if (!isFollowUp)
+        host.noteArmSent(arm, candidate.armDecision?.arm ?? null, channel.channelId);
     try {
-        await host.options.account.recordSuccess(channel.channelId, isFollowUp);
+        await host.options.account.recordSuccess(channel.channelId, isFollowUp, arm);
     }
     catch (error) {
         intelligenceStatus = 'fail';
         host.log('warn', `Promotion intelligence success record failed after local success accounting; ${host.formatChannel(channel)} error=${host.normalizeError(error)}`);
-    }
-    if (host.options.attributionEnabled) {
-        try {
-            await host.options.account.recordSend(channel.channelId);
-        }
-        catch (error) {
-            attributionStatus = 'fail';
-            host.log('warn', `Promotion attribution record failed after local success accounting; ${host.formatChannel(channel)} error=${host.normalizeError(error)}`);
-        }
     }
     host.logHookSummary('success', channel.channelId, strategy, isFollowUp, {
         intelligence: intelligenceStatus,
@@ -8500,7 +8786,7 @@ async function recordDeletion(host, message, deletionPolicy, reason = 'message_m
     const strategy = message.strategy || deletionPolicy.strategy || 'legacy';
     // Survival is measured once (check time - send time) and used by the row, the ring and the log.
     // Flow v3 (P3, N1): from `sentAt`, never a re-armed `timestamp` (a legacy item without `sentAt` falls back to it).
-    const survivalMs = (0,_normalize__WEBPACK_IMPORTED_MODULE_5__.safeElapsedMs)(message.sentAt ?? message.timestamp);
+    const survivalMs = (0,_normalize__WEBPACK_IMPORTED_MODULE_6__.safeElapsedMs)(message.sentAt ?? message.timestamp);
     // A delivered message that the channel later removed. The send itself was already recorded as
     // 'delivered'; this is a SECOND row describing the outcome after the fact, which is exactly the
     // history Mongo cannot answer (its messagePool counters are overwritten in place).
@@ -8553,9 +8839,9 @@ function logHookSummary(host, event, channelId, strategy, isFollowUp, statuses) 
     ].join('; '));
 }
 function resolveQueuedPoolSource(result, isFollowUp) {
-    if (isFollowUp || !(0,_normalize__WEBPACK_IMPORTED_MODULE_5__.isValidMessageId)(result.messageId))
+    if (isFollowUp || !(0,_normalize__WEBPACK_IMPORTED_MODULE_6__.isValidMessageId)(result.messageId))
         return null;
-    const entry = (0,_normalize__WEBPACK_IMPORTED_MODULE_5__.createPoolEntry)(result);
+    const entry = (0,_normalize__WEBPACK_IMPORTED_MODULE_6__.createPoolEntry)(result);
     if (!entry)
         return null;
     // The reusable pool contains only independently validated survivors. This keeps all sources
@@ -8581,7 +8867,7 @@ async function recordPoolOutcome(host, message, outcome) {
     if (message.isFollowUp)
         return 'skipped';
     try {
-        const entry = (0,_normalize__WEBPACK_IMPORTED_MODULE_5__.createPoolEntryFromText)(message.messageText, message.poolSource);
+        const entry = (0,_normalize__WEBPACK_IMPORTED_MODULE_6__.createPoolEntryFromText)(message.messageText, message.poolSource);
         if (!entry)
             return 'skipped';
         // Only independently validated survivors earn a new pool slot.  A deletion may refer to an
@@ -8612,7 +8898,7 @@ async function recordPoolOutcome(host, message, outcome) {
     }
 }
 async function recordExploreFailure(host, channelId, candidate, result, isFollowUp) {
-    if (!(0,_normalize__WEBPACK_IMPORTED_MODULE_5__.shouldRecordExploreFromCandidate)(candidate, isFollowUp))
+    if (!(0,_normalize__WEBPACK_IMPORTED_MODULE_6__.shouldRecordExploreFromCandidate)(candidate, isFollowUp))
         return;
     if (result.checkableByChannelId === false)
         return;
@@ -8626,7 +8912,7 @@ async function recordExploreFailure(host, channelId, candidate, result, isFollow
     }
 }
 async function recordExploreSurvival(host, message) {
-    if ((0,_normalize__WEBPACK_IMPORTED_MODULE_5__.resolveQueuedPoolMode)(message) !== 'explore')
+    if ((0,_normalize__WEBPACK_IMPORTED_MODULE_6__.resolveQueuedPoolMode)(message) !== 'explore')
         return;
     try {
         await host.options.account.recordExploreOutcome(message.channelId, 'survived');
@@ -8684,7 +8970,11 @@ function measurePickBatch(input) {
     if (input.mode === 'legacy')
         return { annotations: new Map(), summary: null };
     try {
-        const scored = (0,_selection_picker__WEBPACK_IMPORTED_MODULE_0__.scoreCandidates)(input.candidateIds, input.docs, { nowMs: input.nowMs, mu: input.mu });
+        const scored = (0,_selection_picker__WEBPACK_IMPORTED_MODULE_0__.scoreCandidates)(input.candidateIds, input.docs, {
+            nowMs: input.nowMs,
+            mu: input.mu,
+            ...(input.dm !== undefined ? { dm: input.dm } : {}),
+        });
         const annotations = (0,_selection_picker__WEBPACK_IMPORTED_MODULE_0__.annotatePicks)(input.selectedIds, scored, {
             mode: input.mode,
             reasonOf: input.reasonOf,
@@ -8715,6 +9005,7 @@ function formatPickSummary(summary) {
 
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   REFILL_PEEK_FACTOR: () => (/* binding */ REFILL_PEEK_FACTOR),
 /* harmony export */   selectCycleChannels: () => (/* binding */ selectCycleChannels)
 /* harmony export */ });
 /* harmony import */ var _channel_intelligence_channel_intelligence_schema__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../../channel-intelligence/channel-intelligence-schema */ "../../packages/tg-channel-state/src/channel-message-promotions/channel-intelligence/channel-intelligence-schema.ts");
@@ -8724,7 +9015,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _utils_channel_id__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../../utils/channel-id */ "../../packages/tg-channel-state/src/channel-message-promotions/utils/channel-id.ts");
 /* harmony import */ var _eligibility__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ./eligibility */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/eligibility.ts");
 /* harmony import */ var _normalize__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ./normalize */ "../../packages/tg-channel-state/src/channel-message-promotions/orchestrator/flow-runner/normalize.ts");
-// PromotionFlowRunner: one cycle's channel selection (source order or ranked, legacy/shadow/v2 picker),
+// PromotionFlowRunner: one cycle's channel selection (source order or ranked, legacy/shadow/v2/dm picker),
 // with the P0 pool classification and the P5 eligibility filter.
 
 
@@ -8765,6 +9056,8 @@ function raceTimeout(work, ms) {
     const timeout = new Promise((resolve) => { timer = setTimeout(() => resolve(SCORE_TIMEOUT), ms); });
     return Promise.race([work, timeout]).finally(() => clearTimeout(timer));
 }
+/** Mode dm refill: peek at most this many remainder channels per open slot. */
+const REFILL_PEEK_FACTOR = 3;
 /**
  * Picks this cycle's channels. `loadedChannels` is the load before the own-channel drop (P0 counts
  * those too); `channels` is after it. null = a read failed and the cycle pauses (already logged).
@@ -8791,9 +9084,14 @@ async function selectCycleChannels(host, loadedChannels, channels, stats, cycle)
     const safetyV2 = host.promoFlags.safety === 'v2';
     noteSafetyIgnored(host, !safetyV2 ? null
         : pickerMode === 'v2' ? 'picker_v2'
-            : host.options.channelSelectionMode === 'source_order' ? 'source_order' : null);
+            : pickerMode === 'dm' ? 'picker_dm'
+                : host.options.channelSelectionMode === 'source_order' ? 'source_order' : null);
     host.pickAnnotations = new Map();
-    if (host.options.channelSelectionMode === 'source_order' && pickerMode !== 'v2') {
+    // Mode dm only: per-arm DM stats from this cycle's docs, read by message planning (null = fixed arm weights).
+    host.armStats = null;
+    const dmMode = pickerMode === 'dm';
+    const pickerApp = host.options.pickerApp ?? null;
+    if (host.options.channelSelectionMode === 'source_order' && pickerMode !== 'v2' && !dmMode) {
         // The adapter has already applied its bounded membership policy (promote-clients uses
         // participant-count descending plus a Fisher-Yates shuffle). Preserve that source order;
         // only the mobile-specific Telegram block remains a preflight exclusion here.
@@ -8890,20 +9188,34 @@ async function selectCycleChannels(host, loadedChannels, channels, stats, cycle)
             host.log('warn', `Promotion per-mobile block lookup failed; pausing cycle safely; error=${host.normalizeError(error)}`);
             return null;
         }
+        // Mode dm: k and base rate per app; fallback DMs scaled by this cycle's dm2h share (no extra read).
+        const dmFallback = dmMode ? (0,_selection_picker__WEBPACK_IMPORTED_MODULE_2__.dmFallbackScale)(intelligenceDocs, pickNowMs) : { scale: 1, dm2hDocs: 0 };
+        const dmConfig = (0,_selection_picker__WEBPACK_IMPORTED_MODULE_2__.dmScoreConfigFor)(pickerApp, dmFallback.scale);
         const selectFrom = (candidates) => (0,_selection__WEBPACK_IMPORTED_MODULE_1__.selectPromotionChannels)({
             channels: candidates,
             intelligenceDocs,
             batchTarget,
             blockedChannelIds,
             // P9: `safety=v2` moves the legacy ranker onto v2 counters; `outcomes` (default) keeps HEAD's default ranker.
-            ...(pickerMode === 'v2'
-                ? { rankScore: (doc) => (0,_selection_picker__WEBPACK_IMPORTED_MODULE_2__.v2ChannelScore)(doc, pickNowMs, pickerMu) }
-                : safetyV2 ? { rankScore: (doc) => (0,_selection_picker__WEBPACK_IMPORTED_MODULE_2__.legacyChannelScoreV2Safety)(doc, pickNowMs) } : {}),
+            ...(dmMode
+                ? {
+                    // Mode dm: DM score, fixed per-app explore share, low-try = fewer than 5 resolved sends.
+                    rankScore: (doc) => (0,_selection_picker__WEBPACK_IMPORTED_MODULE_2__.dmChannelScore)(doc, pickNowMs, dmConfig),
+                    explorationShare: (0,_selection_picker__WEBPACK_IMPORTED_MODULE_2__.dmExploreShareFor)(pickerApp),
+                    exploreBelowAttempted: _selection_picker__WEBPACK_IMPORTED_MODULE_2__.DM_LOW_TRY_DELIVERED,
+                    // Low-try counts DELIVERED sends (resolved ones lag); explore slots are a long-run target.
+                    isExploreCandidate: (doc) => (0,_selection_picker__WEBPACK_IMPORTED_MODULE_2__.dmDeliveredCount)(doc, pickNowMs) < _selection_picker__WEBPACK_IMPORTED_MODULE_2__.DM_LOW_TRY_DELIVERED,
+                    probabilisticExploration: true,
+                }
+                : pickerMode === 'v2'
+                    ? { rankScore: (doc) => (0,_selection_picker__WEBPACK_IMPORTED_MODULE_2__.v2ChannelScore)(doc, pickNowMs, pickerMu) }
+                    : safetyV2 ? { rankScore: (doc) => (0,_selection_picker__WEBPACK_IMPORTED_MODULE_2__.legacyChannelScoreV2Safety)(doc, pickNowMs) } : {}),
         });
         const rankInput = (0,_eligibility__WEBPACK_IMPORTED_MODULE_5__.eligibleOnly)(host, channels, blockedChannelIds, intelligenceDocs, cycle.nowMs);
         let selection;
         let excludedDeadIds = new Set();
-        if (pickerMode === 'v2') {
+        let deadSkipped = 0;
+        if (pickerMode === 'v2' || dmMode) {
             // v2 only: lifetime-dead channels (>= 125 attempts, 0 DMs) leave the list. Shadow measurement
             // below still scores them (candidates come from `channels`). Dead channels are never sent, even
             // when no live channel is eligible (P5 review H1).
@@ -8915,17 +9227,22 @@ async function selectCycleChannels(host, loadedChannels, channels, stats, cycle)
             }
             const live = rankInput.filter((channel) => !deadIds.has((0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_4__.normalizeChannelId)(channel.channelId) ?? ''));
             const dead = rankInput.length - live.length;
+            deadSkipped = dead;
             selection = selectFrom(live);
             const eligible = selection.proven.length + selection.untested.length;
             if (dead > 0 && eligible === 0) {
                 // P5 review H1: the live pool is empty because it is cooling (or otherwise ineligible), not
                 // because the list ran dry; sending to dead channels is never the answer.
                 excludedDeadIds = deadIds;
-                host.log('info', `Promotion v2 dead-channel skip; skipped=${dead}; dead=${dead}; eligible=0; no live channel eligible, dead channels not sent`);
+                host.log('info', dmMode
+                    ? `picker kind=dead_skip mode=dm skipped=${dead} eligible=0 note=no_live_channel`
+                    : `Promotion v2 dead-channel skip; skipped=${dead}; dead=${dead}; eligible=0; no live channel eligible, dead channels not sent`);
             }
             else if (dead > 0) {
                 excludedDeadIds = deadIds;
-                host.log('info', `Promotion v2 dead-channel skip; skipped=${dead}; dead=${dead}; eligible=${eligible}`);
+                host.log('info', dmMode
+                    ? `picker kind=dead_skip mode=dm skipped=${dead} eligible=${eligible}`
+                    : `Promotion v2 dead-channel skip; skipped=${dead}; dead=${dead}; eligible=${eligible}`);
             }
         }
         else {
@@ -8936,11 +9253,53 @@ async function selectCycleChannels(host, loadedChannels, channels, stats, cycle)
         const exploreDenied = await host.explorationDenied(selection.selected, false);
         selectionExploreDenied = exploreDenied.size;
         selectedChannels = selection.selected.filter((channel) => !exploreDenied.has(channel.channelId));
+        let refilled = 0;
+        if (dmMode && selectedChannels.length < selection.selected.length) {
+            // Review L4: refill the slots the exploration budget denied from the next ranked candidates
+            // (proven in rank order, then the exploration lane), skipping any the budget also denies.
+            // The peek runs over the selected channels first, so the hour's allowance they already used is
+            // not offered again, and over at most REFILL_PEEK_FACTOR x the open slots of the remainder.
+            const need = selection.selected.length - selectedChannels.length;
+            const chosen = new Set(selection.selected.map((channel) => channel.channelId));
+            const remainder = [...selection.proven, ...selection.untested]
+                .filter((channel) => !chosen.has(channel.channelId))
+                .slice(0, need * REFILL_PEEK_FACTOR);
+            const remainderDenied = remainder.length > 0
+                ? await host.explorationDenied([...selection.selected, ...remainder], false)
+                : new Set();
+            for (const channel of remainder) {
+                if (selectedChannels.length >= selection.selected.length)
+                    break;
+                if (remainderDenied.has(channel.channelId))
+                    continue;
+                selectedChannels.push(channel);
+                refilled += 1;
+            }
+        }
+        const provenIds = new Set(selection.proven.map((channel) => (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_4__.normalizeChannelId)(channel.channelId) ?? ''));
         if (pickerMode !== 'legacy' && selectedChannels.length > 0) {
-            const provenIds = new Set(selection.proven.map((channel) => (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_4__.normalizeChannelId)(channel.channelId) ?? ''));
             const v2 = pickerMode === 'v2';
             const unblockedCandidates = channels.filter((channel) => !blockedChannelIds.has(channel.channelId));
-            host.measurePicks(pickerMode, unblockedCandidates, selectedChannels, intelligenceDocs, (channelId) => (provenIds.has(channelId) ? (v2 ? 'v' : 'r') : (v2 ? 'x' : 'e')), pickNowMs, pickerMu);
+            host.measurePicks(pickerMode, unblockedCandidates, selectedChannels, intelligenceDocs, (channelId) => (provenIds.has(channelId)
+                ? (dmMode ? 'm' : v2 ? 'v' : 'r')
+                : (dmMode ? 'n' : v2 ? 'x' : 'e')), pickNowMs, pickerMu, dmMode ? dmConfig : undefined);
+        }
+        if (dmMode) {
+            host.armStats = (0,_selection_picker__WEBPACK_IMPORTED_MODULE_2__.aggregateArmStats)(intelligenceDocs, pickNowMs, pickerMu);
+            logDmPicks(host, selectedChannels, intelligenceDocs, provenIds, {
+                nowMs: pickNowMs,
+                config: dmConfig,
+                dm2hDocs: dmFallback.dm2hDocs,
+                exploreDenied: exploreDenied.size,
+                refilled,
+                mu: pickerMu,
+                app: pickerApp ?? 'none',
+                candidates: rankInput.length,
+                dead: deadSkipped,
+                explorePct: selectedChannels.length > 0
+                    ? selectedChannels.filter((channel) => !provenIds.has((0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_4__.normalizeChannelId)(channel.channelId) ?? '')).length / selectedChannels.length
+                    : 0,
+            });
         }
         host.log('info', [
             'Promotion selection ready',
@@ -8971,6 +9330,62 @@ async function selectCycleChannels(host, loadedChannels, channels, stats, cycle)
         }
     }
     return { selectedChannels, selectionExploreDenied, poolClass, eligibleSource };
+}
+/**
+ * Mode dm decision log: one info `picker kind=batch` line per cycle (the owner's "every decision logs"
+ * rule) and one debug `picker kind=pick` line per selected channel (score, source, explore lane,
+ * state). Never throws.
+ */
+function logDmPicks(host, selected, docs, provenIds, ctx) {
+    try {
+        const byId = new Map();
+        for (const doc of docs) {
+            const id = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_4__.normalizeChannelId)(doc.channelId);
+            if (id && !byId.has(id))
+                byId.set(id, doc);
+        }
+        const srcCounts = {};
+        let explore = 0;
+        for (const channel of selected) {
+            const id = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_4__.normalizeChannelId)(channel.channelId) ?? channel.channelId;
+            const doc = byId.get(id) ?? null;
+            const parts = (0,_selection_picker__WEBPACK_IMPORTED_MODULE_2__.dmScoreParts)(doc, ctx.nowMs, ctx.config);
+            const isExplore = !provenIds.has(id);
+            if (isExplore)
+                explore += 1;
+            srcCounts[parts.src] = (srcCounts[parts.src] ?? 0) + 1;
+            host.log('debug', [
+                'picker kind=pick mode=dm',
+                `chan=${id}`,
+                `score=${parts.score.toFixed(5)}`,
+                `src=${parts.src}`,
+                `explore=${isExplore ? 1 : 0}`,
+                `state=${(0,_selection_picker__WEBPACK_IMPORTED_MODULE_2__.classifyChannelState)(doc, ctx.mu)}`,
+                `dm=${parts.dm.toFixed(2)}`,
+                `dl=${parts.delivered.toFixed(2)}`,
+                `ban=${parts.banRate.toFixed(3)}`,
+            ].join(' '));
+        }
+        host.log('info', [
+            'picker kind=batch mode=dm',
+            `app=${ctx.app}`,
+            `k=${ctx.config.k}`,
+            `base=${ctx.config.base}`,
+            `scale=${(ctx.config.fallbackScale ?? 1).toFixed(2)}`,
+            `dm2hDocs=${ctx.dm2hDocs}`,
+            `candidates=${ctx.candidates}`,
+            `selected=${selected.length}`,
+            `explore=${explore}`,
+            `explorePct=${ctx.explorePct.toFixed(2)}`,
+            `dead=${ctx.dead}`,
+            `denied=${ctx.exploreDenied}`,
+            `refill=${ctx.refilled}`,
+            `src=${Object.entries(srcCounts).sort().map(([key, value]) => `${key}:${value}`).join(',') || 'none'}`,
+        ].join(' '));
+    }
+    catch {
+        /* a log line must never pause a cycle */
+    }
 }
 
 
@@ -9844,6 +10259,10 @@ class PromotionFlowRunner {
         this.markerErrorSuppressed = 0;
         /** This cycle's pick annotations by channelId (shadow/v2 measurement; empty in legacy). */
         this.pickAnnotations = new Map();
+        /** Picker mode dm: this cycle's per-arm DM stats (selection-pass); null = fixed arm weights. */
+        this.armStats = null;
+        /** Mode dm: this cycle's arm decisions, logged once per cycle as `arm kind=batch`. */
+        this.armTally = emptyArmTally();
         /** P0 measurement. Logs only, never writes state. */
         // fu_sent and sends_1h live in this runner instance: both start again at 0 on every runner restart.
         this.sendWindow = new _flow_runner_cycle_metrics__WEBPACK_IMPORTED_MODULE_22__.PromoSendWindow();
@@ -10046,6 +10465,7 @@ class PromotionFlowRunner {
         this.cycleWaitDeclared = false;
         this.cooldownRestUntil = null;
         this.log('debug', `Promotion cycle start; queueSize=${this.messageQueue.size}`);
+        this.armTally = emptyArmTally();
         try {
             await this.checkQueuedMessages();
             let channels = [];
@@ -10082,6 +10502,7 @@ class PromotionFlowRunner {
             if (!selection)
                 return;
             const run = await (0,_flow_runner_cycle_run__WEBPACK_IMPORTED_MODULE_17__.runSelectedChannels)(hostOf(this), selection.selectedChannels);
+            this.logArmBatch();
             await (0,_flow_runner_cycle_run__WEBPACK_IMPORTED_MODULE_17__.finishCycle)(hostOf(this), stats, run, selection);
         }
         finally {
@@ -10132,12 +10553,30 @@ class PromotionFlowRunner {
         this.log('debug', `Promotion channel attempt start; ${this.formatChannel(channel)} isFollowUp=${isFollowUp}`);
         const percentiles = await this.loadPercentiles(channel);
         let doc = null;
+        let deadCheckGap = null;
         try {
             const loaded = await this.adapter.getIntelligenceDoc(channel.channelId);
             doc = (0,_channel_intelligence_channel_intelligence_schema__WEBPACK_IMPORTED_MODULE_0__.isChannelIntelligence)(loaded) ? loaded : null;
+            if (!doc && loaded !== null && loaded !== undefined)
+                deadCheckGap = 'invalid_doc';
         }
         catch (error) {
+            deadCheckGap = 'read_error';
             this.log('warn', `Promotion intelligence doc load failed; using cold-start strategy; ${this.formatChannel(channel)} error=${this.normalizeError(error)}`);
+        }
+        // Mode dm: the lifetime-dead rule again at send time, on the doc just read, so a channel that
+        // died after selection (or after its follow-up was queued) is not sent. Other modes unchanged.
+        // Fails OPEN when the doc cannot be read: selection already dropped channels dead in the cycle
+        // read, and a Mongo blip must not stop every send. Logged at the decision.
+        if ((0,_selection_picker__WEBPACK_IMPORTED_MODULE_1__.readPickerMode)(process.env, this.options.pickerApp ?? null) === 'dm') {
+            const chan = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_3__.normalizeChannelId)(channel.channelId) ?? channel.channelId;
+            if (doc && (0,_selection_picker__WEBPACK_IMPORTED_MODULE_1__.isLifetimeDeadChannel)(doc)) {
+                this.log('info', (0,_flow_runner_eligibility__WEBPACK_IMPORTED_MODULE_14__.promoSkipLine)('dead', chan, this.options.account.mobile, isFollowUp));
+                return 'skipped';
+            }
+            if (deadCheckGap) {
+                this.log('warn', `promo-flow kind=dead_check_unavailable channel=${chan} mobile=****${String(this.options.account.mobile ?? '').slice(-4)} stage=${isFollowUp ? 'followup' : 'main'} cause=${deadCheckGap} action=send`);
+            }
         }
         const mergedChannel = (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_11__.mergePromotionHealthSignals)(channel, doc);
         const planningChannel = mergedChannel;
@@ -10162,8 +10601,21 @@ class PromotionFlowRunner {
             legacyAvailable: (availableMessageIds?.length ?? 0) > 0,
             ...(percentiles ? { percentiles } : {}),
             nowMs: Date.now(),
+            // Picker mode dm: arm chosen by DMs per delivered send in this channel's state (main sends only).
+            ...(this.armStats && !isFollowUp ? { armContext: { stats: this.armStats, state: (0,_selection_picker__WEBPACK_IMPORTED_MODULE_1__.classifyChannelState)(doc) } } : {}),
         };
         const candidates = (0,_policy__WEBPACK_IMPORTED_MODULE_4__.selectPromotionMessageCandidates)(messagePolicyInput);
+        const armDecision = candidates[0]?.armDecision;
+        if (armDecision) {
+            this.armTally[armDecision.arm] += 1;
+            this.armTally.src[armDecision.src] = (this.armTally.src[armDecision.src] ?? 0) + 1;
+            this.log('debug', `arm kind=pick arm=${armDecision.arm} p=${armDecision.p.toFixed(3)} state=${armDecision.state} src=${armDecision.src} chan=${(0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_3__.normalizeChannelId)(channel.channelId) ?? channel.channelId}`);
+        }
+        else if (messagePolicyInput.armContext && candidates.some((candidate) => candidate.armDecision)) {
+            // A partial-pool reuse candidate led instead of the arm pick (learning channel).
+            this.armTally.skip += 1;
+            this.log('debug', `arm kind=skip reason=pool_reuse state=${messagePolicyInput.armContext.state} chan=${(0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_3__.normalizeChannelId)(channel.channelId) ?? channel.channelId}`);
+        }
         this.log('debug', [
             'Promotion candidate plan',
             this.formatChannel(channel),
@@ -10210,6 +10662,12 @@ class PromotionFlowRunner {
                 return 'budget_exhausted';
             }
             const result = await this.trySendPromotion(planningChannel, candidate, isFollowUp);
+            // dm2h send history first, stamped with the time the send returned (review round 4); a failed
+            // write is retried in recordSuccess with this same time.
+            const sentAtMs = Date.now();
+            const early = result.sent
+                ? { status: await (0,_flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_12__.recordSendHistory)(hostOf(this), planningChannel, candidate, result, isFollowUp, sentAtMs), deliveredAtMs: sentAtMs }
+                : null;
             await this.settleDailySendBudget(result, dailySendBudget);
             if (result.held === true)
                 return firstSendResult ? 'held' : 'not_sent';
@@ -10220,7 +10678,7 @@ class PromotionFlowRunner {
                     this.fuSentSinceCycleEnd += 1;
                 else
                     await this.noteChannelCooldown(planningChannel.channelId);
-                await this.recordSuccess(planningChannel, candidate, result, isFollowUp, percentiles, (0,_tg_core_utils_spam_limit__WEBPACK_IMPORTED_MODULE_5__.isSpamLimited)(stats.daysLeft));
+                await this.recordSuccess(planningChannel, candidate, result, isFollowUp, percentiles, (0,_tg_core_utils_spam_limit__WEBPACK_IMPORTED_MODULE_5__.isSpamLimited)(stats.daysLeft), early);
                 return 'sent';
             }
             if (result.errorMessage) {
@@ -10406,8 +10864,8 @@ class PromotionFlowRunner {
     recordSendAnalytics(channel, candidate, result, outcome, channelIdOverride, messageText, extra) {
         return (0,_flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_12__.recordSendAnalytics)(hostOf(this), channel, candidate, result, outcome, channelIdOverride, messageText, extra);
     }
-    recordSuccess(channel, candidate, result, isFollowUp, percentiles, aggressive) {
-        return (0,_flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_12__.recordSuccess)(hostOf(this), channel, candidate, result, isFollowUp, percentiles, aggressive);
+    recordSuccess(channel, candidate, result, isFollowUp, percentiles, aggressive, early = null) {
+        return (0,_flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_12__.recordSuccess)(hostOf(this), channel, candidate, result, isFollowUp, percentiles, aggressive, early);
     }
     recordFailure(channel, candidate, result, isFollowUp, percentiles, aggressive) {
         return (0,_flow_runner_outcome_recording__WEBPACK_IMPORTED_MODULE_12__.recordFailure)(hostOf(this), channel, candidate, result, isFollowUp, percentiles, aggressive);
@@ -10469,7 +10927,7 @@ class PromotionFlowRunner {
         return isFollowUp ? null : this.pickAnnotations.get((0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_3__.normalizeChannelId)(channelId) ?? '') ?? null;
     }
     /** Measure one pick batch and emit the sampled debug line. Never throws. */
-    measurePicks(mode, candidates, selected, docs, reasonOf, nowMs, mu) {
+    measurePicks(mode, candidates, selected, docs, reasonOf, nowMs, mu, dm) {
         try {
             const result = (0,_flow_runner_pick_shadow__WEBPACK_IMPORTED_MODULE_2__.measurePickBatch)({
                 mode,
@@ -10480,6 +10938,7 @@ class PromotionFlowRunner {
                 clientId: this.options.account.clientId ?? null,
                 nowMs,
                 mu,
+                ...(dm !== undefined ? { dm } : {}),
                 logSample: (0,_selection_picker__WEBPACK_IMPORTED_MODULE_1__.readPickerLogSample)(),
             });
             this.pickAnnotations = result.annotations;
@@ -10559,6 +11018,30 @@ class PromotionFlowRunner {
             return;
         }
         await (0,_flow_runner_follow_up__WEBPACK_IMPORTED_MODULE_13__.sleepWithFollowUps)(hostOf(this), (0,_flow_runner_normalize__WEBPACK_IMPORTED_MODULE_11__.safeDelayMs)(ms, 0), declare);
+    }
+    /** Mode dm: one info line per cycle with the arm decisions (per-send lines are debug). */
+    /** Mode dm: the arm a main send actually delivered with, against the planned arm pick (if any). */
+    noteArmSent(sent, planned, channelId) {
+        if (!this.armStats)
+            return;
+        const key = sent ?? 'none';
+        this.armTally.sent[key] = (this.armTally.sent[key] ?? 0) + 1;
+        this.log('debug', `arm kind=sent arm=${key} planned=${planned ?? 'none'} chan=${(0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_3__.normalizeChannelId)(channelId) ?? channelId}`);
+    }
+    logArmBatch() {
+        if (!this.armStats)
+            return;
+        const t = this.armTally;
+        this.log('info', [
+            'arm kind=batch mode=dm',
+            `picks=${t.legacy + t.custom + t.ai}`,
+            `legacy=${t.legacy}`,
+            `custom=${t.custom}`,
+            `ai=${t.ai}`,
+            `skip=${t.skip}`,
+            `src=${Object.entries(t.src).sort().map(([key, value]) => `${key}:${value}`).join(',') || 'none'}`,
+            `sent=${Object.entries(t.sent).sort().map(([key, value]) => `${key}:${value}`).join(',') || 'none'}`,
+        ].join(' '));
     }
     /**
      * Unproven channels this mobile must skip this round (it keeps getting banned in new channels).
@@ -10710,6 +11193,9 @@ class PromotionFlowRunner {
         this.health.lastDurabilityFailureAt = Date.now();
         this.health.lastDurabilityFailure = this.compact(this.normalizeError(error));
     }
+}
+function emptyArmTally() {
+    return { legacy: 0, custom: 0, ai: 0, skip: 0, src: {}, sent: {} };
 }
 
 
@@ -11702,6 +12188,193 @@ __webpack_require__.r(__webpack_exports__);
 
 /***/ },
 
+/***/ "../../packages/tg-channel-state/src/channel-message-promotions/policy/message-arm.ts"
+/*!********************************************************************************************!*\
+  !*** ../../packages/tg-channel-state/src/channel-message-promotions/policy/message-arm.ts ***!
+  \********************************************************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   ARM_DRAWS: () => (/* binding */ ARM_DRAWS),
+/* harmony export */   ARM_FLOOR: () => (/* binding */ ARM_FLOOR),
+/* harmony export */   ARM_MIN_DELIVERED: () => (/* binding */ ARM_MIN_DELIVERED),
+/* harmony export */   armProbabilities: () => (/* binding */ armProbabilities),
+/* harmony export */   armTableFor: () => (/* binding */ armTableFor),
+/* harmony export */   chooseArm: () => (/* binding */ chooseArm),
+/* harmony export */   flooredPrior: () => (/* binding */ flooredPrior),
+/* harmony export */   pickArm: () => (/* binding */ pickArm)
+/* harmony export */ });
+/* harmony import */ var _selection_picker__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../selection/picker */ "../../packages/tg-channel-state/src/channel-message-promotions/selection/picker.ts");
+/**
+ * DM-based message-arm choice (picker mode dm, 2026-11-27).
+ *
+ * Arms: legacy / custom / ai. Each arm's DMs-per-delivered is Beta(dm + 1, delivered - dm + 1)
+ * (dm = DMs within 2 h of that arm's main send on the same channel by the same client; v2.am / v2.ad,
+ * decayed). The arm probability is probability matching (Thompson): the share of ARM_DRAWS posterior
+ * draws each arm wins, then mixed with a floor so every available arm keeps at least ARM_FLOOR:
+ *     p(arm) = floor + (1 - floor * n) * wins(arm) / draws
+ * Data source, logged as src=: the channel's state (classifyChannelState) when that state holds at
+ * least ARM_MIN_DELIVERED delivered across arms, else the global sum, else `prior` (the caller keeps
+ * its fixed weights). Draws use a small PRNG seeded from one call of the caller's random, so a
+ * stubbed random stays deterministic and the loop always ends.
+ */
+
+/** Every available arm keeps at least this share of picks, so arms keep being measured. */
+const ARM_FLOOR = 0.10;
+/** Posterior draws per decision. */
+const ARM_DRAWS = 256;
+/** Delivered sends (decayed, across arms) a stats table needs before it is used. */
+const ARM_MIN_DELIVERED = 30;
+/**
+ * The table to learn from for this state, or null (prior). Only the `available` arms count toward
+ * ARM_MIN_DELIVERED: delivered sends of an arm that cannot be sent here are not evidence for this pick.
+ */
+function armTableFor(stats, state, available = _selection_picker__WEBPACK_IMPORTED_MODULE_0__.MESSAGE_ARMS) {
+    const own = stats.byState[state];
+    if (own && totalDelivered(own, available) >= ARM_MIN_DELIVERED)
+        return { table: own, src: 'state' };
+    if (totalDelivered(stats.global, available) >= ARM_MIN_DELIVERED)
+        return { table: stats.global, src: 'global' };
+    return null;
+}
+/**
+ * Prior (not enough arm data): mix the given shares with the ARM_FLOOR so every available arm keeps
+ * at least the floor, as in the data path. `shares` need not sum to 1; arms absent from it get 0.
+ */
+function flooredPrior(shares, available) {
+    const arms = _selection_picker__WEBPACK_IMPORTED_MODULE_0__.MESSAGE_ARMS.filter((arm) => available.includes(arm));
+    const probs = { legacy: 0, custom: 0, ai: 0 };
+    if (arms.length === 0)
+        return probs;
+    const total = arms.reduce((sum, arm) => sum + Math.max(0, shares[arm] ?? 0), 0);
+    const floor = Math.min(ARM_FLOOR, 1 / arms.length);
+    const rest = 1 - floor * arms.length;
+    for (const arm of arms) {
+        const share = total > 0 ? Math.max(0, shares[arm] ?? 0) / total : 1 / arms.length;
+        probs[arm] = floor + rest * share;
+    }
+    return probs;
+}
+/**
+ * Arm probabilities over `available` arms (floor applied over those arms only). null when no table
+ * has enough data (src prior): the caller keeps its fixed weights.
+ */
+function armProbabilities(context, available, random) {
+    const arms = _selection_picker__WEBPACK_IMPORTED_MODULE_0__.MESSAGE_ARMS.filter((arm) => available.includes(arm));
+    if (arms.length === 0)
+        return null;
+    const chosen = armTableFor(context.stats, context.state, arms);
+    if (!chosen)
+        return null;
+    const probs = { legacy: 0, custom: 0, ai: 0 };
+    if (arms.length === 1) {
+        probs[arms[0]] = 1;
+        return { probs, src: chosen.src };
+    }
+    const rng = mulberry32(seedFrom(random));
+    const wins = { legacy: 0, custom: 0, ai: 0 };
+    for (let draw = 0; draw < ARM_DRAWS; draw += 1) {
+        let best = arms[0];
+        let bestValue = -1;
+        for (const arm of arms) {
+            const { d, m } = chosen.table[arm];
+            const dm = Math.max(0, Math.min(m, d));
+            const value = sampleBeta(dm + 1, Math.max(0, d - dm) + 1, rng);
+            if (value > bestValue) {
+                bestValue = value;
+                best = arm;
+            }
+        }
+        wins[best] += 1;
+    }
+    const floor = Math.min(ARM_FLOOR, 1 / arms.length);
+    const rest = 1 - floor * arms.length;
+    for (const arm of arms)
+        probs[arm] = floor + rest * (wins[arm] / ARM_DRAWS);
+    return { probs, src: chosen.src };
+}
+/** Pick one arm by its probabilities. */
+function pickArm(probs, available, random) {
+    const arms = _selection_picker__WEBPACK_IMPORTED_MODULE_0__.MESSAGE_ARMS.filter((arm) => available.includes(arm) && probs[arm] > 0);
+    if (arms.length === 0)
+        return available[0] ?? 'legacy';
+    const total = arms.reduce((sum, arm) => sum + probs[arm], 0);
+    let target = unit(random) * total;
+    for (const arm of arms) {
+        target -= probs[arm];
+        if (target < 0)
+            return arm;
+    }
+    return arms[arms.length - 1];
+}
+/** One decision: probabilities, then the pick. null = prior (caller keeps its fixed weights). */
+function chooseArm(context, available, random) {
+    const result = armProbabilities(context, available, random);
+    if (!result)
+        return null;
+    const arm = pickArm(result.probs, available, random);
+    return { arm, p: result.probs[arm], probs: result.probs, src: result.src, state: context.state };
+}
+function totalDelivered(table, available) {
+    return _selection_picker__WEBPACK_IMPORTED_MODULE_0__.MESSAGE_ARMS.reduce((sum, arm) => sum + (available.includes(arm) && Number.isFinite(table[arm].d) && table[arm].d > 0 ? table[arm].d : 0), 0);
+}
+function unit(random) {
+    try {
+        const value = random();
+        return Number.isFinite(value) ? Math.max(0, Math.min(0.999999999, value)) : 0.5;
+    }
+    catch {
+        return 0.5;
+    }
+}
+function seedFrom(random) {
+    return Math.floor(unit(random) * 4294967296) >>> 0;
+}
+function mulberry32(seed) {
+    let a = seed >>> 0;
+    return () => {
+        a = (a + 0x6d2b79f5) >>> 0;
+        let t = a;
+        t = Math.imul(t ^ (t >>> 15), t | 1);
+        t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+        return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+}
+/** Beta(a, b) for a, b >= 1 via two Marsaglia-Tsang gamma draws. */
+function sampleBeta(a, b, rng) {
+    const x = sampleGamma(a, rng);
+    const y = sampleGamma(b, rng);
+    const sum = x + y;
+    return sum > 0 ? x / sum : a / (a + b);
+}
+function sampleGamma(shape, rng) {
+    const d = shape - 1 / 3;
+    const c = 1 / Math.sqrt(9 * d);
+    // Bounded: the acceptance rate is above 95% for shape >= 1; after 64 rejections use the mean.
+    for (let i = 0; i < 64; i += 1) {
+        const x = normal(rng);
+        const v0 = 1 + c * x;
+        if (v0 <= 0)
+            continue;
+        const v = v0 * v0 * v0;
+        const u = rng();
+        if (u < 1 - 0.0331 * x * x * x * x)
+            return d * v;
+        if (u > 0 && Math.log(u) < 0.5 * x * x + d * (1 - v + Math.log(v)))
+            return d * v;
+    }
+    return shape;
+}
+function normal(rng) {
+    const u1 = Math.max(rng(), 1e-12);
+    const u2 = rng();
+    return Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
+}
+
+
+/***/ },
+
 /***/ "../../packages/tg-channel-state/src/channel-message-promotions/policy/message-policy.ts"
 /*!***********************************************************************************************!*\
   !*** ../../packages/tg-channel-state/src/channel-message-promotions/policy/message-policy.ts ***!
@@ -11715,19 +12388,24 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   selectPromotionMessageCandidates: () => (/* binding */ selectPromotionMessageCandidates)
 /* harmony export */ });
 /* harmony import */ var _pool__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../pool */ "../../packages/tg-channel-state/src/channel-message-promotions/pool/index.ts");
-/* harmony import */ var _policy_number_utils__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./policy-number-utils */ "../../packages/tg-channel-state/src/channel-message-promotions/policy/policy-number-utils.ts");
-/* harmony import */ var _utils_guards__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../../utils/guards */ "../../packages/tg-channel-state/src/utils/guards.ts");
+/* harmony import */ var _message_arm__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./message-arm */ "../../packages/tg-channel-state/src/channel-message-promotions/policy/message-arm.ts");
+/* harmony import */ var _selection_picker__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../selection/picker */ "../../packages/tg-channel-state/src/channel-message-promotions/selection/picker.ts");
+/* harmony import */ var _policy_number_utils__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ./policy-number-utils */ "../../packages/tg-channel-state/src/channel-message-promotions/policy/policy-number-utils.ts");
+/* harmony import */ var _utils_guards__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../../utils/guards */ "../../packages/tg-channel-state/src/utils/guards.ts");
+
+
 
 
 
 function selectPromotionMessageCandidates(input) {
-    const malformedInput = !(0,_utils_guards__WEBPACK_IMPORTED_MODULE_2__.isRecord)(input);
+    const malformedInput = !(0,_utils_guards__WEBPACK_IMPORTED_MODULE_4__.isRecord)(input);
     const safeInput = malformedInput ? {} : input;
-    const { isFollowUp = false, freeformDeletedCount, followUpDeletedCount, availableMessageIds, messagePool, seedProbeCounts = null, legacyAvailable, minSendIntervalMs = 0, percentiles = null, nowMs = Date.now(), random = malformedInput ? (() => 0.5) : Math.random, } = safeInput;
+    const { isFollowUp = false, freeformDeletedCount, followUpDeletedCount, availableMessageIds, messagePool, seedProbeCounts = null, legacyAvailable, minSendIntervalMs = 0, percentiles = null, nowMs = Date.now(), random = malformedInput ? (() => 0.5) : Math.random, armContext = null, } = safeInput;
+    const safeArmContext = isArmContext(armContext) ? armContext : null;
     const safeIsFollowUp = isFollowUp === true;
     // Probe caps derive from durable pool attempt counters.
     const effectiveSeedProbeCounts = seedProbeCounts ?? deriveSeedProbeCounts(messagePool);
-    const followUpDeleted = (0,_policy_number_utils__WEBPACK_IMPORTED_MODULE_1__.safeNonNegative)(followUpDeletedCount);
+    const followUpDeleted = (0,_policy_number_utils__WEBPACK_IMPORTED_MODULE_3__.safeNonNegative)(followUpDeletedCount);
     // Follow-up: rate-driven. A channel that keeps deleting follow-ups drops the soft follow-up for a
     // plain legacy message. (Handled before the learning/proven fork — follow-ups never explore.)
     if (safeIsFollowUp) {
@@ -11751,20 +12429,21 @@ function selectPromotionMessageCandidates(input) {
         // When probing is exhausted but the channel already has SOME survivors, reuse the available pool
         // (force it to the front) before legacy — don't waste sends re-probing a capped channel, and
         // don't ignore the partial pool we did build. Otherwise (still probing) keep exploring to learn.
-        const seedPool = selectPoolReuseCandidate(messagePool, survivorCount, random, (0,_policy_number_utils__WEBPACK_IMPORTED_MODULE_1__.safeNonNegative)(nowMs), percentiles ?? null, minSendIntervalMs, 
+        const seedPool = selectPoolReuseCandidate(messagePool, survivorCount, random, (0,_policy_number_utils__WEBPACK_IMPORTED_MODULE_3__.safeNonNegative)(nowMs), percentiles ?? null, minSendIntervalMs, 
         /* forceSurvivor */ seedExhausted && survivorCount > 0);
         return withPoolCandidate(seedPool, buildSeedLadder({
             seedProbeCounts: effectiveSeedProbeCounts,
             legacyAvailable: resolveLegacyAvailable(legacyAvailable, availableMessageIds),
             availableMessageIds,
             random,
+            armContext: safeArmContext,
         }));
     }
     // ── PROVEN (survivors >= target): pure EXPLOIT. No probing, no AI, no custom generation. ─────────
     // Pick a random survivor from the pool and send it; legacy + fallback only backstop the (rare) case
     // where survivor selection can't produce text. Deletions here are still tracked by the delete-check
     // sweep — if survivors erode back under the target the channel naturally re-enters LEARNING.
-    const survivor = pickRandomSurvivor(messagePool, random);
+    const survivor = safeArmContext ? pickSurvivorByArm(messagePool, random, safeArmContext) : pickRandomSurvivor(messagePool, random);
     const proven = [];
     if (survivor)
         proven.push(survivor);
@@ -11783,20 +12462,67 @@ function pickRandomSurvivor(messagePool, random) {
     const survivors = distinctSurvivorsByKey(messagePool);
     if (survivors.length === 0)
         return null;
-    const idx = Math.floor((0,_policy_number_utils__WEBPACK_IMPORTED_MODULE_1__.safeUnitRandom)(random) * survivors.length);
+    const idx = Math.floor((0,_policy_number_utils__WEBPACK_IMPORTED_MODULE_3__.safeUnitRandom)(random) * survivors.length);
     const chosen = survivors[Math.min(idx, survivors.length - 1)];
     return chosen ? buildPoolCandidate(chosen) : null;
+}
+/**
+ * Picker mode dm, PROVEN channel: choose the arm among the arms that have a survivor (DM-based, 10%
+ * floor; message-arm.ts), then a random survivor of that arm. Without enough arm data the arm is
+ * the random survivor's own (src prior, p = that arm's share of survivors).
+ */
+function pickSurvivorByArm(messagePool, random, context) {
+    const survivors = distinctSurvivorsByKey(messagePool);
+    if (survivors.length === 0)
+        return null;
+    const present = [...new Set(survivors.map((entry) => entry.source))].filter(_selection_picker__WEBPACK_IMPORTED_MODULE_2__.isMessageArm);
+    const decision = (0,_message_arm__WEBPACK_IMPORTED_MODULE_1__.chooseArm)(context, present, random);
+    if (decision) {
+        const ofArm = survivors.filter((entry) => entry.source === decision.arm);
+        const chosen = ofArm[Math.min(Math.floor((0,_policy_number_utils__WEBPACK_IMPORTED_MODULE_3__.safeUnitRandom)(random) * ofArm.length), ofArm.length - 1)];
+        if (chosen)
+            return { ...buildPoolCandidate(chosen), armDecision: decision };
+    }
+    // Prior: arms weighted by their survivor share, then floored, so an arm with few survivors still
+    // gets at least ARM_FLOOR of the picks (the same floor as the data path).
+    if (present.length > 0) {
+        const shares = {};
+        for (const arm of present)
+            shares[arm] = survivors.filter((entry) => entry.source === arm).length;
+        const probs = (0,_message_arm__WEBPACK_IMPORTED_MODULE_1__.flooredPrior)(shares, present);
+        const arm = (0,_message_arm__WEBPACK_IMPORTED_MODULE_1__.pickArm)(probs, present, random);
+        const ofArm = survivors.filter((entry) => entry.source === arm);
+        const chosen = ofArm[Math.min(Math.floor((0,_policy_number_utils__WEBPACK_IMPORTED_MODULE_3__.safeUnitRandom)(random) * ofArm.length), ofArm.length - 1)];
+        if (chosen)
+            return { ...buildPoolCandidate(chosen), armDecision: priorDecision(arm, probs[arm], context) };
+    }
+    const idx = Math.floor((0,_policy_number_utils__WEBPACK_IMPORTED_MODULE_3__.safeUnitRandom)(random) * survivors.length);
+    const chosen = survivors[Math.min(idx, survivors.length - 1)];
+    if (!chosen)
+        return null;
+    const arm = (0,_selection_picker__WEBPACK_IMPORTED_MODULE_2__.isMessageArm)(chosen.source) ? chosen.source : 'legacy';
+    const share = survivors.filter((entry) => entry.source === arm).length / survivors.length;
+    return { ...buildPoolCandidate(chosen), armDecision: priorDecision(arm, share, context) };
+}
+function priorDecision(arm, p, context) {
+    const probs = { legacy: 0, custom: 0, ai: 0 };
+    probs[arm] = p;
+    return { arm, p, probs, src: 'prior', state: context.state };
+}
+function isArmContext(value) {
+    return (0,_utils_guards__WEBPACK_IMPORTED_MODULE_4__.isRecord)(value) && (0,_utils_guards__WEBPACK_IMPORTED_MODULE_4__.isRecord)(value['stats']) && (0,_utils_guards__WEBPACK_IMPORTED_MODULE_4__.isRecord)(value['stats']['global'])
+        && typeof value['state'] === 'string';
 }
 /** Distinct (by semantic-core key) pool entries that meet the survivor bar. One entry per key. */
 function distinctSurvivorsByKey(messagePool) {
     return distinctPoolEntriesByContent(messagePool, (entry) => entry.state !== 'benched'
-        && (0,_policy_number_utils__WEBPACK_IMPORTED_MODULE_1__.safeNonNegative)(entry.survived) >= _pool__WEBPACK_IMPORTED_MODULE_0__.MESSAGE_SAFETY.MIN_SURVIVOR_SURVIVED
+        && (0,_policy_number_utils__WEBPACK_IMPORTED_MODULE_3__.safeNonNegative)(entry.survived) >= _pool__WEBPACK_IMPORTED_MODULE_0__.MESSAGE_SAFETY.MIN_SURVIVOR_SURVIVED
         // A message that was later deleted has lost its survivor slot until it proves itself again.
-        && (0,_policy_number_utils__WEBPACK_IMPORTED_MODULE_1__.safeNonNegative)(entry.survived) > (0,_policy_number_utils__WEBPACK_IMPORTED_MODULE_1__.safeNonNegative)(entry.deleted));
+        && (0,_policy_number_utils__WEBPACK_IMPORTED_MODULE_3__.safeNonNegative)(entry.survived) > (0,_policy_number_utils__WEBPACK_IMPORTED_MODULE_3__.safeNonNegative)(entry.deleted));
 }
 /** Counter-only smoothed rate (used for follow-ups, which have no dedicated pool source). */
 function computeCounterDeletionRate(deletedCounter) {
-    const deleted = (0,_policy_number_utils__WEBPACK_IMPORTED_MODULE_1__.safeNonNegative)(deletedCounter);
+    const deleted = (0,_policy_number_utils__WEBPACK_IMPORTED_MODULE_3__.safeNonNegative)(deletedCounter);
     const { DELETION_SMOOTH_ALPHA: a, DELETION_SMOOTH_BETA: b } = _pool__WEBPACK_IMPORTED_MODULE_0__.MESSAGE_SAFETY;
     return (deleted + a) / (deleted + a + b);
 }
@@ -11815,8 +12541,8 @@ function countPoolSurvivors(messagePool) {
  */
 function isSeedExhausted(seedProbeCounts, legacyAvailable) {
     const legacyDone = !legacyAvailable;
-    const customDone = (0,_policy_number_utils__WEBPACK_IMPORTED_MODULE_1__.safeNonNegative)(seedProbeCounts?.custom) >= _pool__WEBPACK_IMPORTED_MODULE_0__.MESSAGE_SAFETY.SEED_CAP_CUSTOM;
-    const aiDone = (0,_policy_number_utils__WEBPACK_IMPORTED_MODULE_1__.safeNonNegative)(seedProbeCounts?.ai) >= _pool__WEBPACK_IMPORTED_MODULE_0__.MESSAGE_SAFETY.SEED_CAP_AI;
+    const customDone = (0,_policy_number_utils__WEBPACK_IMPORTED_MODULE_3__.safeNonNegative)(seedProbeCounts?.custom) >= _pool__WEBPACK_IMPORTED_MODULE_0__.MESSAGE_SAFETY.SEED_CAP_CUSTOM;
+    const aiDone = (0,_policy_number_utils__WEBPACK_IMPORTED_MODULE_3__.safeNonNegative)(seedProbeCounts?.ai) >= _pool__WEBPACK_IMPORTED_MODULE_0__.MESSAGE_SAFETY.SEED_CAP_AI;
     return legacyDone && customDone && aiDone;
 }
 function deriveSeedProbeCounts(messagePool) {
@@ -11827,7 +12553,7 @@ function deriveSeedProbeCounts(messagePool) {
         if (!isPoolEntry(entry))
             continue;
         // One pool entry can be tried repeatedly. The safety cap is based on sends, not variants.
-        counts[entry.source] += (0,_policy_number_utils__WEBPACK_IMPORTED_MODULE_1__.safeNonNegative)(entry.attempted);
+        counts[entry.source] += (0,_policy_number_utils__WEBPACK_IMPORTED_MODULE_3__.safeNonNegative)(entry.attempted);
     }
     return counts;
 }
@@ -11852,11 +12578,11 @@ function resolveLegacyAvailable(legacyAvailable, availableMessageIds) {
  *     probing and channel safety blocks it if it keeps deleting.
  */
 function buildSeedLadder(opts) {
-    const { seedProbeCounts, legacyAvailable, availableMessageIds, random } = opts;
+    const { seedProbeCounts, legacyAvailable, availableMessageIds, random, armContext = null } = opts;
     const used = {
-        legacy: (0,_policy_number_utils__WEBPACK_IMPORTED_MODULE_1__.safeNonNegative)(seedProbeCounts?.legacy),
-        custom: (0,_policy_number_utils__WEBPACK_IMPORTED_MODULE_1__.safeNonNegative)(seedProbeCounts?.custom),
-        ai: (0,_policy_number_utils__WEBPACK_IMPORTED_MODULE_1__.safeNonNegative)(seedProbeCounts?.ai),
+        legacy: (0,_policy_number_utils__WEBPACK_IMPORTED_MODULE_3__.safeNonNegative)(seedProbeCounts?.legacy),
+        custom: (0,_policy_number_utils__WEBPACK_IMPORTED_MODULE_3__.safeNonNegative)(seedProbeCounts?.custom),
+        ai: (0,_policy_number_utils__WEBPACK_IMPORTED_MODULE_3__.safeNonNegative)(seedProbeCounts?.ai),
     };
     // Sources still under their OWN per-source cap. Legacy has no count cap (SEED_CAP_LEGACY is null) —
     // it is available whenever the caller still has legacy ids left, regardless of how many times it has
@@ -11871,11 +12597,32 @@ function buildSeedLadder(opts) {
     if (available.length === 0) {
         return buildRestrictedCandidates(availableMessageIds, random);
     }
-    // Pick the leading source by weight (renormalized over available sources).
-    const lead = pickWeightedSource(available, weightBySource, random);
+    // Pick the leading source. Picker mode dm: by DMs per delivered send among the sources still
+    // under their cap (10% floor); without enough arm data, the fixed weights below (src prior).
+    // Every other mode: by weight (renormalized over available sources).
+    let lead;
+    let decision = null;
+    if (armContext) {
+        decision = (0,_message_arm__WEBPACK_IMPORTED_MODULE_1__.chooseArm)(armContext, available.filter(_selection_picker__WEBPACK_IMPORTED_MODULE_2__.isMessageArm), random);
+        if (decision) {
+            lead = decision.arm;
+        }
+        else {
+            // Prior: the fixed weights (50/25/25, renormalised over available arms: every arm >= 25%,
+            // above ARM_FLOOR already).
+            lead = pickWeightedSource(available, weightBySource, random);
+            const total = available.reduce((sum, s) => sum + Math.max(0, weightBySource[s]), 0);
+            decision = priorDecision((0,_selection_picker__WEBPACK_IMPORTED_MODULE_2__.isMessageArm)(lead) ? lead : 'legacy', total > 0 ? weightBySource[lead] / total : 1, armContext);
+        }
+    }
+    else {
+        lead = pickWeightedSource(available, weightBySource, random);
+    }
     // Order: lead first, then the other available sources (fall-through), then legacy + fallback tail.
     const ordered = [lead, ...available.filter((s) => s !== lead)];
     const candidates = ordered.map((source) => createSourceCandidate(source, availableMessageIds, random));
+    if (decision && candidates[0])
+        candidates[0] = { ...candidates[0], armDecision: decision };
     candidates.push({ kind: 'legacy', randomIndex: pickMessageId(availableMessageIds, random), strategy: 'legacy' });
     candidates.push({ kind: 'fallback', randomIndex: '0', strategy: 'legacy' });
     return ensureFallback(dedupeCandidatesByRandomIndex(candidates));
@@ -11884,7 +12631,7 @@ function pickWeightedSource(sources, weights, random) {
     const total = sources.reduce((sum, s) => sum + Math.max(0, weights[s]), 0);
     if (total <= 0)
         return sources[0] ?? 'legacy';
-    let target = (0,_policy_number_utils__WEBPACK_IMPORTED_MODULE_1__.safeUnitRandom)(random) * total;
+    let target = (0,_policy_number_utils__WEBPACK_IMPORTED_MODULE_3__.safeUnitRandom)(random) * total;
     for (const s of sources) {
         target -= Math.max(0, weights[s]);
         if (target < 0)
@@ -11937,8 +12684,8 @@ function selectPoolReuseCandidate(value, survivorCount, random, nowMs, percentil
         return null;
     const scored = benchableEntries.map((entry) => ({
         entry,
-        score: (0,_pool__WEBPACK_IMPORTED_MODULE_0__.rawScore)(entry, (0,_policy_number_utils__WEBPACK_IMPORTED_MODULE_1__.safeNonNegative)(entry.lastValidatedAtMs), nowMs),
-        benched: isBenchRankedEntry(entry, (0,_pool__WEBPACK_IMPORTED_MODULE_0__.rawScore)(entry, (0,_policy_number_utils__WEBPACK_IMPORTED_MODULE_1__.safeNonNegative)(entry.lastValidatedAtMs), nowMs), percentiles),
+        score: (0,_pool__WEBPACK_IMPORTED_MODULE_0__.rawScore)(entry, (0,_policy_number_utils__WEBPACK_IMPORTED_MODULE_3__.safeNonNegative)(entry.lastValidatedAtMs), nowMs),
+        benched: isBenchRankedEntry(entry, (0,_pool__WEBPACK_IMPORTED_MODULE_0__.rawScore)(entry, (0,_policy_number_utils__WEBPACK_IMPORTED_MODULE_3__.safeNonNegative)(entry.lastValidatedAtMs), nowMs), percentiles),
     }));
     const eligible = keepAboveMedian(scored.filter((item) => item.benched !== true));
     const rotated = excludeMostRecentlySent(eligible);
@@ -11972,7 +12719,7 @@ function pickMessageId(ids, random) {
         .filter((id) => id.length > 0);
     if (validIds.length === 0)
         return '0';
-    return validIds[Math.floor((0,_policy_number_utils__WEBPACK_IMPORTED_MODULE_1__.safeUnitRandom)(random) * validIds.length)] || '0';
+    return validIds[Math.floor((0,_policy_number_utils__WEBPACK_IMPORTED_MODULE_3__.safeUnitRandom)(random) * validIds.length)] || '0';
 }
 function normalizeMessageIndex(value) {
     return typeof value === 'string' ? value.trim() : '';
@@ -11984,8 +12731,8 @@ function normalizeBenchablePoolEntries(value) {
     return distinctPoolEntriesByContent(value, hasReusablePoolSurvival);
 }
 function hasReusablePoolSurvival(entry) {
-    return (0,_policy_number_utils__WEBPACK_IMPORTED_MODULE_1__.safeNonNegative)(entry.survived) >= _pool__WEBPACK_IMPORTED_MODULE_0__.MESSAGE_SAFETY.MIN_SURVIVOR_SURVIVED
-        && (0,_policy_number_utils__WEBPACK_IMPORTED_MODULE_1__.safeNonNegative)(entry.survived) > (0,_policy_number_utils__WEBPACK_IMPORTED_MODULE_1__.safeNonNegative)(entry.deleted);
+    return (0,_policy_number_utils__WEBPACK_IMPORTED_MODULE_3__.safeNonNegative)(entry.survived) >= _pool__WEBPACK_IMPORTED_MODULE_0__.MESSAGE_SAFETY.MIN_SURVIVOR_SURVIVED
+        && (0,_policy_number_utils__WEBPACK_IMPORTED_MODULE_3__.safeNonNegative)(entry.survived) > (0,_policy_number_utils__WEBPACK_IMPORTED_MODULE_3__.safeNonNegative)(entry.deleted);
 }
 /** Read-time compatibility for historical pools that used a non-canonical stored key. */
 function distinctPoolEntriesByContent(value, include) {
@@ -12005,19 +12752,19 @@ function distinctPoolEntriesByContent(value, include) {
     return [...byContentKey.values()];
 }
 function isMoreRecentPoolEntry(candidate, current) {
-    return (0,_policy_number_utils__WEBPACK_IMPORTED_MODULE_1__.safeNonNegative)(candidate.lastValidatedAtMs) > (0,_policy_number_utils__WEBPACK_IMPORTED_MODULE_1__.safeNonNegative)(current.lastValidatedAtMs)
-        || ((0,_policy_number_utils__WEBPACK_IMPORTED_MODULE_1__.safeNonNegative)(candidate.lastValidatedAtMs) === (0,_policy_number_utils__WEBPACK_IMPORTED_MODULE_1__.safeNonNegative)(current.lastValidatedAtMs)
-            && (0,_policy_number_utils__WEBPACK_IMPORTED_MODULE_1__.safeNonNegative)(candidate.lastSentAtMs) > (0,_policy_number_utils__WEBPACK_IMPORTED_MODULE_1__.safeNonNegative)(current.lastSentAtMs));
+    return (0,_policy_number_utils__WEBPACK_IMPORTED_MODULE_3__.safeNonNegative)(candidate.lastValidatedAtMs) > (0,_policy_number_utils__WEBPACK_IMPORTED_MODULE_3__.safeNonNegative)(current.lastValidatedAtMs)
+        || ((0,_policy_number_utils__WEBPACK_IMPORTED_MODULE_3__.safeNonNegative)(candidate.lastValidatedAtMs) === (0,_policy_number_utils__WEBPACK_IMPORTED_MODULE_3__.safeNonNegative)(current.lastValidatedAtMs)
+            && (0,_policy_number_utils__WEBPACK_IMPORTED_MODULE_3__.safeNonNegative)(candidate.lastSentAtMs) > (0,_policy_number_utils__WEBPACK_IMPORTED_MODULE_3__.safeNonNegative)(current.lastSentAtMs));
 }
 function isPoolEntry(value) {
-    return (0,_utils_guards__WEBPACK_IMPORTED_MODULE_2__.isRecord)(value)
+    return (0,_utils_guards__WEBPACK_IMPORTED_MODULE_4__.isRecord)(value)
         && typeof value['key'] === 'string'
         && typeof value['text'] === 'string'
         && (0,_pool__WEBPACK_IMPORTED_MODULE_0__.isMessageSource)(value['source']);
 }
 function shouldReusePartialPool(survivorCount, random) {
-    const probability = Math.max(0, Math.min(1, (0,_policy_number_utils__WEBPACK_IMPORTED_MODULE_1__.safeNonNegative)(survivorCount) / _pool__WEBPACK_IMPORTED_MODULE_0__.MESSAGE_SAFETY.PROVEN_SURVIVOR_TARGET));
-    return probability > 0 && (0,_policy_number_utils__WEBPACK_IMPORTED_MODULE_1__.safeUnitRandom)(random) < probability;
+    const probability = Math.max(0, Math.min(1, (0,_policy_number_utils__WEBPACK_IMPORTED_MODULE_3__.safeNonNegative)(survivorCount) / _pool__WEBPACK_IMPORTED_MODULE_0__.MESSAGE_SAFETY.PROVEN_SURVIVOR_TARGET));
+    return probability > 0 && (0,_policy_number_utils__WEBPACK_IMPORTED_MODULE_3__.safeUnitRandom)(random) < probability;
 }
 function createSourceCandidate(source, availableMessageIds, random) {
     if (source === 'ai') {
@@ -12067,14 +12814,14 @@ function selectBenchedProbeCandidate(entries, nowMs, minSendIntervalMs) {
     const due = entries
         .filter((item) => item.benched === true)
         .filter((item) => {
-        const lastSentAtMs = (0,_policy_number_utils__WEBPACK_IMPORTED_MODULE_1__.safeNonNegative)(item.entry.lastSentAtMs);
+        const lastSentAtMs = (0,_policy_number_utils__WEBPACK_IMPORTED_MODULE_3__.safeNonNegative)(item.entry.lastSentAtMs);
         return lastSentAtMs <= 0 || nowMs - lastSentAtMs >= probeIntervalMs;
     })
-        .sort((left, right) => (0,_policy_number_utils__WEBPACK_IMPORTED_MODULE_1__.safeNonNegative)(left.entry.lastSentAtMs) - (0,_policy_number_utils__WEBPACK_IMPORTED_MODULE_1__.safeNonNegative)(right.entry.lastSentAtMs));
+        .sort((left, right) => (0,_policy_number_utils__WEBPACK_IMPORTED_MODULE_3__.safeNonNegative)(left.entry.lastSentAtMs) - (0,_policy_number_utils__WEBPACK_IMPORTED_MODULE_3__.safeNonNegative)(right.entry.lastSentAtMs));
     return due[0] ?? null;
 }
 function resolveBenchedProbeIntervalMs(value) {
-    const safeIntervalMs = typeof value === 'number' ? (0,_policy_number_utils__WEBPACK_IMPORTED_MODULE_1__.safeNonNegative)(value) : 0;
+    const safeIntervalMs = typeof value === 'number' ? (0,_policy_number_utils__WEBPACK_IMPORTED_MODULE_3__.safeNonNegative)(value) : 0;
     const baseIntervalMs = Math.max(_pool__WEBPACK_IMPORTED_MODULE_0__.POOL.MIN_SEND_INTERVAL_FLOOR_MS, safeIntervalMs);
     return Math.max(baseIntervalMs * 12, 60 * 60 * 1000);
 }
@@ -12088,17 +12835,17 @@ function keepAboveMedian(entries) {
 function excludeMostRecentlySent(entries) {
     if (entries.length <= 1)
         return entries;
-    const mostRecent = Math.max(...entries.map((entry) => (0,_policy_number_utils__WEBPACK_IMPORTED_MODULE_1__.safeNonNegative)(entry.entry.lastSentAtMs)));
+    const mostRecent = Math.max(...entries.map((entry) => (0,_policy_number_utils__WEBPACK_IMPORTED_MODULE_3__.safeNonNegative)(entry.entry.lastSentAtMs)));
     if (mostRecent <= 0)
         return entries;
-    const rotated = entries.filter((entry) => (0,_policy_number_utils__WEBPACK_IMPORTED_MODULE_1__.safeNonNegative)(entry.entry.lastSentAtMs) < mostRecent);
+    const rotated = entries.filter((entry) => (0,_policy_number_utils__WEBPACK_IMPORTED_MODULE_3__.safeNonNegative)(entry.entry.lastSentAtMs) < mostRecent);
     return rotated.length > 0 ? rotated : entries;
 }
 function pickWeightedEntry(entries, random) {
     if (entries.length === 0)
         return null;
     const totalWeight = entries.reduce((sum, entry) => sum + Math.max(entry.score, 0.000001), 0);
-    const target = (0,_policy_number_utils__WEBPACK_IMPORTED_MODULE_1__.safeUnitRandom)(random) * totalWeight;
+    const target = (0,_policy_number_utils__WEBPACK_IMPORTED_MODULE_3__.safeUnitRandom)(random) * totalWeight;
     let running = 0;
     for (const entry of entries) {
         running += Math.max(entry.score, 0.000001);
@@ -13420,8 +14167,8 @@ class BasePromotionEngine {
     /**
      * The runner's ranked-selection read (adapter.getIntelligenceDocs). An app whose loadChannelsForRunner
      * warms intelligenceDocCache over the same candidates opts in via runnerIntelligenceFromCycleCache:
-     * then warmed docs come from the cache and only the ids not warmed this cycle are read (full docs,
-     * since selection needs them). Otherwise a fresh batchGet, as before.
+     * then warmed docs come from the cache and only the ids not warmed this cycle are read, without
+     * messagePool (selection never reads it). Otherwise a fresh batchGet, as before.
      */
     async getSelectionIntelligenceDocsForRunner(channelIds) {
         const cache = this.intelligenceDocCache;
@@ -13442,8 +14189,14 @@ class BasePromotionEngine {
                 missing.push(id);
             }
         }
-        if (missing.length > 0)
-            out.push(...(await this.getIntelligenceDocsForRunner(missing)));
+        if (missing.length > 0) {
+            // Cache misses: selection reads no messagePool, so leave it out of the read (review 2026-11-27).
+            const account = this.promotionContext ?? this.refreshPromotionContext();
+            const intelligence = account.intelligence;
+            out.push(...(typeof intelligence.batchGetForSelection === 'function'
+                ? await intelligence.batchGetForSelection(missing)
+                : await this.getIntelligenceDocsForRunner(missing)));
+        }
         return out;
     }
     /**
@@ -15692,11 +16445,13 @@ class RedisAccountExploration {
             const used = toCount(await this.redis.get(usedKey));
             let remaining = Math.max(0, UNPROVEN_PER_HOUR_WHEN_RESTRICTED - used);
             let charged = 0;
-            for (const channelId of orderedChannelIds) {
-                const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_0__.normalizeChannelId)(channelId);
-                if (!safeChannelId || denied.has(safeChannelId))
+            // Proven flags: one MGET when the client has it, else one GET per channel (as before).
+            const ids = Array.from(new Set(orderedChannelIds.map((id) => (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_0__.normalizeChannelId)(id)).filter((id) => !!id)));
+            const proven = await this.provenFlags(safeMobile, ids);
+            for (const safeChannelId of ids) {
+                if (denied.has(safeChannelId))
                     continue;
-                if (await this.isProvenKey(`promote:chanok:${safeMobile}:${safeChannelId}`))
+                if (proven.has(safeChannelId))
                     continue;
                 if (remaining > 0) {
                     remaining -= 1;
@@ -15721,6 +16476,26 @@ class RedisAccountExploration {
         if (!safeMobile || !safeChannelId)
             return null;
         return { proven: `promote:chanok:${safeMobile}:${safeChannelId}`, streak: `promote:explore:streak:${safeMobile}` };
+    }
+    async provenFlags(safeMobile, ids) {
+        const out = new Set();
+        if (ids.length === 0)
+            return out;
+        const keys = ids.map((id) => `promote:chanok:${safeMobile}:${id}`);
+        if (typeof this.redis.mget === 'function') {
+            const values = await this.redis.mget(...keys);
+            ids.forEach((id, index) => {
+                const raw = Array.isArray(values) ? values[index] : null;
+                if (raw !== null && raw !== undefined)
+                    out.add(id);
+            });
+            return out;
+        }
+        for (let index = 0; index < ids.length; index += 1) {
+            if (await this.isProvenKey(keys[index]))
+                out.add(ids[index]);
+        }
+        return out;
     }
     async isProvenKey(key) {
         const raw = await this.redis.get(key);
@@ -16423,12 +17198,23 @@ async function readChannelStates(redis, app, mobile, nowMs) {
 
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   CLIENT_SEND_HISTORY: () => (/* binding */ CLIENT_SEND_HISTORY),
+/* harmony export */   CLIENT_SEND_MAX_CHANNELS: () => (/* binding */ CLIENT_SEND_MAX_CHANNELS),
+/* harmony export */   CLIENT_SEND_TTL_SECONDS: () => (/* binding */ CLIENT_SEND_TTL_SECONDS),
+/* harmony export */   CONVERSION_ALLOCATION_TTL_SECONDS: () => (/* binding */ CONVERSION_ALLOCATION_TTL_SECONDS),
+/* harmony export */   CONVERSION_CLAIM_DONE: () => (/* binding */ CONVERSION_CLAIM_DONE),
+/* harmony export */   CONVERSION_CLAIM_PENDING: () => (/* binding */ CONVERSION_CLAIM_PENDING),
+/* harmony export */   CONVERSION_CLAIM_PENDING_TTL_SECONDS: () => (/* binding */ CONVERSION_CLAIM_PENDING_TTL_SECONDS),
+/* harmony export */   CONVERSION_CLAIM_TTL_SECONDS: () => (/* binding */ CONVERSION_CLAIM_TTL_SECONDS),
 /* harmony export */   ROUTE_PENDING_TTL_SECONDS: () => (/* binding */ ROUTE_PENDING_TTL_SECONDS),
 /* harmony export */   RedisPromotionTracker: () => (/* binding */ RedisPromotionTracker)
 /* harmony export */ });
-/* harmony import */ var _utils_channel_id__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ../utils/channel-id */ "../../packages/tg-channel-state/src/channel-message-promotions/utils/channel-id.ts");
-/* harmony import */ var _utils_guards__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../../utils/guards */ "../../packages/tg-channel-state/src/utils/guards.ts");
-/* harmony import */ var _redis_utils__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./redis-utils */ "../../packages/tg-channel-state/src/channel-message-promotions/redis/redis-utils.ts");
+/* harmony import */ var node_crypto__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! node:crypto */ "node:crypto");
+/* harmony import */ var node_crypto__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(node_crypto__WEBPACK_IMPORTED_MODULE_0__);
+/* harmony import */ var _utils_channel_id__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ../utils/channel-id */ "../../packages/tg-channel-state/src/channel-message-promotions/utils/channel-id.ts");
+/* harmony import */ var _utils_guards__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ../../utils/guards */ "../../packages/tg-channel-state/src/utils/guards.ts");
+/* harmony import */ var _redis_utils__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ./redis-utils */ "../../packages/tg-channel-state/src/channel-message-promotions/redis/redis-utils.ts");
+/* harmony import */ var _selection_picker__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ../selection/picker */ "../../packages/tg-channel-state/src/channel-message-promotions/selection/picker.ts");
 /**
  * Redis state for promotion history and conversion coordination.
  *
@@ -16443,10 +17229,39 @@ __webpack_require__.r(__webpack_exports__);
 
 
 
+
+
 const MOBILE_HISTORY_TTL = 7200; // 2 hours
 const CHANNEL_LAST_MOBILE_TTL = 7200; // 2 hours, aligned with attribution window
-const CONVERSION_CLAIM_TTL = 3 * 3600; // Covers the attribution window plus retry overlap.
+// 25 h: routed DMs are attributed by the promote sweep, which retries for up to 24 h
+// (PENDING_ROUTE_TTL_MS). A shorter claim let a retry after it expired re-credit channels.
+const CONVERSION_CLAIM_TTL_SECONDS = 25 * 3600;
+const CONVERSION_CLAIM_PENDING = 'pending';
+/** A pending claim (holder working) lives 10 min, so a crashed holder frees it; `done` lives 25 h. */
+const CONVERSION_CLAIM_PENDING_TTL_SECONDS = 10 * 60;
+const CONVERSION_CLAIM_DONE = 'done';
+/**
+ * The first channel allocation of a DM conversion (2026-11-27): promote:alloc:<conversionId> =
+ * JSON {ch: channelIds, hit: {channelId: arm | ''}} (hit = channels that earned dm2h, with the arm of
+ * the main send). SET NX, so the direct (tg-aut) and routed (promote) paths, and every retry, credit
+ * the same channel set with the same dm2h split. Same TTL as the claims.
+ */
+const CONVERSION_ALLOCATION_TTL_SECONDS = CONVERSION_CLAIM_TTL_SECONDS;
 const ROUTE_PENDING_TTL_SECONDS = 20 * 60;
+/**
+ * Per client + channel delivered-send history for the DM score's 2 h gate (2026-11-27):
+ *   promote:dm2hs:<clientId>:<channelId>  = sorted set, score = delivery time (ms), member =
+ *                                           "<ms>:<arm or ->:<mobile>"
+ * Trimmed by TIME (entries older than 26 h go on every write), so newer sends never push out the
+ * send that earned a DM; CLIENT_SEND_HISTORY is only a hard memory bound (a promote mobile sends a
+ * channel at most about twice an hour, so 26 h of one client is far below it). TTL 26 h: routed DMs
+ * are attributed by the promote sweep, which retries for up to 24 h (PENDING_ROUTE_TTL_MS), and the
+ * earned send can be up to 2 h before the DM. Read: one pipelined ZRANGEBYSCORE per channel over the
+ * DM's 2 h window only, at most CLIENT_SEND_MAX_CHANNELS channels per read.
+ */
+const CLIENT_SEND_TTL_SECONDS = 26 * 3600;
+const CLIENT_SEND_HISTORY = 256;
+const CLIENT_SEND_MAX_CHANNELS = 100;
 const MAX_HISTORY_SIZE = 50;
 class RedisPromotionTracker {
     constructor(redis) {
@@ -16456,7 +17271,7 @@ class RedisPromotionTracker {
         this.redis = redis;
     }
     static init(redis, options = {}) {
-        if (!RedisPromotionTracker.instance || (0,_utils_guards__WEBPACK_IMPORTED_MODULE_1__.shouldReplace)(options)) {
+        if (!RedisPromotionTracker.instance || (0,_utils_guards__WEBPACK_IMPORTED_MODULE_2__.shouldReplace)(options)) {
             RedisPromotionTracker.instance = new RedisPromotionTracker(redis);
         }
         return RedisPromotionTracker.instance;
@@ -16474,13 +17289,16 @@ class RedisPromotionTracker {
      * Record a successful promotion send.
      * Keyed by MOBILE NUMBER for accurate attribution.
      */
-    async recordSend(channelId, mobile, clientId) {
-        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_0__.normalizeChannelId)(channelId);
-        const safeMobile = (0,_redis_utils__WEBPACK_IMPORTED_MODULE_2__.normalizeKeyPart)(mobile);
-        const safeClientId = (0,_redis_utils__WEBPACK_IMPORTED_MODULE_2__.normalizeKeyPart)(clientId);
+    async recordSend(channelId, mobile, clientId, arm = null, deliveredAtMs = null) {
+        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_1__.normalizeChannelId)(channelId);
+        const safeMobile = (0,_redis_utils__WEBPACK_IMPORTED_MODULE_3__.normalizeKeyPart)(mobile);
+        const safeClientId = (0,_redis_utils__WEBPACK_IMPORTED_MODULE_3__.normalizeKeyPart)(clientId);
         if (!safeChannelId || !safeMobile || !safeClientId)
             return;
-        const timestamp = Date.now();
+        // The delivery time the caller saw (before its Mongo/hook writes), else now.
+        const timestamp = typeof deliveredAtMs === 'number' && Number.isFinite(deliveredAtMs) && deliveredAtMs > 0
+            ? Math.floor(deliveredAtMs)
+            : Date.now();
         const data = JSON.stringify({
             channelId: safeChannelId,
             mobile: safeMobile,
@@ -16497,6 +17315,15 @@ class RedisPromotionTracker {
         pipeline.ltrim(mobileKey, 0, MAX_HISTORY_SIZE - 1);
         pipeline.expire(mobileKey, MOBILE_HISTORY_TTL);
         pipeline.set(channelKey, JSON.stringify({ mobile: safeMobile, clientId: safeClientId, timestamp }), 'EX', CHANNEL_LAST_MOBILE_TTL);
+        // Feature-detected: ioredis pipelines have the sorted-set commands; a client without them keeps
+        // the attribution keys above and simply has no dm2h history (the gate then credits no dm2h).
+        if (typeof pipeline.zadd === 'function' && typeof pipeline.zremrangebyscore === 'function' && typeof pipeline.zremrangebyrank === 'function') {
+            const sendKey = clientSendKey(safeClientId, safeChannelId);
+            pipeline.zadd(sendKey, timestamp, `${timestamp}:${(0,_selection_picker__WEBPACK_IMPORTED_MODULE_4__.isMessageArm)(arm) ? arm : '-'}:${safeMobile}`);
+            pipeline.zremrangebyscore(sendKey, '-inf', timestamp - CLIENT_SEND_TTL_SECONDS * 1000);
+            pipeline.zremrangebyrank(sendKey, 0, -(CLIENT_SEND_HISTORY + 1));
+            pipeline.expire(sendKey, CLIENT_SEND_TTL_SECONDS);
+        }
         const execResult = await pipeline.exec();
         const pipelineError = getPipelineExecError(execResult);
         if (pipelineError) {
@@ -16504,10 +17331,77 @@ class RedisPromotionTracker {
         }
     }
     /**
+     * This client's delivered sends per channel inside [fromMs, toMs] (the DM's 2 h window), for the
+     * DM 2 h gate. One pipeline (one round trip) of ZRANGEBYSCORE, at most CLIENT_SEND_MAX_CHANNELS
+     * channels. Channels with no send in the window are absent. Throws when the read fails, so the
+     * caller can keep its claims for a retry.
+     */
+    async getClientSends(clientId, channelIds, window = null) {
+        const out = new Map();
+        const safeClientId = (0,_redis_utils__WEBPACK_IMPORTED_MODULE_3__.normalizeKeyPart)(clientId);
+        if (!safeClientId)
+            return out;
+        const ids = Array.from(new Set(channelIds.map((id) => (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_1__.normalizeChannelId)(id)).filter((id) => !!id)))
+            .slice(0, CLIENT_SEND_MAX_CHANNELS);
+        if (ids.length === 0)
+            return out;
+        const toMs = window && Number.isFinite(window.toMs) ? window.toMs : Date.now();
+        const fromMs = window && Number.isFinite(window.fromMs) ? window.fromMs : toMs - CLIENT_SEND_TTL_SECONDS * 1000;
+        const pipeline = this.redis.pipeline();
+        if (!(0,_utils_guards__WEBPACK_IMPORTED_MODULE_2__.isRecord)(pipeline) || typeof pipeline.zrangebyscore !== 'function' || typeof pipeline.exec !== 'function') {
+            throw new Error('RedisPromotionTracker redis pipeline ZRANGEBYSCORE is required to read send history');
+        }
+        for (const id of ids)
+            pipeline.zrangebyscore(clientSendKey(safeClientId, id), fromMs, toMs);
+        const results = await pipeline.exec();
+        const pipelineError = getPipelineExecError(results);
+        if (pipelineError)
+            throw new Error(`RedisPromotionTracker send history read failed: ${pipelineError}`);
+        ids.forEach((id, index) => {
+            const row = Array.isArray(results) ? results[index] : null;
+            const members = normalizeRedisList(Array.isArray(row) ? row[1] : row);
+            const sends = [];
+            for (const raw of members) {
+                const [msRaw = '', armRaw = ''] = raw.split(':');
+                const atMs = parsePositiveMs(msRaw);
+                if (atMs === null)
+                    continue;
+                sends.push({ atMs, arm: (0,_selection_picker__WEBPACK_IMPORTED_MODULE_4__.isMessageArm)(armRaw) ? armRaw : null });
+            }
+            sends.sort((a, b) => b.atMs - a.atMs);
+            if (sends.length > 0)
+                out.set(id, { sends });
+        });
+        return out;
+    }
+    /** The stored first allocation of a DM conversion, or null. Throws when the read fails. */
+    async getConversionAllocation(conversionId) {
+        const safeConversionId = (0,_redis_utils__WEBPACK_IMPORTED_MODULE_3__.normalizeKeyPart)(conversionId);
+        if (!safeConversionId)
+            return null;
+        return parseConversionAllocation(await this.redis.get(allocationKey(safeConversionId)));
+    }
+    /**
+     * Store the first allocation of a DM conversion (SET NX). Returns the allocation that holds: this
+     * one when it was stored, else the one stored first (a racing direct/routed attribution).
+     */
+    async claimConversionAllocation(conversionId, allocation) {
+        const safeConversionId = (0,_redis_utils__WEBPACK_IMPORTED_MODULE_3__.normalizeKeyPart)(conversionId);
+        if (!safeConversionId)
+            return allocation;
+        const result = await this.redis.set(allocationKey(safeConversionId), JSON.stringify(allocation), 'EX', CONVERSION_ALLOCATION_TTL_SECONDS, 'NX');
+        if (result === 'OK' || result === 1 || result === true)
+            return allocation;
+        const stored = parseConversionAllocation(await this.redis.get(allocationKey(safeConversionId)));
+        if (!stored)
+            throw new Error('RedisPromotionTracker conversion allocation exists but is unreadable');
+        return stored;
+    }
+    /**
      * Get promotion history for a mobile number.
      */
     async getMobileHistory(mobile) {
-        const safeMobile = (0,_redis_utils__WEBPACK_IMPORTED_MODULE_2__.normalizeKeyPart)(mobile);
+        const safeMobile = (0,_redis_utils__WEBPACK_IMPORTED_MODULE_3__.normalizeKeyPart)(mobile);
         if (!safeMobile)
             return [];
         const key = `promote:mobile:${safeMobile}:history`;
@@ -16524,7 +17418,7 @@ class RedisPromotionTracker {
      * Get which mobile last promoted to a channel.
      */
     async getLastPromoter(channelId) {
-        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_0__.normalizeChannelId)(channelId);
+        const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_1__.normalizeChannelId)(channelId);
         if (!safeChannelId)
             return null;
         const key = `promote:channel:${safeChannelId}:lastMobile`;
@@ -16540,21 +17434,21 @@ class RedisPromotionTracker {
      * attribution, which preserves source-account ownership for routed DMs.
      */
     async markRoutePending(conversionId) {
-        const safeConversionId = (0,_redis_utils__WEBPACK_IMPORTED_MODULE_2__.normalizeKeyPart)(conversionId);
+        const safeConversionId = (0,_redis_utils__WEBPACK_IMPORTED_MODULE_3__.normalizeKeyPart)(conversionId);
         if (!safeConversionId)
             return false;
         const result = await this.redis.set(`promote:route-pending:${safeConversionId}`, 'pending', 'EX', ROUTE_PENDING_TTL_SECONDS);
         return result === 'OK' || result === 1 || result === true;
     }
     async isRoutePending(conversionId) {
-        const safeConversionId = (0,_redis_utils__WEBPACK_IMPORTED_MODULE_2__.normalizeKeyPart)(conversionId);
+        const safeConversionId = (0,_redis_utils__WEBPACK_IMPORTED_MODULE_3__.normalizeKeyPart)(conversionId);
         if (!safeConversionId)
             return false;
         return (await this.redis.get(`promote:route-pending:${safeConversionId}`)) !== null;
     }
     /** Clear a pre-send marker when the route CTA was not delivered. */
     async clearRoutePending(conversionId) {
-        const safeConversionId = (0,_redis_utils__WEBPACK_IMPORTED_MODULE_2__.normalizeKeyPart)(conversionId);
+        const safeConversionId = (0,_redis_utils__WEBPACK_IMPORTED_MODULE_3__.normalizeKeyPart)(conversionId);
         if (!safeConversionId)
             return;
         if (typeof this.redis.del !== 'function') {
@@ -16565,28 +17459,128 @@ class RedisPromotionTracker {
     /**
      * Atomically reserve one DM conversion for attribution. A repeated Telegram
      * update for the same chat must never credit channel intelligence twice.
+     * The claim is `pending:<token>` for CONVERSION_CLAIM_PENDING_TTL_SECONDS (a crashed holder frees
+     * it), then `done` for CONVERSION_CLAIM_TTL_SECONDS (completeConversion). Returns the owner token,
+     * or false when another path holds the claim.
      */
     async claimConversion(conversionId) {
-        const safeConversionId = (0,_redis_utils__WEBPACK_IMPORTED_MODULE_2__.normalizeKeyPart)(conversionId);
+        const safeConversionId = (0,_redis_utils__WEBPACK_IMPORTED_MODULE_3__.normalizeKeyPart)(conversionId);
         if (!safeConversionId)
             return false;
-        const result = await this.redis.set(`promote:conversion:${safeConversionId}`, 'claimed', 'EX', CONVERSION_CLAIM_TTL, 'NX');
-        return result === 'OK' || result === 1 || result === true;
+        const token = (0,node_crypto__WEBPACK_IMPORTED_MODULE_0__.randomUUID)();
+        const result = await this.redis.set(`promote:conversion:${safeConversionId}`, `${CONVERSION_CLAIM_PENDING}:${token}`, 'EX', CONVERSION_CLAIM_PENDING_TTL_SECONDS, 'NX');
+        return result === 'OK' || result === 1 || result === true ? token : false;
+    }
+    /**
+     * Mark the claim `done` (25 h) only while this owner still holds it. Returns false when the claim
+     * is no longer ours (expired, reclaimed); throws on a Redis error. A token-less call (an older
+     * claim) sets done unconditionally.
+     */
+    async completeConversion(conversionId, token) {
+        const safeConversionId = (0,_redis_utils__WEBPACK_IMPORTED_MODULE_3__.normalizeKeyPart)(conversionId);
+        if (!safeConversionId)
+            return false;
+        const key = `promote:conversion:${safeConversionId}`;
+        if (!token) {
+            await this.redis.set(key, CONVERSION_CLAIM_DONE, 'EX', CONVERSION_CLAIM_TTL_SECONDS);
+            return true;
+        }
+        const expected = `${CONVERSION_CLAIM_PENDING}:${token}`;
+        if (typeof this.redis.eval === 'function') {
+            return Number(await this.redis.eval(CLAIM_DONE_IF_OWNER_SCRIPT, 1, key, expected, CONVERSION_CLAIM_DONE, CONVERSION_CLAIM_TTL_SECONDS)) === 1;
+        }
+        // No EVAL: compare then set (a tiny race window, accepted; the CAS above is the normal path).
+        if ((await this.redis.get(key)) !== expected)
+            return false;
+        await this.redis.set(key, CONVERSION_CLAIM_DONE, 'EX', CONVERSION_CLAIM_TTL_SECONDS);
+        return true;
+    }
+    /** 'pending' = another path holds the claim and has not finished; 'done' = finished; null = no claim. */
+    async conversionClaimState(conversionId) {
+        const safeConversionId = (0,_redis_utils__WEBPACK_IMPORTED_MODULE_3__.normalizeKeyPart)(conversionId);
+        if (!safeConversionId)
+            return null;
+        const value = await this.redis.get(`promote:conversion:${safeConversionId}`);
+        if (value === null || value === undefined)
+            return null;
+        // Older builds wrote 'claimed' for a finished claim.
+        return value === CONVERSION_CLAIM_PENDING || String(value).startsWith(`${CONVERSION_CLAIM_PENDING}:`) ? 'pending' : 'done';
     }
     /**
      * Release a conversion only when no analytics write succeeded. This lets a
      * later delivery retry transient storage failures without reopening claims
-     * that already produced partial credit.
+     * that already produced partial credit. With a token, only the owner's own
+     * pending claim is deleted; someone else's claim is never touched.
      */
-    async releaseConversion(conversionId) {
-        const safeConversionId = (0,_redis_utils__WEBPACK_IMPORTED_MODULE_2__.normalizeKeyPart)(conversionId);
+    async releaseConversion(conversionId, token) {
+        const safeConversionId = (0,_redis_utils__WEBPACK_IMPORTED_MODULE_3__.normalizeKeyPart)(conversionId);
         if (!safeConversionId)
             return;
         if (typeof this.redis.del !== 'function') {
             throw new Error('RedisPromotionTracker redis DEL is required to release a conversion');
         }
-        await this.redis.del(`promote:conversion:${safeConversionId}`);
+        const key = `promote:conversion:${safeConversionId}`;
+        if (!token) {
+            await this.redis.del(key);
+            return;
+        }
+        const expected = `${CONVERSION_CLAIM_PENDING}:${token}`;
+        if (typeof this.redis.eval === 'function') {
+            await this.redis.eval(CLAIM_RELEASE_IF_OWNER_SCRIPT, 1, key, expected);
+            return;
+        }
+        if ((await this.redis.get(key)) === expected)
+            await this.redis.del(key);
     }
+}
+/** KEYS[1] claim; ARGV: expected owner value, done value, done TTL seconds. 1 = marked done. */
+const CLAIM_DONE_IF_OWNER_SCRIPT = [
+    "if redis.call('GET', KEYS[1]) == ARGV[1] then",
+    "  redis.call('SET', KEYS[1], ARGV[2], 'EX', tonumber(ARGV[3]))",
+    "  return 1",
+    "end",
+    "return 0",
+].join('\n');
+/** KEYS[1] claim; ARGV[1] expected owner value. Deletes only the owner's own claim. */
+const CLAIM_RELEASE_IF_OWNER_SCRIPT = [
+    "if redis.call('GET', KEYS[1]) == ARGV[1] then",
+    "  return redis.call('DEL', KEYS[1])",
+    "end",
+    "return 0",
+].join('\n');
+function clientSendKey(clientId, channelId) {
+    return `promote:dm2hs:${clientId}:${channelId}`;
+}
+function allocationKey(conversionId) {
+    return `promote:alloc:${conversionId}`;
+}
+function parseConversionAllocation(raw) {
+    if (typeof raw !== 'string' || raw === '')
+        return null;
+    let value;
+    try {
+        value = JSON.parse(raw);
+    }
+    catch {
+        return null;
+    }
+    if (!(0,_utils_guards__WEBPACK_IMPORTED_MODULE_2__.isRecord)(value) || !Array.isArray(value['ch']))
+        return null;
+    const ch = value['ch'].filter((id) => typeof id === 'string' && id !== '');
+    const hit = {};
+    if ((0,_utils_guards__WEBPACK_IMPORTED_MODULE_2__.isRecord)(value['hit'])) {
+        for (const [id, arm] of Object.entries(value['hit'])) {
+            if (ch.includes(id))
+                hit[id] = (0,_selection_picker__WEBPACK_IMPORTED_MODULE_4__.isMessageArm)(arm) ? arm : '';
+        }
+    }
+    return { ch, hit };
+}
+function parsePositiveMs(value) {
+    if (typeof value !== 'string' || value.trim() === '')
+        return null;
+    const n = Number(value);
+    return Number.isFinite(n) && n > 0 ? n : null;
 }
 function parseJson(value) {
     try {
@@ -16597,21 +17591,21 @@ function parseJson(value) {
     }
 }
 function normalizeSendRecord(value) {
-    if (!(0,_utils_guards__WEBPACK_IMPORTED_MODULE_1__.isRecord)(value))
+    if (!(0,_utils_guards__WEBPACK_IMPORTED_MODULE_2__.isRecord)(value))
         return null;
-    const channelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_0__.normalizeChannelId)(value['channelId']);
-    const mobile = (0,_redis_utils__WEBPACK_IMPORTED_MODULE_2__.normalizeKeyPart)(value['mobile']);
-    const clientId = (0,_redis_utils__WEBPACK_IMPORTED_MODULE_2__.normalizeKeyPart)(value['clientId']);
+    const channelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_1__.normalizeChannelId)(value['channelId']);
+    const mobile = (0,_redis_utils__WEBPACK_IMPORTED_MODULE_3__.normalizeKeyPart)(value['mobile']);
+    const clientId = (0,_redis_utils__WEBPACK_IMPORTED_MODULE_3__.normalizeKeyPart)(value['clientId']);
     const timestamp = value['timestamp'];
     if (!channelId || !mobile || !clientId || !isValidAttributionTimestamp(timestamp, MOBILE_HISTORY_TTL))
         return null;
     return { channelId, mobile, clientId, timestamp };
 }
 function normalizeLastPromoter(value) {
-    if (!(0,_utils_guards__WEBPACK_IMPORTED_MODULE_1__.isRecord)(value))
+    if (!(0,_utils_guards__WEBPACK_IMPORTED_MODULE_2__.isRecord)(value))
         return null;
-    const mobile = (0,_redis_utils__WEBPACK_IMPORTED_MODULE_2__.normalizeKeyPart)(value['mobile']);
-    const clientId = (0,_redis_utils__WEBPACK_IMPORTED_MODULE_2__.normalizeKeyPart)(value['clientId']);
+    const mobile = (0,_redis_utils__WEBPACK_IMPORTED_MODULE_3__.normalizeKeyPart)(value['mobile']);
+    const clientId = (0,_redis_utils__WEBPACK_IMPORTED_MODULE_3__.normalizeKeyPart)(value['clientId']);
     const timestamp = value['timestamp'];
     if (!mobile || !clientId || !isValidAttributionTimestamp(timestamp, CHANNEL_LAST_MOBILE_TTL))
         return null;
@@ -16624,14 +17618,14 @@ function isValidAttributionTimestamp(value, ttlSeconds) {
     return ageMs >= 0 && ageMs <= ttlSeconds * 1000;
 }
 function isRedisLike(value) {
-    return (0,_utils_guards__WEBPACK_IMPORTED_MODULE_1__.isRecord)(value)
+    return (0,_utils_guards__WEBPACK_IMPORTED_MODULE_2__.isRecord)(value)
         && typeof value['get'] === 'function'
         && typeof value['set'] === 'function'
         && typeof value['lrange'] === 'function'
         && typeof value['pipeline'] === 'function';
 }
 function isRedisPipelineLike(value) {
-    return (0,_utils_guards__WEBPACK_IMPORTED_MODULE_1__.isRecord)(value)
+    return (0,_utils_guards__WEBPACK_IMPORTED_MODULE_2__.isRecord)(value)
         && typeof value['lpush'] === 'function'
         && typeof value['ltrim'] === 'function'
         && typeof value['expire'] === 'function'
@@ -16974,10 +17968,11 @@ class PromotionAccountContext {
     get intelligence() {
         return this.runtime.intelligence;
     }
-    async recordSend(channelId) {
+    /** Delivered send for attribution. `arm` (main sends only) lets a DM within 2 h credit that message arm. */
+    async recordSend(channelId, arm = null, deliveredAtMs = null) {
         const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_12__.normalizeChannelId)(channelId);
         if (this.runtime.tracker && safeChannelId) {
-            await this.runtime.tracker.recordSend(safeChannelId, this.mobile, this.clientId);
+            await this.runtime.tracker.recordSend(safeChannelId, this.mobile, this.clientId, arm, deliveredAtMs);
         }
     }
     /** Permanently block a channel for THIS mobile (write/send forbidden, private, invalid). */
@@ -17010,7 +18005,7 @@ class PromotionAccountContext {
             return new Set();
         return this.runtime.exploration.deniedChannels(this.mobile, channelIds, options).catch((error) => { logger.warn(`exploration.deniedChannels failed for ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_15__.maskMobile)(this.mobile)}; failing open`, error); return new Set(); });
     }
-    async recordSuccess(channelId, isFollowup) {
+    async recordSuccess(channelId, isFollowup, arm = null) {
         const safeChannelId = (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_12__.normalizeChannelId)(channelId);
         if (!safeChannelId)
             return;
@@ -17023,7 +18018,7 @@ class PromotionAccountContext {
         if (this.runtime.exploration) {
             await this.runtime.exploration.recordDelivery(this.mobile, safeChannelId).catch((error) => { logger.warn(`exploration.recordDelivery failed for ${(0,_tg_core_utils_dc_ip_family__WEBPACK_IMPORTED_MODULE_15__.maskMobile)(this.mobile)}/${safeChannelId}`, error); });
         }
-        await this.runtime.intelligence.recordSuccess(safeChannelId, isFollowup);
+        await this.runtime.intelligence.recordSuccess(safeChannelId, isFollowup, arm);
         if (this.runtime.accountHealth) {
             await this.runtime.accountHealth.recordLanded(this.mobile);
         }
@@ -17393,7 +18388,15 @@ __webpack_require__.r(__webpack_exports__);
 const PROMOTION_EXPLORATION_SHARE = 0.20;
 function selectPromotionChannels(options) {
     const safeOptions = (0,_utils_guards__WEBPACK_IMPORTED_MODULE_2__.isRecord)(options) ? options : {};
-    const { channels: inputChannels, intelligenceDocs: inputIntelligenceDocs, batchTarget: inputBatchTarget = 0, blockedChannelIds: inputBlockedChannelIds = null, random = Math.random, rankScore = conversionSafetyPriorityScore, } = safeOptions;
+    const { channels: inputChannels, intelligenceDocs: inputIntelligenceDocs, batchTarget: inputBatchTarget = 0, blockedChannelIds: inputBlockedChannelIds = null, random = Math.random, rankScore = conversionSafetyPriorityScore, explorationShare: inputExplorationShare, exploreBelowAttempted: inputExploreBelowAttempted, isExploreCandidate: inputIsExploreCandidate, probabilisticExploration = false, } = safeOptions;
+    const explorationShare = typeof inputExplorationShare === 'number' && Number.isFinite(inputExplorationShare)
+        && inputExplorationShare > 0 && inputExplorationShare < 1
+        ? inputExplorationShare
+        : PROMOTION_EXPLORATION_SHARE;
+    const exploreBelowAttempted = typeof inputExploreBelowAttempted === 'number' && Number.isFinite(inputExploreBelowAttempted)
+        && inputExploreBelowAttempted >= 1
+        ? inputExploreBelowAttempted
+        : 1;
     // Channels this mobile cannot post in (per-mobile: USER_BANNED 3h / forbidden permanent). Filtered
     // out entirely in pre-flight so we never select an unsendable channel for this account.
     const blockedChannelIds = inputBlockedChannelIds instanceof Set
@@ -17465,7 +18468,7 @@ function selectPromotionChannels(options) {
             // Channel safety is the only channel-level exclusion in the simplified schema.
             skipped.push(channel);
         }
-        else if (isExploreCandidate(doc)) {
+        else if (typeof inputIsExploreCandidate === 'function' ? safeExploreTest(inputIsExploreCandidate, doc) : isExploreCandidate(doc, exploreBelowAttempted)) {
             explorationErrors.set(channelId, safeNonNegative(doc.safety.consecutiveErrors));
             explorationAttempts.set(channelId, safeNonNegative(doc.outcomes.attempted));
             explorationLastPromotedAt.set(channelId, safeNonNegative(doc.timestamps.lastPromotionAtMs));
@@ -17541,9 +18544,11 @@ function selectPromotionChannels(options) {
             provenIds.add(channelId);
         selected.push(channel);
     };
-    const explorationTarget = batchTarget >= 5 && untested.length > 0
-        ? Math.max(1, Math.floor(batchTarget * PROMOTION_EXPLORATION_SHARE))
-        : 0;
+    const explorationTarget = untested.length === 0
+        ? 0
+        : probabilisticExploration
+            ? randomRound(batchTarget * explorationShare, random)
+            : batchTarget >= 5 ? Math.max(1, Math.floor(batchTarget * explorationShare)) : 0;
     const provenTarget = Math.max(0, batchTarget - explorationTarget);
     const plannedProven = proven.slice(0, provenTarget);
     const plannedExploration = untested.slice(0, explorationTarget);
@@ -17551,11 +18556,18 @@ function selectPromotionChannels(options) {
         // Interleave the reserved lane instead of appending it at the tail. A paced
         // cycle can stop early when its daily budget is exhausted; 4:1 ordering
         // makes the intended 80/20 mix effective even in a partially-run cycle.
-        const exploitationStride = Math.max(1, Math.round((1 - PROMOTION_EXPLORATION_SHARE) / PROMOTION_EXPLORATION_SHARE));
+        const exploitationStride = Math.max(1, Math.round((1 - explorationShare) / explorationShare));
+        // Probabilistic (dm) mode: at 5-10% the stride (9 / 19) can exceed a small batch, putting its only
+        // explore slot last, where an early budget stop drops it. The first slot comes after at most
+        // half the batch instead; later slots keep the stride.
+        const firstRun = probabilisticExploration
+            ? Math.min(exploitationStride, Math.ceil((plannedProven.length + plannedExploration.length) / 2))
+            : exploitationStride;
         let provenIndex = 0;
         let explorationIndex = 0;
         while (provenIndex < plannedProven.length || explorationIndex < plannedExploration.length) {
-            for (let index = 0; index < exploitationStride && provenIndex < plannedProven.length; index += 1) {
+            const run = explorationIndex === 0 ? firstRun : exploitationStride;
+            for (let index = 0; index < run && provenIndex < plannedProven.length; index += 1) {
                 pushUnique(plannedProven[provenIndex++], true);
             }
             if (explorationIndex < plannedExploration.length) {
@@ -17595,8 +18607,24 @@ function normalizeChannel(value) {
         channelId,
     };
 }
-function isExploreCandidate(doc) {
-    return safeNonNegative(doc.outcomes.attempted) <= 0;
+/** Low-try: fewer than `belowAttempted` resolved sends (default 1 = never resolved). */
+/** floor(x), plus 1 with probability frac(x): its mean is exactly x. */
+function randomRound(x, random) {
+    if (!Number.isFinite(x) || x <= 0)
+        return 0;
+    const base = Math.floor(x);
+    return base + (safeUnitRandom(random) < x - base ? 1 : 0);
+}
+function safeExploreTest(test, doc) {
+    try {
+        return test(doc) === true;
+    }
+    catch {
+        return false;
+    }
+}
+function isExploreCandidate(doc, belowAttempted = 1) {
+    return safeNonNegative(doc.outcomes.attempted) < belowAttempted;
 }
 function normalizeSelectionIntelligence(value) {
     return (0,_channel_intelligence__WEBPACK_IMPORTED_MODULE_0__.isChannelIntelligence)(value) ? value : null;
@@ -17644,6 +18672,21 @@ function safeNonNegative(value) {
 
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   DEFAULT_PICKER_MODE: () => (/* reexport safe */ _picker__WEBPACK_IMPORTED_MODULE_1__.DEFAULT_PICKER_MODE),
+/* harmony export */   DM2H_MIN_DELIVERED: () => (/* reexport safe */ _picker__WEBPACK_IMPORTED_MODULE_1__.DM2H_MIN_DELIVERED),
+/* harmony export */   DM2H_WINDOW_MS: () => (/* reexport safe */ _picker__WEBPACK_IMPORTED_MODULE_1__.DM2H_WINDOW_MS),
+/* harmony export */   DM_BAN_PRIOR_ATTEMPTS: () => (/* reexport safe */ _picker__WEBPACK_IMPORTED_MODULE_1__.DM_BAN_PRIOR_ATTEMPTS),
+/* harmony export */   DM_BAN_PRIOR_BANS: () => (/* reexport safe */ _picker__WEBPACK_IMPORTED_MODULE_1__.DM_BAN_PRIOR_BANS),
+/* harmony export */   DM_BASE_RATE: () => (/* reexport safe */ _picker__WEBPACK_IMPORTED_MODULE_1__.DM_BASE_RATE),
+/* harmony export */   DM_EXPLORE_SHARE: () => (/* reexport safe */ _picker__WEBPACK_IMPORTED_MODULE_1__.DM_EXPLORE_SHARE),
+/* harmony export */   DM_FALLBACK_BAN_MIN_ATTEMPTS: () => (/* reexport safe */ _picker__WEBPACK_IMPORTED_MODULE_1__.DM_FALLBACK_BAN_MIN_ATTEMPTS),
+/* harmony export */   DM_FALLBACK_SCALE_MIN: () => (/* reexport safe */ _picker__WEBPACK_IMPORTED_MODULE_1__.DM_FALLBACK_SCALE_MIN),
+/* harmony export */   DM_FALLBACK_SCALE_MIN_DN: () => (/* reexport safe */ _picker__WEBPACK_IMPORTED_MODULE_1__.DM_FALLBACK_SCALE_MIN_DN),
+/* harmony export */   DM_FALLBACK_SCALE_MIN_DOCS: () => (/* reexport safe */ _picker__WEBPACK_IMPORTED_MODULE_1__.DM_FALLBACK_SCALE_MIN_DOCS),
+/* harmony export */   DM_LOW_TRY_DELIVERED: () => (/* reexport safe */ _picker__WEBPACK_IMPORTED_MODULE_1__.DM_LOW_TRY_DELIVERED),
+/* harmony export */   DM_SCORE_K: () => (/* reexport safe */ _picker__WEBPACK_IMPORTED_MODULE_1__.DM_SCORE_K),
+/* harmony export */   DM_SCORE_VERSION: () => (/* reexport safe */ _picker__WEBPACK_IMPORTED_MODULE_1__.DM_SCORE_VERSION),
+/* harmony export */   MESSAGE_ARMS: () => (/* reexport safe */ _picker__WEBPACK_IMPORTED_MODULE_1__.MESSAGE_ARMS),
 /* harmony export */   PICKER_SCORE_TIMEOUT_DEFAULT_MS: () => (/* reexport safe */ _picker__WEBPACK_IMPORTED_MODULE_1__.PICKER_SCORE_TIMEOUT_DEFAULT_MS),
 /* harmony export */   PICK_MODE_CODES: () => (/* reexport safe */ _picker__WEBPACK_IMPORTED_MODULE_1__.PICK_MODE_CODES),
 /* harmony export */   PROMO_PICKER_APP_MODE_KEYS: () => (/* reexport safe */ _picker__WEBPACK_IMPORTED_MODULE_1__.PROMO_PICKER_APP_MODE_KEYS),
@@ -17658,17 +18701,28 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   V2_RECENT_PENALTY_ABOVE: () => (/* reexport safe */ _picker__WEBPACK_IMPORTED_MODULE_1__.V2_RECENT_PENALTY_ABOVE),
 /* harmony export */   V2_RECENT_RING_SIZE: () => (/* reexport safe */ _picker__WEBPACK_IMPORTED_MODULE_1__.V2_RECENT_RING_SIZE),
 /* harmony export */   V2_SCORE_VERSION: () => (/* reexport safe */ _picker__WEBPACK_IMPORTED_MODULE_1__.V2_SCORE_VERSION),
+/* harmony export */   aggregateArmStats: () => (/* reexport safe */ _picker__WEBPACK_IMPORTED_MODULE_1__.aggregateArmStats),
 /* harmony export */   anchoredWeight: () => (/* reexport safe */ _picker__WEBPACK_IMPORTED_MODULE_1__.anchoredWeight),
 /* harmony export */   annotatePicks: () => (/* reexport safe */ _picker__WEBPACK_IMPORTED_MODULE_1__.annotatePicks),
 /* harmony export */   arm: () => (/* reexport safe */ _picker__WEBPACK_IMPORTED_MODULE_1__.arm),
 /* harmony export */   classifyChannelState: () => (/* reexport safe */ _picker__WEBPACK_IMPORTED_MODULE_1__.classifyChannelState),
+/* harmony export */   computeDmScore: () => (/* reexport safe */ _picker__WEBPACK_IMPORTED_MODULE_1__.computeDmScore),
 /* harmony export */   computeV2sf: () => (/* reexport safe */ _picker__WEBPACK_IMPORTED_MODULE_1__.computeV2sf),
 /* harmony export */   decayAnchored: () => (/* reexport safe */ _picker__WEBPACK_IMPORTED_MODULE_1__.decayAnchored),
+/* harmony export */   dmChannelScore: () => (/* reexport safe */ _picker__WEBPACK_IMPORTED_MODULE_1__.dmChannelScore),
+/* harmony export */   dmDeliveredCount: () => (/* reexport safe */ _picker__WEBPACK_IMPORTED_MODULE_1__.dmDeliveredCount),
+/* harmony export */   dmExploreShareFor: () => (/* reexport safe */ _picker__WEBPACK_IMPORTED_MODULE_1__.dmExploreShareFor),
+/* harmony export */   dmFallbackScale: () => (/* reexport safe */ _picker__WEBPACK_IMPORTED_MODULE_1__.dmFallbackScale),
+/* harmony export */   dmScoreConfigFor: () => (/* reexport safe */ _picker__WEBPACK_IMPORTED_MODULE_1__.dmScoreConfigFor),
+/* harmony export */   dmScoreKFor: () => (/* reexport safe */ _picker__WEBPACK_IMPORTED_MODULE_1__.dmScoreKFor),
+/* harmony export */   dmScoreParts: () => (/* reexport safe */ _picker__WEBPACK_IMPORTED_MODULE_1__.dmScoreParts),
 /* harmony export */   explainChannelScore: () => (/* reexport safe */ _picker__WEBPACK_IMPORTED_MODULE_1__.explainChannelScore),
 /* harmony export */   flagOn: () => (/* reexport safe */ _picker__WEBPACK_IMPORTED_MODULE_1__.flagOn),
 /* harmony export */   fnv1a32: () => (/* reexport safe */ _picker__WEBPACK_IMPORTED_MODULE_1__.fnv1a32),
 /* harmony export */   hasV2Data: () => (/* reexport safe */ _picker__WEBPACK_IMPORTED_MODULE_1__.hasV2Data),
+/* harmony export */   isDm2hSourced: () => (/* reexport safe */ _picker__WEBPACK_IMPORTED_MODULE_1__.isDm2hSourced),
 /* harmony export */   isLifetimeDeadChannel: () => (/* reexport safe */ _picker__WEBPACK_IMPORTED_MODULE_1__.isLifetimeDeadChannel),
+/* harmony export */   isMessageArm: () => (/* reexport safe */ _picker__WEBPACK_IMPORTED_MODULE_1__.isMessageArm),
 /* harmony export */   istDayOf: () => (/* reexport safe */ _picker__WEBPACK_IMPORTED_MODULE_1__.istDayOf),
 /* harmony export */   legacyChannelScore: () => (/* reexport safe */ _picker__WEBPACK_IMPORTED_MODULE_1__.legacyChannelScore),
 /* harmony export */   legacyChannelScoreV2Safety: () => (/* reexport safe */ _picker__WEBPACK_IMPORTED_MODULE_1__.legacyChannelScoreV2Safety),
@@ -17701,6 +18755,21 @@ __webpack_require__.r(__webpack_exports__);
 
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   DEFAULT_PICKER_MODE: () => (/* binding */ DEFAULT_PICKER_MODE),
+/* harmony export */   DM2H_MIN_DELIVERED: () => (/* binding */ DM2H_MIN_DELIVERED),
+/* harmony export */   DM2H_WINDOW_MS: () => (/* binding */ DM2H_WINDOW_MS),
+/* harmony export */   DM_BAN_PRIOR_ATTEMPTS: () => (/* binding */ DM_BAN_PRIOR_ATTEMPTS),
+/* harmony export */   DM_BAN_PRIOR_BANS: () => (/* binding */ DM_BAN_PRIOR_BANS),
+/* harmony export */   DM_BASE_RATE: () => (/* binding */ DM_BASE_RATE),
+/* harmony export */   DM_EXPLORE_SHARE: () => (/* binding */ DM_EXPLORE_SHARE),
+/* harmony export */   DM_FALLBACK_BAN_MIN_ATTEMPTS: () => (/* binding */ DM_FALLBACK_BAN_MIN_ATTEMPTS),
+/* harmony export */   DM_FALLBACK_SCALE_MIN: () => (/* binding */ DM_FALLBACK_SCALE_MIN),
+/* harmony export */   DM_FALLBACK_SCALE_MIN_DN: () => (/* binding */ DM_FALLBACK_SCALE_MIN_DN),
+/* harmony export */   DM_FALLBACK_SCALE_MIN_DOCS: () => (/* binding */ DM_FALLBACK_SCALE_MIN_DOCS),
+/* harmony export */   DM_LOW_TRY_DELIVERED: () => (/* binding */ DM_LOW_TRY_DELIVERED),
+/* harmony export */   DM_SCORE_K: () => (/* binding */ DM_SCORE_K),
+/* harmony export */   DM_SCORE_VERSION: () => (/* binding */ DM_SCORE_VERSION),
+/* harmony export */   MESSAGE_ARMS: () => (/* binding */ MESSAGE_ARMS),
 /* harmony export */   PICKER_SCORE_TIMEOUT_DEFAULT_MS: () => (/* binding */ PICKER_SCORE_TIMEOUT_DEFAULT_MS),
 /* harmony export */   PICK_MODE_CODES: () => (/* binding */ PICK_MODE_CODES),
 /* harmony export */   PROMO_PICKER_APP_MODE_KEYS: () => (/* binding */ PROMO_PICKER_APP_MODE_KEYS),
@@ -17715,17 +18784,28 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   V2_RECENT_PENALTY_ABOVE: () => (/* binding */ V2_RECENT_PENALTY_ABOVE),
 /* harmony export */   V2_RECENT_RING_SIZE: () => (/* binding */ V2_RECENT_RING_SIZE),
 /* harmony export */   V2_SCORE_VERSION: () => (/* binding */ V2_SCORE_VERSION),
+/* harmony export */   aggregateArmStats: () => (/* binding */ aggregateArmStats),
 /* harmony export */   anchoredWeight: () => (/* reexport safe */ _tg_core_utils_experiment_arm__WEBPACK_IMPORTED_MODULE_3__.anchoredWeight),
 /* harmony export */   annotatePicks: () => (/* binding */ annotatePicks),
 /* harmony export */   arm: () => (/* binding */ arm),
 /* harmony export */   classifyChannelState: () => (/* binding */ classifyChannelState),
+/* harmony export */   computeDmScore: () => (/* binding */ computeDmScore),
 /* harmony export */   computeV2sf: () => (/* binding */ computeV2sf),
 /* harmony export */   decayAnchored: () => (/* reexport safe */ _tg_core_utils_experiment_arm__WEBPACK_IMPORTED_MODULE_3__.decayAnchored),
+/* harmony export */   dmChannelScore: () => (/* binding */ dmChannelScore),
+/* harmony export */   dmDeliveredCount: () => (/* binding */ dmDeliveredCount),
+/* harmony export */   dmExploreShareFor: () => (/* binding */ dmExploreShareFor),
+/* harmony export */   dmFallbackScale: () => (/* binding */ dmFallbackScale),
+/* harmony export */   dmScoreConfigFor: () => (/* binding */ dmScoreConfigFor),
+/* harmony export */   dmScoreKFor: () => (/* binding */ dmScoreKFor),
+/* harmony export */   dmScoreParts: () => (/* binding */ dmScoreParts),
 /* harmony export */   explainChannelScore: () => (/* binding */ explainChannelScore),
 /* harmony export */   flagOn: () => (/* binding */ flagOn),
 /* harmony export */   fnv1a32: () => (/* reexport safe */ _tg_core_utils_experiment_arm__WEBPACK_IMPORTED_MODULE_3__.fnv1a32),
 /* harmony export */   hasV2Data: () => (/* binding */ hasV2Data),
+/* harmony export */   isDm2hSourced: () => (/* binding */ isDm2hSourced),
 /* harmony export */   isLifetimeDeadChannel: () => (/* binding */ isLifetimeDeadChannel),
+/* harmony export */   isMessageArm: () => (/* binding */ isMessageArm),
 /* harmony export */   istDayOf: () => (/* binding */ istDayOf),
 /* harmony export */   legacyChannelScore: () => (/* binding */ legacyChannelScore),
 /* harmony export */   legacyChannelScoreV2Safety: () => (/* binding */ legacyChannelScoreV2Safety),
@@ -17751,8 +18831,10 @@ __webpack_require__.r(__webpack_exports__);
 
 // One hash and one decay for the picker, reaction signals and the reaction holdout (@tg/core).
 
+/** The picker mode when no env key holds a valid value (2026-11-27: dm, owner go). */
+const DEFAULT_PICKER_MODE = 'dm';
 /** Stored on promotion_send.pick_mode. */
-const PICK_MODE_CODES = Object.freeze({ legacy: 'l', shadow: 's', v2: 'v' });
+const PICK_MODE_CODES = Object.freeze({ legacy: 'l', shadow: 's', v2: 'v', dm: 'd' });
 /** 2 (2026-11-17): a lifetime-dead channel (isLifetimeDeadChannel) scores 0. 1: plain v2sf. */
 const V2_SCORE_VERSION = 2;
 const V2_PRIOR_DELIVERIES = 20;
@@ -17764,6 +18846,10 @@ const V2_RECENT_PENALTY_ABOVE = 0.6;
 /** Ring codes: s survived, d deleted, f fast-deleted (< 60 s), g gone (entity not found / access lost). */
 const V2_FAST_DELETE_MS = 60000;
 const SWITCHBACK_SALT = 'picker-switchback-2026-11';
+const MESSAGE_ARMS = Object.freeze(['legacy', 'custom', 'ai']);
+function isMessageArm(value) {
+    return value === 'legacy' || value === 'custom' || value === 'ai';
+}
 // ── pure math ────────────────────────────────────────────────────────────────────────────────
 /** Exact backtest formula. Pure; inputs are the decayed counters. */
 function computeV2sf(c, mu = V2_DEFAULT_MU) {
@@ -17855,6 +18941,199 @@ function v2ScoreOf(doc, components) {
 function v2ChannelScore(doc, nowMs, mu = V2_DEFAULT_MU) {
     return v2ScoreOf(doc, computeV2sf(v2CountersOf(doc, nowMs), mu));
 }
+// ── DM score (mode `dm`, 2026-11-27) ─────────────────────────────────────────────────────────
+//
+//   score   = (dm + k x base) / (delivered + k) x (1 - banRate)^2
+//   banRate = (bans + 1) / (attempts + 5)
+//
+// base is the app's DMs-per-send base rate (replay "current" policy: promote 0.045, tg-aut 0.138), so a
+// channel with no data scores the base rate, not 1/k (1/10 was 2x the promote base and put every
+// unknown channel ahead of measured ones). k is fixed per app (promote 10, tg-aut 20); no env key.
+// Replay (built on 4 days, judged on the next 3): DMs/send promote 0.0447 -> 0.0717 (k=10), tg-aut
+// 0.138 -> 0.191 (k=20), bans 2.6% / 19.9% (v2 raised tg-aut bans to 21.6%). Counters are
+// anchored-decayed (7-day half-life).
+// Sources, per channel, logged as src=:
+//   dm2h          v2.m2 / v2.d2 / v2.b2 / v2.a2. Sticky: once the never-decayed delivery count v2.n2
+//                 reaches DM2H_MIN_DELIVERED the channel stays on dm2h (decay can not flip it back).
+//   fallback_v2   v2.dm x fallbackScale / v2.dl
+//   fallback_life DMs.credited x fallbackScale / outcomes.attempted
+// Fallback DMs include membership-only credit (a shared channel with no send of ours); dm2h does not.
+// fallbackScale = this cycle's sum(m2) / sum(dm) over its dm2h-sourced docs, clamped to
+// [DM_FALLBACK_SCALE_MIN, 1] (1 when no doc is on dm2h yet): the share of membership DMs our sends
+// actually earned, so membership credit can not keep unswitched channels ahead.
+// Fallback ban term: real bans (b2 / a2) once a2 >= DM_FALLBACK_BAN_MIN_ATTEMPTS. Before that,
+// fallback_v2 uses fl / (dl + fl) (fl also counts non-ban refusals, so it overstates bans) and
+// fallback_life has no ban data (bans 0).
+// b2 counts USER_BANNED_IN_CHANNEL, which Telegram also returns for an account-level limit (the
+// account, not the channel, is the cause); a2 counts FLOOD_WAIT refusals as attempts. Accepted for
+// now (review M3, 2026-11-27): both apply to every channel the limited account tries alike.
+/**
+ * k (prior delivered sends) per app: 20 for both. tg-aut: replay winner (lowest ban). promote: raised
+ * from 10 (review 2026-11-27): the replay's DMs/send was flat over k 2-20, and k=20 damps a lucky
+ * 1-DM-in-5 channel (0.078 -> 0.062 against 0.046 for 2 in 40, which sits near the 0.045 base).
+ */
+const DM_SCORE_K = Object.freeze({ promote: 20, 'tg-aut': 20 });
+/** Base DMs per delivered send per app (replay, current policy): the prior a channel with no data scores. */
+const DM_BASE_RATE = Object.freeze({ promote: 0.045, 'tg-aut': 0.138 });
+/** Explore share of a batch per app (was PROMOTION_EXPLORATION_SHARE 0.20 for every mode). */
+const DM_EXPLORE_SHARE = Object.freeze({ promote: 0.10, 'tg-aut': 0.05 });
+/** A channel with fewer DELIVERED sends (dmDeliveredCount) than this is low-try: exploration lane in dm mode. */
+const DM_LOW_TRY_DELIVERED = 5;
+/** The fallback scale is used only once the dm2h docs hold this much v2.dn (DMs since this build)... */
+const DM_FALLBACK_SCALE_MIN_DN = 20;
+/** ...and this many docs are on dm2h; until both, the scale is 1 (one doc must not swing it). */
+const DM_FALLBACK_SCALE_MIN_DOCS = 10;
+/** A DM counts for a channel only when this client delivered there at most this long before the DM. */
+const DM2H_WINDOW_MS = 2 * 3600000;
+/** Never-decayed deliveries (v2.n2) at which a channel moves to dm2h for good. */
+const DM2H_MIN_DELIVERED = 5;
+const DM_BAN_PRIOR_BANS = 1;
+const DM_BAN_PRIOR_ATTEMPTS = 5;
+/** Lower clamp of the fallback DM scale. */
+const DM_FALLBACK_SCALE_MIN = 0.2;
+/** Decayed v2.a2 from which a fallback channel's ban term uses real bans (b2 / a2). */
+const DM_FALLBACK_BAN_MIN_ATTEMPTS = 5;
+/** score_version on promotion_send rows of a dm pick; pick_score_v2 / pick_rank_v2 then hold the DM score and rank. */
+const DM_SCORE_VERSION = 3;
+function safeConfig(config) {
+    const k = config && Number.isFinite(config.k) && config.k > 0 ? config.k : DM_SCORE_K['tg-aut'];
+    const base = config && Number.isFinite(config.base) && config.base >= 0 && config.base <= 1 ? config.base : DM_BASE_RATE['tg-aut'];
+    const scale = config && typeof config.fallbackScale === 'number' && Number.isFinite(config.fallbackScale)
+        ? Math.max(0, Math.min(1, config.fallbackScale))
+        : 1;
+    return { k, base, fallbackScale: scale };
+}
+/** The formula. Pure. attempts is raised to at least bans so banRate stays below 1. */
+function computeDmScore(input, config) {
+    const { k, base } = safeConfig(config);
+    const dm = finiteNonNegative(input.dm);
+    const delivered = finiteNonNegative(input.delivered);
+    const bans = finiteNonNegative(input.bans);
+    const attempts = Math.max(finiteNonNegative(input.attempts), bans);
+    const rate = (dm + k * base) / (delivered + k);
+    const banRate = (bans + DM_BAN_PRIOR_BANS) / (attempts + DM_BAN_PRIOR_ATTEMPTS);
+    const keep = 1 - Math.min(1, banRate);
+    return { rate, banRate, score: rate * keep * keep };
+}
+/** True once the channel has had DM2H_MIN_DELIVERED deliveries counted by v2.n2 (never decayed): sticky. */
+function isDm2hSourced(doc) {
+    return (0,_utils_guards__WEBPACK_IMPORTED_MODULE_1__.isRecord)(doc?.v2) && finiteNonNegative(doc.v2.n2) >= DM2H_MIN_DELIVERED;
+}
+/**
+ * Inputs and source for one channel at `nowMs`, then the score. Missing doc = fallback_life with zeros.
+ */
+function dmScoreParts(doc, nowMs, config) {
+    const cfg = safeConfig(config);
+    const v2 = (0,_utils_guards__WEBPACK_IMPORTED_MODULE_1__.isRecord)(doc?.v2) ? doc.v2 : {};
+    let src;
+    let input;
+    let scale = 1;
+    if (isDm2hSourced(doc)) {
+        src = 'dm2h';
+        input = { dm: (0,_tg_core_utils_experiment_arm__WEBPACK_IMPORTED_MODULE_3__.decayAnchored)(v2.m2, nowMs), delivered: (0,_tg_core_utils_experiment_arm__WEBPACK_IMPORTED_MODULE_3__.decayAnchored)(v2.d2, nowMs), bans: (0,_tg_core_utils_experiment_arm__WEBPACK_IMPORTED_MODULE_3__.decayAnchored)(v2.b2, nowMs), attempts: (0,_tg_core_utils_experiment_arm__WEBPACK_IMPORTED_MODULE_3__.decayAnchored)(v2.a2, nowMs) };
+    }
+    else {
+        scale = cfg.fallbackScale;
+        const a2 = (0,_tg_core_utils_experiment_arm__WEBPACK_IMPORTED_MODULE_3__.decayAnchored)(v2.a2, nowMs);
+        const realBans = a2 >= DM_FALLBACK_BAN_MIN_ATTEMPTS ? { bans: (0,_tg_core_utils_experiment_arm__WEBPACK_IMPORTED_MODULE_3__.decayAnchored)(v2.b2, nowMs), attempts: a2 } : null;
+        if (hasV2Data(doc)) {
+            src = 'fallback_v2';
+            const dl = (0,_tg_core_utils_experiment_arm__WEBPACK_IMPORTED_MODULE_3__.decayAnchored)(v2.dl, nowMs);
+            const fl = (0,_tg_core_utils_experiment_arm__WEBPACK_IMPORTED_MODULE_3__.decayAnchored)(v2.fl, nowMs);
+            input = { dm: (0,_tg_core_utils_experiment_arm__WEBPACK_IMPORTED_MODULE_3__.decayAnchored)(v2.dm, nowMs) * scale, delivered: dl, ...(realBans ?? { bans: fl, attempts: dl + fl }) };
+        }
+        else {
+            src = 'fallback_life';
+            const attempted = finiteNonNegative(doc?.outcomes?.attempted);
+            input = { dm: finiteNonNegative(doc?.DMs?.credited) * scale, delivered: attempted, ...(realBans ?? { bans: 0, attempts: attempted }) };
+        }
+    }
+    const math = computeDmScore(input, cfg);
+    return {
+        ...input, src, k: cfg.k, base: cfg.base, scale,
+        rate: math.rate, banRate: math.banRate,
+        score: isLifetimeDeadChannel(doc) ? 0 : math.score,
+    };
+}
+function dmChannelScore(doc, nowMs, config) {
+    return dmScoreParts(doc, nowMs, config).score;
+}
+/**
+ * Fallback DM scale for one cycle: sum(m2) / sum(dn) over the docs already on dm2h, clamped to
+ * [DM_FALLBACK_SCALE_MIN, 1]. dn counts the same DMs as dm but only from the build that added m2, so
+ * old (pre-m2) DMs can not pull the scale down. 1 until sum(dn) >= DM_FALLBACK_SCALE_MIN_DN and
+ * DM_FALLBACK_SCALE_MIN_DOCS docs are on dm2h, and when sum(dn) is 0. Pure, no read.
+ */
+function dmFallbackScale(docs, nowMs) {
+    let m2 = 0;
+    let dn = 0;
+    let dm2hDocs = 0;
+    for (const doc of docs) {
+        if (!isDm2hSourced(doc))
+            continue;
+        dm2hDocs += 1;
+        m2 += (0,_tg_core_utils_experiment_arm__WEBPACK_IMPORTED_MODULE_3__.decayAnchored)(doc.v2.m2, nowMs);
+        dn += (0,_tg_core_utils_experiment_arm__WEBPACK_IMPORTED_MODULE_3__.decayAnchored)(doc.v2.dn, nowMs);
+    }
+    // BOTH thresholds must be met before the scale moves (owner review 2026-11-27).
+    if (dn <= 0 || dn < DM_FALLBACK_SCALE_MIN_DN || dm2hDocs < DM_FALLBACK_SCALE_MIN_DOCS)
+        return { scale: 1, dm2hDocs };
+    return { scale: Math.max(DM_FALLBACK_SCALE_MIN, Math.min(1, m2 / dn)), dm2hDocs };
+}
+/**
+ * Delivered sends for the dm low-try test: the best lower bound we hold. outcomes.attempted counts
+ * only RESOLVED sends (validation done); v2.n2 counts every delivery from the 2026-11-27 build on;
+ * decayed v2.dl counts recent deliveries.
+ */
+function dmDeliveredCount(doc, nowMs) {
+    const v2 = (0,_utils_guards__WEBPACK_IMPORTED_MODULE_1__.isRecord)(doc?.v2) ? doc.v2 : {};
+    return Math.max(finiteNonNegative(doc?.outcomes?.attempted), finiteNonNegative(v2.n2), (0,_tg_core_utils_experiment_arm__WEBPACK_IMPORTED_MODULE_3__.decayAnchored)(v2.dl, nowMs));
+}
+/** DM score k for an app; an unknown app gets the tg-aut (stricter) value. */
+function dmScoreKFor(app) {
+    return app === 'promote' ? DM_SCORE_K.promote : DM_SCORE_K['tg-aut'];
+}
+/** k and base rate for an app; an unknown app gets the tg-aut values. */
+function dmScoreConfigFor(app, fallbackScale = 1) {
+    const key = app === 'promote' ? 'promote' : 'tg-aut';
+    return { k: DM_SCORE_K[key], base: DM_BASE_RATE[key], fallbackScale };
+}
+/** Explore share for an app; an unknown app gets the tg-aut (smaller) value. */
+function dmExploreShareFor(app) {
+    return app === 'promote' ? DM_EXPLORE_SHARE.promote : DM_EXPLORE_SHARE['tg-aut'];
+}
+function emptyArmTable() {
+    return { legacy: { d: 0, m: 0 }, custom: { d: 0, m: 0 }, ai: { d: 0, m: 0 } };
+}
+/**
+ * Per-arm delivered and dm2h sums over this cycle's docs (v2.ad / v2.am, decayed), globally and per
+ * channel state. Pure; uses docs the selection already loaded, so it costs no read.
+ */
+function aggregateArmStats(docs, nowMs, mu = V2_DEFAULT_MU) {
+    const global = emptyArmTable();
+    const byState = {};
+    for (const doc of docs) {
+        if (!doc || !(0,_utils_guards__WEBPACK_IMPORTED_MODULE_1__.isRecord)(doc.v2))
+            continue;
+        const ad = (0,_utils_guards__WEBPACK_IMPORTED_MODULE_1__.isRecord)(doc.v2.ad) ? doc.v2.ad : null;
+        if (!ad)
+            continue;
+        const am = (0,_utils_guards__WEBPACK_IMPORTED_MODULE_1__.isRecord)(doc.v2.am) ? doc.v2.am : {};
+        const state = classifyChannelState(doc, mu);
+        const table = byState[state] ?? (byState[state] = emptyArmTable());
+        for (const a of MESSAGE_ARMS) {
+            const d = (0,_tg_core_utils_experiment_arm__WEBPACK_IMPORTED_MODULE_3__.decayAnchored)(ad[a], nowMs);
+            const m = Math.min(d, (0,_tg_core_utils_experiment_arm__WEBPACK_IMPORTED_MODULE_3__.decayAnchored)(am[a], nowMs));
+            if (d <= 0)
+                continue;
+            global[a].d += d;
+            global[a].m += m;
+            table[a].d += d;
+            table[a].m += m;
+        }
+    }
+    return { global, byState };
+}
 function classifyChannelState(doc, mu = V2_DEFAULT_MU) {
     if (!doc)
         return 'u';
@@ -17902,7 +19181,7 @@ const PROMO_PICKER_APP_MODE_KEYS = Object.freeze({
 });
 function parsePickerMode(value) {
     const raw = (value ?? '').trim().toLowerCase();
-    return raw === 'legacy' || raw === 'shadow' || raw === 'v2' ? raw : null;
+    return raw === 'legacy' || raw === 'shadow' || raw === 'v2' || raw === 'dm' ? raw : null;
 }
 const pickerLog = new _logging_promo_logger__WEBPACK_IMPORTED_MODULE_2__.PromoLogger('picker');
 /** App keys already warned about in this process (read per cycle, so warn once, not every cycle). */
@@ -17911,8 +19190,9 @@ function resetPickerModeWarningsForTests() {
     warnedInvalidAppKeys.clear();
 }
 /**
- * Picker mode: legacy | shadow | v2. Read per cycle. The app key (TGAUT_PROMO_PICKER_MODE or
- * PROMOTE_PROMO_PICKER_MODE) wins when it holds a valid value; else PROMO_PICKER_MODE; else shadow.
+ * Picker mode: legacy | shadow | v2 | dm. Read per cycle. The app key (TGAUT_PROMO_PICKER_MODE or
+ * PROMOTE_PROMO_PICKER_MODE) wins when it holds a valid value; else PROMO_PICKER_MODE; else dm
+ * (DEFAULT_PICKER_MODE, 2026-11-27). Setting "shadow" on either key is the rollback.
  * A non-empty invalid app value falls back the same way and warns once per process per key.
  */
 function readPickerMode(env = process.env, app = null, options = {}) {
@@ -17921,13 +19201,13 @@ function readPickerMode(env = process.env, app = null, options = {}) {
     const appMode = parsePickerMode(appValue);
     if (appKey && !appMode && (appValue ?? '').trim() !== '' && !warnedInvalidAppKeys.has(appKey)) {
         warnedInvalidAppKeys.add(appKey);
-        const message = `${appKey}=${JSON.stringify(appValue)} is not legacy|shadow|v2; using PROMO_PICKER_MODE or shadow`;
+        const message = `${appKey}=${JSON.stringify(appValue)} is not legacy|shadow|v2|dm; using PROMO_PICKER_MODE or ${DEFAULT_PICKER_MODE}`;
         if (options.warn)
             options.warn(message);
         else
             pickerLog.warn('invalid-app-picker-mode', { key: appKey, value: appValue });
     }
-    return appMode ?? parsePickerMode(env.PROMO_PICKER_MODE) ?? 'shadow';
+    return appMode ?? parsePickerMode(env.PROMO_PICKER_MODE) ?? DEFAULT_PICKER_MODE;
 }
 /** PROMO_PICKER_V2_MU overrides the fleet prior; invalid values fall back to V2_DEFAULT_MU. */
 function readPickerMu(env = process.env) {
@@ -17945,11 +19225,11 @@ function flagOn(env, key) {
  */
 function scoreCandidates(channelIds, docs, options) {
     const mu = options.mu ?? V2_DEFAULT_MU;
-    const byId = new Map();
+    const docById = new Map();
     for (const doc of docs) {
         const id = doc && typeof doc.channelId === 'string' ? (0,_utils_channel_id__WEBPACK_IMPORTED_MODULE_0__.normalizeChannelId)(doc.channelId) : null;
-        if (id && !byId.has(id))
-            byId.set(id, doc);
+        if (id && !docById.has(id))
+            docById.set(id, doc);
     }
     const rows = [];
     const seen = new Set();
@@ -17958,7 +19238,7 @@ function scoreCandidates(channelIds, docs, options) {
         if (!channelId || seen.has(channelId))
             continue;
         seen.add(channelId);
-        const doc = byId.get(channelId) ?? null;
+        const doc = docById.get(channelId) ?? null;
         const counters = v2CountersOf(doc, options.nowMs);
         const components = computeV2sf(counters, mu);
         rows.push({
@@ -17970,10 +19250,16 @@ function scoreCandidates(channelIds, docs, options) {
             rankV2: 0,
             components,
             counters,
+            ...(options.dm !== undefined ? { dm: dmScoreParts(doc, options.nowMs, options.dm) } : {}),
         });
     }
-    const order = [...rows].sort((a, b) => (b.scoreV2 - a.scoreV2) || (a.channelId < b.channelId ? -1 : a.channelId > b.channelId ? 1 : 0));
+    const byId = (a, b) => (a.channelId < b.channelId ? -1 : a.channelId > b.channelId ? 1 : 0);
+    const order = [...rows].sort((a, b) => (b.scoreV2 - a.scoreV2) || byId(a, b));
     order.forEach((row, index) => { row.rankV2 = index + 1; });
+    if (options.dm !== undefined) {
+        const dmOrder = [...rows].sort((a, b) => ((b.dm?.score ?? 0) - (a.dm?.score ?? 0)) || byId(a, b));
+        dmOrder.forEach((row, index) => { row.rankDm = index + 1; });
+    }
     return new Map(rows.map((row) => [row.channelId, row]));
 }
 /** Annotations for the selected channels. Legacy mode returns an empty map (nothing new recorded). */
@@ -17987,15 +19273,18 @@ function annotatePicks(selectedIds, scored, options) {
         if (!channelId)
             continue;
         const s = scored.get(channelId);
+        // Mode dm: pick_score_v2 / pick_rank_v2 carry the DM score and rank, marked by score_version 3
+        // (no new promotion_send column; pick_mode 'd' fits the existing text column).
+        const dm = options.mode === 'dm';
         out.set(channelId, {
             mode: PICK_MODE_CODES[options.mode],
             reason: options.reasonOf(channelId),
             scoreLegacy: s?.scoreLegacy ?? null,
             scoreLegacyV2Safety: s?.scoreLegacyV2Safety ?? null,
-            scoreV2: s ? s.scoreV2 : null,
-            rankV2: s ? s.rankV2 : null,
+            scoreV2: s ? (dm ? (s.dm?.score ?? null) : s.scoreV2) : null,
+            rankV2: s ? (dm ? (s.rankDm ?? null) : s.rankV2) : null,
             state: s?.state ?? 'u',
-            scoreVersion: V2_SCORE_VERSION,
+            scoreVersion: dm ? DM_SCORE_VERSION : V2_SCORE_VERSION,
             arm: pickArm,
         });
     }
@@ -18082,6 +19371,7 @@ function explainChannelScore(doc, options = {}) {
         scoreLegacy: doc ? legacyChannelScore(doc) : null,
         scoreLegacyV2Safety: doc ? legacyChannelScoreV2Safety(doc, nowMs) : null,
         scoreV2: v2ScoreOf(doc, components),
+        dm: dmScoreParts(doc, nowMs, options.dm ?? dmScoreConfigFor('tg-aut')),
     };
 }
 function fmt(n) {
@@ -19012,7 +20302,22 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   DEFAULT_CHANNEL_PROBE_COOLDOWN_DAYS: () => (/* reexport safe */ _channel_state__WEBPACK_IMPORTED_MODULE_6__.DEFAULT_CHANNEL_PROBE_COOLDOWN_DAYS),
 /* harmony export */   DEFAULT_CHANNEL_PROBE_MIN_SUCCESS: () => (/* reexport safe */ _channel_state__WEBPACK_IMPORTED_MODULE_6__.DEFAULT_CHANNEL_PROBE_MIN_SUCCESS),
 /* harmony export */   DEFAULT_CHANNEL_PROBE_MIN_SUCCESS_RATE_PERCENT: () => (/* reexport safe */ _channel_state__WEBPACK_IMPORTED_MODULE_6__.DEFAULT_CHANNEL_PROBE_MIN_SUCCESS_RATE_PERCENT),
+/* harmony export */   DEFAULT_PICKER_MODE: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.DEFAULT_PICKER_MODE),
+/* harmony export */   DM2H_MIN_DELIVERED: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.DM2H_MIN_DELIVERED),
+/* harmony export */   DM2H_WINDOW_MS: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.DM2H_WINDOW_MS),
+/* harmony export */   DM_BAN_PRIOR_ATTEMPTS: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.DM_BAN_PRIOR_ATTEMPTS),
+/* harmony export */   DM_BAN_PRIOR_BANS: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.DM_BAN_PRIOR_BANS),
+/* harmony export */   DM_BASE_RATE: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.DM_BASE_RATE),
+/* harmony export */   DM_EXPLORE_SHARE: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.DM_EXPLORE_SHARE),
+/* harmony export */   DM_FALLBACK_BAN_MIN_ATTEMPTS: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.DM_FALLBACK_BAN_MIN_ATTEMPTS),
+/* harmony export */   DM_FALLBACK_SCALE_MIN: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.DM_FALLBACK_SCALE_MIN),
+/* harmony export */   DM_FALLBACK_SCALE_MIN_DN: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.DM_FALLBACK_SCALE_MIN_DN),
+/* harmony export */   DM_FALLBACK_SCALE_MIN_DOCS: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.DM_FALLBACK_SCALE_MIN_DOCS),
+/* harmony export */   DM_LOW_TRY_DELIVERED: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.DM_LOW_TRY_DELIVERED),
+/* harmony export */   DM_SCORE_K: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.DM_SCORE_K),
+/* harmony export */   DM_SCORE_VERSION: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.DM_SCORE_VERSION),
 /* harmony export */   DelayCalculator: () => (/* reexport safe */ _channel_message_promotions_promotion_runtime_helpers_delay_calculator__WEBPACK_IMPORTED_MODULE_4__.DelayCalculator),
+/* harmony export */   MESSAGE_ARMS: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.MESSAGE_ARMS),
 /* harmony export */   MESSAGE_SAFETY: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.MESSAGE_SAFETY),
 /* harmony export */   MESSAGE_SOURCES: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.MESSAGE_SOURCES),
 /* harmony export */   PARTICIPANTS_COUNT_RECHECK_DAYS: () => (/* reexport safe */ _channel_state__WEBPACK_IMPORTED_MODULE_6__.PARTICIPANTS_COUNT_RECHECK_DAYS),
@@ -19055,6 +20360,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   V2_RECENT_RING_SIZE: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.V2_RECENT_RING_SIZE),
 /* harmony export */   V2_SCORE_VERSION: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.V2_SCORE_VERSION),
 /* harmony export */   addPoolOutcomeTotals: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.addPoolOutcomeTotals),
+/* harmony export */   aggregateArmStats: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.aggregateArmStats),
 /* harmony export */   anchoredWeight: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.anchoredWeight),
 /* harmony export */   annotatePicks: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.annotatePicks),
 /* harmony export */   arm: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.arm),
@@ -19074,6 +20380,7 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   computeAccountDeletionRate: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.computeAccountDeletionRate),
 /* harmony export */   computeAccountFailureRate: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.computeAccountFailureRate),
 /* harmony export */   computeAccountHealth: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.computeAccountHealth),
+/* harmony export */   computeDmScore: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.computeDmScore),
 /* harmony export */   computeLiveCanSendMsgs: () => (/* reexport safe */ _channel_state__WEBPACK_IMPORTED_MODULE_6__.computeLiveCanSendMsgs),
 /* harmony export */   computePercentileRank: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.computePercentileRank),
 /* harmony export */   computeV2sf: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.computeV2sf),
@@ -19086,6 +20393,13 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   deriveProvenBySource: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.deriveProvenBySource),
 /* harmony export */   deriveSharedChannelVerdict: () => (/* reexport safe */ _channel_state__WEBPACK_IMPORTED_MODULE_6__.deriveSharedChannelVerdict),
 /* harmony export */   deriveTelegramChannelLiveFacts: () => (/* reexport safe */ _channel_state__WEBPACK_IMPORTED_MODULE_6__.deriveTelegramChannelLiveFacts),
+/* harmony export */   dmChannelScore: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.dmChannelScore),
+/* harmony export */   dmDeliveredCount: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.dmDeliveredCount),
+/* harmony export */   dmExploreShareFor: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.dmExploreShareFor),
+/* harmony export */   dmFallbackScale: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.dmFallbackScale),
+/* harmony export */   dmScoreConfigFor: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.dmScoreConfigFor),
+/* harmony export */   dmScoreKFor: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.dmScoreKFor),
+/* harmony export */   dmScoreParts: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.dmScoreParts),
 /* harmony export */   evaluateChannelPromotionHealth: () => (/* reexport safe */ _channel_state__WEBPACK_IMPORTED_MODULE_6__.evaluateChannelPromotionHealth),
 /* harmony export */   evaluateChannelSendability: () => (/* reexport safe */ _channel_state__WEBPACK_IMPORTED_MODULE_6__.evaluateChannelSendability),
 /* harmony export */   evaluateDeletionPolicy: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.evaluateDeletionPolicy),
@@ -19114,8 +20428,10 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   hasV2Data: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.hasV2Data),
 /* harmony export */   hydrateChannelDocument: () => (/* reexport safe */ _channel_state_hydrate_channel_document__WEBPACK_IMPORTED_MODULE_7__.hydrateChannelDocument),
 /* harmony export */   isChannelIntelligence: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.isChannelIntelligence),
+/* harmony export */   isDm2hSourced: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.isDm2hSourced),
 /* harmony export */   isLifetimeDeadChannel: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.isLifetimeDeadChannel),
 /* harmony export */   isLimitReached: () => (/* reexport safe */ _channel_message_promotions_promotion_message_helpers__WEBPACK_IMPORTED_MODULE_5__.isLimitReached),
+/* harmony export */   isMessageArm: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.isMessageArm),
 /* harmony export */   isMessageSource: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.isMessageSource),
 /* harmony export */   isPaidUserLimitReached: () => (/* reexport safe */ _channel_message_promotions_promotion_message_helpers__WEBPACK_IMPORTED_MODULE_5__.isPaidUserLimitReached),
 /* harmony export */   isPoolEntry: () => (/* reexport safe */ _channel_message_promotions__WEBPACK_IMPORTED_MODULE_0__.isPoolEntry),
@@ -53585,8 +54901,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "fa5153042827b919c284bdfc19d798530d6bd4b5" : 0;
-    const builtAt =  true ? "2026-11-27T05:10:41.751Z" : 0;
+    const sha =  true ? "01c93fe028281f267bbc973cde257dad9b2f3def" : 0;
+    const builtAt =  true ? "2026-11-27T07:52:56.773Z" : 0;
     return { sha, builtAt };
 }
 
@@ -62271,8 +63587,13 @@ class TelegramManager {
         }
         // Only a confirmed Telegram send enters this mobile's in-memory conversion backlog.
         const routedAt = Date.now();
-        this.pendingRouteChats.set(chatId, routedAt);
-        void this.routeStore?.addBacklog(chatId, routedAt);
+        // Keep the FIRST route time of a pending chat: it is the DM time the dm2h gate uses (stage 1
+        // goes out right after the user's DM). Later stages must not move it, nor the 24 h retry window.
+        const firstRoutedAt = this.pendingRouteChats.get(chatId);
+        if (typeof firstRoutedAt !== 'number' || !Number.isFinite(firstRoutedAt) || firstRoutedAt <= 0) {
+            this.pendingRouteChats.set(chatId, routedAt);
+            void this.routeStore?.addBacklog(chatId, routedAt);
+        }
         const { nth, firstToday } = this.noteRouteSend(chatId, routedAt);
         // Daily routes_sent: one per confirmed route message (any stage), same event as messageCount below.
         // routed_users: the user's first confirmed route message of the IST day from this mobile.
@@ -62336,19 +63657,24 @@ class TelegramManager {
                 return false;
             }
             // client_id = the client this promote account serves, i.e. whose tg-aut got the routed DM.
+            // dmAtMs = when the route went out right after the user's DM (routedAt). This sweep runs every
+            // ~10 min and retries for up to 24 h, so "now" would push the DM out of the 2 h dm2h window.
+            const routedAt = this.pendingRouteChats.get(chatId);
             const result = await runtime.attribution.attributeDMConversion(commonChatIds, conversionId, {
                 clientId: this.clientDetails.clientId,
                 mobile: this.clientDetails.mobile ?? null,
+                dmAtMs: typeof routedAt === 'number' && Number.isFinite(routedAt) && routedAt > 0 ? routedAt : null,
             });
-            if (result.failedChannelIds.length > 0) {
-                logger.warn(`[RoutedAttribution] ${this.clientDetails.mobile}:${chatId} failed ${result.failedChannelIds.length} channel write(s); retaining route for retry`);
+            if (result.allocationFailed === true || result.failedChannelIds.length > 0) {
+                logger.warn(`[RoutedAttribution] ${this.clientDetails.mobile}:${chatId} failed ${result.failedChannelIds.length} channel write(s) allocationFailed=${result.allocationFailed === true}; retaining route for retry`);
                 return false;
             }
             // Stamp userData only after every newly claimed channel write has
             // succeeded. This timestamp also tells later retries that a deferred
             // promote-owned attribution already completed.
             const db = _data_user_data_crud__WEBPACK_IMPORTED_MODULE_19__.UserDataDtoCrud.getInstance();
-            const persisted = await db.recordAttributionChannelIds(chatId, commonChatIds);
+            // The frozen set (the DM's first allocation, shared with the direct path), not the raw lookup.
+            const persisted = await db.recordAttributionChannelIds(chatId, result.discoveredChannelIds);
             if (!persisted) {
                 logger.warn(`[RoutedAttribution] ${this.clientDetails.mobile}:${chatId} userData persistence failed; retaining route for retry`);
                 return false;
