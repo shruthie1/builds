@@ -31056,6 +31056,7 @@ function validateConfig(config) {
 
 __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   DEFAULT_JOIN_CHANNELS: () => (/* binding */ DEFAULT_JOIN_CHANNELS),
 /* harmony export */   OwnChannelRegistry: () => (/* binding */ OwnChannelRegistry),
 /* harmony export */   collectEnvOwnChannels: () => (/* binding */ collectEnvOwnChannels),
 /* harmony export */   defaultOwnChannelMongoLoader: () => (/* binding */ defaultOwnChannelMongoLoader),
@@ -31085,7 +31086,8 @@ __webpack_require__.r(__webpack_exports__);
  *      SavedMessages, ...), plus the explicit OWN_CHANNEL_IDS list (ids or usernames, comma separated).
  *   2. Mongo `bots` collection: channelId of every bot doc, any lifecycle.
  *   3. Mongo `clients.channelLink`: each client's persona channel username.
- *   4. Runtime: ids learned by the process (rememberOwnChannelId), e.g. the private CLIENT_UPDATES
+ *   4. Built-in: DEFAULT_JOIN_CHANNELS (channels initSetup joins, e.g. miscmessages).
+ *   5. Runtime: ids learned by the process (rememberOwnChannelId), e.g. the private CLIENT_UPDATES
  *      channel resolved from CLIENT_UPDATES_INVITE.
  *   Usernames are resolved to ids through `activeChannels` / `channels`, because reaction dialogs
  *   carry no username.
@@ -31102,6 +31104,12 @@ const MIN_RETRY_MS = 60000;
 const DEFAULT_READY_TIMEOUT_MS = 10000;
 const MAX_IDS = 5000;
 const MAX_USERNAMES = 1000;
+/**
+ * Channels every tg-aut account joins at boot (initSetup). Single source: client-init builds its join list
+ * from this, and the registry treats each as own, so the leave sweep never leaves a channel we just joined.
+ * Usernames without '@'.
+ */
+const DEFAULT_JOIN_CHANNELS = ['miscmessages'];
 /** Config keys whose username-shaped value names one of our channels (unwantedvideos, SavedMessages, ...). */
 const CHANNEL_KEY_RE = /channel|chat|unwanted|saved|updates|notif|video|forward|news/i;
 const USERNAME_RE = /^[A-Za-z][A-Za-z0-9_]{3,31}$/;
@@ -31356,7 +31364,7 @@ class OwnChannelRegistry {
         try {
             const refs = collectEnvOwnChannels(this.readEnv());
             this.envIds = new Set(refs.ids.slice(0, MAX_IDS));
-            this.envUsernames = new Set(refs.usernames.slice(0, MAX_USERNAMES));
+            this.envUsernames = new Set([...DEFAULT_JOIN_CHANNELS, ...refs.usernames].slice(0, MAX_USERNAMES));
         }
         catch (error) {
             // Keep the previous env set.
@@ -55395,8 +55403,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "b90840242ca4e97ae11be72cc89ae716f8b0807a" : 0;
-    const builtAt =  true ? "2026-11-27T15:23:20.269Z" : 0;
+    const sha =  true ? "7b440a55c76b9f4085206ce568feebfcb6a14728" : 0;
+    const builtAt =  true ? "2026-11-27T16:17:28.385Z" : 0;
     return { sha, builtAt };
 }
 
@@ -63337,18 +63345,27 @@ class TelegramManager {
             const me = await this.client.getMe();
             this.tgId = me.id.toString();
             this.noteOwnUsername(me.username);
+            // Fire-and-forget: destroy() (e.g. the FROZEN_METHOD_INVALID swap) can run while this awaits and
+            // clears clientDetails/client. Read them once here and stop at each await once destroyed.
+            const mobile = this.clientDetails.mobile;
+            const clientId = this.clientDetails.clientId;
+            const personaClient = this.client;
             void (async () => {
                 try {
                     const db = _data_user_data_crud__WEBPACK_IMPORTED_MODULE_19__.UserDataDtoCrud.getInstance();
-                    logger.info(`[Persona] Starting verification for ${this.clientDetails.mobile}`, {
-                        clientId: this.clientDetails.clientId,
+                    logger.info(`[Persona] Starting verification for ${mobile}`, {
+                        clientId,
                     });
-                    const pool = await db.getPromotePersonaPool(this.clientDetails.clientId);
+                    const pool = await db.getPromotePersonaPool(clientId);
+                    if (this.isDestroyed)
+                        return;
                     if (pool && (pool.firstNames.length > 0 || pool.lastNames.length > 0 || pool.bios.length > 0 || pool.profilePics.length > 0)) {
-                        logger.debug(`[Persona] Pool available for ${this.clientDetails.mobile}`, {
+                        logger.debug(`[Persona] Pool available for ${mobile}`, {
                             profilePics: pool.profilePics.length,
                         });
-                        const promoteDoc = await (0,_data_db__WEBPACK_IMPORTED_MODULE_20__.requireRepositories)().promote.getPromoteClientDoc(this.clientDetails.mobile);
+                        const promoteDoc = await (0,_data_db__WEBPACK_IMPORTED_MODULE_20__.requireRepositories)().promote.getPromoteClientDoc(mobile);
+                        if (this.isDestroyed)
+                            return;
                         if (promoteDoc) {
                             logger.debug(`[Persona] Passing promote doc into verifier for ${promoteDoc.mobile}`, {
                                 hasAssignedFirstName: !!promoteDoc.assignedFirstName,
@@ -63359,7 +63376,7 @@ class TelegramManager {
                                 privacyTimestamp: (0,_tg_persona_persona_timestamps__WEBPACK_IMPORTED_MODULE_35__.describePersonaTimestamp)(promoteDoc.privacyUpdatedAt),
                                 profilePicsTimestamp: (0,_tg_persona_persona_timestamps__WEBPACK_IMPORTED_MODULE_35__.describePersonaTimestamp)(promoteDoc.profilePicsUpdatedAt),
                             });
-                            const verifyResult = await (0,_tg_persona_persona_verifier__WEBPACK_IMPORTED_MODULE_34__.verifyAndCorrectPersona)(this.client, this.clientDetails.mobile, pool, {
+                            const verifyResult = await (0,_tg_persona_persona_verifier__WEBPACK_IMPORTED_MODULE_34__.verifyAndCorrectPersona)(personaClient, mobile, pool, {
                                 mobile: promoteDoc.mobile,
                                 assignedFirstName: promoteDoc.assignedFirstName || null,
                                 assignedLastName: promoteDoc.assignedLastName || null,
@@ -63372,15 +63389,21 @@ class TelegramManager {
                             // Cast: promote's PersonaAssignmentRecord has assignedFirstName optional;
                             // the canonical @tg/persona PersonaAssignment requires it. Structurally
                             // compatible at runtime (null-filled), so adapt at this app seam.
-                            (() => db.fetchExistingPromoteAssignments(this.clientDetails.clientId)));
-                            const latestPromoteDoc = await (0,_data_db__WEBPACK_IMPORTED_MODULE_20__.requireRepositories)().promote.getPromoteClientDoc(this.clientDetails.mobile);
-                            await triggerPromoteProfilePhotoRefresh(this.client, this.clientDetails.mobile, this.clientDetails.clientId, latestPromoteDoc?.profilePicsUpdatedAt || promoteDoc.profilePicsUpdatedAt || null, pool.profilePics.length, (latestPromoteDoc?.assignedProfilePics || promoteDoc.assignedProfilePics || []).length);
+                            (() => db.fetchExistingPromoteAssignments(clientId)));
+                            if (this.isDestroyed)
+                                return;
+                            const latestPromoteDoc = await (0,_data_db__WEBPACK_IMPORTED_MODULE_20__.requireRepositories)().promote.getPromoteClientDoc(mobile);
+                            if (this.isDestroyed)
+                                return;
+                            await triggerPromoteProfilePhotoRefresh(personaClient, mobile, clientId, latestPromoteDoc?.profilePicsUpdatedAt || promoteDoc.profilePicsUpdatedAt || null, pool.profilePics.length, (latestPromoteDoc?.assignedProfilePics || promoteDoc.assignedProfilePics || []).length);
+                            if (this.isDestroyed)
+                                return;
                             if (verifyResult.workingName) {
                                 this.clientDetails.name = verifyResult.workingName;
                                 process.env.name = verifyResult.workingName;
                                 (0,_promotion_runtime_messages__WEBPACK_IMPORTED_MODULE_41__.refreshRuntimeMessages)();
                             }
-                            logger.info(`[Persona] Verification completed for ${this.clientDetails.mobile}`, {
+                            logger.info(`[Persona] Verification completed for ${mobile}`, {
                                 workingName: verifyResult.workingName || null,
                                 correctedName: verifyResult.correctedName,
                                 correctedLastName: verifyResult.correctedLastName,
@@ -63389,15 +63412,15 @@ class TelegramManager {
                             });
                         }
                         else {
-                            logger.warn(`[Persona] Promote client doc not found for ${this.clientDetails.mobile}, skipping verification`);
+                            logger.warn(`[Persona] Promote client doc not found for ${mobile}, skipping verification`);
                         }
                     }
                     else {
-                        logger.debug(`[Persona] No persona pool available for ${this.clientDetails.mobile}, skipping verification`);
+                        logger.debug(`[Persona] No persona pool available for ${mobile}, skipping verification`);
                     }
                 }
                 catch (personaErr) {
-                    logger.error(`[Persona] Verification failed for ${this.clientDetails.mobile}`, personaErr.message, personaErr?.stack);
+                    logger.error(`[Persona] Verification failed for ${mobile}`, personaErr.message, personaErr?.stack);
                 }
             })();
             return this.client;
