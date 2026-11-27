@@ -21119,7 +21119,7 @@ let BotsService = BotsService_1 = class BotsService {
                 return desired;
             const capped = {};
             for (const [k, v] of Object.entries(desired)) {
-                capped[k] = k === 'anonymous' ? v : Boolean(v && perms[k]);
+                capped[k] = Boolean(v && perms[k]);
             }
             return capped;
         }
@@ -41496,15 +41496,16 @@ function foldUpiRevenueWithCredits(input) {
         allPayers.add(chat);
         rupees += amt;
         credits++;
+        const ourId = matchUpi(r.payeeUpiId, known);
         if (isLaxmiName(r.payeeName)) {
             laxmi.rupees += amt;
             laxmi.credits++;
             laxmi.payers.add(chat);
-            counted.push({ key: exports.UPI_LAXMI_KEY, row: exports.UPI_LAXMI_KEY, proof: r, rupees: amt, match: 'none' });
+            counted.push({ key: exports.UPI_LAXMI_KEY, row: exports.UPI_LAXMI_KEY, proof: r, rupees: amt, match: 'none', idOurs: ourId !== null });
             continue;
         }
         const tag = bankingTag(r.payeeName);
-        let key = matchUpi(r.payeeUpiId, known);
+        let key = ourId;
         const byName = key === null && tag !== null && (key = nameMatchedId(tag, clientById.get(String(r.clientId ?? '')), accounts)) !== null;
         const a = acc.get(key) ?? newAcc();
         a.rupees += amt;
@@ -41520,7 +41521,7 @@ function foldUpiRevenueWithCredits(input) {
             a.tags.set(tag, (a.tags.get(tag) ?? 0) + 1);
         acc.set(key, a);
         const label = key === null ? undefined : labelOf.get(key);
-        counted.push({ key: upiRowKey(key), row: label ? (0, exports.upiLabelKey)(label) : upiRowKey(key), proof: r, rupees: amt, match: key === null ? 'none' : byName ? 'name' : 'id' });
+        counted.push({ key: upiRowKey(key), row: label ? (0, exports.upiLabelKey)(label) : upiRowKey(key), proof: r, rupees: amt, match: key === null ? 'none' : byName ? 'name' : 'id', idOurs: ourId !== null });
     }
     for (const id of qrOf.keys())
         if (!acc.has(id))
@@ -41605,7 +41606,7 @@ const iso = (v) => {
 function upiRowItems(credits, key, hosts = new Map()) {
     return credits
         .filter((c) => c.key === key || c.row === key)
-        .map(({ proof: r, rupees, match }) => {
+        .map(({ proof: r, rupees, match, idOurs }) => {
         const read = normUpi(r.payeeUpiId);
         const tel = Number(r.telegramMsgId);
         return {
@@ -41621,6 +41622,7 @@ function upiRowItems(credits, key, hosts = new Map()) {
             payeeUpi: read ? maskUpi(read) : null,
             payeeTag: bankingTag(r.payeeName),
             payeeNameRead: String(r.payeeName ?? '').trim() !== '',
+            payeeIdOurs: idOurs,
             legacy: !(typeof r.verdict?.outcome === 'string' && r.verdict.outcome),
             clientHost: hosts.get(String(r.clientId ?? '')) ?? null,
             username: null,
