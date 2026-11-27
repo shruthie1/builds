@@ -31189,9 +31189,9 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */ __webpack_require__.d(__webpack_exports__, {
 /* harmony export */   BotConfig: () => (/* binding */ BotConfig),
 /* harmony export */   ChannelCategory: () => (/* binding */ ChannelCategory),
-/* harmony export */   NotificationSeverity: () => (/* reexport safe */ _notification_format__WEBPACK_IMPORTED_MODULE_7__.NotificationSeverity),
-/* harmony export */   escapeTelegramHtml: () => (/* reexport safe */ _notification_format__WEBPACK_IMPORTED_MODULE_7__.escapeTelegramHtml),
-/* harmony export */   formatRichNotification: () => (/* reexport safe */ _notification_format__WEBPACK_IMPORTED_MODULE_7__.formatRichNotification)
+/* harmony export */   NotificationSeverity: () => (/* reexport safe */ _notification_format__WEBPACK_IMPORTED_MODULE_8__.NotificationSeverity),
+/* harmony export */   escapeTelegramHtml: () => (/* reexport safe */ _notification_format__WEBPACK_IMPORTED_MODULE_8__.escapeTelegramHtml),
+/* harmony export */   formatRichNotification: () => (/* reexport safe */ _notification_format__WEBPACK_IMPORTED_MODULE_8__.formatRichNotification)
 /* harmony export */ });
 /* harmony import */ var _notice_digest__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./notice-digest */ "../../packages/tg-core/src/utils/notice-digest.ts");
 /* harmony import */ var axios__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! axios */ "axios");
@@ -31201,10 +31201,11 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var fs__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! fs */ "fs");
 /* harmony import */ var fs__WEBPACK_IMPORTED_MODULE_3___default = /*#__PURE__*/__webpack_require__.n(fs__WEBPACK_IMPORTED_MODULE_3__);
 /* harmony import */ var _parseError__WEBPACK_IMPORTED_MODULE_4__ = __webpack_require__(/*! ./parseError */ "../../packages/tg-core/src/utils/parseError.ts");
-/* harmony import */ var _logger__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ./logger */ "../../packages/tg-core/src/utils/logger.ts");
-/* harmony import */ var _timers__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ./timers */ "../../packages/tg-core/src/utils/timers.ts");
-/* harmony import */ var _notification_format__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ./notification-format */ "../../packages/tg-core/src/utils/notification-format.ts");
-/* harmony import */ var _rich_message__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ./rich-message */ "../../packages/tg-core/src/utils/rich-message.ts");
+/* harmony import */ var _channel_config_env__WEBPACK_IMPORTED_MODULE_5__ = __webpack_require__(/*! ./channel-config-env */ "../../packages/tg-core/src/utils/channel-config-env.ts");
+/* harmony import */ var _logger__WEBPACK_IMPORTED_MODULE_6__ = __webpack_require__(/*! ./logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _timers__WEBPACK_IMPORTED_MODULE_7__ = __webpack_require__(/*! ./timers */ "../../packages/tg-core/src/utils/timers.ts");
+/* harmony import */ var _notification_format__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ./notification-format */ "../../packages/tg-core/src/utils/notification-format.ts");
+/* harmony import */ var _rich_message__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! ./rich-message */ "../../packages/tg-core/src/utils/rich-message.ts");
 
 
 
@@ -31214,7 +31215,8 @@ __webpack_require__.r(__webpack_exports__);
 
 
 
-const logger = new _logger__WEBPACK_IMPORTED_MODULE_5__.Logger('tg-core:telegram-bots-config');
+
+const logger = new _logger__WEBPACK_IMPORTED_MODULE_6__.Logger('tg-core:telegram-bots-config');
 
 const ChannelCategory = Object.freeze({
     CLIENT_UPDATES: 'CLIENT_UPDATES',
@@ -31327,13 +31329,18 @@ class BotConfig {
         if (this.initializing) {
             await this.ready();
         }
+        // Keep benches (FROZEN_METHOD_INVALID, timed) of bots still in the pool for the same channel: an env change
+        // must not put a frozen bot back in rotation.
+        const previous = this.categoryMap;
         this.initialized = false;
         this.initPromise = this.initialize();
         await this.initPromise;
+        if (this.categoryMap !== previous)
+            this.carryBotState(previous, this.categoryMap);
     }
     currentEnvFingerprint() {
         return Object.keys(process.env)
-            .filter(key => key.startsWith('TELEGRAM_CHANNEL_CONFIG_'))
+            .filter(_channel_config_env__WEBPACK_IMPORTED_MODULE_5__.isChannelConfigEnvKey)
             .sort()
             .map(key => `${key}=${process.env[key] ?? ''}`)
             .join('\n');
@@ -31417,15 +31424,14 @@ class BotConfig {
         }
     }
     async addEnvBots(categoryMap) {
-        const envKeys = Object.keys(process.env).filter(key => key.startsWith('TELEGRAM_CHANNEL_CONFIG_'));
+        const envKeys = Object.keys(process.env).filter(_channel_config_env__WEBPACK_IMPORTED_MODULE_5__.isChannelConfigEnvKey);
         for (const key of envKeys) {
             const value = process.env[key];
             if (!value)
                 continue;
             try {
-                const [channelId, description = '', botTokensStr] = value.split('::');
-                const botTokens = botTokensStr?.split(',').map(t => t.trim()).filter(Boolean);
-                if (!channelId || !botTokens || botTokens.length === 0) {
+                const { channelId, description, botTokens } = (0,_channel_config_env__WEBPACK_IMPORTED_MODULE_5__.parseChannelConfigValue)(value);
+                if (!channelId || botTokens.length === 0) {
                     logger.debug(`Invalid configuration for ${key}: missing channelId or botTokens`);
                     continue;
                 }
@@ -31778,7 +31784,7 @@ class BotConfig {
         entry.lastUsed = new Date();
         this.pendingUsage.set(key, entry);
         if (!this.usageFlushTimer) {
-            this.usageFlushTimer = (0,_timers__WEBPACK_IMPORTED_MODULE_6__.scheduleUnrefTimeout)(() => {
+            this.usageFlushTimer = (0,_timers__WEBPACK_IMPORTED_MODULE_7__.scheduleUnrefTimeout)(() => {
                 this.usageFlushTimer = null;
                 void this.flushBotUsage();
             }, this.USAGE_FLUSH_MS);
@@ -31862,7 +31868,7 @@ class BotConfig {
      */
     clientPrefix(parseMode) {
         const clientId = process.env.clientId ?? 'unknown';
-        return parseMode === 'HTML' ? (0,_notification_format__WEBPACK_IMPORTED_MODULE_7__.escapeTelegramHtml)(clientId) : clientId;
+        return parseMode === 'HTML' ? (0,_notification_format__WEBPACK_IMPORTED_MODULE_8__.escapeTelegramHtml)(clientId) : clientId;
     }
     /** Client id alone on the first line (owner, 2026-10-19), as in rich cards. */
     prefixMessage(message, parseMode, gap = false) {
@@ -31882,9 +31888,9 @@ class BotConfig {
             const richInput = options.rich === true
                 ? { summary: message }
                 : { ...options.rich, summary: options.rich.summary ?? message };
-            return { text: (0,_notification_format__WEBPACK_IMPORTED_MODULE_7__.formatRichNotification)(houseStyle ? { ...richInput, houseStyle } : richInput), parseMode: 'HTML' };
+            return { text: (0,_notification_format__WEBPACK_IMPORTED_MODULE_8__.formatRichNotification)(houseStyle ? { ...richInput, houseStyle } : richInput), parseMode: 'HTML' };
         }
-        return { text: (0,_notification_format__WEBPACK_IMPORTED_MODULE_7__.formatRichNotification)(houseStyle ? { ...message, houseStyle } : message), parseMode: 'HTML' };
+        return { text: (0,_notification_format__WEBPACK_IMPORTED_MODULE_8__.formatRichNotification)(houseStyle ? { ...message, houseStyle } : message), parseMode: 'HTML' };
     }
     /** Rich-message HTML for a structured notice (Bot API sendRichMessage). */
     richMessageHtml(message, options, category) {
@@ -31892,7 +31898,7 @@ class BotConfig {
         if (category === ChannelCategory.CLIENT_UPDATES)
             input.houseStyle = true;
         const source = input.source ?? (options.prefix === false ? '' : process.env.clientId ?? '');
-        return (0,_rich_message__WEBPACK_IMPORTED_MODULE_8__.formatRichMessageHtml)(input, { prefix: source || undefined });
+        return (0,_rich_message__WEBPACK_IMPORTED_MODULE_9__.formatRichMessageHtml)(input, { prefix: source || undefined });
     }
     /** The notice's buttons, then any caller reply_markup rows, as one classic inline keyboard under the bubble. */
     richKeyboard(message, replyMarkup) {
@@ -31905,7 +31911,7 @@ class BotConfig {
                 markup = undefined;
             }
         }
-        const rows = [...((0,_rich_message__WEBPACK_IMPORTED_MODULE_8__.notificationKeyboard)(message)?.inline_keyboard ?? []), ...(Array.isArray(markup?.inline_keyboard) ? markup.inline_keyboard : [])];
+        const rows = [...((0,_rich_message__WEBPACK_IMPORTED_MODULE_9__.notificationKeyboard)(message)?.inline_keyboard ?? []), ...(Array.isArray(markup?.inline_keyboard) ? markup.inline_keyboard : [])];
         return rows.length ? { inline_keyboard: rows } : undefined;
     }
     /** True for failures that are about the bot/channel (rate limit, kicked...), not the rich payload. */
@@ -32094,7 +32100,7 @@ class BotConfig {
      * line on top. Bot failover is sendMedia's. `onSent` gets the photo's message id.
      */
     async sendPhotoCard(category, photo, card, options = {}) {
-        const caption = (0,_rich_message__WEBPACK_IMPORTED_MODULE_8__.formatPhotoCaptionHtml)(card, card.source ?? process.env.clientId ?? undefined);
+        const caption = (0,_rich_message__WEBPACK_IMPORTED_MODULE_9__.formatPhotoCaptionHtml)(card, card.source ?? process.env.clientId ?? undefined);
         return this.sendMedia(category, 'sendPhoto', photo, {
             caption,
             parseMode: 'HTML',
@@ -32102,7 +32108,7 @@ class BotConfig {
             disableNotification: options.disableNotification,
             replyToMessageId: options.replyToMessageId,
             allowSendingWithoutReply: options.replyToMessageId ? true : undefined,
-            replyMarkup: (0,_rich_message__WEBPACK_IMPORTED_MODULE_8__.notificationKeyboard)(card),
+            replyMarkup: (0,_rich_message__WEBPACK_IMPORTED_MODULE_9__.notificationKeyboard)(card),
             onSent: options.onSent,
         });
     }
@@ -32592,6 +32598,37 @@ function isAcceptedApiKey(key) {
     if (!presented)
         return false;
     return getAcceptedApiKeys().includes(presented);
+}
+
+
+/***/ },
+
+/***/ "../../packages/tg-core/src/utils/channel-config-env.ts"
+/*!**************************************************************!*\
+  !*** ../../packages/tg-core/src/utils/channel-config-env.ts ***!
+  \**************************************************************/
+(__unused_webpack_module, __webpack_exports__, __webpack_require__) {
+
+"use strict";
+__webpack_require__.r(__webpack_exports__);
+/* harmony export */ __webpack_require__.d(__webpack_exports__, {
+/* harmony export */   CHANNEL_CONFIG_ENV_PREFIX: () => (/* binding */ CHANNEL_CONFIG_ENV_PREFIX),
+/* harmony export */   isChannelConfigEnvKey: () => (/* binding */ isChannelConfigEnvKey),
+/* harmony export */   parseChannelConfigValue: () => (/* binding */ parseChannelConfigValue)
+/* harmony export */ });
+/**
+ * TELEGRAM_CHANNEL_CONFIG_* remote-config values: `<channelId>::<CATEGORY description>::<token,token,...>`.
+ * One parser for every reader (BotConfig pools, the own-channel registry).
+ */
+const CHANNEL_CONFIG_ENV_PREFIX = 'TELEGRAM_CHANNEL_CONFIG_';
+function isChannelConfigEnvKey(key) {
+    return key.startsWith(CHANNEL_CONFIG_ENV_PREFIX);
+}
+/** Pure. Missing parts come back empty; callers decide what is usable. */
+function parseChannelConfigValue(value) {
+    const [channelId = '', description = '', botTokensStr] = value.split('::');
+    const botTokens = botTokensStr?.split(',').map(t => t.trim()).filter(Boolean) ?? [];
+    return { channelId: channelId.trim(), description, botTokens };
 }
 
 
@@ -36179,13 +36216,16 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   isMypromclsUsername: () => (/* binding */ isMypromclsUsername),
 /* harmony export */   isOwnChannel: () => (/* binding */ isOwnChannel),
 /* harmony export */   normalizeChannelUsername: () => (/* binding */ normalizeChannelUsername),
-/* harmony export */   normalizeOwnChannelId: () => (/* binding */ normalizeOwnChannelId)
+/* harmony export */   normalizeOwnChannelId: () => (/* binding */ normalizeOwnChannelId),
+/* harmony export */   rememberOwnChannelId: () => (/* binding */ rememberOwnChannelId)
 /* harmony export */ });
 /* harmony import */ var _logger__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! ./logger */ "../../packages/tg-core/src/utils/logger.ts");
+/* harmony import */ var _channel_config_env__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! ./channel-config-env */ "../../packages/tg-core/src/utils/channel-config-env.ts");
 /**
  * Own-channel registry: every Telegram channel WE own or operate (bot notification channels,
  * updates / forwarding / video channels, client persona channels). Reactions and promotions treat
  * an own channel exactly like a permanently reaction-restricted channel: never selected.
+ * The tg-aut leave sweep never leaves an own channel.
  *
  * Why code and not a DB flag: `reactRestricted` is read only inside a 7-day window
  * (ChannelsRepository.reactRestrictedChannelIds) and CMS auto-heals it after 7 days, so a DB flag
@@ -36199,12 +36239,15 @@ __webpack_require__.r(__webpack_exports__);
  *      SavedMessages, ...), plus the explicit OWN_CHANNEL_IDS list (ids or usernames, comma separated).
  *   2. Mongo `bots` collection: channelId of every bot doc, any lifecycle.
  *   3. Mongo `clients.channelLink`: each client's persona channel username.
+ *   4. Runtime: ids learned by the process (rememberOwnChannelId), e.g. the private CLIENT_UPDATES
+ *      channel resolved from CLIENT_UPDATES_INVITE.
  *   Usernames are resolved to ids through `activeChannels` / `channels`, because reaction dialogs
  *   carry no username.
  *
  * Fails safe: a failed Mongo load keeps the last known set (never shrinks it to env-only) and is
  * retried with exponential backoff capped at the refresh interval. isOwnChannel never throws.
  */
+
 
 const logger = new _logger__WEBPACK_IMPORTED_MODULE_0__.Logger('tg-core:own-channels');
 const DEFAULT_REFRESH_MS = 30 * 60000;
@@ -36267,8 +36310,8 @@ function collectEnvOwnChannels(env) {
     for (const [key, value] of Object.entries(env)) {
         if (typeof value !== 'string' || !value.trim())
             continue;
-        if (key.startsWith('TELEGRAM_CHANNEL_CONFIG_')) {
-            const id = normalizeOwnChannelId(value.split('::')[0]);
+        if ((0,_channel_config_env__WEBPACK_IMPORTED_MODULE_1__.isChannelConfigEnvKey)(key)) {
+            const id = normalizeOwnChannelId((0,_channel_config_env__WEBPACK_IMPORTED_MODULE_1__.parseChannelConfigValue)(value).channelId);
             if (id)
                 ids.add(id);
             continue;
@@ -36370,6 +36413,8 @@ class OwnChannelRegistry {
         this.mongoIds = new Set();
         this.mongoUsernames = new Set();
         this.loadedAt = null;
+        /** Ids learned at runtime (e.g. the private CLIENT_UPDATES channel resolved from its invite). Never expire. */
+        this.runtimeIds = new Set();
         this.nextAttemptAt = 0;
         this.retryMs = MIN_RETRY_MS;
         this.lastError = null;
@@ -36394,7 +36439,7 @@ class OwnChannelRegistry {
             this.scanEnvIfStale();
             this.refreshInBackgroundIfDue();
             const id = normalizeOwnChannelId(channelId);
-            if (id && (this.envIds.has(id) || this.mongoIds.has(id)))
+            if (id && (this.envIds.has(id) || this.mongoIds.has(id) || this.runtimeIds.has(id)))
                 return true;
             const name = normalizeChannelUsername(username ?? undefined);
             if (name && (this.envUsernames.has(name) || this.mongoUsernames.has(name)))
@@ -36409,6 +36454,12 @@ class OwnChannelRegistry {
             });
             return false;
         }
+    }
+    /** Record an own channel id learned at runtime. Never throws. */
+    addRuntimeId(channelId) {
+        const id = normalizeOwnChannelId(channelId);
+        if (id && this.runtimeIds.size < MAX_IDS)
+            this.runtimeIds.add(id);
     }
     /** Wait for the first load (bounded). Resolves even when the source fails. */
     async ready(timeoutMs = DEFAULT_READY_TIMEOUT_MS) {
@@ -36443,7 +36494,7 @@ class OwnChannelRegistry {
     snapshot() {
         this.scanEnvIfStale();
         return {
-            ids: [...new Set([...this.envIds, ...this.mongoIds])].sort(),
+            ids: [...new Set([...this.envIds, ...this.mongoIds, ...this.runtimeIds])].sort(),
             usernames: [...new Set([...this.envUsernames, ...this.mongoUsernames])].sort(),
             loadedAt: this.loadedAt,
             lastError: this.lastError,
@@ -36527,6 +36578,10 @@ class OwnChannelRegistry {
 /** Process-wide check used by reaction and promotion selectors. */
 function isOwnChannel(channelId, username) {
     return OwnChannelRegistry.getInstance().isOwnChannel(channelId, username);
+}
+/** Process-wide: remember an own channel id learned at runtime (CLIENT_UPDATES invite join). */
+function rememberOwnChannelId(channelId) {
+    OwnChannelRegistry.getInstance().addRuntimeId(channelId);
 }
 
 
@@ -64122,8 +64177,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony export */   buildInfo: () => (/* binding */ buildInfo)
 /* harmony export */ });
 function buildInfo() {
-    const sha =  true ? "98d0d2ae571cc0c49d1d4c64da737c7a2467919e" : 0;
-    const builtAt =  true ? "2026-11-23T04:42:15.520Z" : 0;
+    const sha =  true ? "fa5153042827b919c284bdfc19d798530d6bd4b5" : 0;
+    const builtAt =  true ? "2026-11-27T05:10:43.337Z" : 0;
     return { sha, builtAt };
 }
 
@@ -71603,6 +71658,8 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var _telegram_client_access__WEBPACK_IMPORTED_MODULE_8__ = __webpack_require__(/*! ../telegram/client-access */ "./src/telegram/client-access.ts");
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_9__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
 /* harmony import */ var _tg_channel_state__WEBPACK_IMPORTED_MODULE_10__ = __webpack_require__(/*! @tg/channel-state */ "../../packages/tg-channel-state/src/index.ts");
+/* harmony import */ var _tg_core_utils_own_channels__WEBPACK_IMPORTED_MODULE_11__ = __webpack_require__(/*! @tg/core/utils/own-channels */ "../../packages/tg-core/src/utils/own-channels.ts");
+
 
 
 
@@ -71849,9 +71906,27 @@ async function joinChannels(client, str, sendInChannel = true, collect) {
         }
     }
 }
+function leaveLabel(channel) {
+    return String(channel?.username ? `@${channel.username}` : channel?.channelId ?? channel?.title ?? "");
+}
+/**
+ * Our own channels (updatesChannel, the CLIENT_UPDATES invite channel, every TELEGRAM_CHANNEL_CONFIG_* channel,
+ * bot channels from Mongo: see own-channels.ts) are never left. They are broadcast channels, so the sweep below
+ * read them as "cannot send" and left them; the account then missed the exit<client> broadcast until its next boot
+ * (2026-11-25: 33 leaves of Client Updates across 20/20 tg-aut processes).
+ */
+function ownChannelSkip(channel, label) {
+    if (!(0,_tg_core_utils_own_channels__WEBPACK_IMPORTED_MODULE_11__.isOwnChannel)(channel?.channelId, channel?.username))
+        return null;
+    logger.log(`[leave] kind=skip_own channel=${label} title=${channel?.title ?? ""}`);
+    return { operation: "leave", channel: label, ok: false, error: "own_channel" };
+}
 async function leaveChannel(client, channel, opts = {}) {
     const notify = opts.notify !== false;
-    const label = String(channel?.username ? `@${channel.username}` : channel?.channelId ?? channel?.title ?? "");
+    const label = leaveLabel(channel);
+    const own = ownChannelSkip(channel, label);
+    if (own)
+        return own;
     try {
         // Leaving is entity-type-specific and the two RPCs are NOT interchangeable:
         //   Api.Channel (broadcast channel OR supergroup) -> channels.LeaveChannel (needs InputChannel)
@@ -71894,9 +71969,13 @@ async function leaveChannel(client, channel, opts = {}) {
 async function leaveChannels(client, opts = {}) {
     const dialogManager = _telegram_client_access__WEBPACK_IMPORTED_MODULE_8__.TelegramManager.getInstance().dialogManager; //new DialogManager(client, { instanceId: process.env.mobile, instanceName: process.env.clientId });
     const dialogs = await dialogManager.getChannelInfo();
+    // Bounded wait for the Mongo half of the own-channel set (bot channels); env ids are read synchronously.
+    await _tg_core_utils_own_channels__WEBPACK_IMPORTED_MODULE_11__.OwnChannelRegistry.getInstance().ready();
     const results = [];
     for (let channel of dialogs.channels) {
         if (channel && (channel.restricted || !channel.canSendMsgs)) {
+            if (ownChannelSkip(channel, leaveLabel(channel)))
+                continue;
             logger.log("Leaving Channel:", channel?.title);
             const outcome = await leaveChannel(client, channel, opts);
             if (outcome)
@@ -72266,18 +72345,28 @@ __webpack_require__.r(__webpack_exports__);
 /* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_0__ = __webpack_require__(/*! telegram */ "telegram");
 /* harmony import */ var telegram__WEBPACK_IMPORTED_MODULE_0___default = /*#__PURE__*/__webpack_require__.n(telegram__WEBPACK_IMPORTED_MODULE_0__);
 /* harmony import */ var _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_1__ = __webpack_require__(/*! @tg/core/utils/logger */ "../../packages/tg-core/src/utils/logger.ts");
-/* harmony import */ var _unwanted_updates_group__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! ./unwanted-updates-group */ "./src/channels/unwanted-updates-group.ts");
+/* harmony import */ var _tg_core_utils_own_channels__WEBPACK_IMPORTED_MODULE_2__ = __webpack_require__(/*! @tg/core/utils/own-channels */ "../../packages/tg-core/src/utils/own-channels.ts");
+/* harmony import */ var _unwanted_updates_group__WEBPACK_IMPORTED_MODULE_3__ = __webpack_require__(/*! ./unwanted-updates-group */ "./src/channels/unwanted-updates-group.ts");
+
 
 
 
 const logger = new _tg_core_utils_logger__WEBPACK_IMPORTED_MODULE_1__.Logger("tg-aut:client-updates");
+/** The leave sweep must never leave this channel: remember its id once Telegram names it. */
+function rememberChats(chats) {
+    for (const chat of Array.isArray(chats) ? chats : [chats]) {
+        const id = chat?.id;
+        if (id !== undefined && id !== null)
+            (0,_tg_core_utils_own_channels__WEBPACK_IMPORTED_MODULE_2__.rememberOwnChannelId)(String(id));
+    }
+}
 function rpcMessage(error) {
     const e = error;
     return String(e?.errorMessage ?? e?.message ?? error);
 }
 async function joinClientUpdatesChannel(client) {
     const raw = process.env.CLIENT_UPDATES_INVITE;
-    const hash = (0,_unwanted_updates_group__WEBPACK_IMPORTED_MODULE_2__.parseInviteHash)(raw);
+    const hash = (0,_unwanted_updates_group__WEBPACK_IMPORTED_MODULE_3__.parseInviteHash)(raw);
     if (!hash) {
         logger.warn(`[client-updates] kind=no_invite reason=${raw ? "not_an_invite_link" : "unset"}`);
         return { kind: "no_invite" };
@@ -72285,11 +72374,13 @@ async function joinClientUpdatesChannel(client) {
     try {
         const invite = await client.invoke(new telegram__WEBPACK_IMPORTED_MODULE_0__.Api.messages.CheckChatInvite({ hash }));
         if (invite instanceof telegram__WEBPACK_IMPORTED_MODULE_0__.Api.ChatInviteAlready) {
+            rememberChats(invite.chat);
             logger.log(`[client-updates] kind=already_member`);
             return { kind: "already_member" };
         }
         try {
-            await client.invoke(new telegram__WEBPACK_IMPORTED_MODULE_0__.Api.messages.ImportChatInvite({ hash }));
+            const updates = await client.invoke(new telegram__WEBPACK_IMPORTED_MODULE_0__.Api.messages.ImportChatInvite({ hash }));
+            rememberChats(updates?.chats ?? []);
         }
         catch (error) {
             if (!rpcMessage(error).includes("USER_ALREADY_PARTICIPANT"))
@@ -128917,8 +129008,8 @@ async function initSetup(client) {
     const clientUpdates = await (0,_channels_client_updates_channel__WEBPACK_IMPORTED_MODULE_4__.joinClientUpdatesChannel)(client);
     if (clientUpdates.floodWait)
         return;
-    // No invite configured: no join was made, so no gap is needed before the next one.
-    if (clientUpdates.kind !== "no_invite")
+    // No invite configured or already a member: no join was made, so no gap is needed before the next one.
+    if (clientUpdates.kind !== "no_invite" && clientUpdates.kind !== "already_member")
         await (0,telegram_Helpers__WEBPACK_IMPORTED_MODULE_0__.sleep)(JOIN_GAP_MS);
     if ((await (0,_channels_channel_ops__WEBPACK_IMPORTED_MODULE_2__.joinChannels)(client, DEFAULT_CHANNELS, false)) === "stop")
         return;
