@@ -20339,11 +20339,14 @@ let BotsService = BotsService_1 = class BotsService {
         const pending = due
             .map((bot, order) => ({ bot, order, live: liveByCategory.get(String(bot.category)) || 0 }))
             .sort((a, b) => a.live - b.live || a.order - b.order)
-            .slice(0, pendingLimit)
             .map(entry => entry.bot);
+        let handled = 0;
         for (const bot of pending) {
+            if (handled >= pendingLimit)
+                break;
             const attempts = bot.repairAttempts || 0;
             if (attempts >= this.maxPendingAdminRepairAttempts) {
+                handled++;
                 proposedActions.push(`move @${bot.username} to manual_attention after ${attempts} failed admin repairs`);
                 if (!options.dryRun) {
                     await this.botModel.updateOne({ _id: bot._id, lifecycle: 'pending_admin' }, {
@@ -20354,13 +20357,18 @@ let BotsService = BotsService_1 = class BotsService {
                 continue;
             }
             if (options.dryRun) {
+                handled++;
                 proposedActions.push(`reconcile pending-admin @${bot.username} in ${bot.channelId}`);
                 continue;
             }
             if (!(await this.resolveChannelAdminCached(bot.channelId, controllability))) {
                 proposedActions.push(`skip pending-admin @${bot.username}: channel ${bot.channelId} not controllable (no re-add possible)`);
+                await this.botModel.updateOne({ _id: bot._id, lifecycle: 'pending_admin' }, {
+                    $set: { nextRepairAt: new Date(now.getTime() + 24 * 60 * 60 * 1000) },
+                }).exec();
                 continue;
             }
+            handled++;
             try {
                 const info = await this.telegramService.getBotInfo(bot.token);
                 const botId = String(info?.id || '');
@@ -21106,17 +21114,20 @@ let BotsService = BotsService_1 = class BotsService {
         return null;
     }
     async intersectWithPromoterRights(promoterMobile, channelId, desired) {
+        const withoutAnonymous = { ...desired, anonymous: false };
         try {
             const promoterUser = (await this.usersService.search({ mobile: promoterMobile }))[0];
             const promoterTgId = promoterUser?.tgId ? String(promoterUser.tgId) : null;
             if (!promoterTgId)
-                return desired;
+                return withoutAnonymous;
             const viaBots = await this.readChannelViaBots(channelId);
             const admins = viaBots?.admins.length ? viaBots.admins : await this.telegramService.getGroupAdmins(promoterMobile, channelId);
             const me = (Array.isArray(admins) ? admins : []).find((a) => String(a?.userId ?? a?.id) === promoterTgId);
-            const perms = me?.permissions;
-            if (!perms || me?.rank === 'creator')
+            if (me?.rank === 'creator')
                 return desired;
+            const perms = me?.permissions;
+            if (!perms)
+                return withoutAnonymous;
             const capped = {};
             for (const [k, v] of Object.entries(desired)) {
                 capped[k] = Boolean(v && perms[k]);
@@ -21124,7 +21135,7 @@ let BotsService = BotsService_1 = class BotsService {
             return capped;
         }
         catch {
-            return desired;
+            return withoutAnonymous;
         }
     }
     async findHealthyAccountsByIdentity(mobiles, tgIds) {
